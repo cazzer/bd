@@ -1,15 +1,10 @@
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { defineConfig } from "drizzle-kit";
-import dotenv from "dotenv";
+import { resolveDatabaseUrl } from "./src/env.js";
 
-const dirname = path.dirname(fileURLToPath(import.meta.url));
-dotenv.config({ path: path.resolve(dirname, "../../.env") });
-
-const databaseUrl = process.env["DATABASE_URL"];
-if (!databaseUrl) {
-  throw new Error("DATABASE_URL is not set (expected in .env at repo root)");
-}
+// This file is the drizzle-kit CLI entry point, not part of the
+// @breakdown/db library surface — resolving/throwing at load time here is
+// fine; it never gets imported by another package.
+const databaseUrl = resolveDatabaseUrl();
 
 export default defineConfig({
   schema: "./src/schema.ts",

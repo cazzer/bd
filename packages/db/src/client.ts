@@ -1,18 +1,19 @@
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
-import dotenv from "dotenv";
 import * as schema from "./schema.js";
 
-const dirname = path.dirname(fileURLToPath(import.meta.url));
-dotenv.config({ path: path.resolve(dirname, "../../../.env") });
-
-const databaseUrl = process.env["DATABASE_URL"];
-if (!databaseUrl) {
-  throw new Error("DATABASE_URL is not set (expected in .env at repo root)");
+/**
+ * Explicit construction only — nothing here runs at module scope. Callers
+ * (migrate.ts, apps/mcp startup, tests) decide when to open a connection
+ * and with what connection string, and are responsible for calling
+ * pool.end() when done.
+ */
+export function createPool(connectionString: string): Pool {
+  return new Pool({ connectionString });
 }
 
-export const pool = new Pool({ connectionString: databaseUrl });
+export function createDb(pool: Pool) {
+  return drizzle(pool, { schema });
+}
 
-export const db = drizzle(pool, { schema });
+export type Database = ReturnType<typeof createDb>;
