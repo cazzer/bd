@@ -26,11 +26,25 @@
  *     comment before touching this one; the two are the same fix for the
  *     same shape of bug (an edge from a loser to its own survivor folding
  *     into a node "related to itself").
+ *
+ *     `getNeighbors` is bounded (bd-hmd.1): a hub can have hundreds of
+ *     edges, and returning all of them defeats the point of a "look at one
+ *     node" call. Results are ordered by weight descending with `node_id`
+ *     then `edge_id` as deterministic tie-breaks, capped at `limit`
+ *     (default `DEFAULT_NEIGHBOR_LIMIT`), and `hasMore`/`nextCursor` report
+ *     whether more exist and how to fetch them. Pagination is keyset
+ *     (`cursor` carries the last row's `weight`/`nodeId`/`edgeId`), not
+ *     offset — an offset page is defined relative to a row count that
+ *     shifts under concurrent writes (a new higher-weight edge asserted
+ *     between pages shifts every later offset, silently repeating or
+ *     skipping a neighbor), where a keyset page is defined relative to the
+ *     last row actually seen and is unaffected by writes elsewhere in the
+ *     order.
  */
 
 import { sql, type SQL } from "drizzle-orm";
 import type { Database } from "@breakdown/db";
-import { InvalidLookupIdError, LookupFailedError, NodeNotFoundError } from "./errors.js";
+import { InvalidLookupIdError, InvalidLookupOptionError, LookupFailedError, NodeNotFoundError } from "./errors.js";
 import { asPgError, formatPgInfo, sqlArray } from "./sql-helpers.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -198,13 +212,38 @@ export interface Neighbor {
   title: string;
 }
 
+/** Opaque-to-the-caller paging position: the last neighbor row seen, in listing order. */
+export interface NeighborsCursor {
+  weight: number;
+  nodeId: string;
+  edgeId: string;
+}
+
+export interface GetNeighborsOptions {
+  /** Max neighbors to return in this page. Default `DEFAULT_NEIGHBOR_LIMIT` (25). */
+  limit?: number;
+  /** Continue after a previous call's `nextCursor`. Omit or pass `null` for the first page. */
+  cursor?: NeighborsCursor | null;
+}
+
 export interface GetNeighborsResult {
   /** The id passed to `getNeighbors`, trimmed. */
   requestedId: string;
   /** Canonical (merge-resolved) id of the node whose neighbors were listed — differs from `requestedId` only when it names a merged-away node. */
   canonicalId: string;
-  /** Sorted by weight descending, then edge id, for deterministic pagination/truncation at the caller. */
+  /** At most `limit` neighbors, ordered by weight descending, then node id, then edge id — a total order, so repeated identical requests return identical results. */
   neighbors: Neighbor[];
+  /** True when neighbors beyond this page were withheld by `limit`. */
+  hasMore: boolean;
+  /** Pass as `cursor` to fetch the next page. `null` when `hasMore` is false. */
+  nextCursor: NeighborsCursor | null;
+}
+
+/** Resolved, validated arguments to `buildGetNeighborsQuery` — see `getNeighbors` for how `limit`/`cursor` are validated. */
+export interface BuildGetNeighborsQueryParams {
+  id: string;
+  limit: number;
+  cursor: NeighborsCursor | null;
 }
 
 /**
@@ -213,11 +252,18 @@ export interface GetNeighborsResult {
  * itself reports whether it found anything (`found` in the raw result),
  * which `getNeighbors` turns into `NodeNotFoundError` when it did not.
  */
-export function buildGetNeighborsQuery(id: string): SQL {
+export function buildGetNeighborsQuery(params: BuildGetNeighborsQueryParams): SQL {
+  // NULL means "first page" — mirrors retrieval.ts's nullable-filter
+  // convention (`(:param IS NULL OR ...)`), rather than a second code
+  // path for "no cursor" vs. "cursor".
+  const cursorWeight = params.cursor === null ? sql`NULL::double precision` : sql`${params.cursor.weight}::double precision`;
+  const cursorNodeId = params.cursor === null ? sql`NULL::uuid` : sql`${params.cursor.nodeId}::uuid`;
+  const cursorEdgeId = params.cursor === null ? sql`NULL::uuid` : sql`${params.cursor.edgeId}::uuid`;
+
   return sql`
 WITH self AS (
   SELECT id, COALESCE(merged_into, id) AS canonical_id
-  FROM nodes WHERE id = ${id}
+  FROM nodes WHERE id = ${params.id}
 ),
 -- Every node merged away into the queried node's canonical id — an edge
 -- attached to one of these must still surface as this node's neighbor
@@ -264,13 +310,36 @@ filtered AS (
   -- to itself, which is not a neighbor. The raw edge is untouched in the
   -- database — this only excludes it from this listing.
   WHERE rn.other_id <> (SELECT canonical_id FROM self)
+),
+-- Keyset page (bd-hmd.1): "strictly after" the cursor under the exact
+-- same total order as the final ORDER BY below (weight DESC, node_id
+-- ASC, edge_id ASC), so paging never repeats or skips a row regardless
+-- of how many neighbors tie on weight. A NULL cursor (first page)
+-- matches every row. Fetches one row beyond \`limit\` so \`has_more\`
+-- below is answered without a separate COUNT(*) over the (unbounded)
+-- neighbor set.
+paged AS (
+  SELECT f.*
+  FROM filtered f
+  WHERE ${cursorWeight} IS NULL
+     OR f.weight < ${cursorWeight}
+     OR (f.weight = ${cursorWeight} AND f.node_id > ${cursorNodeId})
+     OR (f.weight = ${cursorWeight} AND f.node_id = ${cursorNodeId} AND f.edge_id > ${cursorEdgeId})
+  ORDER BY f.weight DESC, f.node_id ASC, f.edge_id ASC
+  LIMIT ${params.limit + 1}::int
 )
 SELECT jsonb_build_object(
   'found', EXISTS(SELECT 1 FROM self),
   'canonical_id', (SELECT canonical_id FROM self),
   'neighbors', COALESCE((
-    SELECT jsonb_agg(to_jsonb(f) ORDER BY f.weight DESC, f.edge_id) FROM filtered f
-  ), '[]'::jsonb)
+    SELECT jsonb_agg(to_jsonb(p) ORDER BY p.weight DESC, p.node_id, p.edge_id)
+    FROM (
+      SELECT * FROM paged
+      ORDER BY weight DESC, node_id ASC, edge_id ASC
+      LIMIT ${params.limit}::int
+    ) p
+  ), '[]'::jsonb),
+  'has_more', (SELECT count(*) FROM paged) > ${params.limit}::int
 ) AS result
 `;
 }
@@ -292,7 +361,11 @@ interface RawGetNeighborsResult {
   found: boolean;
   canonical_id: string | null;
   neighbors: RawNeighbor[];
+  has_more: boolean;
 }
+
+/** Default page size for `getNeighbors` — same order of magnitude as `DEFAULT_FANOUT` (retrieval.ts's per-node traversal cap), for the same reason: a hub's true neighbor count is unbounded, this call's cost per page should not be. */
+export const DEFAULT_NEIGHBOR_LIMIT = 25;
 
 function mapNeighbor(row: RawNeighbor): Neighbor {
   return {
@@ -309,6 +382,32 @@ function mapNeighbor(row: RawNeighbor): Neighbor {
   };
 }
 
+/** Validates `limit`/`cursor`, throwing `InvalidLookupOptionError` on the first problem found — before any SQL runs, same convention as retrieval.ts's `resolveRetrievalParams`. */
+function resolveGetNeighborsOptions(options: GetNeighborsOptions): { limit: number; cursor: NeighborsCursor | null } {
+  const limit = options.limit ?? DEFAULT_NEIGHBOR_LIMIT;
+  if (!Number.isInteger(limit) || limit <= 0) {
+    throw new InvalidLookupOptionError("limit", limit, "must be a positive integer");
+  }
+
+  const cursor = options.cursor ?? null;
+  if (cursor !== null) {
+    if (typeof cursor !== "object") {
+      throw new InvalidLookupOptionError("cursor", cursor, "must be an object with weight, nodeId, and edgeId, or null");
+    }
+    if (!Number.isFinite(cursor.weight)) {
+      throw new InvalidLookupOptionError("cursor", cursor, "cursor.weight must be a finite number");
+    }
+    if (typeof cursor.nodeId !== "string" || !UUID_RE.test(cursor.nodeId.trim())) {
+      throw new InvalidLookupOptionError("cursor", cursor, "cursor.nodeId must be a valid uuid");
+    }
+    if (typeof cursor.edgeId !== "string" || !UUID_RE.test(cursor.edgeId.trim())) {
+      throw new InvalidLookupOptionError("cursor", cursor, "cursor.edgeId must be a valid uuid");
+    }
+  }
+
+  return { limit, cursor };
+}
+
 /**
  * A node's immediate neighbors — edge type, direction, weight, and source
  * system for each — folded through merge resolution on both the queried
@@ -317,16 +416,24 @@ function mapNeighbor(row: RawNeighbor): Neighbor {
  * chain), same treatment `mergeNodes` gives a missing id — unlike
  * `getNodes`, this takes a single required id, not a batch to partially
  * satisfy.
+ *
+ * Bounded and ordered (bd-hmd.1): at most `options.limit` (default
+ * `DEFAULT_NEIGHBOR_LIMIT`) neighbors come back, by weight descending with
+ * `nodeId` then `edgeId` as deterministic tie-breaks. `hasMore` reports
+ * whether more exist; pass `nextCursor` back as `options.cursor` to fetch
+ * the next page — see the module header for why this is keyset, not
+ * offset, pagination.
  */
-export async function getNeighbors(db: Database, id: string): Promise<GetNeighborsResult> {
+export async function getNeighbors(db: Database, id: string, options: GetNeighborsOptions = {}): Promise<GetNeighborsResult> {
   const trimmed = typeof id === "string" ? id.trim() : "";
   if (!UUID_RE.test(trimmed)) {
     throw new InvalidLookupIdError(id, "must be a valid uuid");
   }
+  const { limit, cursor } = resolveGetNeighborsOptions(options);
 
   let result: { rows: { result: RawGetNeighborsResult }[] };
   try {
-    result = await db.execute<{ result: RawGetNeighborsResult }>(buildGetNeighborsQuery(trimmed));
+    result = await db.execute<{ result: RawGetNeighborsResult }>(buildGetNeighborsQuery({ id: trimmed, limit, cursor }));
   } catch (err) {
     throw new LookupFailedError(`getNeighbors query failed${formatPgInfo(asPgError(err))}`, "getNeighbors", { cause: err });
   }
@@ -339,9 +446,15 @@ export async function getNeighbors(db: Database, id: string): Promise<GetNeighbo
     throw new NodeNotFoundError(trimmed);
   }
 
+  const neighbors = row.result.neighbors.map(mapNeighbor);
+  const last = neighbors[neighbors.length - 1];
+  const hasMore = row.result.has_more;
+
   return {
     requestedId: trimmed,
     canonicalId: row.result.canonical_id,
-    neighbors: row.result.neighbors.map(mapNeighbor),
+    neighbors,
+    hasMore,
+    nextCursor: hasMore && last ? { weight: last.weight, nodeId: last.nodeId, edgeId: last.edgeId } : null,
   };
 }

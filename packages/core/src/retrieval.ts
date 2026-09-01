@@ -20,6 +20,14 @@
  * only when that statement reports zero seeds — issues a second, fuzzy
  * statement. That is the one documented exception to "one round trip";
  * every other path here issues exactly one statement.
+ *
+ * `RetrievedNode.degree` (bd-hmd.1, add-visual-layer design.md "Degree is
+ * computed per query, for the returned nodes only") is a store-wide count
+ * — the `degree` CTE joined in below — computed fresh on every call from
+ * the returned node set's `kept_probe` rows, never materialized or
+ * cached. It reuses the alias/probe_ids merge-folding this module already
+ * does and the same merge-induced self-connection guard `result_edges`
+ * uses, rather than a second implementation of either.
  */
 
 import { sql, type SQL } from "drizzle-orm";
@@ -120,6 +128,17 @@ export interface RetrievedNode {
   edgePath: string[];
   /** The id of the last edge traversed to reach this node. `null` for a seed. */
   viaEdgeId: string | null;
+  /**
+   * Distinct canonical nodes connected to this one across the WHOLE
+   * STORE — not merely within this result's returned subgraph
+   * (design.md "Degree is computed per query, for the returned nodes
+   * only"; bd-hmd.1). Counted over canonical nodes with endpoints folded
+   * through `merged_into`, and merge-induced self-connections excluded
+   * (same guard `result_edges` uses below). Two nodes joined by several
+   * differently-typed edges still contribute 1 to each other's degree. A
+   * node with no edges reports 0, never null or absent.
+   */
+  degree: number;
 }
 
 export interface RetrievedEdge {
@@ -225,12 +244,14 @@ result_nodes AS (
          n.updated_at, k.score, k.depth,
          (s.node_id IS NOT NULL) AS is_seed, s.relevance, s.matched_node_id,
          ${snippetExpr} AS snippet,
-         k.seed_id, k.edge_path, k.via_edge_id
+         k.seed_id, k.edge_path, k.via_edge_id,
+         COALESCE(d.degree, 0) AS degree
   FROM kept k
   JOIN resolved_nodes n ON n.id = k.node_id
   CROSS JOIN tsq t
   LEFT JOIN seeds s ON s.node_id = k.node_id
   LEFT JOIN nodes m ON m.id = s.matched_node_id
+  LEFT JOIN degree d ON d.node_id = k.node_id
 )`;
 }
 
@@ -372,6 +393,45 @@ kept_probe AS (
   FROM kept k LEFT JOIN alias a ON a.canonical_id = k.node_id
 ),
 
+-- Store-wide degree (bd-hmd.1): distinct canonical nodes connected to
+-- each kept node ACROSS THE WHOLE STORE, not just among other kept
+-- nodes — unlike result_edges below, this is not restricted to edges
+-- whose far endpoint also made it into \`kept\`. Reuses kept_probe's
+-- probe_ids (self + every merged-away alias) so an edge attached to an
+-- alias still counts toward the survivor, and \`= ANY(probe_ids)\` keeps
+-- both branches on the same indexed (src_id)/(dst_id) predicate shape
+-- the traversal LATERAL above and getNeighbors' probe already use. The
+-- far endpoint is folded through merge resolution so a neighbor that
+-- has itself been merged away is counted once, under its survivor.
+-- \`LEFT JOIN ... ON true\` guarantees one output row per kept node even
+-- when the LATERAL finds nothing, so COUNT(DISTINCT ...) yields 0
+-- rather than no row at all for a degree-zero node.
+degree AS (
+  SELECT kp.node_id, COUNT(DISTINCT far.canonical_id) AS degree
+  FROM kept_probe kp
+  LEFT JOIN LATERAL (
+    SELECT COALESCE(dn.merged_into, dn.id) AS canonical_id
+    FROM edges e
+    JOIN nodes dn ON dn.id = e.dst_id
+    WHERE e.src_id = ANY (kp.probe_ids)
+      -- Merge-induced self-loop guard, same shape as result_edges'
+      -- \`COALESCE(dn.merged_into, dn.id) <> kp.node_id\` below and
+      -- getNeighbors' \`other_id <>\` guard in lookup.ts — a
+      -- loser-to-survivor edge must not inflate the survivor's own
+      -- degree by counting a connection to itself.
+      AND COALESCE(dn.merged_into, dn.id) <> kp.node_id
+
+    UNION ALL
+
+    SELECT COALESCE(sn.merged_into, sn.id)
+    FROM edges e
+    JOIN nodes sn ON sn.id = e.src_id
+    WHERE e.dst_id = ANY (kp.probe_ids)
+      AND COALESCE(sn.merged_into, sn.id) <> kp.node_id
+  ) far ON true
+  GROUP BY kp.node_id
+),
+
 -- ALL edges between kept nodes (the induced subgraph), not just
 -- traversed ones. Probing outgoing only is sufficient and
 -- non-duplicating: probe sets partition the raw node ids, so each edge
@@ -444,6 +504,7 @@ interface RawRetrievedNode {
   seed_id: string;
   edge_path: string[];
   via_edge_id: string | null;
+  degree: number;
 }
 
 interface RawRetrievedEdge {
@@ -486,6 +547,7 @@ function mapNode(row: RawRetrievedNode): RetrievedNode {
     seedId: row.seed_id,
     edgePath: row.edge_path,
     viaEdgeId: row.via_edge_id,
+    degree: row.degree,
   };
 }
 

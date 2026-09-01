@@ -290,3 +290,47 @@ Optional, deferred: `nodes (updated_at DESC, id)` for the summary's recent-nodes
   Returning full content would blow the MCP response budget on the first hub.
 - The dev database is shared: scope test fixtures by a unique `source_system`, and never assert
   on global counts (the summary's `totalNodes` will be flaky).
+
+## Degree (bd-hmd.1)
+
+Each returned node also carries `degree`: the count of distinct canonical nodes connected to it
+**across the whole store**, not just among the other nodes this query happened to return.
+Computed per query, for the returned node set only — no materialized view, no refresh strategy
+(add-visual-layer design.md, "Degree is computed per query, for the returned nodes only").
+
+```sql
+degree AS (
+  SELECT kp.node_id, COUNT(DISTINCT far.canonical_id) AS degree
+  FROM kept_probe kp
+  LEFT JOIN LATERAL (
+    SELECT COALESCE(dn.merged_into, dn.id) AS canonical_id
+    FROM edges e
+    JOIN nodes dn ON dn.id = e.dst_id
+    WHERE e.src_id = ANY (kp.probe_ids)
+      AND COALESCE(dn.merged_into, dn.id) <> kp.node_id
+    UNION ALL
+    SELECT COALESCE(sn.merged_into, sn.id)
+    FROM edges e
+    JOIN nodes sn ON sn.id = e.src_id
+    WHERE e.dst_id = ANY (kp.probe_ids)
+      AND COALESCE(sn.merged_into, sn.id) <> kp.node_id
+  ) far ON true
+  GROUP BY kp.node_id
+),
+```
+
+Reuses `kept_probe`'s `probe_ids` (self + every merged-away alias), so an edge attached to an
+alias still counts toward the survivor. `LEFT JOIN ... ON true` guarantees one output row per
+kept node even when the LATERAL finds nothing, so a degree-zero node gets `COUNT(DISTINCT NULL)
+= 0` rather than no row. The `<> kp.node_id` guards on both branches are the same merge-induced
+self-connection guard `result_edges` uses (`COALESCE(dn.merged_into, dn.id) <> kp.node_id`) —
+without them a loser-to-survivor edge would count as the survivor being connected to itself.
+
+**Measured**: seeded 20,050 nodes / 20,056 edges (a scoped throwaway `source_system`, on top of
+the untouched dev corpus) so the planner's choice reflects real scale rather than a small table's
+seq-scan preference. `EXPLAIN (ANALYZE, BUFFERS)` on a retrieval returning 26 kept nodes shows the
+degree CTE's per-kept-node probe as `Index Scan using edges_src_id_edge_type_idx (Index Cond:
+src_id = ANY (kp.probe_ids))` and `Bitmap Index Scan on edges_dst_id_edge_type_idx (Index Cond:
+dst_id = ANY (kp.probe_ids))` — a keyed lookup on the same two indexes the traversal LATERAL
+already uses, not a full-table scan or count. Total query time 11.7ms, `shared hit=2037` (no
+disk reads). No new index required.

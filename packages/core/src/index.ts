@@ -25,6 +25,7 @@ export {
   RetrievalFailedError,
   InvalidLookupIdError,
   LookupFailedError,
+  InvalidLookupOptionError,
 } from "./errors.js";
 
 // `asPgError`/`PgErrorLike` are re-exported (not just used internally) so
@@ -103,11 +104,15 @@ export {
   buildGetNodesQuery,
   getNeighbors,
   buildGetNeighborsQuery,
+  DEFAULT_NEIGHBOR_LIMIT,
   type LookedUpNode,
   type GetNodesResult,
   type NeighborDirection,
   type Neighbor,
+  type NeighborsCursor,
+  type GetNeighborsOptions,
   type GetNeighborsResult,
+  type BuildGetNeighborsQueryParams,
 } from "./lookup.js";
 
 // Pure helpers for the repo-markdown seed script (bd-vt2.6, task 6.1) —

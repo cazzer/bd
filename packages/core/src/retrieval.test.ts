@@ -663,6 +663,104 @@ describe("retrieve", () => {
   });
 });
 
+// --- degree (bd-hmd.1, retrieval spec "Results carry each node's degree") --
+
+describe("retrieve — degree", () => {
+  it("counts beyond the returned subgraph: a node with twenty connections but only three inside a fanout-3 result still reports degree 20 (spec: Degree counts beyond the returned subgraph)", async () => {
+    const run = await newRun();
+    const specs: Omit<NodeInput, "sourceSystem">[] = [
+      { nodeType: "doc", externalId: "hub", title: "Degree hub root", content: "degree hub root unique phrase upsilon" },
+    ];
+    for (let i = 1; i <= 20; i++) {
+      specs.push({ nodeType: "doc", externalId: `dnbr${i}`, title: `Degree neighbor ${i}`, content: `degree neighbor ${i}` });
+    }
+    const nodeMap = await makeNodes(run, specs);
+    const hubId = nodeMap.get("hub")!;
+    const edgeSpecs: Omit<EdgeInput, "sourceSystem">[] = [];
+    for (let i = 1; i <= 20; i++) {
+      edgeSpecs.push({ srcId: hubId, dstId: nodeMap.get(`dnbr${i}`)!, edgeType: "hub_edge", weight: i / 20 });
+    }
+    await makeEdges(run, edgeSpecs);
+
+    const result = await retrieve(db, "degree hub root upsilon", { fanout: 3, nodeBudget: 40, sourceSystems: [run.sourceSystem] });
+    if (result.mode === "empty") throw new Error("expected a found result");
+
+    // Only 3 of the 20 neighbors were traversed into the returned subgraph...
+    const returnedNeighbors = result.nodes.filter((n) => n.externalId.startsWith("dnbr"));
+    expect(returnedNeighbors).toHaveLength(3);
+
+    // ...but the hub's reported degree is the store-wide count, not 3.
+    const hub = result.nodes.find((n) => n.id === hubId)!;
+    expect(hub.degree).toBe(20);
+  });
+
+  it("counts across a merge, once per distinct far node, when the merged-away node had connections the survivor did not (spec: Degree across a merge)", async () => {
+    const run = await newRun();
+    const nodeMap = await makeNodes(run, [
+      { nodeType: "doc", externalId: "survivor", title: "Degree merge survivor", content: "degree merge unique phrase tau" },
+      { nodeType: "doc", externalId: "loser", title: "Degree merge loser", content: "unrelated content about gardening" },
+      { nodeType: "doc", externalId: "farA", title: "Far A", content: "unrelated" },
+      { nodeType: "doc", externalId: "farB", title: "Far B", content: "unrelated" },
+    ]);
+    const survivorId = nodeMap.get("survivor")!;
+    const loserId = nodeMap.get("loser")!;
+    const farAId = nodeMap.get("farA")!;
+    const farBId = nodeMap.get("farB")!;
+    // farA is connected from BOTH the survivor and the loser before the
+    // merge — it must still count once, not twice, afterward.
+    await makeEdges(run, [
+      { srcId: survivorId, dstId: farAId, edgeType: "rel", weight: 0.9 },
+      { srcId: loserId, dstId: farAId, edgeType: "rel2", weight: 0.8 },
+      { srcId: loserId, dstId: farBId, edgeType: "rel3", weight: 0.7 },
+    ]);
+    await mergeNodes(db, loserId, survivorId);
+
+    const result = await retrieve(db, "degree merge tau", { sourceSystems: [run.sourceSystem] });
+    if (result.mode === "empty") throw new Error("expected a found result");
+    const survivor = result.nodes.find((n) => n.id === survivorId)!;
+    expect(survivor.degree).toBe(2); // farA once (not twice), farB once
+  });
+
+  it("does not count a merge-induced self-connection: two connected nodes merged into one report neither the self-link nor a connection to themselves (spec: A self-connection created by a merge)", async () => {
+    const run = await newRun();
+    const nodeMap = await makeNodes(run, [
+      { nodeType: "doc", externalId: "loser", title: "Degree self-loop loser", content: "unrelated" },
+      { nodeType: "doc", externalId: "survivor", title: "Degree self-loop survivor", content: "degree self loop unique phrase phi" },
+      { nodeType: "doc", externalId: "farC", title: "Far C", content: "unrelated" },
+    ]);
+    const loserId = nodeMap.get("loser")!;
+    const survivorId = nodeMap.get("survivor")!;
+    const farCId = nodeMap.get("farC")!;
+    await makeEdges(run, [
+      { srcId: loserId, dstId: survivorId, edgeType: "mentions", weight: 0.9 }, // becomes a self-loop once merged
+      { srcId: survivorId, dstId: farCId, edgeType: "rel", weight: 0.5 }, // a real, non-self connection
+    ]);
+    await mergeNodes(db, loserId, survivorId);
+
+    const result = await retrieve(db, "degree self loop phi", { sourceSystems: [run.sourceSystem] });
+    if (result.mode === "empty") throw new Error("expected a found result");
+    const survivor = result.nodes.find((n) => n.id === survivorId)!;
+    // 1 (farC), not 2 — the folded loser->survivor edge must not count as
+    // the survivor being connected to itself.
+    expect(survivor.degree).toBe(1);
+    expect(result.edges.some((e) => e.srcNodeId === e.dstNodeId)).toBe(false);
+  });
+
+  it("reports zero, not null or absent, for a node with no edges at all (spec: An unconnected node)", async () => {
+    const run = await newRun();
+    const nodeMap = await makeNodes(run, [
+      { nodeType: "doc", externalId: "lonely", title: "Degree lonely node", content: "degree lonely unique phrase chi" },
+    ]);
+    const lonelyId = nodeMap.get("lonely")!;
+
+    const result = await retrieve(db, "degree lonely chi", { sourceSystems: [run.sourceSystem] });
+    if (result.mode === "empty") throw new Error("expected a found result");
+    const lonely = result.nodes.find((n) => n.id === lonelyId)!;
+    expect(lonely).toBeDefined();
+    expect(lonely.degree).toBe(0);
+  });
+});
+
 // --- getStoreSummary ----------------------------------------------------------
 
 describe("getStoreSummary", () => {

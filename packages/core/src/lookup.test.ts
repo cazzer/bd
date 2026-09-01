@@ -3,14 +3,14 @@ import { inArray } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database } from "@breakdown/db";
 import { edges, ingestRuns, nodes } from "@breakdown/db";
-import { InvalidLookupIdError, NodeNotFoundError } from "./errors.js";
+import { InvalidLookupIdError, InvalidLookupOptionError, NodeNotFoundError } from "./errors.js";
 import type { EdgeInput } from "./edges.js";
 import { upsertEdges } from "./edges.js";
 import { openIngestRun, type IngestRunHandle } from "./ingest-runs.js";
 import { mergeNodes } from "./merge.js";
 import type { NodeInput } from "./nodes.js";
 import { upsertNodes } from "./nodes.js";
-import { buildGetNeighborsQuery, buildGetNodesQuery, getNeighbors, getNodes } from "./lookup.js";
+import { buildGetNeighborsQuery, buildGetNodesQuery, DEFAULT_NEIGHBOR_LIMIT, getNeighbors, getNodes, type NeighborsCursor } from "./lookup.js";
 import { connectTestDb, type TestPool, uniqueSuffix } from "./test-helpers.js";
 
 let pool: TestPool;
@@ -84,22 +84,34 @@ describe("buildGetNodesQuery", () => {
 
 describe("buildGetNeighborsQuery", () => {
   const dialect = new PgDialect();
+  const baseParams = { id: BOGUS_ID, limit: 25, cursor: null };
 
-  it("is pure: the same id produces identical SQL text and params on every call", () => {
-    const a = dialect.sqlToQuery(buildGetNeighborsQuery(BOGUS_ID));
-    const b = dialect.sqlToQuery(buildGetNeighborsQuery(BOGUS_ID));
+  it("is pure: the same params produce identical SQL text and params on every call", () => {
+    const a = dialect.sqlToQuery(buildGetNeighborsQuery(baseParams));
+    const b = dialect.sqlToQuery(buildGetNeighborsQuery(baseParams));
     expect(a.sql).toBe(b.sql);
     expect(a.params).toEqual(b.params);
   });
 
   it("contains no semicolon — it is exactly one statement", () => {
-    const { sql: text } = dialect.sqlToQuery(buildGetNeighborsQuery(BOGUS_ID));
+    const { sql: text } = dialect.sqlToQuery(buildGetNeighborsQuery(baseParams));
     expect(text).not.toContain(";");
   });
 
   it("excludes the self-loop guard's canonical id, mirroring result_edges in retrieval.ts", () => {
-    const { sql: text } = dialect.sqlToQuery(buildGetNeighborsQuery(BOGUS_ID));
+    const { sql: text } = dialect.sqlToQuery(buildGetNeighborsQuery(baseParams));
     expect(text).toContain("other_id <>");
+  });
+
+  it("renders a literal NULL for an unset cursor and a bound parameter for a set one — same nullable-filter convention as retrieval.ts's nodeTypes/updatedSince", () => {
+    const unset = dialect.sqlToQuery(buildGetNeighborsQuery(baseParams));
+    expect(unset.sql).toContain("NULL::double precision");
+    expect(unset.sql).toContain("NULL::uuid");
+
+    const withCursor = { id: BOGUS_ID, limit: 10, cursor: { weight: 0.5, nodeId: BOGUS_ID, edgeId: BOGUS_ID } };
+    const cursored = dialect.sqlToQuery(buildGetNeighborsQuery(withCursor));
+    expect(cursored.sql).not.toContain("NULL::double precision");
+    expect(cursored.params).toContain(0.5);
   });
 });
 
@@ -352,5 +364,138 @@ describe("getNeighbors", () => {
 
   it("rejects a malformed (non-uuid) id with InvalidLookupIdError", async () => {
     await expect(getNeighbors(db, "not-a-uuid")).rejects.toBeInstanceOf(InvalidLookupIdError);
+  });
+});
+
+// --- getNeighbors: bounded and ordered (bd-hmd.1) ---------------------------
+
+describe("getNeighbors — bounded and ordered", () => {
+  /** Builds a hub with `count` neighbors, each edge weight distinct (`i / count`) so the weight order is unambiguous. */
+  async function makeDistinctWeightHub(run: IngestRunHandle, count: number, prefix: string): Promise<{ hubId: string; nodeMap: Map<string, string> }> {
+    const specs: Omit<NodeInput, "sourceSystem">[] = [{ nodeType: "doc", externalId: `${prefix}-hub`, title: "Hub", content: "c" }];
+    for (let i = 1; i <= count; i++) specs.push({ nodeType: "doc", externalId: `${prefix}-n${i}`, title: `Neighbor ${i}`, content: "c" });
+    const nodeMap = await makeNodes(run, specs);
+    const hubId = nodeMap.get(`${prefix}-hub`)!;
+    const edgeSpecs: Omit<EdgeInput, "sourceSystem">[] = [];
+    for (let i = 1; i <= count; i++) {
+      edgeSpecs.push({ srcId: hubId, dstId: nodeMap.get(`${prefix}-n${i}`)!, edgeType: "e", weight: i / count });
+    }
+    await makeEdges(run, edgeSpecs);
+    return { hubId, nodeMap };
+  }
+
+  it("caps a 500-neighbour hub at a limit of 25, returning exactly the 25 highest-weighted neighbours, and reports more exist (spec: A hub with more neighbours than the limit)", async () => {
+    const run = await newRun();
+    const COUNT = 500;
+    const { hubId, nodeMap } = await makeDistinctWeightHub(run, COUNT, "big");
+
+    const result = await getNeighbors(db, hubId, { limit: 25 });
+
+    expect(result.neighbors).toHaveLength(25);
+    expect(result.hasMore).toBe(true);
+    expect(result.nextCursor).not.toBeNull();
+    const expectedTop25 = new Set(Array.from({ length: 25 }, (_, i) => nodeMap.get(`big-n${COUNT - i}`)!)); // n500..n476: highest weights
+    expect(new Set(result.neighbors.map((n) => n.nodeId))).toEqual(expectedTop25);
+
+    // Omitting `limit` uses DEFAULT_NEIGHBOR_LIMIT, which is also 25.
+    expect(DEFAULT_NEIGHBOR_LIMIT).toBe(25);
+    const withDefault = await getNeighbors(db, hubId);
+    expect(withDefault.neighbors).toHaveLength(DEFAULT_NEIGHBOR_LIMIT);
+    expect(withDefault.neighbors.map((n) => n.nodeId)).toEqual(result.neighbors.map((n) => n.nodeId));
+  });
+
+  it("orders tied weights deterministically by node id, so repeated identical requests return the same neighbours in the same order (spec: Equal weights order deterministically)", async () => {
+    const run = await newRun();
+    const specs: Omit<NodeInput, "sourceSystem">[] = [{ nodeType: "doc", externalId: "tie-hub", title: "Hub", content: "c" }];
+    for (let i = 1; i <= 30; i++) specs.push({ nodeType: "doc", externalId: `tie-n${i}`, title: `Neighbor ${i}`, content: "c" });
+    const nodeMap = await makeNodes(run, specs);
+    const hubId = nodeMap.get("tie-hub")!;
+    // Every edge shares the same weight — the limit (10) falls squarely among the ties.
+    const edgeSpecs: Omit<EdgeInput, "sourceSystem">[] = [];
+    for (let i = 1; i <= 30; i++) edgeSpecs.push({ srcId: hubId, dstId: nodeMap.get(`tie-n${i}`)!, edgeType: "e", weight: 0.5 });
+    await makeEdges(run, edgeSpecs);
+
+    const first = await getNeighbors(db, hubId, { limit: 10 });
+    const second = await getNeighbors(db, hubId, { limit: 10 });
+
+    expect(first.neighbors).toHaveLength(10);
+    expect(first.neighbors.map((n) => n.nodeId)).toEqual(second.neighbors.map((n) => n.nodeId));
+    // The tie-break is node id ascending.
+    const allNeighborIds = Array.from({ length: 30 }, (_, i) => nodeMap.get(`tie-n${i + 1}`)!).sort();
+    expect(first.neighbors.map((n) => n.nodeId)).toEqual(allNeighborIds.slice(0, 10));
+  });
+
+  it("fetches the remainder via nextCursor with no neighbour repeated or skipped, matching the single-page ground truth in order (spec: Fetching the remainder)", async () => {
+    const run = await newRun();
+    const COUNT = 60;
+    const { hubId } = await makeDistinctWeightHub(run, COUNT, "page");
+
+    const groundTruth = await getNeighbors(db, hubId, { limit: COUNT });
+    expect(groundTruth.hasMore).toBe(false);
+    expect(groundTruth.neighbors).toHaveLength(COUNT);
+
+    const collected: string[] = [];
+    let cursor: NeighborsCursor | null = null;
+    let pages = 0;
+    for (;;) {
+      const page = await getNeighbors(db, hubId, { limit: 17, cursor });
+      collected.push(...page.neighbors.map((n) => n.nodeId));
+      pages++;
+      if (!page.hasMore) {
+        expect(page.nextCursor).toBeNull();
+        break;
+      }
+      expect(page.nextCursor).not.toBeNull();
+      cursor = page.nextCursor;
+      if (pages > COUNT) throw new Error("pagination did not terminate");
+    }
+
+    expect(collected).toHaveLength(COUNT);
+    expect(new Set(collected).size).toBe(COUNT); // no repeats
+    expect(collected).toEqual(groundTruth.neighbors.map((n) => n.nodeId)); // same order, nothing skipped
+  });
+
+  it("reports none withheld when a node has fewer neighbours than the limit (spec: Fewer neighbours than the limit)", async () => {
+    const run = await newRun();
+    const nodeMap = await makeNodes(run, [
+      { nodeType: "doc", externalId: "hub", title: "Hub", content: "c" },
+      { nodeType: "doc", externalId: "n1", title: "N1", content: "c" },
+      { nodeType: "doc", externalId: "n2", title: "N2", content: "c" },
+      { nodeType: "doc", externalId: "n3", title: "N3", content: "c" },
+    ]);
+    const hubId = nodeMap.get("hub")!;
+    await makeEdges(run, [
+      { srcId: hubId, dstId: nodeMap.get("n1")!, edgeType: "e", weight: 0.9 },
+      { srcId: hubId, dstId: nodeMap.get("n2")!, edgeType: "e", weight: 0.5 },
+      { srcId: hubId, dstId: nodeMap.get("n3")!, edgeType: "e", weight: 0.1 },
+    ]);
+
+    const result = await getNeighbors(db, hubId, { limit: 25 });
+
+    expect(result.neighbors).toHaveLength(3);
+    expect(result.hasMore).toBe(false);
+    expect(result.nextCursor).toBeNull();
+  });
+
+  it("rejects a non-positive limit with InvalidLookupOptionError, before any SQL runs", async () => {
+    const run = await newRun();
+    const nodeMap = await makeNodes(run, [{ nodeType: "doc", externalId: "n1", title: "N1", content: "c" }]);
+    await expect(getNeighbors(db, nodeMap.get("n1")!, { limit: 0 })).rejects.toBeInstanceOf(InvalidLookupOptionError);
+    await expect(getNeighbors(db, nodeMap.get("n1")!, { limit: -5 })).rejects.toBeInstanceOf(InvalidLookupOptionError);
+    await expect(getNeighbors(db, nodeMap.get("n1")!, { limit: 1.5 })).rejects.toBeInstanceOf(InvalidLookupOptionError);
+  });
+
+  it("rejects a malformed cursor with InvalidLookupOptionError", async () => {
+    const run = await newRun();
+    const nodeMap = await makeNodes(run, [{ nodeType: "doc", externalId: "n1", title: "N1", content: "c" }]);
+    const id = nodeMap.get("n1")!;
+    // @ts-expect-error deliberately malformed for the runtime check
+    await expect(getNeighbors(db, id, { cursor: { weight: 0.5 } })).rejects.toBeInstanceOf(InvalidLookupOptionError);
+    await expect(getNeighbors(db, id, { cursor: { weight: 0.5, nodeId: "not-a-uuid", edgeId: BOGUS_ID } })).rejects.toBeInstanceOf(
+      InvalidLookupOptionError,
+    );
+    await expect(getNeighbors(db, id, { cursor: { weight: Number.NaN, nodeId: BOGUS_ID, edgeId: BOGUS_ID } })).rejects.toBeInstanceOf(
+      InvalidLookupOptionError,
+    );
   });
 });

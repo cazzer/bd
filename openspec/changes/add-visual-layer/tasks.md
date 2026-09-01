@@ -1,11 +1,11 @@
 ## 1. Degree and bounded neighbours in core
 
-- [ ] 1.1 Add degree to the retrieval result: a scoped aggregate over the returned node set, counted on canonical nodes with endpoints folded through `merged_into` and merge-induced self-connections excluded
-- [ ] 1.2 Add a `limit` and a continuation to the neighbour fetch, ordered by descending edge weight with a deterministic tie-break on id, reporting whether more were withheld
-- [ ] 1.3 Extend the retrieval and neighbour result types with the new fields, keeping `apps/mcp` compiling and its tests green
-- [ ] 1.4 Write tests for the degree spec scenarios: degree counts beyond the returned subgraph, degree across a merge, a merge-induced self-connection is not counted, an unconnected node reports zero
-- [ ] 1.5 Write tests for the bounded-neighbour scenarios: a 500-neighbour hub against a limit of 25, deterministic ordering when weights tie, fetching the remainder without repeats or gaps, fewer neighbours than the limit
-- [ ] 1.6 Confirm with `EXPLAIN (ANALYZE, BUFFERS)` that the degree aggregate is a keyed lookup on indexed columns rather than a full-table count, and record the measurement
+- [x] 1.1 Add degree to the retrieval result: a scoped aggregate over the returned node set, counted on canonical nodes with endpoints folded through `merged_into` and merge-induced self-connections excluded
+- [x] 1.2 Add a `limit` and a continuation to the neighbour fetch, ordered by descending edge weight with a deterministic tie-break on id, reporting whether more were withheld
+- [x] 1.3 Extend the retrieval and neighbour result types with the new fields, keeping `apps/mcp` compiling and its tests green
+- [x] 1.4 Write tests for the degree spec scenarios: degree counts beyond the returned subgraph, degree across a merge, a merge-induced self-connection is not counted, an unconnected node reports zero
+- [x] 1.5 Write tests for the bounded-neighbour scenarios: a 500-neighbour hub against a limit of 25, deterministic ordering when weights tie, fetching the remainder without repeats or gaps, fewer neighbours than the limit
+- [x] 1.6 Confirm with `EXPLAIN (ANALYZE, BUFFERS)` that the degree aggregate is a keyed lookup on indexed columns rather than a full-table count, and record the measurement
 
 ## 2. Human write surface in core
 

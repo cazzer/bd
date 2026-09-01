@@ -347,3 +347,19 @@ export class LookupFailedError extends KnowledgeStoreError {
     super(message, options);
   }
 }
+
+/**
+ * `getNeighbors()` received an out-of-range `limit` or a malformed
+ * `cursor` (bd-hmd.1) — rejected before any SQL runs, naming the
+ * offending option. Distinct from `InvalidLookupIdError`, which is about
+ * the required `id` argument, not the optional paging options.
+ */
+export class InvalidLookupOptionError extends KnowledgeStoreError {
+  constructor(
+    readonly option: string,
+    readonly value: unknown,
+    reason: string,
+  ) {
+    super(`invalid lookup option ${option} (got ${JSON.stringify(value)}): ${reason}`);
+  }
+}
