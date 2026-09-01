@@ -58,6 +58,31 @@ export class ContentTooLargeError extends KnowledgeStoreError {
   }
 }
 
+/**
+ * A node's `title` or `content` contains a NUL byte or other C0 control
+ * character (other than tab/newline/carriage return). Postgres `text`
+ * columns cannot store a literal NUL at all, and other control bytes are
+ * never legitimate prose — this is almost always mis-decoded or
+ * binary-contaminated scraped content. Rejected before the batch reaches
+ * the database, same treatment as `ContentTooLargeError`, so the error
+ * names the row instead of surfacing only a chunk's index range.
+ */
+export class InvalidNodeContentError extends KnowledgeStoreError {
+  constructor(
+    readonly index: number,
+    readonly sourceSystem: string,
+    readonly externalId: string,
+    readonly field: "title" | "content",
+    readonly charPosition: number,
+    readonly codePoint: number,
+  ) {
+    super(
+      `node ${sourceSystem}/${externalId} (batch index ${index}) has a disallowed control character ` +
+        `(U+${codePoint.toString(16).toUpperCase().padStart(4, "0")}) in ${field} at position ${charPosition}`,
+    );
+  }
+}
+
 /** Two rows in the same batch share the (source_system, external_id) dedup key. */
 export class DuplicateNodeInBatchError extends KnowledgeStoreError {
   constructor(
@@ -178,5 +203,24 @@ export class SelfMergeError extends KnowledgeStoreError {
         ? `cannot merge node ${loserId} into ${survivorId}: ${survivorId} resolves to ${resolvedCanonicalId}, which is ${loserId} itself`
         : `cannot merge node ${loserId} into itself`,
     );
+  }
+}
+
+/**
+ * `mergeNodes` failed for a reason other than the validation errors above
+ * (`NodeNotFoundError`, `SelfMergeError`) — a genuine database failure,
+ * such as a deadlock (Postgres `40P01`) that survived the bounded retry,
+ * or any other unexpected error. Wrapped so every error this package
+ * throws is a `KnowledgeStoreError`, never a raw driver error with no
+ * hook for a caller (including the MCP server in bd-vt2.5) to catch.
+ */
+export class MergeFailedError extends KnowledgeStoreError {
+  constructor(
+    message: string,
+    readonly loserId: string,
+    readonly survivorId: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
   }
 }

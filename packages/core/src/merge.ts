@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import type { Database } from "@breakdown/db";
-import { NodeNotFoundError, SelfMergeError } from "./errors.js";
+import { MergeFailedError, NodeNotFoundError, SelfMergeError } from "./errors.js";
+import { asPgError, formatPgInfo } from "./sql-helpers.js";
 
 export interface MergeResult {
   /** The ultimate canonical node id every merged node now points at. */
@@ -18,6 +19,12 @@ type NodeMergeRow = {
   id: string;
   merged_into: string | null;
 }
+
+/** Postgres SQLSTATE for a detected deadlock. */
+const DEADLOCK_DETECTED = "40P01";
+
+/** How many times to retry the merge transaction after a deadlock before giving up. */
+const MAX_DEADLOCK_RETRIES = 3;
 
 /**
  * Merges `loserId` into `survivorId`: `loserId` becomes a redirect to the
@@ -41,24 +48,53 @@ type NodeMergeRow = {
  *   3. If the loser is already merged into that same canonical node, this
  *      is a no-op — idempotent re-application succeeds and changes
  *      nothing.
- *   4. Otherwise, one UPDATE repoints every node with
- *      `id = loserId OR merged_into = loserId` directly at the canonical
- *      id. The `OR merged_into = loserId` half is the chain collapse: any
+ *   4. Otherwise, explicitly lock the exact set of rows about to change —
+ *      the loser, plus every node currently pointing at it — before
+ *      repointing them all in one UPDATE. The `OR merged_into = loserId`
+ *      half of both the lock and the UPDATE is the chain collapse: any
  *      node that was itself merged into the loser (the loser was a
  *      survivor of an earlier merge) gets repointed in the same
  *      statement, so nothing is ever left pointing at a now-non-canonical
  *      node — exactly the shape the trigger would otherwise reject one
  *      row at a time.
  *
- * `FOR UPDATE` on the initial lookup guards against a concurrent merge
- * racing on the same nodes; everything happens in one transaction so a
- * failure at any step leaves no partial redirect.
+ * Every step above runs inside one transaction, so a failure at any point
+ * leaves no partial redirect. A genuine database failure (not one of the
+ * `NodeNotFoundError`/`SelfMergeError` validation errors above, which are
+ * never worth retrying) gets one automatic retry loop for a detected
+ * deadlock (Postgres `40P01` — two concurrent merges can legitimately lock
+ * rows in different orders and deadlock; retrying is the correct response,
+ * not surfacing it), and otherwise is wrapped as `MergeFailedError` so
+ * every error this function can throw is a `KnowledgeStoreError` a caller
+ * can catch by type, never a raw driver error.
  */
 export async function mergeNodes(db: Database, loserId: string, survivorId: string): Promise<MergeResult> {
   if (loserId === survivorId) {
     throw new SelfMergeError(loserId, survivorId);
   }
 
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await runMergeTransaction(db, loserId, survivorId);
+    } catch (err) {
+      if (err instanceof NodeNotFoundError || err instanceof SelfMergeError) {
+        throw err;
+      }
+      const pg = asPgError(err);
+      if (pg?.code === DEADLOCK_DETECTED && attempt <= MAX_DEADLOCK_RETRIES) {
+        continue;
+      }
+      throw new MergeFailedError(
+        `failed to merge node ${loserId} into ${survivorId}${formatPgInfo(pg)}`,
+        loserId,
+        survivorId,
+        { cause: err },
+      );
+    }
+  }
+}
+
+async function runMergeTransaction(db: Database, loserId: string, survivorId: string): Promise<MergeResult> {
   return db.transaction(async (tx) => {
     const lookup = await tx.execute<NodeMergeRow>(sql`
       SELECT id, merged_into FROM nodes WHERE id = ${loserId} OR id = ${survivorId} FOR UPDATE
@@ -90,6 +126,18 @@ export async function mergeNodes(db: Database, loserId: string, survivorId: stri
       // repoint.
       return { survivorId: canonicalId, mergedNodeIds: [] };
     }
+
+    // Lock the exact set of rows this merge is about to modify — the
+    // loser, plus every node currently pointing at it (the chain members
+    // a chain collapse must repoint) — before the UPDATE touches any of
+    // them. This is what actually prevents a concurrent merge from racing
+    // on the same rows; it is not an incidental side effect of the
+    // foreign key on merged_into (that FK protects referential integrity,
+    // not this operation's atomicity, and would silently stop providing
+    // it if the FK were ever relaxed).
+    await tx.execute(sql`
+      SELECT id FROM nodes WHERE id = ${loserId} OR merged_into = ${loserId} FOR UPDATE
+    `);
 
     const updated = await tx.execute<{ id: string }>(sql`
       UPDATE nodes

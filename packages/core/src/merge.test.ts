@@ -2,7 +2,7 @@ import { eq, inArray } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database } from "@breakdown/db";
 import { ingestRuns, nodes, resolvedNodes } from "@breakdown/db";
-import { NodeNotFoundError, SelfMergeError } from "./errors.js";
+import { MergeFailedError, NodeNotFoundError, SelfMergeError } from "./errors.js";
 import { openIngestRun, type IngestRunHandle } from "./ingest-runs.js";
 import { mergeNodes } from "./merge.js";
 import { upsertNodes } from "./nodes.js";
@@ -167,6 +167,33 @@ describe("mergeNodes", () => {
 
     await expect(mergeNodes(db, bogus, a)).rejects.toBeInstanceOf(NodeNotFoundError);
     await expect(mergeNodes(db, a, bogus)).rejects.toBeInstanceOf(NodeNotFoundError);
+  });
+
+  it("wraps a genuine database failure as MergeFailedError, not a raw driver error", async () => {
+    // A malformed uuid isn't caught by any validation in merge.ts (unlike
+    // edges.ts, mergeNodes doesn't pre-validate id shape) — it reaches
+    // Postgres and fails there (22P02, "invalid input syntax for type
+    // uuid"). That's exactly the kind of failure this test needs: not one
+    // of the two intentional validation errors (NodeNotFoundError,
+    // SelfMergeError), so it must come back wrapped, with the original
+    // error preserved as `cause`, per the bd-vt2.3 review ("a deadlock
+    // surfaces as a raw driver error with no KnowledgeStoreError hook").
+    const run = await newRun();
+    const [a] = await makeNodes(run, 1);
+    if (!a) throw new Error("setup failed");
+
+    let thrown: unknown;
+    try {
+      await mergeNodes(db, "not-a-uuid", a);
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(thrown).toBeInstanceOf(MergeFailedError);
+    const err = thrown as MergeFailedError;
+    expect(err.loserId).toBe("not-a-uuid");
+    expect(err.survivorId).toBe(a);
+    expect(err.cause).toBeDefined();
   });
 
   it("lets the merged-away node's original source keep updating it, with the merge still in effect", async () => {

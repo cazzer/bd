@@ -35,3 +35,32 @@ export function sqlArray(values: readonly unknown[], pgType: string): SQL {
     sql.raw(","),
   )}]::${sql.raw(pgType)}[]`;
 }
+
+/** The bits of a `pg` `DatabaseError` this package inspects when wrapping a database failure. */
+export interface PgErrorLike {
+  code?: string;
+  constraint?: string;
+  detail?: string;
+  table?: string;
+}
+
+/**
+ * Extracts the underlying `pg` driver error from whatever drizzle-orm threw.
+ * drizzle-orm's node-postgres driver wraps the real error in a
+ * `DrizzleQueryError` and exposes the original as `.cause` — this unwraps
+ * that (or falls back to the error itself, if it already looks like a raw
+ * driver error) so callers can read `.code`/`.constraint`/`.detail`.
+ */
+export function asPgError(err: unknown): PgErrorLike | undefined {
+  const cause = (err as { cause?: unknown } | undefined)?.cause;
+  if (cause && typeof cause === "object") return cause as PgErrorLike;
+  if (err && typeof err === "object" && "code" in err) return err as PgErrorLike;
+  return undefined;
+}
+
+/** Formats a `PgErrorLike` as a short `" (postgres: ...)"` suffix for an error message, or `""` if there isn't one. */
+export function formatPgInfo(pg: PgErrorLike | undefined): string {
+  if (!pg) return "";
+  const parts = [pg.code, pg.constraint, pg.detail].filter(Boolean);
+  return parts.length > 0 ? ` (postgres: ${parts.join(" — ")})` : "";
+}

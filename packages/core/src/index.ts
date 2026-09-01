@@ -9,6 +9,7 @@ export {
   InvalidIngestRunError,
   InvalidNodeInputError,
   ContentTooLargeError,
+  InvalidNodeContentError,
   DuplicateNodeInBatchError,
   NodeUpsertFailedError,
   InvalidEdgeInputError,
@@ -17,6 +18,7 @@ export {
   EdgeUpsertFailedError,
   NodeNotFoundError,
   SelfMergeError,
+  MergeFailedError,
 } from "./errors.js";
 
 export {

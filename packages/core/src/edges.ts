@@ -7,7 +7,7 @@ import {
   InvalidEdgeWeightError,
 } from "./errors.js";
 import type { IngestRunHandle } from "./ingest-runs.js";
-import { chunk, sqlArray } from "./sql-helpers.js";
+import { asPgError, chunk, formatPgInfo, sqlArray } from "./sql-helpers.js";
 
 /** Default chunk size for the `unnest(...)` batch upsert — see design.md "Writes". */
 export const DEFAULT_EDGE_CHUNK_SIZE = 1000;
@@ -153,20 +153,6 @@ function buildUpsertEdgesQuery(rows: readonly PreparedEdge[], ingestRunId: strin
   `;
 }
 
-interface PgErrorLike {
-  code?: string;
-  constraint?: string;
-  detail?: string;
-  table?: string;
-}
-
-function asPgError(err: unknown): PgErrorLike | undefined {
-  const cause = (err as { cause?: unknown } | undefined)?.cause;
-  if (cause && typeof cause === "object") return cause as PgErrorLike;
-  if (err && typeof err === "object" && "code" in err) return err as PgErrorLike;
-  return undefined;
-}
-
 /**
  * On a genuine database-level failure (e.g. src_id/dst_id referencing a
  * node that does not exist — an FK violation, since this is the one
@@ -189,7 +175,7 @@ function wrapEdgeWriteError(err: unknown, rows: readonly PreparedEdge[]): EdgeUp
     }
   }
 
-  const pgInfo = pg ? ` (postgres: ${[pg.code, pg.constraint, pg.detail].filter(Boolean).join(" — ")})` : "";
+  const pgInfo = formatPgInfo(pg);
   const message = offending
     ? `edge ${offending.srcId} -[${offending.edgeType}]-> ${offending.dstId} (source_system=${offending.sourceSystem}, batch index ${offending.index}) failed to write${pgInfo}`
     : `edge batch write failed for batch indexes ${start}-${end}${pgInfo}`;
