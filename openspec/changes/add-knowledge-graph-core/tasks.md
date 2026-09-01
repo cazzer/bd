@@ -16,12 +16,12 @@
 
 ## 3. Write path
 
-- [ ] 3.1 Implement batched node upsert over `unnest(...)` arrays, chunked at ~1,000 rows in one transaction, returning created/updated/unchanged counts derived from `content_hash`
-- [ ] 3.2 Implement batched edge upsert with weight validation that names the offending edge on rejection
-- [ ] 3.3 Make batch failure all-or-nothing: a constraint violation rolls back the entire batch and identifies the offending row
-- [ ] 3.4 Implement ingest run open/close with node and edge counts, and a query returning everything a run produced
-- [ ] 3.5 Implement `mergeNodes(loser, survivor)`: set `merged_into`, keep the loser's rows and edge provenance intact, idempotent when re-applied
-- [ ] 3.6 Write write-path tests: re-running an unchanged batch creates no duplicates and advances no timestamps; a changed node reports as updated; a bad row rejects the whole batch; merged-away nodes stop appearing in `resolved_nodes`
+- [x] 3.1 Implement batched node upsert over `unnest(...)` arrays, chunked at ~1,000 rows in one transaction, returning created/updated/unchanged counts derived from `content_hash`
+- [x] 3.2 Implement batched edge upsert with weight validation that names the offending edge on rejection
+- [x] 3.3 Make batch failure all-or-nothing: a constraint violation rolls back the entire batch and identifies the offending row
+- [x] 3.4 Implement ingest run open/close with node and edge counts, and a query returning everything a run produced
+- [x] 3.5 Implement `mergeNodes(loser, survivor)`: set `merged_into`, keep the loser's rows and edge provenance intact, idempotent when re-applied
+- [x] 3.6 Write write-path tests: re-running an unchanged batch creates no duplicates and advances no timestamps; a changed node reports as updated; a bad row rejects the whole batch; merged-away nodes stop appearing in `resolved_nodes`
 
 ## 4. Retrieval
 

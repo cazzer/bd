@@ -6,6 +6,10 @@
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
+  "dependencies": {
+    "@breakdown/db": "workspace:*",
+    "drizzle-orm": "0.45.2"
+  },
   "devDependencies": {
     "typescript": "5.9.3"
   }
