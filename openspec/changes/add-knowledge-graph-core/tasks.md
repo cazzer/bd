@@ -25,12 +25,12 @@
 
 ## 4. Retrieval
 
-- [ ] 4.1 Write the seeds CTE: `websearch_to_tsquery` parsing, `ts_rank_cd` scoring, `ts_headline` snippets, relevance floor, seed limit, and the type/source/updated-since filters
-- [ ] 4.2 Write the recursive expansion: bidirectional edge following, depth bound, `CYCLE` clause, `parent_score * edge_weight * decay^depth` scoring, per-hop `LATERAL` fanout cap ordered by edge weight
-- [ ] 4.3 Assemble both into one statement returning seed nodes, expanded nodes, connecting edges, and each node's inclusion provenance (seed relevance or path from seed)
-- [ ] 4.4 Implement the trigram fallback: issued only when the seeds CTE returns empty, results flagged as fuzzy
-- [ ] 4.5 Implement the store summary query: node types, source systems, and edge types with counts, plus recently updated nodes
-- [ ] 4.6 Write retrieval tests over a fixture graph: phrase and exclusion syntax, depth bound, node budget keeps top scorers, cycle visited once, hub fanout cap, byte-identical repeated results, source filter excluded, fuzzy fallback on a misspelling, empty result when both modes fail
+- [x] 4.1 Write the seeds CTE: `websearch_to_tsquery` parsing, `ts_rank_cd` scoring, `ts_headline` snippets, relevance floor, seed limit, and the type/source/updated-since filters
+- [x] 4.2 Write the recursive expansion: bidirectional edge following, depth bound, `CYCLE` clause, `parent_score * edge_weight * decay^depth` scoring, per-hop `LATERAL` fanout cap ordered by edge weight
+- [x] 4.3 Assemble both into one statement returning seed nodes, expanded nodes, connecting edges, and each node's inclusion provenance (seed relevance or path from seed)
+- [x] 4.4 Implement the trigram fallback: issued only when the seeds CTE returns empty, results flagged as fuzzy
+- [x] 4.5 Implement the store summary query: node types, source systems, and edge types with counts, plus recently updated nodes
+- [x] 4.6 Write retrieval tests over a fixture graph: phrase and exclusion syntax, depth bound, node budget keeps top scorers, cycle visited once, hub fanout cap, byte-identical repeated results, source filter excluded, fuzzy fallback on a misspelling, empty result when both modes fail
 
 ## 5. MCP server
 

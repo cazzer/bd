@@ -118,6 +118,23 @@ export const nodes = pgTable(
     ),
     // Trigram GIN indexes on title/content are hand-written alongside
     // the pg_trgm extension — see the file header comment.
+    //
+    // Partial B-tree index backing the retrieval query's `alias` CTE
+    // (bd-vt2.4, docs/retrieval-query-design.md), which groups every
+    // merged-away node by its survivor on every single retrieval call.
+    // Without it that CTE sequentially scans all of `nodes` — measured
+    // 8.2ms vs 0.055ms at 30k rows, ~22% of total retrieval time, and
+    // growing linearly while the rest of the query does not. `WHERE
+    // merged_into IS NOT NULL` keeps it small: most nodes are never
+    // merged away, and the retrieval query only ever looks up rows that
+    // have a non-null merged_into. Expressible through pg-core's index
+    // builder (unlike the tsvector/GIN/trigram/trigger constructs above),
+    // so — unlike those — this one round-trips through `drizzle-kit
+    // generate` into its own additive migration rather than being
+    // hand-written.
+    index("nodes_merged_into_idx")
+      .on(table.mergedInto)
+      .where(sql`${table.mergedInto} IS NOT NULL`),
   ],
 );
 

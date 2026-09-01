@@ -1,0 +1,1 @@
+CREATE INDEX "nodes_merged_into_idx" ON "nodes" USING btree ("merged_into") WHERE "nodes"."merged_into" IS NOT NULL;

@@ -224,3 +224,61 @@ export class MergeFailedError extends KnowledgeStoreError {
     super(message, options);
   }
 }
+
+// --- Retrieval (bd-vt2.4) ---------------------------------------------------
+
+/**
+ * A `retrieve()` / `getStoreSummary()` option is out of range or
+ * malformed — e.g. `minRelevance <= 0` (the retrieval spec requires a
+ * strictly positive floor: a query consisting only of exclusions matches
+ * every document lacking the term at rank zero, so a `>= 0` floor would
+ * return an arbitrary slice of the store), `maxDepth` outside `[0, 3]`,
+ * `decay` outside `(0, 1]`, or a non-positive `seedLimit` / `fanout` /
+ * `nodeBudget`. Rejected before any SQL runs, naming the offending
+ * option.
+ */
+export class InvalidRetrievalOptionError extends KnowledgeStoreError {
+  constructor(
+    readonly option: string,
+    readonly value: unknown,
+    reason: string,
+  ) {
+    super(`invalid retrieval option ${option} (got ${JSON.stringify(value)}): ${reason}`);
+  }
+}
+
+/**
+ * `retrieve()` was called with query text containing no searchable terms
+ * — either the empty/whitespace-only string, or text that
+ * `websearch_to_tsquery` parses down to zero lexemes (stopwords only,
+ * e.g. `"the of and"`; detected via `numnode(tsq) = 0`, per
+ * docs/retrieval-query-design.md's "Implementation notes"). Distinct from
+ * a query that parses fine but matches nothing (that returns an
+ * `"empty"`-mode result, not an error) and from a pure-exclusion query
+ * like `-supabase` (that has two tsquery nodes and is handled by the
+ * `minRelevance` floor, not this error — see the retrieval spec's "Query
+ * matching only excluded terms").
+ */
+export class EmptyQueryError extends KnowledgeStoreError {
+  constructor(readonly queryText: string) {
+    super(`query text ${JSON.stringify(queryText)} contains no searchable terms`);
+  }
+}
+
+/**
+ * A retrieval query (exact seeds+traversal, fuzzy fallback, or store
+ * summary) failed at the database after passing boundary validation — a
+ * genuine driver/Postgres failure, not a caller mistake
+ * `InvalidRetrievalOptionError` / `EmptyQueryError` would already have
+ * caught. Wraps the original error as `cause` so every error
+ * `retrieve()` / `getStoreSummary()` can throw is a `KnowledgeStoreError`.
+ */
+export class RetrievalFailedError extends KnowledgeStoreError {
+  constructor(
+    message: string,
+    readonly mode: "exact" | "fuzzy" | "summary",
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+  }
+}
