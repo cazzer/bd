@@ -6,7 +6,9 @@ Turns query text into a bounded, scored subgraph — full-text search picks the 
 
 ### Requirement: Text search selects seeds
 
-Given query text, retrieval SHALL rank nodes by full-text relevance and return the highest-scoring ones as seeds. The query syntax SHALL support quoted phrases, alternation, and term exclusion. Callers SHALL be able to set the number of seeds and a minimum relevance score. Each seed SHALL carry its relevance score and a highlighted snippet showing the matched text in context.
+Given query text, retrieval SHALL rank nodes by full-text relevance and return the highest-scoring ones as seeds. The query syntax SHALL support quoted phrases, alternation, and term exclusion. Callers SHALL be able to set the number of seeds and a minimum relevance score. Each seed SHALL carry its relevance score, and — for an exact match — a highlighted snippet showing the matched text in context. A fuzzy seed MAY omit the snippet, since approximate matching produces no parsed query to highlight against.
+
+The minimum relevance score SHALL default to a small positive value rather than zero, because a query consisting only of exclusions matches every document lacking the excluded term at rank zero.
 
 #### Scenario: Query with clear matches
 
@@ -30,7 +32,7 @@ When full-text search returns no seeds, retrieval SHALL retry using approximate 
 #### Scenario: Misspelled query
 
 - **WHEN** a caller searches for `postgress` and full-text search returns nothing
-- **THEN** nodes about `postgres` are returned, flagged as fuzzy matches
+- **THEN** nodes about `postgres` are returned, flagged as fuzzy matches, and expanded into a subgraph the same way exact seeds are
 
 #### Scenario: Fuzzy fallback also finds nothing
 
@@ -83,6 +85,16 @@ Callers SHALL be able to restrict retrieval by node type, source system, and a m
 
 - **WHEN** a caller filters to source system `github`
 - **THEN** no node from another source system appears among seeds or expanded nodes
+
+#### Scenario: Filtered-out node blocks the path behind it
+
+- **WHEN** a node matching the filter is reachable only by traversing through a node that does not match
+- **THEN** it is absent from the result, because a filtered-out node is excluded from the graph rather than hidden from the output
+
+#### Scenario: Query matching only excluded terms
+
+- **WHEN** a caller searches for `-supabase` with no positive term
+- **THEN** an empty seed set is returned, rather than an arbitrary slice of every document lacking the term
 
 ### Requirement: Results explain why each node was included
 

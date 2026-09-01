@@ -64,7 +64,12 @@ seeds AS (          -- GIN scan over nodes.search, ranked, filtered
 ) SELECT nodes, edges FROM expand ORDER BY score DESC LIMIT node_budget
 ```
 
-- Score decays as `parent_score * edge_weight * decay^depth`; ties break on node id so repeated queries are byte-identical.
+- Score decays **once per hop**: `child_score = parent_score * edge_weight * decay`, giving the closed form `seed_relevance * Π(edge_weight) * decay^depth`. Read as a per-hop recurrence with `depth` as the exponent it would compound to `decay^(1+2+...+d)`, which is not intended — the arithmetic is asserted in a test because the misreading is silent and changes every score.
+- Ties break on node id so repeated queries are byte-identical.
+- **`min_relevance` must default to a small positive number (1e-6), never 0.** A query consisting only of exclusions (`-supabase`) parses to a tsquery that matches every document *lacking* the term, all at `ts_rank_cd = 0`; a floor of `>= 0` would return an arbitrary slice of the entire store. The floor is the guard — `numnode()` does not distinguish this case.
+- **Filters exclude nodes from the graph, not just from the output.** They are applied inside the traversal, so a filtered-out node never enters the frontier and nothing reachable only through it is returned. The alternative — filtering at output — returns edges referencing nodes absent from the result and provenance paths through nodes the caller was told do not exist. The honest cost is that a narrow filter can disconnect the graph.
+- **A node that is both a seed and reachable by traversal always reports as a seed** at depth 0 with its own relevance. Since `weight <= 1` and `decay <= 1`, an expanded node can never outscore its own seed, so this never reorders anything.
+- Default depth is 2 with a hard ceiling of 3; worst-case frontier is `seed_limit * fanout^depth`.
 - Cycles use Postgres's `CYCLE` clause rather than a hand-rolled visited array.
 - Each hop applies a per-node fanout cap (`LATERAL ... ORDER BY weight DESC LIMIT n`) before the global node budget, so one hub cannot swamp the frontier.
 - Traversal follows edges in both directions — a `mentions` edge is as useful backwards as forwards.
@@ -100,7 +105,8 @@ Stdio covers Claude Code and Claude Desktop. HTTP transport is deferred until so
 - **Lexical search misses paraphrase** → the agent issues multiple phrasings per question, `brain_map` exposes the actual vocabulary, and explicit edges carry relationships that wording would not surface. If this proves insufficient in practice, pgvector is additive; a follow-up bead tracks the decision point.
 - **Traversal fan-out on hub nodes** → per-hop `LATERAL` fanout cap plus a global node budget; depth capped at 3 by default.
 - **Agent-authored edges are unverified** → every edge carries `source_system` and `ingest_run_id`, so a bad run is identifiable and removable as a unit.
-- **Merged nodes complicate every query** → all reads go through `resolved_nodes`, never resolving at the call site.
+- **Merged nodes complicate every query** → canonical-row joins go through `resolved_nodes`. Retrieval is the one necessary exception: seed selection must scan `nodes` directly (a text match on a merged-away row has to fold onto its survivor rather than being lost), and traversal must fold `edges.src_id`/`dst_id` through `coalesce(merged_into, id)` (or edges attached to a merged-away node become unreachable from the survivor, which the spec requires to work). Both folds are confined to the retrieval module and noted in its header.
+- **`nodes.merged_into` needs a partial index** — `CREATE INDEX ... ON nodes (merged_into) WHERE merged_into IS NOT NULL`. Without it the alias-folding CTE sequentially scans the whole node table on every query (measured: 8.2ms vs 0.055ms at 30k nodes, ~22% of total retrieval time, growing linearly while the rest of the query does not).
 - **Bounded MCP responses can hide the best answer** → truncation always keeps the highest-scoring items and says explicitly that it truncated.
 - **English-only text search configuration** → acceptable for a personal brain; the configuration is a column-level choice that can be revisited.
 

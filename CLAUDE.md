@@ -101,5 +101,6 @@ Data model: typed `nodes` joined by `edges` that carry provenance (source system
 - `content_hash` drives the created/updated/unchanged counts reported back to a writing agent — never diff content in application code.
 - A batch write is all-or-nothing. Partial success leaves an agent unable to tell what to retry.
 - `node_type` is open text, not an enum — new kinds of node must not require a migration.
-- Every read path resolves `merged_into` through the `resolved_nodes` view, never at the call site.
+- Canonical-row joins go through the `resolved_nodes` view. Retrieval is the one deliberate exception: seed search scans `nodes` directly and folds via `coalesce(merged_into, id)`, because a text match on a merged-away row must return its survivor rather than vanish, and traversal folds edge endpoints the same way. Confined to the retrieval module; documented in its header.
+- **Adding a column to `nodes` requires a `CREATE OR REPLACE VIEW resolved_nodes` in the same migration.** Postgres froze the view's `SELECT *` into an explicit column list at creation, so a new column is invisible to every read path until the view is replaced. This will bite when embeddings are revisited (`bd-55t`).
 - No SQL passthrough tool is ever exposed to a model. New retrieval needs become real, validated tools.
