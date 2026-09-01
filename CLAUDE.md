@@ -93,7 +93,11 @@ pnpm monorepo, TypeScript, ESM, Node 22.
 
 Data model: typed `nodes` joined by `edges` that carry provenance (source system, ingest run) and a confidence weight, because most edges are agent-asserted. Node title and content are indexed by a generated `tsvector` column. Retrieval is one SQL statement: full-text search picks seeds, a recursive CTE expands a bounded, score-decayed subgraph.
 
-**No embeddings, and no model call in the read path.** The agent is the loading mechanism, not a runtime dependency — it reads source material, decides what matters, and writes nodes and explicit edges through MCP. Serving a query is pure Postgres, needing no credential beyond `DATABASE_URL`.
+**No model call anywhere in this codebase — not in the read path, not in the write path, not in a background job.** The app holds no model credential and takes no model dependency. The only environment variables it reads are `DATABASE_URL`, `BRAIN_READ_ONLY`, and `WEB_SERVER_PORT`; adding an API key of any kind is an architecture change, not a feature.
+
+Intelligence enters exclusively through MCP, from a session the user is already paying for by subscription. The agent is the loading and linking mechanism, not a runtime dependency: it reads source material, decides what matters and what relates to what, and writes nodes and explicit edges through the `brain_*` tools. "Run a linking pass on the repo I just imported" is a request a person makes to their own Claude session — never a job this app runs on their behalf.
+
+Serving a query, and every write the app performs itself, is pure Postgres.
 
 ## Conventions & Patterns
 

@@ -169,3 +169,22 @@ export {
   LINKS_TO_WEIGHT,
   type EdgeCandidate,
 } from "./corpus.js";
+
+// Pure helpers for the GitHub repos/issues loader (bd-5hd) — not
+// write-path or retrieval behavior, just how src/ingest-github.ts names
+// its source system/node/edge types and resolves `#N`/`owner/repo#N`
+// cross-references in issue text into `mentions` edges. See github.ts.
+export {
+  extractIssueReferences,
+  deriveMentionEdges,
+  GITHUB_SOURCE_SYSTEM,
+  REPO_NODE_TYPE,
+  ISSUE_NODE_TYPE,
+  BELONGS_TO_EDGE_TYPE,
+  BELONGS_TO_WEIGHT,
+  MENTIONS_EDGE_TYPE,
+  MENTIONS_WEIGHT,
+  type ParsedReference,
+  type IssueRefSource,
+  type MentionEdgeCandidate,
+} from "./github.js";

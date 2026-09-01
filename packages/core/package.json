@@ -10,7 +10,8 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "db:seed": "tsx src/seed.ts"
+    "db:seed": "tsx src/seed.ts",
+    "ingest:github": "tsx src/ingest-github.ts"
   },
   "dependencies": {
     "@breakdown/db": "workspace:*",
