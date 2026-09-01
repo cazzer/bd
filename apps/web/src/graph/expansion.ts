@@ -147,21 +147,21 @@ export function mergeExpansion(previous: GraphCanvasData, params: ExpansionParam
       title: neighbor.title,
       nodeType: neighbor.nodeType,
       sourceSystem: neighbor.nodeSourceSystem,
-      // `Neighbor` (packages/core/src/lookup.ts) carries no store-wide
-      // degree — only `retrieve()`'s `RetrievedNode` does, by design
-      // (design.md: "Degree is computed per query, for the returned
-      // nodes only"). A node reached by expansion therefore starts at
-      // `degreeToRadius`'s own floor for degree 0 — the SAME visible-
-      // minimum a genuinely degree-zero node gets, not a fabricated
-      // number — rather than either lying about size or reaching into
-      // `@breakdown/core` for a value this DTO doesn't carry (out of
-      // scope: this ticket does not modify packages/core or the server
-      // procedures). If the same node later comes back from a *search*,
-      // `mergeGraphData`'s `Object.assign` corrects degree/radius onto
-      // the SAME object, in place, without disturbing its by-then-
-      // settled position.
-      degree: 0,
-      radius: degreeToRadius(0),
+      // `Neighbor.degree` (packages/core/src/lookup.ts, bd-hmd.5 review)
+      // is the SAME store-wide aggregate `retrieve()`'s `RetrievedNode`
+      // computes — see `buildGetNeighborsQuery`'s "degree" CTE comment
+      // for the derivation. This has to be the real number, not a
+      // fallback: graph-explorer/spec.md's "Size is stable across views"
+      // requires a node to draw at the same size whether it arrived by
+      // search or by expansion, and a degree-0 placeholder here would
+      // draw exactly the nodes progressive exploration exists to surface
+      // at the wrong size. If the same node later comes back from a
+      // *search*, `mergeGraphData`'s `Object.assign` still overwrites
+      // degree/radius onto the SAME object in place (both paths agree on
+      // the number, per lookup.test.ts's "agrees with retrieve()'s
+      // degree" test, so this is idempotent, not just harmless).
+      degree: neighbor.degree,
+      radius: degreeToRadius(neighbor.degree),
       color: colorForNodeType(neighbor.nodeType),
       isEditable: neighbor.isEditable,
       // Never "seed" — graph-explorer/spec.md's "An expanded node

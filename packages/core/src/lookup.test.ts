@@ -1,5 +1,5 @@
 import { PgDialect } from "drizzle-orm/pg-core";
-import { inArray } from "drizzle-orm";
+import { inArray, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database } from "@breakdown/db";
 import { edges, ingestRuns, nodes } from "@breakdown/db";
@@ -17,8 +17,10 @@ import {
   getNeighbors,
   getNodes,
   MAX_NEIGHBOR_LIMIT,
+  type BuildGetNeighborsQueryParams,
   type NeighborsCursor,
 } from "./lookup.js";
+import { retrieve } from "./retrieval.js";
 import { connectTestDb, type TestPool, uniqueSuffix } from "./test-helpers.js";
 
 let pool: TestPool;
@@ -372,6 +374,211 @@ describe("getNeighbors", () => {
 
   it("rejects a malformed (non-uuid) id with InvalidLookupIdError", async () => {
     await expect(getNeighbors(db, "not-a-uuid")).rejects.toBeInstanceOf(InvalidLookupIdError);
+  });
+});
+
+// --- getNeighbors: degree (bd-hmd.5 review) --------------------------------
+//
+// bd-hmd.5's expansion draws a node reached by getNeighbors at a radius
+// derived from its degree. Before this, `Neighbor` carried none, so an
+// expanded node drew at the floor radius even when the very same node,
+// reached instead by search, drew at its true size — a direct violation
+// of graph-explorer/spec.md's "Size is stable across views" ("a node
+// SHALL be drawn at the same size wherever it appears"). These mirror
+// retrieval.ts's own degree tests (bd-hmd.1) shape-for-shape, since this
+// is the identical aggregate applied to a neighbor instead of a
+// traversal-kept node — see buildGetNeighborsQuery's "degree" CTE
+// comment for the derivation.
+
+describe("getNeighbors — degree (bd-hmd.5 review)", () => {
+  it("counts a neighbor's degree across the whole store, not just its edge to the queried node (spec: Size is stable across views)", async () => {
+    const run = await newRun();
+    const nodeMap = await makeNodes(run, [
+      { nodeType: "doc", externalId: "center", title: "Degree-neighbor center", content: "c" },
+      { nodeType: "doc", externalId: "spoke", title: "Degree-neighbor spoke", content: "c" },
+    ]);
+    const centerId = nodeMap.get("center")!;
+    const spokeId = nodeMap.get("spoke")!;
+    const farSpecs: Omit<NodeInput, "sourceSystem">[] = [];
+    for (let i = 1; i <= 19; i++) farSpecs.push({ nodeType: "doc", externalId: `far${i}`, title: `Far ${i}`, content: "c" });
+    const farMap = await makeNodes(run, farSpecs);
+
+    const edgeSpecs: Omit<EdgeInput, "sourceSystem">[] = [{ srcId: centerId, dstId: spokeId, edgeType: "mentions", weight: 0.9 }];
+    for (let i = 1; i <= 19; i++) edgeSpecs.push({ srcId: spokeId, dstId: farMap.get(`far${i}`)!, edgeType: "relates_to", weight: 0.5 });
+    await makeEdges(run, edgeSpecs);
+
+    const result = await getNeighbors(db, centerId);
+    expect(result.neighbors).toHaveLength(1);
+    // spoke's degree is center (1) + 19 far nodes (19) = 20 — none of
+    // those 19 far nodes are themselves center's neighbors (they aren't
+    // in this listing at all), yet the reported degree still counts them.
+    expect(result.neighbors[0]!.degree).toBe(20);
+  });
+
+  it("counts distinct connected nodes, not edges — a neighbor joined to a third node by three differently-typed/-directed edges still contributes 1 to that neighbor's degree", async () => {
+    const run = await newRun();
+    const nodeMap = await makeNodes(run, [
+      { nodeType: "doc", externalId: "center", title: "c", content: "c" },
+      { nodeType: "doc", externalId: "spoke", title: "s", content: "c" },
+      { nodeType: "doc", externalId: "third", title: "t", content: "c" },
+    ]);
+    const centerId = nodeMap.get("center")!;
+    const spokeId = nodeMap.get("spoke")!;
+    const thirdId = nodeMap.get("third")!;
+    await makeEdges(run, [
+      { srcId: centerId, dstId: spokeId, edgeType: "mentions", weight: 0.9 },
+      { srcId: spokeId, dstId: thirdId, edgeType: "type-a", weight: 0.5 },
+      { srcId: spokeId, dstId: thirdId, edgeType: "type-b", weight: 0.4 },
+      { srcId: thirdId, dstId: spokeId, edgeType: "type-c", weight: 0.3 },
+    ]);
+
+    const result = await getNeighbors(db, centerId);
+    const spoke = result.neighbors.find((n) => n.nodeId === spokeId)!;
+    // center (1) + third (1, despite three edges across both directions) = 2, not 4.
+    expect(spoke.degree).toBe(2);
+  });
+
+  it("counts across a merge, once per distinct far node, when the merged-away node had connections the survivor did not", async () => {
+    const run = await newRun();
+    const nodeMap = await makeNodes(run, [
+      { nodeType: "doc", externalId: "center", title: "c", content: "c" },
+      { nodeType: "doc", externalId: "survivor", title: "s", content: "c" },
+      { nodeType: "doc", externalId: "loser", title: "l", content: "c" },
+      { nodeType: "doc", externalId: "farA", title: "a", content: "c" },
+      { nodeType: "doc", externalId: "farB", title: "b", content: "c" },
+    ]);
+    const centerId = nodeMap.get("center")!;
+    const survivorId = nodeMap.get("survivor")!;
+    const loserId = nodeMap.get("loser")!;
+    const farAId = nodeMap.get("farA")!;
+    const farBId = nodeMap.get("farB")!;
+    await makeEdges(run, [
+      { srcId: centerId, dstId: survivorId, edgeType: "mentions", weight: 0.9 },
+      { srcId: survivorId, dstId: farAId, edgeType: "rel", weight: 0.9 },
+      { srcId: loserId, dstId: farAId, edgeType: "rel2", weight: 0.8 }, // same farA, from the about-to-be-merged loser
+      { srcId: loserId, dstId: farBId, edgeType: "rel3", weight: 0.7 },
+    ]);
+    await mergeNodes(db, loserId, survivorId);
+
+    const result = await getNeighbors(db, centerId);
+    const survivor = result.neighbors.find((n) => n.nodeId === survivorId)!;
+    // center (1) + farA (1, not 2) + farB (1) = 3.
+    expect(survivor.degree).toBe(3);
+  });
+
+  it("does not count a merge-induced self-connection in a neighbor's own degree", async () => {
+    const run = await newRun();
+    const nodeMap = await makeNodes(run, [
+      { nodeType: "doc", externalId: "center", title: "c", content: "c" },
+      { nodeType: "doc", externalId: "loser", title: "l", content: "c" },
+      { nodeType: "doc", externalId: "survivor", title: "s", content: "c" },
+      { nodeType: "doc", externalId: "farC", title: "f", content: "c" },
+    ]);
+    const centerId = nodeMap.get("center")!;
+    const loserId = nodeMap.get("loser")!;
+    const survivorId = nodeMap.get("survivor")!;
+    const farCId = nodeMap.get("farC")!;
+    await makeEdges(run, [
+      { srcId: centerId, dstId: survivorId, edgeType: "mentions", weight: 0.9 },
+      { srcId: loserId, dstId: survivorId, edgeType: "self-ish", weight: 0.9 }, // becomes a self-loop once merged
+      { srcId: survivorId, dstId: farCId, edgeType: "rel", weight: 0.5 },
+    ]);
+    await mergeNodes(db, loserId, survivorId);
+
+    const result = await getNeighbors(db, centerId);
+    const survivor = result.neighbors.find((n) => n.nodeId === survivorId)!;
+    // center (1) + farC (1) = 2 — NOT 3, which would mean the folded
+    // loser->survivor edge counted survivor as connected to itself.
+    expect(survivor.degree).toBe(2);
+  });
+
+  it("(regression) a far node reached via both the neighbor's own edge and its merged-away alias's edge counts once toward that neighbor's degree", async () => {
+    const run = await newRun();
+    const nodeMap = await makeNodes(run, [
+      { nodeType: "doc", externalId: "center", title: "c", content: "c" },
+      { nodeType: "doc", externalId: "survivor", title: "s", content: "c" },
+      { nodeType: "doc", externalId: "loser", title: "l", content: "c" },
+      { nodeType: "doc", externalId: "far", title: "f", content: "c" },
+    ]);
+    const centerId = nodeMap.get("center")!;
+    const survivorId = nodeMap.get("survivor")!;
+    const loserId = nodeMap.get("loser")!;
+    const farId = nodeMap.get("far")!;
+    await makeEdges(run, [
+      { srcId: centerId, dstId: survivorId, edgeType: "mentions", weight: 0.9 },
+      { srcId: survivorId, dstId: farId, edgeType: "rel", weight: 0.8 },
+      { srcId: loserId, dstId: farId, edgeType: "rel2", weight: 0.6 },
+    ]);
+    await mergeNodes(db, loserId, survivorId);
+
+    const result = await getNeighbors(db, centerId);
+    const survivor = result.neighbors.find((n) => n.nodeId === survivorId)!;
+    expect(survivor.degree).toBe(2); // center + far, not center + far + far
+  });
+
+  // --- the assertion that actually closes the spec scenario -----------------
+
+  it("agrees with retrieve()'s degree for the SAME node, whether it is reached by search or by expansion (graph-explorer/spec.md, \"Size is stable across views\": a node SHALL be drawn at the same size wherever it appears)", async () => {
+    const run = await newRun();
+    const nodeMap = await makeNodes(run, [
+      { nodeType: "doc", externalId: "center", title: "Degree agreement center unique phrase zeta", content: "c" },
+      { nodeType: "doc", externalId: "hub", title: "Degree agreement hub", content: "c" },
+    ]);
+    const centerId = nodeMap.get("center")!;
+    const hubId = nodeMap.get("hub")!;
+    const farSpecs: Omit<NodeInput, "sourceSystem">[] = [];
+    for (let i = 1; i <= 5; i++) farSpecs.push({ nodeType: "doc", externalId: `far${i}`, title: `Far ${i}`, content: "c" });
+    const farMap = await makeNodes(run, farSpecs);
+    const edgeSpecs: Omit<EdgeInput, "sourceSystem">[] = [{ srcId: centerId, dstId: hubId, edgeType: "mentions", weight: 0.9 }];
+    for (let i = 1; i <= 5; i++) edgeSpecs.push({ srcId: hubId, dstId: farMap.get(`far${i}`)!, edgeType: "rel", weight: 0.5 });
+    await makeEdges(run, edgeSpecs);
+
+    // hub, reached via retrieve() — a search whose seed is "center", traversing to hub...
+    const searchResult = await retrieve(db, "degree agreement center zeta", { sourceSystems: [run.sourceSystem] });
+    if (searchResult.mode === "empty") throw new Error("expected a found result");
+    const hubViaSearch = searchResult.nodes.find((n) => n.id === hubId)!;
+
+    // ...and the SAME hub, reached via getNeighbors(center) — an expansion.
+    const neighborsResult = await getNeighbors(db, centerId);
+    const hubViaExpansion = neighborsResult.neighbors.find((n) => n.nodeId === hubId)!;
+
+    expect(hubViaSearch.degree).toBe(6); // center + 5 far
+    expect(hubViaExpansion.degree).toBe(hubViaSearch.degree); // the two aggregates must never disagree
+  });
+
+  it("(regression) resolves the degree aggregate via index scans on edges/nodes, not sequential scans, confirmed with EXPLAIN (ANALYZE, BUFFERS) — the neighbor query is on the click path, run far more often than search", async () => {
+    const run = await newRun();
+    const NEIGHBOR_COUNT = 50;
+    const specs: Omit<NodeInput, "sourceSystem">[] = [{ nodeType: "doc", externalId: "hub", title: "Degree index hub", content: "c" }];
+    for (let i = 1; i <= NEIGHBOR_COUNT; i++) specs.push({ nodeType: "doc", externalId: `dnbr${i}`, title: `Degree index neighbor ${i}`, content: "c" });
+    const nodeMap = await makeNodes(run, specs);
+    const hubId = nodeMap.get("hub")!;
+    const edgeSpecs: Omit<EdgeInput, "sourceSystem">[] = [];
+    for (let i = 1; i <= NEIGHBOR_COUNT; i++) edgeSpecs.push({ srcId: hubId, dstId: nodeMap.get(`dnbr${i}`)!, edgeType: "hub_edge", weight: i / NEIGHBOR_COUNT });
+    await makeEdges(run, edgeSpecs);
+
+    // One neighbor gets a merged-away alias, so the plan also exercises
+    // the nodes_merged_into_idx join the degree CTE's alias resolution
+    // (neighbor_alias) needs — not just the plain edges lookups.
+    const loserMap = await makeNodes(run, [{ nodeType: "doc", externalId: "alias-loser", title: "l", content: "c" }]);
+    await mergeNodes(db, loserMap.get("alias-loser")!, nodeMap.get("dnbr1")!);
+
+    const params: BuildGetNeighborsQueryParams = { id: hubId, limit: DEFAULT_NEIGHBOR_LIMIT, cursor: null };
+
+    await db.transaction(async (tx) => {
+      // Same technique retrieval.ts's own degree EXPLAIN test uses: forces
+      // the planner off sequential scans wherever an index exists, so
+      // this holds deterministically regardless of the live table's size
+      // at test time.
+      await tx.execute(sql`SET LOCAL enable_seqscan = off`);
+      const explain = await tx.execute<{ "QUERY PLAN": string }>(sql`EXPLAIN (ANALYZE, BUFFERS) ${buildGetNeighborsQuery(params)}`);
+      const planText = explain.rows.map((r) => r["QUERY PLAN"]).join("\n");
+      expect(planText).not.toContain("Seq Scan");
+      expect(planText).toContain("edges_src_id_edge_type_idx");
+      expect(planText).toContain("edges_dst_id_edge_type_idx");
+      expect(planText).toContain("nodes_merged_into_idx");
+      expect(planText).toContain("nodes_pkey");
+    });
   });
 });
 

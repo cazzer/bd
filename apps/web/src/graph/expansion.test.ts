@@ -16,7 +16,7 @@
 // own header for why that's structurally out of reach for a test.
 
 import { describe, expect, it } from "vitest";
-import type { GraphCanvasData, GraphNode } from "./encoding.js";
+import { degreeToRadius, searchResultToGraphData, type GraphCanvasData, type GraphNode, type SearchResult, type SearchResultNode } from "./encoding.js";
 import {
   cursorForExpansion,
   expandableNodeIds,
@@ -66,6 +66,7 @@ function makeNeighbor(overrides: Partial<ExpandedNeighbor> & { edgeId: string; n
     externalId: overrides.nodeId,
     title: `Node ${overrides.nodeId}`,
     isEditable: false,
+    degree: 3,
     ...overrides,
   } as ExpandedNeighbor;
 }
@@ -159,16 +160,65 @@ describe("mergeExpansion — new nodes seed at the parent's position", () => {
     expect(fresh.y).toBeUndefined();
   });
 
-  it("gives a new node the degree-zero floor radius and path provenance — Neighbor carries no store-wide degree, and an expanded node has no relevance (graph-explorer/spec.md: \"An expanded node carries no relevance\")", () => {
+  it("gives a new node its real degree/radius from the Neighbor DTO (bd-hmd.5 review — a degree-0 fallback would draw it smaller than the same node found by search) and path provenance — an expanded node has no relevance (graph-explorer/spec.md: \"An expanded node carries no relevance\")", () => {
     const parent = placed(makeNode({ id: "parent" }), 0, 0);
     const merged = mergeExpansion(graphOf([parent]), {
       parentId: "parent",
       parentPosition: { x: 0, y: 0 },
-      neighbors: [makeNeighbor({ edgeId: "e1", nodeId: "fresh", edgeType: "sibling" })],
+      neighbors: [makeNeighbor({ edgeId: "e1", nodeId: "fresh", edgeType: "sibling", degree: 8 })],
     });
     const fresh = merged.nodes.find((n) => n.id === "fresh")!;
-    expect(fresh.degree).toBe(0);
+    expect(fresh.degree).toBe(8);
+    expect(fresh.radius).toBe(degreeToRadius(8));
     expect(fresh.provenance).toEqual({ kind: "path", edgePath: ["sibling"] });
+  });
+
+  it("draws the SAME node at the SAME radius whether it is reached by search (searchResultToGraphData) or by expansion (mergeExpansion), given the same degree — graph-explorer/spec.md's \"Size is stable across views\", closed end-to-end on the client side (bd-hmd.5 review: the gap this closes is exactly the one lookup.test.ts's \"agrees with retrieve()'s degree\" test closes server-side)", () => {
+    const DEGREE = 14;
+
+    const searchResult = searchResultToGraphData({
+      mode: "exact",
+      seedCount: 0,
+      nodeCount: 1,
+      truncated: false,
+      defaultsUsed: {} as SearchResult extends { defaultsUsed: infer D } ? D : never,
+      droppedNodeIds: [],
+      shrunkNodeIds: [],
+      nodes: [
+        {
+          id: "shared-node",
+          nodeType: "doc",
+          sourceSystem: "repo",
+          externalId: "shared-node",
+          title: "Shared node",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+          score: 1,
+          depth: 1,
+          isSeed: false,
+          relevance: null,
+          matchedNodeId: null,
+          snippet: null,
+          seedId: "seed",
+          edgePath: ["sibling"],
+          viaEdgeId: null,
+          degree: DEGREE,
+          isEditable: false,
+        } as SearchResultNode,
+      ],
+      edges: [],
+    } as SearchResult);
+    const viaSearch = searchResult.nodes[0]!;
+
+    const parent = placed(makeNode({ id: "parent" }), 0, 0);
+    const merged = mergeExpansion(graphOf([parent]), {
+      parentId: "parent",
+      parentPosition: { x: 0, y: 0 },
+      neighbors: [makeNeighbor({ edgeId: "e1", nodeId: "shared-node", degree: DEGREE })],
+    });
+    const viaExpansion = merged.nodes.find((n) => n.id === "shared-node")!;
+
+    expect(viaExpansion.radius).toBe(viaSearch.radius);
+    expect(viaExpansion.radius).toBe(degreeToRadius(DEGREE));
   });
 
   it("carries isEditable through from the Neighbor DTO", () => {

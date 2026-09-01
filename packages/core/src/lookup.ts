@@ -217,6 +217,19 @@ export interface Neighbor {
   nodeSourceSystem: string;
   externalId: string;
   title: string;
+  /**
+   * The neighboring node's own store-wide degree (bd-hmd.5 review) —
+   * distinct connected canonical nodes across the WHOLE STORE, not just
+   * within this page or this call's result set. Same aggregate
+   * retrieval.ts's `RetrievedNode.degree` computes (see that module's
+   * "Store-wide degree" CTE comment for the full derivation), applied
+   * here per neighbor instead of per traversal-kept node, and for the
+   * same reason: a node drawn on screen by expansion must be the same
+   * size as the same node drawn by search (graph-explorer/spec.md,
+   * "Size is stable across views") — a degree scoped to "this page" or
+   * defaulted to 0 would draw it smaller than the truth.
+   */
+  degree: number;
 }
 
 /**
@@ -342,17 +355,79 @@ paged AS (
      OR (f.weight = ${cursorWeight} AND f.node_id = ${cursorNodeId} AND f.edge_id > ${cursorEdgeId})
   ORDER BY f.weight DESC, f.node_id ASC, f.edge_id ASC
   LIMIT ${params.limit + 1}::int
+),
+-- The actual response page — at most \`limit\` rows, dropping the one
+-- extra \`paged\` fetched only to answer \`has_more\`. Named separately so
+-- the degree CTEs below (and the final SELECT) can reference "what is
+-- actually being returned" without re-deriving it or recomputing degree
+-- for the discarded \`limit + 1\`th row.
+page AS (
+  SELECT * FROM paged
+  ORDER BY weight DESC, node_id ASC, edge_id ASC
+  LIMIT ${params.limit}::int
+),
+-- Store-wide degree of each neighbor NODE actually in \`page\` (bd-hmd.5
+-- review — graph-explorer/spec.md's "Size is stable across views": a
+-- node drawn by expansion must be the same size as the same node drawn
+-- by search, so this cannot default to 0 or be scoped to this result).
+-- Mirrors retrieval.ts's degree CTE exactly (see that module's "Store-
+-- wide degree" comment for the full derivation) — computed fresh here
+-- too, never cached, and scoped to \`page\` for the same reason
+-- retrieval.ts scopes to \`kept\`: computing this for a node that is not
+-- even in the response would be wasted work.
+--
+-- A neighbor's own canonical id can itself have merged-away aliases —
+-- a node can simultaneously be "a neighbor of the queried node" and "a
+-- survivor other nodes were merged into" — so \`neighbor_probe\` folds
+-- those in via \`neighbor_alias\`, the same alias-then-probe shape
+-- \`self\`/\`alias\`/\`probe\` above uses for the QUERIED node, applied here
+-- once per distinct neighbor instead of once for the query's own node.
+distinct_page_nodes AS (
+  SELECT DISTINCT node_id FROM page
+),
+neighbor_alias AS (
+  SELECT dpn.node_id AS canonical_id, al.id AS alias_id
+  FROM distinct_page_nodes dpn
+  JOIN nodes al ON al.merged_into = dpn.node_id
+),
+neighbor_probe AS (
+  SELECT dpn.node_id,
+         ARRAY[dpn.node_id] || COALESCE(array_agg(na.alias_id) FILTER (WHERE na.alias_id IS NOT NULL), ARRAY[]::uuid[]) AS probe_ids
+  FROM distinct_page_nodes dpn
+  LEFT JOIN neighbor_alias na ON na.canonical_id = dpn.node_id
+  GROUP BY dpn.node_id
+),
+degree AS (
+  SELECT np.node_id, COUNT(DISTINCT far.canonical_id) AS degree
+  FROM neighbor_probe np
+  LEFT JOIN LATERAL (
+    SELECT COALESCE(dn.merged_into, dn.id) AS canonical_id
+    FROM edges e
+    JOIN nodes dn ON dn.id = e.dst_id
+    WHERE e.src_id = ANY (np.probe_ids)
+      -- Merge-induced self-loop guard, same shape as \`filtered\`'s own
+      -- \`rn.other_id <>\` guard above and retrieval.ts's degree CTE — a
+      -- loser-to-survivor edge must not inflate this neighbor's own
+      -- degree by counting a connection to itself.
+      AND COALESCE(dn.merged_into, dn.id) <> np.node_id
+
+    UNION ALL
+
+    SELECT COALESCE(sn.merged_into, sn.id)
+    FROM edges e
+    JOIN nodes sn ON sn.id = e.src_id
+    WHERE e.dst_id = ANY (np.probe_ids)
+      AND COALESCE(sn.merged_into, sn.id) <> np.node_id
+  ) far ON true
+  GROUP BY np.node_id
 )
 SELECT jsonb_build_object(
   'found', EXISTS(SELECT 1 FROM self),
   'canonical_id', (SELECT canonical_id FROM self),
   'neighbors', COALESCE((
-    SELECT jsonb_agg(to_jsonb(p) ORDER BY p.weight DESC, p.node_id, p.edge_id)
-    FROM (
-      SELECT * FROM paged
-      ORDER BY weight DESC, node_id ASC, edge_id ASC
-      LIMIT ${params.limit}::int
-    ) p
+    SELECT jsonb_agg(to_jsonb(p) || jsonb_build_object('degree', COALESCE(d.degree, 0)) ORDER BY p.weight DESC, p.node_id, p.edge_id)
+    FROM page p
+    LEFT JOIN degree d ON d.node_id = p.node_id
   ), '[]'::jsonb),
   'has_more', (SELECT count(*) FROM paged) > ${params.limit}::int
 ) AS result
@@ -370,6 +445,7 @@ interface RawNeighbor {
   node_source_system: string;
   external_id: string;
   title: string;
+  degree: number;
 }
 
 interface RawGetNeighborsResult {
@@ -410,6 +486,7 @@ function mapNeighbor(row: RawNeighbor): Neighbor {
     nodeSourceSystem: row.node_source_system,
     externalId: row.external_id,
     title: row.title,
+    degree: row.degree,
   };
 }
 
