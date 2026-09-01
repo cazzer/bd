@@ -17,6 +17,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import ForceGraph2D from "react-force-graph-2d";
+import { graphAriaSummary, nodeAccessibleDescription } from "../graph/accessibility.js";
 import type { GraphCanvasData, GraphLink, GraphNode } from "../graph/encoding.js";
 import { placeLabels, type LabelCandidate, type LabelPlacement } from "../graph/labelPlacement.js";
 import { buildLinkTooltip, buildNodeTooltip } from "../graph/tooltip.js";
@@ -61,7 +62,7 @@ type DrawableNode = GraphNode & { x?: number; y?: number };
  * labelPlacement.ts's header for the full rationale (bd-hmd.4 follow-up
  * review: labels were overlapping in the corpus's densest cluster).
  */
-function computeLabelPlacements(nodes: readonly DrawableNode[], globalScale: number, hoveredNodeId: string | null): Map<string, LabelPlacement> {
+function computeLabelPlacements(nodes: readonly DrawableNode[], globalScale: number): Map<string, LabelPlacement> {
   const fontSize = LABEL_FONT_SIZE_PX / globalScale;
   const candidates: LabelCandidate[] = nodes.map((node) => ({
     id: node.id,
@@ -69,13 +70,28 @@ function computeLabelPlacements(nodes: readonly DrawableNode[], globalScale: num
     y: node.y ?? 0,
     radius: node.radius,
     text: node.title || "(untitled)",
-    // A seed's or the hovered node's label must never disappear —
-    // losing the label on the thing just searched for (or pointed at)
-    // would be worse than an overlap. See labelPlacement.ts's header
-    // and palette.ts's comment on why this also keeps that module's
-    // six-node-type colour-plus-label mitigation honest for these
-    // nodes specifically.
-    alwaysShow: node.provenance.kind === "seed" || node.id === hoveredNodeId,
+    // A seed's label must never disappear — losing the label on the
+    // thing just searched for would be worse than an overlap. See
+    // labelPlacement.ts's header and palette.ts's comment on why this
+    // also keeps that module's six-node-type colour-plus-label
+    // mitigation honest for seed nodes specifically.
+    //
+    // NOT also true of the hovered node (bd-hmd.4 review, should-fix
+    // 4): that was tried — a ref updated in onNodeHover, read here —
+    // but never actually took effect. force-graph's redraw is gated on
+    // `!autoPauseRedraw || needsRedraw || isEngineRunning() || photons`
+    // (traced through the installed source); once cooldownTicks elapses
+    // and the simulation stops, updating a ref on hover sets none of
+    // those, so nodeCanvasObject simply never runs again and the
+    // "hovered node keeps its label" branch could never fire — dead
+    // code that read as a working feature. Deleted rather than wired
+    // up: forcing a redraw on every hover means either disabling
+    // autoPauseRedraw (redraws every frame forever, for a label) or
+    // reheating the simulation (visibly disturbs the layout just to
+    // show a label) — both worse than the fix, which is that the DOM
+    // tooltip (nodeLabel, below) already shows a hidden node's title on
+    // hover regardless.
+    alwaysShow: node.provenance.kind === "seed",
     priority: node.degree,
   }));
   const placements = placeLabels(candidates, fontSize);
@@ -151,12 +167,11 @@ export function GraphCanvas({ data }: { data: GraphCanvasData }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
 
-  // Both refs, not React state: they feed the per-frame canvas draw, not
-  // the component tree, so updating them must never trigger a React
-  // re-render (that would fight force-graph's own animation loop for no
-  // benefit — nothing here is rendered by React).
+  // A ref, not React state: it feeds the per-frame canvas draw, not the
+  // component tree, so updating it must never trigger a React re-render
+  // (that would fight force-graph's own animation loop for no benefit —
+  // nothing here is rendered by React).
   const labelPlacementsRef = useRef<Map<string, LabelPlacement>>(new Map());
-  const hoveredNodeIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -172,35 +187,57 @@ export function GraphCanvas({ data }: { data: GraphCanvasData }) {
   }, []);
 
   return (
-    <div ref={containerRef} className="h-full w-full overflow-hidden bg-white">
-      {size.width > 0 && size.height > 0 && (
-        <ForceGraph2D<GraphNode, GraphLink>
-          graphData={data}
-          width={size.width}
-          height={size.height}
-          nodeId="id"
-          linkSource="source"
-          linkTarget="target"
-          backgroundColor="#ffffff"
-          // Recomputed once per frame, before any node is drawn —
-          // force-graph mutates x/y directly onto the same node objects
-          // in `data.nodes`, so reading them here reflects this frame's
-          // actual layout. See computeLabelPlacements' own doc comment.
-          onRenderFramePre={(ctx, globalScale) => {
-            labelPlacementsRef.current = computeLabelPlacements(data.nodes as DrawableNode[], globalScale, hoveredNodeIdRef.current);
-          }}
-          onNodeHover={(node) => {
-            hoveredNodeIdRef.current = (node as DrawableNode | null)?.id ?? null;
-          }}
-          nodeCanvasObject={(node, ctx, globalScale) => drawNode(node, ctx, globalScale, labelPlacementsRef.current)}
-          nodePointerAreaPaint={paintNodePointerArea}
-          nodeLabel={nodeTooltip}
-          linkColor={(link) => link.color}
-          linkWidth={(link) => link.width}
-          linkLabel={linkTooltip}
-          cooldownTicks={200}
-        />
-      )}
+    <div className="flex h-full w-full flex-col overflow-hidden">
+      {/*
+        Accessibility (bd-hmd.4 review, should-fix): SearchResultsList
+        rendered every result as a real, screen-reader-reachable <li> —
+        title, type, source, degree, score, snippet. This canvas replaced
+        it with a bare <canvas> and no fallback content, silently
+        dropping all of that. role="img" + aria-label gives the canvas
+        itself a short accessible name (the common baseline pattern for
+        a canvas visualization with no accessible internal structure of
+        its own — the canvas API exposes nothing to the accessibility
+        tree); the sr-only list below is the actual text alternative,
+        one entry per node, visually hidden but fully navigable by a
+        screen reader — not folded into the aria-label string, which
+        can't represent a list. This is also what keeps palette.ts's
+        CVD mitigation honest for a screen-reader user specifically: the
+        colour argument there depends on identity being available as
+        text, and this list is text identity that never gets crowded
+        out the way an on-canvas label can (labelPlacement.ts).
+      */}
+      <div ref={containerRef} role="img" aria-label={graphAriaSummary(data)} className="min-h-0 flex-1 bg-white">
+        {size.width > 0 && size.height > 0 && (
+          <ForceGraph2D<GraphNode, GraphLink>
+            graphData={data}
+            width={size.width}
+            height={size.height}
+            nodeId="id"
+            linkSource="source"
+            linkTarget="target"
+            backgroundColor="#ffffff"
+            // Recomputed once per frame, before any node is drawn —
+            // force-graph mutates x/y directly onto the same node objects
+            // in `data.nodes`, so reading them here reflects this frame's
+            // actual layout. See computeLabelPlacements' own doc comment.
+            onRenderFramePre={(ctx, globalScale) => {
+              labelPlacementsRef.current = computeLabelPlacements(data.nodes as DrawableNode[], globalScale);
+            }}
+            nodeCanvasObject={(node, ctx, globalScale) => drawNode(node, ctx, globalScale, labelPlacementsRef.current)}
+            nodePointerAreaPaint={paintNodePointerArea}
+            nodeLabel={nodeTooltip}
+            linkColor={(link) => link.color}
+            linkWidth={(link) => link.width}
+            linkLabel={linkTooltip}
+            cooldownTicks={200}
+          />
+        )}
+      </div>
+      <ul className="sr-only" aria-label="Nodes in this graph">
+        {data.nodes.map((node) => (
+          <li key={node.id}>{nodeAccessibleDescription(node)}</li>
+        ))}
+      </ul>
     </div>
   );
 }

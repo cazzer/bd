@@ -10,9 +10,11 @@ import {
   degreeToRadius,
   EDGE_WIDTH_MAX,
   EDGE_WIDTH_MIN,
+  mergeGraphData,
   NODE_RADIUS_MIN,
   searchResultToGraphData,
   weightToEdgeWidth,
+  type GraphCanvasData,
   type SearchResult,
   type SearchResultEdge,
   type SearchResultNode,
@@ -253,3 +255,87 @@ describe("searchResultToGraphData", () => {
     expect(widths.size).toBe(2); // 0.6 and 0.3 map to two distinct widths
   });
 });
+
+// --- mergeGraphData: stable node identity across sequential updates -------
+//
+// bd-hmd.4 review (must-fix): searchResultToGraphData alone constructs a
+// brand-new object per node on every call. react-kapsule/force-graph
+// diff graphData by reference; a fresh object with no x/y triggers
+// d3-force-3d's initializeNodes to re-randomize position — every node
+// jumps on every search, confirmed live with "retrieval" then
+// "breakdown" (they share two node ids). The existing "clears the old
+// highlight"/"same size across views" tests above call the pure
+// function twice and compare RETURN VALUES — real coverage of
+// determinism, but structurally blind to this: they never check that a
+// node occurring in both calls is the SAME OBJECT. These do.
+
+/** Stands in for what force-graph mutates onto a node object after a simulation tick — GraphNode itself declares no x/y (see encoding.ts's GraphNode). */
+function withSimulatedPosition<T extends object>(obj: T, x: number, y: number): T & { x: number; y: number } {
+  return Object.assign(obj, { x, y });
+}
+
+describe("mergeGraphData", () => {
+  it("reuses the SAME object reference for a node id present in both the previous and incoming graph, preserving simulation-assigned x/y", () => {
+    const previous = searchResultToGraphData(makeResult([makeNode({ id: "shared", degree: 3 })], []));
+    const sharedRef = withSimulatedPosition(previous.nodes[0]!, 123.45, 67.89);
+
+    const incoming = searchResultToGraphData(makeResult([makeNode({ id: "shared", degree: 3 })], []));
+    const merged = mergeGraphData(previous, incoming);
+
+    expect(merged.nodes[0]).toBe(sharedRef); // identity, not just equal fields
+    expect((merged.nodes[0] as unknown as { x: number }).x).toBe(123.45);
+    expect((merged.nodes[0] as unknown as { y: number }).y).toBe(67.89);
+  });
+
+  it("does NOT reuse an object for a genuinely new id — it has no prior position to preserve", () => {
+    const previous = searchResultToGraphData(makeResult([makeNode({ id: "a" })], []));
+    const incoming = searchResultToGraphData(makeResult([makeNode({ id: "b" })], []));
+    const merged = mergeGraphData(previous, incoming);
+
+    expect(merged.nodes).toHaveLength(1);
+    expect(merged.nodes[0]!.id).toBe("b");
+    expect(merged.nodes).not.toContain(previous.nodes[0]);
+  });
+
+  it("updates a reused node's own fields to the incoming query's values while keeping its identity (and therefore position)", () => {
+    const previous = searchResultToGraphData(makeResult([makeNode({ id: "shared", isSeed: true, relevance: 0.9, degree: 4 })], []));
+    const sharedRef = withSimulatedPosition(previous.nodes[0]!, 10, 20);
+
+    const incoming = searchResultToGraphData(makeResult([makeNode({ id: "shared", isSeed: false, edgePath: ["sibling"], degree: 4 })], []));
+    const merged = mergeGraphData(previous, incoming);
+
+    expect(merged.nodes[0]).toBe(sharedRef); // same object...
+    expect(merged.nodes[0]!.provenance.kind).toBe("path"); // ...its OWN field updated to the new query's value
+    expect((merged.nodes[0] as unknown as { x: number }).x).toBe(10); // ...and its position untouched
+  });
+
+  it("a node present in the previous graph but absent from the incoming result is dropped — a new search replaces the view, it does not accumulate", () => {
+    const previous = searchResultToGraphData(makeResult([makeNode({ id: "stale" })], []));
+    const incoming = searchResultToGraphData(makeResult([makeNode({ id: "fresh" })], []));
+    const merged = mergeGraphData(previous, incoming);
+
+    expect(merged.nodes.map((n) => n.id)).toEqual(["fresh"]);
+  });
+
+  it("reuses link objects by id the same way it reuses nodes", () => {
+    const nodes = [makeNode({ id: "a" }), makeNode({ id: "b" })];
+    const previous = searchResultToGraphData(makeResult(nodes, [makeEdge({ edgeId: "e1", srcNodeId: "a", dstNodeId: "b" })]));
+    const linkRef = previous.links[0]!;
+
+    const incoming = searchResultToGraphData(makeResult(nodes, [makeEdge({ edgeId: "e1", srcNodeId: "a", dstNodeId: "b" })]));
+    const merged = mergeGraphData(previous, incoming);
+
+    expect(merged.links[0]).toBe(linkRef);
+  });
+
+  it("an empty previous graph (first search of a session) just returns the incoming graph's nodes, none of them reused", () => {
+    const incoming = searchResultToGraphData(makeResult([makeNode({ id: "a" }), makeNode({ id: "b" })], []));
+    const merged = mergeGraphData(EMPTY_GRAPH_FOR_TEST(), incoming);
+    expect(merged.nodes.map((n) => n.id)).toEqual(["a", "b"]);
+  });
+});
+
+/** Local alias so this file doesn't need to import EMPTY_GRAPH just for one test — an ordinary empty literal is exactly as valid a "previous" as the exported constant. */
+function EMPTY_GRAPH_FOR_TEST(): GraphCanvasData {
+  return { nodes: [], links: [] };
+}

@@ -147,6 +147,20 @@ function candidateOffsets(radius: number, lineHeight: number): ReadonlyArray<{ d
  * Returns one placement per input candidate, in the same order as
  * `candidates` — order-preserving so a caller can zip results back
  * against its own node list without a second lookup.
+ *
+ * O(n²): every candidate's box is checked against every previously-
+ * placed box (`placedBoxes.some(...)`, below). Left as-is — measured
+ * (this repo, 20-call average, uniformly scattered candidates) at
+ * ~0.7ms/call at 200 nodes and ~2.6ms/call at 1000, called once per
+ * animation frame only while the simulation is running or during
+ * pan/zoom (GraphCanvas.tsx's `onRenderFramePre`), never on every
+ * frame indefinitely — comfortably inside a 16ms frame budget at this
+ * ticket's scale (the seeded corpus has 9 nodes; bd-hmd.5's expansion
+ * stays in "the hundreds" per design.md). If node counts ever reach the
+ * thousands, bucket candidates into a spatial grid keyed by position
+ * and only check a candidate against boxes in nearby cells — not
+ * needed now, and doing it now would be optimizing against a scale
+ * this app doesn't reach.
  */
 export function placeLabels(candidates: readonly LabelCandidate[], fontSize: number, options?: { gap?: number }): LabelPlacement[] {
   const gap = options?.gap ?? DEFAULT_LABEL_GAP;

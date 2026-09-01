@@ -7,7 +7,7 @@
 import { useState } from "react";
 import { GraphCanvas } from "./components/GraphCanvas.js";
 import { GraphLegend } from "./components/GraphLegend.js";
-import { EMPTY_GRAPH, searchResultToGraphData, type GraphCanvasData, type SearchResult } from "./graph/encoding.js";
+import { EMPTY_GRAPH, mergeGraphData, searchResultToGraphData, type GraphCanvasData, type SearchResult } from "./graph/encoding.js";
 import { trpc } from "./trpc.js";
 
 type Status = { kind: "idle" } | { kind: "loading" } | { kind: "error"; message: string } | { kind: "done"; result: SearchResult };
@@ -35,7 +35,19 @@ export function App() {
       // clears an old highlight (encoding.test.ts: "a new query clears
       // the old highlight").
       if (result.mode !== "empty") {
-        setGraph(searchResultToGraphData(result));
+        // mergeGraphData (bd-hmd.4 review, must-fix), not a plain
+        // assignment: searchResultToGraphData builds brand-new node/link
+        // objects every call, and force-graph tracks simulation state
+        // (x/y/vx/vy) BY OBJECT IDENTITY, mutated directly onto whatever
+        // object it was given — a fresh object for a node id that was
+        // already on screen has no x/y yet, so d3-force-3d re-randomizes
+        // its position, and the node visibly jumps. mergeGraphData
+        // reuses the previous render's object for any id still present,
+        // so its position survives; see that function's own header for
+        // the full trace (react-kapsule's prop-diff -> force-graph's
+        // update() -> d3-force-3d's initializeNodes) and why this is
+        // also the function bd-hmd.5's expansion will call.
+        setGraph((previous) => mergeGraphData(previous, searchResultToGraphData(result)));
       }
     } catch (err) {
       // TRPCClientError#message is already the safe, hand-mapped message
@@ -63,6 +75,7 @@ export function App() {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search…"
+            aria-label="Search the knowledge store"
             className="flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
             autoFocus
           />

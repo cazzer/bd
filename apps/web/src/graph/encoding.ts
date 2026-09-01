@@ -179,3 +179,67 @@ export function searchResultToGraphData(result: SearchResult | null): GraphCanva
 
   return { nodes, links };
 }
+
+// --- Stable identity across sequential updates (bd-hmd.4 review) ---------
+//
+// searchResultToGraphData alone constructs a brand-new object per node,
+// every call — fine for a pure function considered in isolation, fatal
+// once it feeds a running force simulation. Traced through the
+// installed source: react-kapsule diffs the `graphData` prop by
+// reference, so any new array reaches force-graph's `update()`, which
+// unconditionally runs `.stop().alpha(1).nodes(...)`; d3-force-3d's
+// initializeNodes then re-randomizes the position of any node whose `x`
+// is NaN — true of every object this module constructs, since GraphNode
+// declares no x/y (force-graph adds them by mutation once the
+// simulation has run). Net effect: every node on screen jumps on every
+// graph update, invisible in bd-hmd.4 (a query replaces the whole graph
+// anyway, so there is nothing to visibly preserve) but fatal to
+// bd-hmd.5, whose spec requires an already-placed node to stay "within
+// a small tolerance of its previous position" across an expansion.
+//
+// The fix is identity, not physics: reuse the SAME node/link object for
+// an id that exists in both `previous` and `incoming`, so whatever
+// x/y/vx/vy/fx/fy force-graph already wrote onto it survives untouched
+// (this function never reads or sets those fields — GraphNode/GraphLink
+// don't even declare them — it only avoids DISCARDING the object that
+// carries them). A field OTHER than position — provenance, most
+// visibly, since that's what makes a query's relevance transient — is
+// still fully overwritten to `incoming`'s value via `Object.assign`,
+// which copies only `incoming`'s own enumerable keys and so never
+// touches whatever extra fields (x/y/...) already live on `existing`.
+// An id with no match in `previous` gets `incoming`'s freshly-built
+// object as-is: a genuinely new node has no prior position to keep, and
+// letting the simulation randomize its start is correct, not a bug.
+//
+// `incoming`'s own node/link SET is authoritative for which ids appear
+// in the result — an id present only in `previous` is dropped. That is
+// what makes a new search *replace* the view rather than accumulate
+// onto it (graph-explorer/spec.md's "First query draws a bounded
+// neighbourhood" — there is one neighbourhood on screen, the current
+// query's). bd-hmd.5's expansion is meant to accumulate instead; it
+// gets that by constructing its OWN `incoming` as the union of what's
+// already on screen plus the newly-expanded neighbours, and calling
+// this same function — this function's only job is "reuse identity
+// where the id matches," not deciding replace vs. accumulate, so
+// bd-hmd.5 needs no change here to get its own semantics.
+export function mergeGraphData(previous: GraphCanvasData, incoming: GraphCanvasData): GraphCanvasData {
+  const previousNodesById = new Map(previous.nodes.map((node) => [node.id, node]));
+  const nodes = incoming.nodes.map((node) => {
+    const existing = previousNodesById.get(node.id);
+    if (existing === undefined) {
+      return node;
+    }
+    return Object.assign(existing, node);
+  });
+
+  const previousLinksById = new Map(previous.links.map((link) => [link.id, link]));
+  const links = incoming.links.map((link) => {
+    const existing = previousLinksById.get(link.id);
+    if (existing === undefined) {
+      return link;
+    }
+    return Object.assign(existing, link);
+  });
+
+  return { nodes, links };
+}
