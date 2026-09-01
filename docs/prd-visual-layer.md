@@ -60,6 +60,7 @@ open — one uniform colour is a graph that knows only directory structure.
 - Node degree as a first-class, queryable property.
 - tiptap editor with `@tiptap/markdown`, for editable nodes only.
 - Hand edge editing: assert, retract, reweight.
+- Creating a `note` node: free-standing, or as an annotation of an existing node.
 
 ### Out of scope
 
@@ -84,27 +85,36 @@ open — one uniform colour is a graph that knows only directory structure.
 | Bubble size | **√degree**, global not subgraph-local | Circle-size perception tracks area, so linear radius makes a 10× hub look 100× heavier. Global degree keeps sizes stable while exploring; subgraph-local degree would resize everything on every click. |
 | Score encoding | Transient highlight, never geometry | Relevance is a property of a *question*, not of a node. Nodes arriving by click have no score at all. Encoding it in size would make the map shift under the user on every search. |
 | Editor | **tiptap** + official `@tiptap/markdown` | Closes `bd-247` (tiptap vs Plate). MIT; only Tiptap Cloud is paid, which is irrelevant locally. |
+| Repo nodes | Read-only, but **annotatable** | A "add note" action creates a separate `note` node, `source_system: 'human'`, joined by an `annotates` edge. Keeps `db:seed` idempotent and the file authoritative, while giving the app somewhere to think. The real argument: every note written becomes a human-authored semantic edge, so `bd-8no`'s missing meaning gets populated as a side effect of ordinary use rather than as a chore. |
+| Degree | **Computed per query for the returned nodes only** | No global degree table and no refresh strategy. For the nodes a query returns, count their edges in a scoped aggregate joined into the same statement — a keyed lookup on indexed columns, not a full-table aggregate. Always fresh; staleness cannot happen. |
+| Node creation | In scope for v1 — blank notes and annotations | Mostly implied by the annotation flow. Makes the app somewhere to write, not only somewhere to look. A blank note created free-floating has degree 0 and is reachable only by search until it is linked; that is acceptable and expected. |
 | Editable nodes | Agent- and human-authored only; repo nodes read-only | Two independent reasons. `pnpm db:seed` upserts by `(source_system, external_id)` and would silently clobber a hand edit with whatever is on disk. And markdown round-trip is documented-lossy — table cell line breaks collapse, footnotes and raw HTML drop — so opening a wild corpus document in WYSIWYG and saving would normalize it. The file is the source of truth for those nodes; the UI shouldn't pretend otherwise. |
 
 ## New work in existing packages
 
-- **Node degree.** Nothing exposes it. Must be computed over *canonical* nodes with endpoints
-  folded through `merged_into` and merge-induced self-loops excluded, or a merged pair shows
-  inflated degree and a node appears linked to itself. Likely a materialized view.
+- **Node degree.** Nothing exposes it. Computed per query for the returned node set — not
+  globally materialized. Must still be counted over *canonical* nodes, with endpoints folded
+  through `merged_into` and merge-induced self-loops excluded, or a merged pair shows inflated
+  degree and a node appears linked to itself.
 - **Bounded neighbour fetch.** `getNeighbors` has no limit; the MCP server applies its budget
   at its own layer. A hub with 500 neighbours would dump 500 bubbles on one click. Needs a
   limit plus weight-descending ordering, with a "show more" tail.
-- **Human write surface.** Assert/retract/reweight an edge and update a node's content, all
-  attributed to an ingest run with `source_system: 'human'`.
+- **Human write surface.** Create a `note` node, update an editable node's content, and
+  assert/retract/reweight an edge — all attributed to an ingest run with
+  `source_system: 'human'`, so hand-authored content stays distinguishable from both the
+  loaders and the agent.
 
 ## Open questions
 
-- [ ] Should human edits to a *repo* node be possible at all via an annotation node linked to
-      the original, or is read-only genuinely enough?
-- [ ] Does the degree materialized view refresh on write, on a timer, or on demand? Staleness
-      shows up as bubbles that are the wrong size, which is cosmetic but confusing.
-- [ ] What does the editor do with a node whose content is empty — is creating a brand-new
-      node from the UI in scope for v1, or does everything originate from a loader or agent?
+Resolved in the jam: repo nodes are annotatable rather than editable, degree is computed per
+query, and node creation ships in v1. Remaining:
+
+- [ ] Should `annotates` edges be weighted below 1.0? A human assertion is the most confident
+      signal in the system, but a uniform 1.0 means the weight column carries no information
+      for the human source — which is the one source we most want to trust.
+- [ ] Does an annotation inherit any filterable property from its target (node type, source
+      system), or is it purely joined by the edge? Affects whether "show me my notes about
+      OpenSpec" is a filter or a traversal.
 
 ## Dependencies
 
@@ -123,5 +133,6 @@ open — one uniform colour is a graph that knows only directory structure.
 | Canvas 2D ceiling (~5–7k nodes) is closer to real usage than it feels | M | M | Progressive loading is the mitigation by design. Keep render logic behind a boundary so a WebGL swap doesn't touch interaction code. Resist any "show the whole graph" feature — it is the one request that breaks the assumption. |
 | Markdown round-trip damages content | M | H | Repo nodes read-only. For editable nodes, treat the WYSIWYG round-trip — not arbitrary hand-written markdown — as the fidelity contract, and say so in the UI. |
 | Force layout still feels unstable despite the technique | M | M | Pin pre-existing nodes with `fx`/`fy` for the first ticks after an expansion so only the new subgraph moves. |
+| Free-floating notes accumulate as unreachable orphans | M | L | Degree-0 notes are findable by search but invisible in the graph. Surface an "unlinked notes" list so they can be connected rather than silently lost. |
 | Graph becomes a toy that is never used, as with Obsidian | M | M | The search bar, not the graph, is the entry point. If the graph proves to be decoration, the panels and provenance lists remain the useful half — build them first. |
 | Two API surfaces (MCP tools + tRPC procedures) drift | L | M | Both are thin adapters over one core; invariants live in `packages/core`, which is the tested layer. Adapters that hold no logic cannot meaningfully drift. |
