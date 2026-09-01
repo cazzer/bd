@@ -28,12 +28,12 @@
 
 ## 4. The graph canvas
 
-- [ ] 4.1 Add `react-force-graph` and render the search result as a force-directed canvas graph
-- [ ] 4.2 Size nodes by the square root of their store-wide degree, and verify a ten-times-degree hub draws at roughly three times the radius
-- [ ] 4.3 Colour nodes by `node_type` and render labels legibly at the default zoom
-- [ ] 4.4 Style edges by provenance: colour by `source_system`, thickness by `weight`
-- [ ] 4.5 Show query relevance as a transient highlight on seeds only, clearing when a new query runs, never affecting size or position
-- [ ] 4.6 Verify against the seeded corpus that a store whose edges are uniformly structural is visually uniform — the `bd-8no` finding should be apparent on sight
+- [x] 4.1 Add `react-force-graph` and render the search result as a force-directed canvas graph
+- [x] 4.2 Size nodes by the square root of their store-wide degree, and verify a ten-times-degree hub draws at roughly three times the radius
+- [x] 4.3 Colour nodes by `node_type` and render labels legibly at the default zoom
+- [x] 4.4 Style edges by provenance: colour by `source_system`, thickness by `weight`
+- [x] 4.5 Show query relevance as a transient highlight on seeds only, clearing when a new query runs, never affecting size or position
+- [x] 4.6 Verify against the seeded corpus that a store whose edges are uniformly structural is visually uniform — the `bd-8no` finding should be apparent on sight
 
 ## 5. Progressive expansion
 
