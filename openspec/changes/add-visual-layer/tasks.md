@@ -46,10 +46,10 @@
 
 ## 6. Editing, annotation, and creation
 
-- [ ] 6.1 Open a node's detail from the graph, showing content, type, source system, and its file origin when it has one
-- [ ] 6.2 Add the tiptap editor with `@tiptap/markdown`, enabled only for editable nodes; render file-backed nodes read-only with their origin shown
-- [ ] 6.3 Add annotation from any node, including read-only ones, creating the note and its `annotates` edge and drawing both immediately
-- [ ] 6.4 Add standalone note creation, and surface unlinked notes somewhere findable so degree-zero notes do not silently accumulate
-- [ ] 6.5 Add hand edge editing from the graph: assert between two nodes with a relationship type, retract, and reweight
-- [ ] 6.6 Test the explorer scenarios for editing: a repo-sourced node offers no editing affordance, annotating one leaves its content unchanged, an edited note's new text is searchable, and a hand-drawn edge is drawn with hand-authored provenance styling
-- [ ] 6.7 Run the whole thing against the seeded corpus end to end: search, expand, annotate, link, and confirm `pnpm check` is green
+- [x] 6.1 Open a node's detail from the graph, showing content, type, source system, and its file origin when it has one
+- [x] 6.2 Add the tiptap editor with `@tiptap/markdown`, enabled only for editable nodes; render file-backed nodes read-only with their origin shown
+- [x] 6.3 Add annotation from any node, including read-only ones, creating the note and its `annotates` edge and drawing both immediately
+- [x] 6.4 Add standalone note creation, and surface unlinked notes somewhere findable so degree-zero notes do not silently accumulate
+- [x] 6.5 Add hand edge editing from the graph: assert between two nodes with a relationship type, retract, and reweight
+- [x] 6.6 Test the explorer scenarios for editing: a repo-sourced node offers no editing affordance, annotating one leaves its content unchanged, an edited note's new text is searchable, and a hand-drawn edge is drawn with hand-authored provenance styling
+- [x] 6.7 Run the whole thing against the seeded corpus end to end: search, expand, annotate, link, and confirm `pnpm check` is green

@@ -45,6 +45,7 @@ import {
   MAX_NODE_BUDGET,
   MAX_RECENT_NODES_LIMIT,
   MAX_SEED_LIMIT,
+  NOTE_NODE_TYPE,
   retrieve,
   type NeighborsCursor,
   type RetrieveOptions,
@@ -238,9 +239,76 @@ const getStoreSummaryProcedure = publicProcedure.input(getStoreSummaryInputSchem
   );
 });
 
+// --- listUnlinkedNotes ---------------------------------------------------
+//
+// bd-hmd.6, tasks.md 6.4: "surface an unlinked-notes list so [degree-zero
+// notes] do not silently accumulate" (design.md's own risk: "Free-
+// floating notes become orphans"). No `@breakdown/core` read returns
+// "nodes of a given type, with their degree" in one call — degree is
+// computed only by `retrieve()` (a search hit) and by `getNeighbors` (for
+// the OTHER side of each neighbor), never for an arbitrary node in
+// isolation — so this composes two existing reads rather than adding a
+// core primitive for a single UI list (this ticket's boundary: don't
+// modify packages/core unless a scenario genuinely can't be met
+// otherwise; composition here meets it):
+//
+//   1. `getStoreSummary`'s `recentNodes`, at the largest bound core
+//      allows, narrowed to `NOTE_NODE_TYPE` — every note is human-
+//      authored (human-writes.ts's `createNote`/`annotateNode` are the
+//      only writers of that node_type), so this is a candidate list, not
+//      a guess.
+//   2. `getNeighbors(id, { limit: 1 })` per candidate: an unfiltered
+//      first page of size >= 1 returning zero rows on `getNeighbors` IS
+//      "degree 0" — a real neighbor would always appear on an unbounded
+//      first page — so this needs no cursor loop, just the one round
+//      trip per note.
+//
+// This is N+1 round trips (one summary call, one getNeighbors call per
+// note candidate), acceptable for a single-user local tool where the
+// candidate count is small; see this ticket's report for why a
+// per-request cache or a core-level index was judged not worth adding
+// for that scale. `recentNodes` is itself bounded by `MAX_RECENT_NODES_LIMIT`
+// (1000, by updatedAt descending) — a store with more than 1000 nodes
+// total could in principle have an even-older, never-updated note fall
+// outside this scan; `scanTruncated` below reports that possibility
+// rather than hiding it.
+
+export const listUnlinkedNotesInputSchema = z.object({}).optional();
+
+const listUnlinkedNotesProcedure = publicProcedure.input(listUnlinkedNotesInputSchema).query(async ({ ctx }) => {
+  let summary;
+  try {
+    summary = await getStoreSummary(ctx.db, { recentNodesLimit: MAX_RECENT_NODES_LIMIT });
+  } catch (err) {
+    throw mapCoreError("listUnlinkedNotes", err);
+  }
+
+  const noteCandidates = summary.recentNodes.filter((n) => n.nodeType === NOTE_NODE_TYPE);
+
+  const unlinked = [];
+  for (const note of noteCandidates) {
+    let neighbors;
+    try {
+      neighbors = await getNeighbors(ctx.db, note.id, { limit: 1 });
+    } catch (err) {
+      throw mapCoreError("listUnlinkedNotes", err);
+    }
+    if (neighbors.neighbors.length === 0) {
+      unlinked.push(toRecentNodeDto(note));
+    }
+  }
+
+  return {
+    notes: unlinked,
+    scannedNotes: noteCandidates.length,
+    scanTruncated: summary.recentNodes.length >= MAX_RECENT_NODES_LIMIT,
+  };
+});
+
 export const readRouter = router({
   search: searchProcedure,
   getNeighbors: getNeighborsProcedure,
   getNodes: getNodesProcedure,
   getStoreSummary: getStoreSummaryProcedure,
+  listUnlinkedNotes: listUnlinkedNotesProcedure,
 });

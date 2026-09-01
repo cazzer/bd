@@ -50,6 +50,20 @@ import { degreeToRadius, mergeGraphData, weightToEdgeWidth } from "./encoding.js
 import { colorForNodeType, colorForSourceSystem } from "./palette.js";
 import type { trpc } from "../trpc.js";
 
+// --- Client-side mirrors of packages/core/src/human-writes.ts's write
+// constants (bd-hmd.6). NOT imported from `@breakdown/core`: dto.ts's
+// header traces why a static import from that package's barrel — even of
+// a dependency-free string constant — pulls the Node-only `pg` driver
+// into the Vite client bundle (human-writes.ts sits behind the same
+// barrel as everything else `@breakdown/core` exports, and the barrel's
+// re-exports are unconditional). palette.ts already established this
+// exact convention (SOURCE_SYSTEM_COLORS/NODE_TYPE_COLORS keyed by these
+// same literal strings, same reasoning) for the same reason — one more
+// place, not a new pattern.
+export const HUMAN_SOURCE_SYSTEM = "human";
+export const NOTE_NODE_TYPE = "note";
+export const ANNOTATES_EDGE_TYPE = "annotates";
+
 // --- API result types, derived from the live client (same reasoning as
 // encoding.ts's SearchResult: a server-side shape change breaks these
 // call sites at typecheck time, no hand-typed duplicate to drift). -------
@@ -200,10 +214,171 @@ export function mergeExpansion(previous: GraphCanvasData, params: ExpansionParam
     });
   }
 
+  return pinThenMerge(previous, newNodes, newLinks);
+}
+
+// --- Shared pin-then-merge primitive, and the bd-hmd.6 write paths that
+// reuse it -------------------------------------------------------------
+//
+// mergeExpansion's own shape (a parent plus its neighbors) can't
+// represent every write this ticket adds: a standalone note has no
+// parent at all, and a hand-drawn edge between two nodes ALREADY on
+// screen adds a link but no node. Rather than duplicate the pin/merge
+// mechanism mergeExpansion's header describes, the append step is
+// factored out here (`pinThenMerge`) and every write path below —
+// mergeExpansion included, see its tail above — goes through the same
+// two calls: `pinPlacedNodes` (freeze everything already on screen) then
+// `mergeGraphData` (identity-preserving union). GraphCanvas's existing
+// `onEngineStop` -> `releasePins` call needs no change for any of these:
+// it already operates on whatever `data.nodes` currently is, regardless
+// of which of these functions produced it.
+
+/** `previous` plus `newNodes`/`newLinks`, appended — the pin-then-merge mechanism mergeExpansion's own header documents, shared by every write path in this module. `newNodes`/`newLinks` may be empty (a links-only or nodes-only addition still needs existing nodes pinned: force-graph's `update()` reheats the whole simulation on ANY `graphData` reference change, per the module header, not only when `nodes` itself changed). */
+function pinThenMerge(previous: GraphCanvasData, newNodes: readonly GraphNode[], newLinks: readonly GraphLink[]): GraphCanvasData {
+  pinPlacedNodes(previous.nodes as readonly PositionedNode[]);
   return mergeGraphData(previous, {
     nodes: [...previous.nodes, ...newNodes],
     links: [...previous.links, ...newLinks],
   });
+}
+
+/**
+ * Builds the single synthetic neighbor `mergeExpansion` needs to draw an
+ * annotation's note and its `annotates` edge (bd-hmd.6, task 6.3) — the
+ * literal reuse this ticket asks for, not a lookalike: `annotateNode`'s
+ * result plus the title the person typed is enough to construct exactly
+ * the shape `getNeighbors` would have returned had the note already
+ * existed. `direction: "incoming"` because the edge is `note
+ * ---annotates---> target` (packages/core/src/human-writes.ts's
+ * `annotateNode`), and `Neighbor.direction` is relative to the PARENT —
+ * here, the annotated (target) node — so the target RECEIVES the edge.
+ * `degree: 1` is exact, not a placeholder: the note is brand new, so its
+ * only edge is this one.
+ */
+export function buildAnnotationNeighbor(result: { noteId: string; noteExternalId: string; annotationEdgeId: string }, title: string | undefined): ExpandedNeighbor {
+  return {
+    edgeId: result.annotationEdgeId,
+    direction: "incoming",
+    edgeType: ANNOTATES_EDGE_TYPE,
+    weight: 1,
+    edgeSourceSystem: HUMAN_SOURCE_SYSTEM,
+    nodeId: result.noteId,
+    nodeType: NOTE_NODE_TYPE,
+    nodeSourceSystem: HUMAN_SOURCE_SYSTEM,
+    externalId: result.noteExternalId,
+    title: title && title.trim().length > 0 ? title : "(untitled note)",
+    degree: 1,
+    isEditable: true,
+  };
+}
+
+/**
+ * A freshly created standalone note (bd-hmd.6, task 6.4), as a
+ * `GraphNode` ready to merge onto the canvas — degree 0, since a note
+ * `createNote` just made has no edges by construction (annotation, which
+ * DOES add an edge, goes through `buildAnnotationNeighbor` + `mergeExpansion`
+ * above instead).
+ */
+export function buildStandaloneNoteNode(result: { id: string }, title: string | undefined): GraphNode {
+  return {
+    id: result.id,
+    title: title && title.trim().length > 0 ? title : "(untitled note)",
+    nodeType: NOTE_NODE_TYPE,
+    sourceSystem: HUMAN_SOURCE_SYSTEM,
+    degree: 0,
+    radius: degreeToRadius(0),
+    color: colorForNodeType(NOTE_NODE_TYPE),
+    isEditable: true,
+    provenance: { kind: "path", edgePath: [] },
+  };
+}
+
+/** The shape `listUnlinkedNotes` (server/routers/read.ts) returns per note — enough to draw it, and degree is always 0 by construction of that list (see this file's `graphNodeFromUnlinkedNote`). */
+export interface UnlinkedNote {
+  id: string;
+  title: string;
+  nodeType: string;
+  sourceSystem: string;
+  isEditable: boolean;
+}
+
+/** An already-existing, previously-unlinked note (bd-hmd.6, task 6.4's "surface an unlinked-notes list") drawn onto the canvas by request — degree 0, same reasoning as `buildStandaloneNoteNode`, except the note isn't new here, `listUnlinkedNotes` already found it. */
+export function graphNodeFromUnlinkedNote(note: UnlinkedNote): GraphNode {
+  return {
+    id: note.id,
+    title: note.title || "(untitled note)",
+    nodeType: note.nodeType,
+    sourceSystem: note.sourceSystem,
+    degree: 0,
+    radius: degreeToRadius(0),
+    color: colorForNodeType(note.nodeType),
+    isEditable: note.isEditable,
+    provenance: { kind: "path", edgePath: [] },
+  };
+}
+
+/** Adds a node with no edges (bd-hmd.6: a freshly created standalone note, or a previously-unlinked one drawn by request) via the same pin-then-merge mechanism as every other write path here. A no-op merge (still pins, still returns a fresh wrapper object) when `node.id` is already drawn, so calling this blindly for a node that might already be on screen is safe. */
+export function mergeStandaloneNode(previous: GraphCanvasData, node: GraphNode): GraphCanvasData {
+  const alreadyDrawn = previous.nodes.some((n) => n.id === node.id);
+  return pinThenMerge(previous, alreadyDrawn ? [] : [node], []);
+}
+
+/**
+ * A hand-drawn edge (bd-hmd.6, task 6.5's "assert ... between two
+ * nodes"), as a `GraphLink` ready to merge — colour/width come from the
+ * same `colorForSourceSystem`/`weightToEdgeWidth` every other edge uses,
+ * so a hand-authored edge gets the SAME provenance styling `human` edges
+ * already have everywhere else in this app (graph-explorer/spec.md: "a
+ * hand-drawn edge is drawn with hand-authored provenance styling") —
+ * nothing new to encode, just the existing `human` styling applied here
+ * too.
+ */
+export function buildAssertedLink(result: { id: string }, input: { srcId: string; dstId: string; edgeType: string; weight?: number }): GraphLink {
+  const weight = input.weight ?? 1.0; // matches packages/core/src/edges.ts's own default when omitted
+  return {
+    id: result.id,
+    source: input.srcId,
+    target: input.dstId,
+    edgeType: input.edgeType,
+    sourceSystem: HUMAN_SOURCE_SYSTEM,
+    weight,
+    color: colorForSourceSystem(HUMAN_SOURCE_SYSTEM),
+    width: weightToEdgeWidth(weight),
+  };
+}
+
+/** Adds a hand-drawn edge between two nodes already on screen. No new node, so degree is deliberately left untouched here — see encoding.ts's `setNodeDegree` header for why an edge between two PRE-EXISTING nodes can't safely be assumed to change either endpoint's degree (they may already be connected by a different edge). */
+export function mergeAssertedEdge(previous: GraphCanvasData, link: GraphLink): GraphCanvasData {
+  return pinThenMerge(previous, [], [link]);
+}
+
+/** Removes one link by id (bd-hmd.6, task 6.5's "retract") — pins placed nodes first for the same reason every function in this section does (see `pinThenMerge`'s own comment: even a links-only change reheats the whole simulation), then relies on `mergeGraphData`'s own rule that an id present only in `previous` is dropped — omitting the retracted link from `incoming.links` IS the removal. */
+export function mergeRetractedEdge(previous: GraphCanvasData, linkId: string): GraphCanvasData {
+  pinPlacedNodes(previous.nodes as readonly PositionedNode[]);
+  return mergeGraphData(previous, { nodes: previous.nodes, links: previous.links.filter((l) => l.id !== linkId) });
+}
+
+/** Changes one link's weight (and its derived colour/width) in place (bd-hmd.6, task 6.5's "reweight") — pins placed nodes first, same reasoning as `mergeRetractedEdge`, then relies on `mergeGraphData`'s `Object.assign(existing, incoming)` for a matching id to mutate the SAME link object force-graph already holds, rather than replacing it. */
+export function mergeReweightedEdge(previous: GraphCanvasData, linkId: string, weight: number): GraphCanvasData {
+  pinPlacedNodes(previous.nodes as readonly PositionedNode[]);
+  const links = previous.links.map((l) => (l.id === linkId ? { ...l, weight, width: weightToEdgeWidth(weight) } : l));
+  return mergeGraphData(previous, { nodes: previous.nodes, links });
+}
+
+/**
+ * Patches one placed node's own fields in place (bd-hmd.6: a saved
+ * content edit may have changed the node's title, which the canvas
+ * displays). Pins placed nodes first for the same reason every function
+ * in this section does — even a title-only change is a fresh `graph`
+ * object from React's point of view, which is enough to make force-graph
+ * reheat the whole simulation on the next `graphData` update unless
+ * everything already placed is pinned first.
+ */
+export function mergeNodePatch(previous: GraphCanvasData, nodeId: string, patch: Partial<GraphNode>): GraphCanvasData {
+  pinPlacedNodes(previous.nodes as readonly PositionedNode[]);
+  const node = previous.nodes.find((n) => n.id === nodeId);
+  if (node) Object.assign(node, patch);
+  return { nodes: previous.nodes, links: previous.links };
 }
 
 // --- Per-node pagination state ---------------------------------------------

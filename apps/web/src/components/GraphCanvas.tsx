@@ -204,7 +204,22 @@ function linkTooltip(link: GraphLink): string {
 
 export interface GraphCanvasProps {
   data: GraphCanvasData;
-  /** Called on node click — App.tsx's `expandNode` (bd-hmd.5). Optional so this component still renders sensibly with no expansion wired up (e.g. a future read-only embed). */
+  /**
+   * Called on node click — App.tsx's combined `handleNodeClick` (bd-hmd.5's
+   * expansion, plus bd-hmd.6's "a click both expands and selects": the
+   * detail panel simply reflects whichever node this last named, no
+   * second gesture). Optional so this component still renders sensibly
+   * with no interaction wired up (e.g. a future read-only embed).
+   *
+   * Also wired to the sr-only node list below (bd-hmd.6, "Detail panel
+   * ... reachable by keyboard"): each entry is a real `<button>` calling
+   * this same handler, not just static text — bd-hmd.4/.5 left the
+   * on-canvas click with no keyboard equivalent as a known, explicitly
+   * deferred gap; this ticket's own detail panel is the first feature
+   * that actually needs opening by keyboard, so it closes that gap here
+   * rather than deferring it again. Activating a list entry is the exact
+   * same gesture as clicking the node on canvas — not a new, third way in.
+   */
   onNodeExpand?: (node: GraphNode) => void;
   /** Node ids with neighbours withheld by `getNeighbors`'s bound — drives both the on-canvas "+" badge and the sr-only list's text. See graph/expansion.ts's `expandableNodeIds`. */
   expandableNodeIds?: ReadonlySet<string>;
@@ -294,9 +309,25 @@ export function GraphCanvas({ data, onNodeExpand, expandableNodeIds = NO_EXPANDA
           />
         )}
       </div>
-      <ul className="sr-only" aria-label="Nodes in this graph">
+      {/*
+        `focus-within:not-sr-only` (bd-hmd.6), not a bare `sr-only`: this
+        list's buttons are now real activation controls (see onNodeExpand's
+        own comment above), and a control a sighted keyboard user can
+        reach but never SEE focused is only half "reachable by keyboard".
+        Tabbing into any entry reveals the whole list, fixed near the
+        top-left so it's never clipped by this panel's own
+        `overflow-hidden`; it returns to sr-only the moment focus leaves.
+      */}
+      <ul
+        className="sr-only max-h-64 w-72 space-y-1 overflow-y-auto border border-slate-300 bg-white p-2 text-xs shadow-lg focus-within:not-sr-only focus-within:fixed focus-within:top-4 focus-within:left-4 focus-within:z-50"
+        aria-label="Nodes in this graph"
+      >
         {data.nodes.map((node) => (
-          <li key={node.id}>{nodeAccessibleDescription(node, expandableNodeIds.has(node.id))}</li>
+          <li key={node.id}>
+            <button type="button" onClick={() => onNodeExpand?.(node)} className="block w-full rounded px-1 py-0.5 text-left hover:bg-slate-100 focus:bg-slate-100 focus:outline-none">
+              {nodeAccessibleDescription(node, expandableNodeIds.has(node.id))}
+            </button>
+          </li>
         ))}
       </ul>
     </div>

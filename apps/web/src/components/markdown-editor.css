@@ -1,0 +1,98 @@
+/* Minimal typography for MarkdownEditor.tsx's ProseMirror content — not
+   Tailwind utility classes, because ProseMirror generates the DOM itself
+   (ul/li/blockquote/pre/code/h1..h6) and Tailwind's own reset (preflight)
+   strips all default browser styling from exactly those elements, which
+   would otherwise leave rendered markdown looking like unstyled text.
+   Scoped to .markdown-editor-prosemirror (set via MarkdownEditor's
+   editorProps.attributes.class) so nothing here leaks into the rest of
+   the app. No @tailwindcss/typography dependency added for this alone —
+   the ruleset this editor's fixed extension set (StarterKit + Markdown)
+   can ever produce is small and enumerable below. */
+
+.markdown-editor-prosemirror {
+  outline: none;
+  font-size: 0.875rem;
+  line-height: 1.6;
+  color: #1e293b;
+}
+
+.markdown-editor-prosemirror > * + * {
+  margin-top: 0.6em;
+}
+
+.markdown-editor-prosemirror h1,
+.markdown-editor-prosemirror h2,
+.markdown-editor-prosemirror h3,
+.markdown-editor-prosemirror h4,
+.markdown-editor-prosemirror h5,
+.markdown-editor-prosemirror h6 {
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.markdown-editor-prosemirror h1 {
+  font-size: 1.25rem;
+}
+.markdown-editor-prosemirror h2 {
+  font-size: 1.125rem;
+}
+.markdown-editor-prosemirror h3 {
+  font-size: 1rem;
+}
+
+.markdown-editor-prosemirror ul,
+.markdown-editor-prosemirror ol {
+  padding-left: 1.4em;
+}
+.markdown-editor-prosemirror ul {
+  list-style: disc;
+}
+.markdown-editor-prosemirror ol {
+  list-style: decimal;
+}
+
+.markdown-editor-prosemirror blockquote {
+  border-left: 3px solid #cbd5e1;
+  padding-left: 0.8em;
+  color: #475569;
+}
+
+.markdown-editor-prosemirror code {
+  background: #f1f5f9;
+  border-radius: 0.25em;
+  padding: 0.1em 0.35em;
+  font-size: 0.85em;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.markdown-editor-prosemirror pre {
+  background: #0f172a;
+  color: #e2e8f0;
+  border-radius: 0.375em;
+  padding: 0.75em 1em;
+  overflow-x: auto;
+}
+
+.markdown-editor-prosemirror pre code {
+  background: none;
+  padding: 0;
+  color: inherit;
+}
+
+.markdown-editor-prosemirror a {
+  color: #4338ca;
+  text-decoration: underline;
+}
+
+.markdown-editor-prosemirror hr {
+  border: none;
+  border-top: 1px solid #e2e8f0;
+}
+
+.markdown-editor-prosemirror p.is-editor-empty:first-child::before {
+  content: "Nothing here yet.";
+  color: #94a3b8;
+  float: left;
+  height: 0;
+  pointer-events: none;
+}

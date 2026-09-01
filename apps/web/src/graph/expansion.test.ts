@@ -16,11 +16,24 @@
 // own header for why that's structurally out of reach for a test.
 
 import { describe, expect, it } from "vitest";
-import { degreeToRadius, searchResultToGraphData, type GraphCanvasData, type GraphNode, type SearchResult, type SearchResultNode } from "./encoding.js";
+import { colorForNodeType, colorForSourceSystem } from "./palette.js";
+import { degreeToRadius, searchResultToGraphData, weightToEdgeWidth, type GraphCanvasData, type GraphNode, type SearchResult, type SearchResultNode } from "./encoding.js";
 import {
+  ANNOTATES_EDGE_TYPE,
+  buildAnnotationNeighbor,
+  buildAssertedLink,
+  buildStandaloneNoteNode,
   cursorForExpansion,
   expandableNodeIds,
+  graphNodeFromUnlinkedNote,
+  HUMAN_SOURCE_SYSTEM,
+  mergeAssertedEdge,
   mergeExpansion,
+  mergeNodePatch,
+  mergeRetractedEdge,
+  mergeReweightedEdge,
+  mergeStandaloneNode,
+  NOTE_NODE_TYPE,
   pinPlacedNodes,
   releasePins,
   shouldFetchExpansion,
@@ -407,5 +420,188 @@ describe("per-node expansion pagination state", () => {
       ["node-c", { status: "loading", hasMore: true, cursor: cursorA }],
     ]);
     expect(expandableNodeIds(entries)).toEqual(new Set(["node-a", "node-c"]));
+  });
+});
+
+// --- bd-hmd.6: annotation, standalone notes, and hand edges reuse the ------
+// same pin-then-merge mechanism as mergeExpansion above (see expansion.ts's
+// "Shared pin-then-merge primitive" section). Every describe block below
+// asserts BOTH the domain-specific outcome (a note appears with an
+// `annotates` edge, a link's weight changes, etc.) AND that every
+// already-placed node was pinned — the same acceptance criterion the
+// mergeExpansion tests above assert, since force-graph reheats on ANY
+// graphData reference change, not only a node addition.
+
+describe("buildAnnotationNeighbor + mergeExpansion — annotation reuses mergeExpansion verbatim (task 6.3)", () => {
+  it("draws the note as a new node and the annotates edge, direction incoming (note -> target)", () => {
+    const target = placed(makeNode({ id: "target" }), 10, 20);
+    const bystander = placed(makeNode({ id: "bystander" }), -5, -5);
+    const previous = graphOf([target, bystander]);
+
+    const neighbor = buildAnnotationNeighbor({ noteId: "note-1", noteExternalId: "note-note-1", annotationEdgeId: "edge-1" }, "My annotation");
+    const merged = mergeExpansion(previous, { parentId: "target", parentPosition: { x: 10, y: 20 }, neighbors: [neighbor] });
+
+    const note = merged.nodes.find((n) => n.id === "note-1")!;
+    expect(note.nodeType).toBe(NOTE_NODE_TYPE);
+    expect(note.sourceSystem).toBe(HUMAN_SOURCE_SYSTEM);
+    expect(note.title).toBe("My annotation");
+    expect(note.isEditable).toBe(true);
+    expect(note.provenance).toEqual({ kind: "path", edgePath: [ANNOTATES_EDGE_TYPE] });
+
+    const edge = merged.links.find((l) => l.id === "edge-1")!;
+    expect(edge.source).toBe("note-1"); // note -> target
+    expect(edge.target).toBe("target");
+    expect(edge.edgeType).toBe(ANNOTATES_EDGE_TYPE);
+    expect(edge.sourceSystem).toBe(HUMAN_SOURCE_SYSTEM);
+
+    // The unrelated bystander node is untouched and pinned, same acceptance
+    // criterion as mergeExpansion's own "placed nodes are held still" block.
+    expect(merged.nodes.find((n) => n.id === "bystander")).toBe(bystander);
+    expect(bystander.fx).toBe(-5);
+    expect(bystander.fy).toBe(-5);
+  });
+
+  it("falls back to a placeholder title when none was given, and never blank", () => {
+    const neighbor = buildAnnotationNeighbor({ noteId: "n", noteExternalId: "note-n", annotationEdgeId: "e" }, undefined);
+    expect(neighbor.title).toBe("(untitled note)");
+    const blank = buildAnnotationNeighbor({ noteId: "n", noteExternalId: "note-n", annotationEdgeId: "e" }, "   ");
+    expect(blank.title).toBe("(untitled note)");
+  });
+
+  it("gives the new note degree 1 — exact, not a placeholder, since the note is provably brand new", () => {
+    const neighbor = buildAnnotationNeighbor({ noteId: "n", noteExternalId: "note-n", annotationEdgeId: "e" }, "t");
+    expect(neighbor.degree).toBe(1);
+  });
+});
+
+describe("buildStandaloneNoteNode / mergeStandaloneNode — standalone note creation (task 6.4)", () => {
+  it("builds a degree-0, editable note node", () => {
+    const node = buildStandaloneNoteNode({ id: "note-1" }, "A note");
+    expect(node).toMatchObject({ id: "note-1", title: "A note", nodeType: NOTE_NODE_TYPE, sourceSystem: HUMAN_SOURCE_SYSTEM, degree: 0, isEditable: true });
+    expect(node.radius).toBe(degreeToRadius(0));
+    expect(node.provenance).toEqual({ kind: "path", edgePath: [] });
+  });
+
+  it("mergeStandaloneNode adds it without disturbing (and while pinning) already-placed nodes", () => {
+    const placedNode = placed(makeNode({ id: "existing" }), 7, 8);
+    const previous = graphOf([placedNode]);
+    const note = buildStandaloneNoteNode({ id: "note-1" }, "A note");
+
+    const merged = mergeStandaloneNode(previous, note);
+
+    expect(merged.nodes.some((n) => n.id === "note-1")).toBe(true);
+    expect(merged.nodes.find((n) => n.id === "existing")).toBe(placedNode);
+    expect(placedNode.fx).toBe(7);
+    expect(placedNode.fy).toBe(8);
+  });
+
+  it("is a no-op for a node id already drawn (e.g. re-showing an unlinked note already on screen)", () => {
+    const already = placed(makeNode({ id: "note-1", title: "Original" }), 1, 1);
+    const previous = graphOf([already]);
+
+    const merged = mergeStandaloneNode(previous, buildStandaloneNoteNode({ id: "note-1" }, "Different title"));
+
+    expect(merged.nodes.filter((n) => n.id === "note-1")).toHaveLength(1);
+    expect(merged.nodes.find((n) => n.id === "note-1")).toBe(already); // same object, not replaced
+  });
+});
+
+describe("graphNodeFromUnlinkedNote", () => {
+  it("builds a degree-0 node carrying the server's own isEditable/nodeType/sourceSystem", () => {
+    const node = graphNodeFromUnlinkedNote({ id: "n1", title: "Found note", nodeType: NOTE_NODE_TYPE, sourceSystem: HUMAN_SOURCE_SYSTEM, isEditable: true });
+    expect(node.degree).toBe(0);
+    expect(node.isEditable).toBe(true);
+    expect(node.color).toBe(colorForNodeType(NOTE_NODE_TYPE));
+  });
+});
+
+describe("buildAssertedLink / mergeAssertedEdge — hand-drawn edges (task 6.5)", () => {
+  it("gets the SAME provenance styling every other human edge gets — graph-explorer/spec.md's 'a hand-drawn edge is drawn with hand-authored provenance styling'", () => {
+    const link = buildAssertedLink({ id: "edge-1" }, { srcId: "a", dstId: "b", edgeType: "relates-to", weight: 0.8 });
+    expect(link.sourceSystem).toBe(HUMAN_SOURCE_SYSTEM);
+    expect(link.color).toBe(colorForSourceSystem(HUMAN_SOURCE_SYSTEM));
+    expect(link.width).toBe(weightToEdgeWidth(0.8));
+    // Distinguishable from a repo edge's styling specifically — the scenario's own wording ("visually distinct").
+    expect(link.color).not.toBe(colorForSourceSystem("repo"));
+  });
+
+  it("defaults weight to 1.0 when omitted, matching packages/core/src/edges.ts's own default", () => {
+    const link = buildAssertedLink({ id: "edge-1" }, { srcId: "a", dstId: "b", edgeType: "relates-to" });
+    expect(link.weight).toBe(1.0);
+    expect(link.width).toBe(weightToEdgeWidth(1.0));
+  });
+
+  it("mergeAssertedEdge adds the link and pins already-placed nodes, without adding a new node", () => {
+    const a = placed(makeNode({ id: "a" }), 1, 1);
+    const b = placed(makeNode({ id: "b" }), 2, 2);
+    const previous = graphOf([a, b]);
+
+    const merged = mergeAssertedEdge(previous, buildAssertedLink({ id: "edge-1" }, { srcId: "a", dstId: "b", edgeType: "relates-to" }));
+
+    expect(merged.nodes).toHaveLength(2);
+    expect(merged.links.some((l) => l.id === "edge-1")).toBe(true);
+    expect(a.fx).toBe(1);
+    expect(b.fx).toBe(2);
+  });
+});
+
+describe("mergeRetractedEdge — hand edge retraction (task 6.5)", () => {
+  it("removes exactly the named link and nothing else, pinning placed nodes", () => {
+    const a = placed(makeNode({ id: "a" }), 1, 1);
+    const b = placed(makeNode({ id: "b" }), 2, 2);
+    const keep = { id: "keep", source: "a", target: "b", edgeType: "sibling", sourceSystem: "repo", weight: 0.4, color: "#000", width: 1 };
+    const gone = { id: "gone", source: "a", target: "b", edgeType: "relates-to", sourceSystem: "human", weight: 1, color: "#111", width: 5 };
+    const previous = graphOf([a, b], [keep, gone]);
+
+    const merged = mergeRetractedEdge(previous, "gone");
+
+    expect(merged.links.map((l) => l.id)).toEqual(["keep"]);
+    expect(a.fx).toBe(1);
+    expect(b.fx).toBe(2);
+  });
+
+  it("is a harmless no-op when the named link isn't present", () => {
+    const previous = graphOf([placed(makeNode({ id: "a" }), 0, 0)], []);
+    const merged = mergeRetractedEdge(previous, "does-not-exist");
+    expect(merged.links).toHaveLength(0);
+  });
+});
+
+describe("mergeReweightedEdge — hand edge reweighting (task 6.5)", () => {
+  it("changes weight and recomputes width for exactly the named link, mutating the SAME link object", () => {
+    const a = placed(makeNode({ id: "a" }), 1, 1);
+    const b = placed(makeNode({ id: "b" }), 2, 2);
+    const link = { id: "e1", source: "a", target: "b", edgeType: "relates-to", sourceSystem: "human", weight: 0.2, color: "#111", width: weightToEdgeWidth(0.2) };
+    const previous = graphOf([a, b], [link]);
+
+    const merged = mergeReweightedEdge(previous, "e1", 0.9);
+
+    const updated = merged.links.find((l) => l.id === "e1")!;
+    expect(updated).toBe(link); // same object, mutated via mergeGraphData's Object.assign
+    expect(updated.weight).toBe(0.9);
+    expect(updated.width).toBe(weightToEdgeWidth(0.9));
+    expect(a.fx).toBe(1);
+    expect(b.fx).toBe(2);
+  });
+});
+
+describe("mergeNodePatch — a saved content edit's new title reaches the canvas", () => {
+  it("patches only the named node's fields, pinning every other placed node", () => {
+    const target = placed(makeNode({ id: "target", title: "Old title" }), 3, 4);
+    const other = placed(makeNode({ id: "other" }), 9, 9);
+    const previous = graphOf([target, other]);
+
+    const merged = mergeNodePatch(previous, "target", { title: "New title" });
+
+    expect(merged.nodes.find((n) => n.id === "target")).toBe(target);
+    expect(target.title).toBe("New title");
+    expect(other.fx).toBe(9);
+    expect(other.fy).toBe(9);
+  });
+
+  it("is a no-op when the named node isn't drawn", () => {
+    const previous = graphOf([placed(makeNode({ id: "a" }), 0, 0)]);
+    const merged = mergeNodePatch(previous, "not-here", { title: "x" });
+    expect(merged.nodes).toHaveLength(1);
   });
 });

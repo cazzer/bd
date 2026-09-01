@@ -13,6 +13,11 @@
   "dependencies": {
     "@breakdown/core": "workspace:*",
     "@breakdown/db": "workspace:*",
+    "@tiptap/core": "3.31.0",
+    "@tiptap/markdown": "3.31.0",
+    "@tiptap/pm": "3.31.0",
+    "@tiptap/react": "3.31.0",
+    "@tiptap/starter-kit": "3.31.0",
     "@trpc/client": "11.18.0",
     "@trpc/server": "11.18.0",
     "react": "19.2.8",

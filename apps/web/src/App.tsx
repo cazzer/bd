@@ -1,27 +1,56 @@
 // Search box, submitted query, results as a force-directed graph canvas
-// (bd-hmd.4), plus click-to-expand (bd-hmd.5) — see graph/expansion.ts
-// for the merge/pin/pagination logic this component only orchestrates.
-// Was a plain list (bd-hmd.3, tasks.md 3.7) — see graph/encoding.ts for
-// the search-result -> graph-data transform this replaces
-// SearchResultsList.tsx's rendering with.
+// (bd-hmd.4), click-to-expand (bd-hmd.5, see graph/expansion.ts for the
+// merge/pin/pagination logic this component only orchestrates), and node
+// detail/editing/annotation/hand edges (bd-hmd.6).
+//
+// --- The gesture conflict (bd-hmd.6's own decision, not up for
+// redesign here) --------------------------------------------------------
+//
+// bd-hmd.5 made a single click expand a node's neighbours — the
+// cheapest, most frequent gesture, and it stays exactly as built.
+// Detail/editing needs a way in, and a click can't mean two things, so:
+// "a click both expands and selects." `handleNodeClick` below does both
+// in the same handler — no new gesture, no conflict — and `DetailPanel`
+// simply reflects whichever node `selectedNodeId` last named, updating
+// as the person keeps exploring. The keyboard path (GraphCanvas's
+// sr-only node list, now real `<button>`s — see that file's header)
+// calls this exact same handler, so "reachable by keyboard" is the same
+// gesture too, not a second one.
 
 import { useRef, useState } from "react";
+import { CreateNoteForm } from "./components/CreateNoteForm.js";
+import { DetailPanel } from "./components/DetailPanel.js";
 import { GraphCanvas } from "./components/GraphCanvas.js";
 import { GraphLegend } from "./components/GraphLegend.js";
-import { EMPTY_GRAPH, mergeGraphData, searchResultToGraphData, type GraphCanvasData, type GraphNode, type SearchResult } from "./graph/encoding.js";
+import { UnlinkedNotes } from "./components/UnlinkedNotes.js";
+import { EMPTY_GRAPH, mergeGraphData, searchResultToGraphData, setNodeDegree, type GraphCanvasData, type GraphNode, type SearchResult } from "./graph/encoding.js";
 import {
+  buildAnnotationNeighbor,
+  buildAssertedLink,
+  buildStandaloneNoteNode,
   cursorForExpansion,
   expandableNodeIds,
+  graphNodeFromUnlinkedNote,
+  mergeAssertedEdge,
   mergeExpansion,
+  mergeNodePatch,
+  mergeRetractedEdge,
+  mergeReweightedEdge,
+  mergeStandaloneNode,
   shouldFetchExpansion,
   withExpansionError,
   withExpansionLoading,
   withExpansionResult,
   type ExpansionEntries,
+  type UnlinkedNote,
 } from "./graph/expansion.js";
 import { trpc } from "./trpc.js";
 
 type Status = { kind: "idle" } | { kind: "loading" } | { kind: "error"; message: string } | { kind: "done"; result: SearchResult };
+
+type AnnotateResult = Awaited<ReturnType<typeof trpc.annotateNode.mutate>>;
+type AssertResult = Awaited<ReturnType<typeof trpc.assertEdge.mutate>>;
+type CreateNoteResult = Awaited<ReturnType<typeof trpc.createNote.mutate>>;
 
 export function App() {
   const [query, setQuery] = useState("");
@@ -29,6 +58,12 @@ export function App() {
   const [graph, setGraph] = useState<GraphCanvasData>(EMPTY_GRAPH);
   const [expansions, setExpansions] = useState<ExpansionEntries>(new Map());
   const [expansionError, setExpansionError] = useState<string | null>(null);
+  // The node the detail panel reflects (bd-hmd.6) — null means closed.
+  // Deliberately just an id, not a copy of the node: DetailPanel always
+  // looks the current node up in `graph.nodes` itself, so it never goes
+  // stale relative to a write that changed that node's own fields (e.g.
+  // a saved title — see `mergeNodePatch`).
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   // Concurrency guard for expandNode, deliberately NOT React state (bd-hmd.1's
   // review, reapplied to this UI — see the ticket report): two clicks on the
   // SAME node fired in the same tick would both read the same, not-yet-
@@ -69,6 +104,12 @@ export function App() {
         // update() -> d3-force-3d's initializeNodes) and why this is
         // also the function bd-hmd.5's expansion will call.
         setGraph((previous) => mergeGraphData(previous, searchResultToGraphData(result)));
+        // A fresh query replaces the whole view (unlike expansion, which
+        // accumulates) — a node selected before this search may no
+        // longer be drawn at all, so the panel closes rather than show
+        // stale detail for a node the person can no longer see on
+        // screen. Re-select by clicking it again if it's still present.
+        setSelectedNodeId(null);
       }
     } catch (err) {
       // TRPCClientError#message is already the safe, hand-mapped message
@@ -131,6 +172,74 @@ export function App() {
     });
   }
 
+  /** "A click both expands and selects" — see this file's header. */
+  function handleNodeClick(node: GraphNode) {
+    setSelectedNodeId(node.id);
+    void expandNode(node);
+  }
+
+  /** A content/title edit was saved (DetailPanel's ContentSection) — patch the canvas node's own title so it's reflected without a re-search. */
+  function handleContentSaved(nodeId: string, newTitle: string) {
+    setGraph((previous) => mergeNodePatch(previous, nodeId, { title: newTitle }));
+  }
+
+  /**
+   * An annotation was created (DetailPanel's AnnotateSection, task 6.3).
+   * Reuses `mergeExpansion` verbatim via a synthesized single-neighbor
+   * page (`buildAnnotationNeighbor`) — the ticket's own instruction: "add
+   * nodes without moving anything ... reuse [mergeExpansion] rather than
+   * inventing a second path."
+   *
+   * `newTargetDegree` is captured HERE, from `target.degree` — before
+   * `setGraph`'s updater runs, not from inside it — and handed to
+   * `setNodeDegree` as an absolute value. That ordering is load-bearing,
+   * not stylistic: `setGraph`'s updater runs twice under React
+   * StrictMode (a documented dev-only purity check), and an earlier
+   * version of this handler read `target.degree` and bumped it by 1
+   * *inside* the updater, which this ticket's own end-to-end run (task
+   * 6.7) caught landing on +2 — see `setNodeDegree`'s header in
+   * encoding.ts for the full trace.
+   */
+  function handleAnnotated(target: GraphNode, result: AnnotateResult, title: string | undefined) {
+    const newTargetDegree = target.degree + 1; // exact, not a guess — the note is brand new, so it was provably not already counted
+    setGraph((previous) => {
+      const parent = previous.nodes.find((n) => n.id === target.id) as (GraphNode & { x?: number; y?: number }) | undefined;
+      const parentPosition = parent && typeof parent.x === "number" && typeof parent.y === "number" ? { x: parent.x, y: parent.y } : undefined;
+      const merged = mergeExpansion(previous, { parentId: target.id, parentPosition, neighbors: [buildAnnotationNeighbor(result, title)] });
+      setNodeDegree(merged.nodes, target.id, newTargetDegree);
+      return merged;
+    });
+  }
+
+  /** A hand edge was asserted between two nodes already on screen (DetailPanel's ConnectForm, task 6.5). */
+  function handleEdgeAsserted(input: { srcId: string; dstId: string; edgeType: string; weight?: number }, result: AssertResult) {
+    setGraph((previous) => mergeAssertedEdge(previous, buildAssertedLink(result, input)));
+  }
+
+  /** A hand edge was retracted (DetailPanel's EdgeRow, task 6.5). */
+  function handleEdgeRetracted(linkId: string) {
+    setGraph((previous) => mergeRetractedEdge(previous, linkId));
+  }
+
+  /** A hand edge was reweighted (DetailPanel's EdgeRow, task 6.5). */
+  function handleEdgeReweighted(linkId: string, weight: number) {
+    setGraph((previous) => mergeReweightedEdge(previous, linkId, weight));
+  }
+
+  /** A standalone note was created (CreateNoteForm, task 6.4) — draws it (degree 0, no edges) and opens its detail. */
+  function handleNoteCreated(result: CreateNoteResult, title: string | undefined) {
+    const node = buildStandaloneNoteNode(result, title);
+    setGraph((previous) => mergeStandaloneNode(previous, node));
+    setSelectedNodeId(result.id);
+  }
+
+  /** A previously-unlinked note was chosen from the list (UnlinkedNotes, task 6.4) — draws it and opens its detail, same as a freshly created one. */
+  function handleShowUnlinkedNote(note: UnlinkedNote) {
+    const node = graphNodeFromUnlinkedNote(note);
+    setGraph((previous) => mergeStandaloneNode(previous, node));
+    setSelectedNodeId(note.id);
+  }
+
   return (
     <div className="flex h-screen flex-col px-6 py-6">
       <div className="mx-auto w-full max-w-3xl shrink-0">
@@ -177,6 +286,14 @@ export function App() {
             </p>
           )}
         </div>
+
+        {/* Node creation/discovery (bd-hmd.6, task 6.4) — deliberately not
+            gated on a search result: a standalone note can be created, and
+            an unlinked one found, with nothing on screen at all. */}
+        <div className="mt-3 flex flex-wrap items-start gap-2">
+          <CreateNoteForm onCreated={handleNoteCreated} />
+          <UnlinkedNotes onShow={handleShowUnlinkedNote} />
+        </div>
       </div>
 
       {expansionError && (
@@ -185,11 +302,27 @@ export function App() {
         </div>
       )}
 
-      <div className="mx-auto mt-4 flex w-full min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-slate-200">
-        <div className="min-h-0 flex-1">
-          <GraphCanvas data={graph} onNodeExpand={(node) => void expandNode(node)} expandableNodeIds={expandableNodeIds(expansions)} />
+      <div className="mx-auto mt-4 flex w-full min-h-0 flex-1 overflow-hidden rounded-lg border border-slate-200">
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+          <div className="min-h-0 flex-1">
+            <GraphCanvas data={graph} onNodeExpand={handleNodeClick} expandableNodeIds={expandableNodeIds(expansions)} />
+          </div>
+          <GraphLegend />
         </div>
-        <GraphLegend />
+        {selectedNodeId && (
+          <DetailPanel
+            key={selectedNodeId}
+            nodeId={selectedNodeId}
+            allNodes={graph.nodes}
+            allLinks={graph.links}
+            onClose={() => setSelectedNodeId(null)}
+            onContentSaved={handleContentSaved}
+            onAnnotated={handleAnnotated}
+            onEdgeAsserted={handleEdgeAsserted}
+            onEdgeRetracted={handleEdgeRetracted}
+            onEdgeReweighted={handleEdgeReweighted}
+          />
+        )}
       </div>
     </div>
   );

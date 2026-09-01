@@ -222,6 +222,52 @@ export function searchResultToGraphData(result: SearchResult | null): GraphCanva
 // this same function — this function's only job is "reuse identity
 // where the id matches," not deciding replace vs. accumulate, so
 // bd-hmd.5 needs no change here to get its own semantics.
+// --- Local degree correction for a write we know the shape of (bd-hmd.6) --
+//
+// No `@breakdown/core` read returns "this node's own store-wide degree"
+// in isolation — only `retrieve()` (a search hit) and `getNeighbors`
+// (the OTHER side of each neighbor) compute it, and neither is a cheap
+// call to make just to keep one number honest after a local edit. For
+// most hand-authored writes this module leaves a placed node's `degree`
+// stale rather than guess wrong: an edge asserted between two nodes
+// already on screen might already be connected by a DIFFERENT edge (in
+// which case degree, "distinct connected nodes," does not change at
+// all), and getting that silently wrong is worse than a number that's
+// merely out of date until the next search or expansion refreshes it.
+//
+// Annotation is the one case this module treats differently, because the
+// note being attached is BRAND NEW — freshly created in the same call —
+// so it is provably exactly one more than whatever the target's degree
+// already was. That "already was" has to be captured as a plain number
+// BEFORE `setGraph`'s updater runs, never read back out of `previous`
+// inside it — see this function's own signature: it takes the new
+// ABSOLUTE degree, not a delta, and App.tsx's annotate handler (the only
+// caller) computes `target.degree + 1` in the ONE place that's safe to
+// read `target.degree`, before calling `setGraph` at all.
+//
+// This is deliberately NOT a "bump by delta" helper mutating in place —
+// an earlier version was, and broke under React StrictMode: `setGraph`
+// updater functions are called TWICE in development (React's documented
+// purity check), with `previous` the SAME object graph both times. A
+// delta applied via direct mutation (`node.degree += 1`) is invisible to
+// React's state mechanism — it is a plain side effect on a shared
+// object — so the FIRST invocation's mutation was still there, already
+// applied, when the SECOND invocation ran and read `node.degree` again:
+// 1 -> 2 on the first call, then 2 -> 3 on the second, landing on 3
+// instead of 2 (caught live during this ticket's task 6.7 end-to-end
+// run — see the ticket report). Setting an ABSOLUTE value computed
+// OUTSIDE the updater, from a plain number captured before either
+// invocation runs, is idempotent: both invocations set the same target
+// value, so calling this twice (or a hundred times) with the same
+// arguments converges, it does not compound.
+export function setNodeDegree(nodes: readonly GraphNode[], id: string, degree: number): boolean {
+  const node = nodes.find((n) => n.id === id);
+  if (!node) return false;
+  node.degree = Math.max(0, degree);
+  node.radius = degreeToRadius(node.degree);
+  return true;
+}
+
 export function mergeGraphData(previous: GraphCanvasData, incoming: GraphCanvasData): GraphCanvasData {
   const previousNodesById = new Map(previous.nodes.map((node) => [node.id, node]));
   const nodes = incoming.nodes.map((node) => {

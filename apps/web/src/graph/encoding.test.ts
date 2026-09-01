@@ -13,8 +13,10 @@ import {
   mergeGraphData,
   NODE_RADIUS_MIN,
   searchResultToGraphData,
+  setNodeDegree,
   weightToEdgeWidth,
   type GraphCanvasData,
+  type GraphNode,
   type SearchResult,
   type SearchResultEdge,
   type SearchResultNode,
@@ -339,3 +341,53 @@ describe("mergeGraphData", () => {
 function EMPTY_GRAPH_FOR_TEST(): GraphCanvasData {
   return { nodes: [], links: [] };
 }
+
+// --- setNodeDegree (bd-hmd.6): the one case a local degree correction is
+// exact, not a guess — see the function's own header for why every OTHER
+// bd-hmd.6 write path (a hand edge between two pre-existing nodes)
+// deliberately does NOT do this, and for why this takes an ABSOLUTE
+// degree rather than a delta (a live bug this ticket's own task 6.7
+// end-to-end run caught: React StrictMode calls a `setGraph` updater
+// function TWICE, and a delta applied via in-place mutation compounds
+// across those two calls since both see the same, already-mutated,
+// shared node object — landing on +2 instead of +1).
+
+describe("setNodeDegree", () => {
+  function graphNode(overrides: Partial<GraphNode> & { id: string }): GraphNode {
+    return { title: "n", nodeType: "note", sourceSystem: "human", degree: 0, radius: degreeToRadius(0), color: "#000", isEditable: true, provenance: { kind: "path", edgePath: [] }, ...overrides };
+  }
+
+  it("sets degree and recomputes radius for the matching node, returning true", () => {
+    const nodes = [graphNode({ id: "target", degree: 2 })];
+    const changed = setNodeDegree(nodes, "target", 3);
+    expect(changed).toBe(true);
+    expect(nodes[0]!.degree).toBe(3);
+    expect(nodes[0]!.radius).toBe(degreeToRadius(3));
+  });
+
+  it("never drives degree negative", () => {
+    const nodes = [graphNode({ id: "target", degree: 0 })];
+    setNodeDegree(nodes, "target", -1);
+    expect(nodes[0]!.degree).toBe(0);
+  });
+
+  it("returns false and touches nothing when the id isn't present", () => {
+    const nodes = [graphNode({ id: "other", degree: 5 })];
+    const changed = setNodeDegree(nodes, "missing", 6);
+    expect(changed).toBe(false);
+    expect(nodes[0]!.degree).toBe(5);
+  });
+
+  it("leaves every other node's degree untouched", () => {
+    const nodes = [graphNode({ id: "a", degree: 1 }), graphNode({ id: "b", degree: 9 })];
+    setNodeDegree(nodes, "a", 2);
+    expect(nodes[1]!.degree).toBe(9);
+  });
+
+  it("is idempotent under a repeated call with the same absolute value — the exact property a React StrictMode double-invoked setGraph updater relies on", () => {
+    const nodes = [graphNode({ id: "target", degree: 1 })];
+    setNodeDegree(nodes, "target", 2);
+    setNodeDegree(nodes, "target", 2); // simulates StrictMode's second invocation computing the SAME absolute value from a value captured before either call
+    expect(nodes[0]!.degree).toBe(2); // NOT 3 — see this describe block's own header for the bug a relative version had
+  });
+});
