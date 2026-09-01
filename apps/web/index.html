@@ -3,6 +3,31 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      Content-Security-Policy (bd-hmd.3 review, flagged after the
+      SearchResultsList.tsx stored-XSS finding). Defense-in-depth, not the
+      fix itself — the fix is removing dangerouslySetInnerHTML so ingested
+      content can never become markup in the first place — but this closes
+      the same class of hole for anything future code adds by mistake:
+      default-src/object-src/base-uri/form-action/frame-ancestors all
+      block third-party origins outright, so even a successful injection
+      has nowhere to load a payload from or exfiltrate to.
+
+      script-src/style-src keep 'unsafe-inline': @vitejs/plugin-react
+      injects an inline `<script type="module">` (the React Fast Refresh
+      preamble) into this file in dev mode, and Vite's CSS HMR injects
+      `<style>` elements at runtime for Tailwind's compiled output — both
+      break under a strict script-src/style-src with no nonce. This does
+      not reopen the finding above: nothing in this app puts untrusted
+      content into a literal `<script>`/`<style>` tag, so 'unsafe-inline'
+      has no ingested-content injection point to exploit — it only
+      tolerates this tool's own dev-time inline script/style, and every
+      third-party origin is still blocked regardless.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none';"
+    />
     <title>breakdown</title>
   </head>
   <body>

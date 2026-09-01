@@ -59,6 +59,7 @@ import {
   unsafeWrapNodeWriteError,
   DEFAULT_MAX_CONTENT_LENGTH,
   DEFAULT_MAX_METADATA_LENGTH,
+  DEFAULT_MAX_TITLE_LENGTH,
   type NodeInput,
   type NodeUpsertAction,
   type UpsertNodeRow,
@@ -162,7 +163,7 @@ export async function createNote(db: Database, input: CreateNoteInput = {}): Pro
     content: input.content,
     metadata: input.metadata,
   };
-  unsafePrepareNodes([nodeInput], DEFAULT_MAX_CONTENT_LENGTH, DEFAULT_MAX_METADATA_LENGTH);
+  unsafePrepareNodes([nodeInput], DEFAULT_MAX_CONTENT_LENGTH, DEFAULT_MAX_METADATA_LENGTH, DEFAULT_MAX_TITLE_LENGTH);
 
   const { ingestRunId, result } = await withHumanIngestRun(db, (run) => upsertNodes(db, run, [nodeInput]));
   const row = result.rows[0];
@@ -244,6 +245,7 @@ export async function annotateNode(db: Database, targetNodeId: string, input: An
     ],
     DEFAULT_MAX_CONTENT_LENGTH,
     DEFAULT_MAX_METADATA_LENGTH,
+    DEFAULT_MAX_TITLE_LENGTH,
   );
 
   const targetRows = await db.select({ id: nodes.id }).from(nodes).where(eq(nodes.id, trimmedTarget));
@@ -353,7 +355,7 @@ export async function updateNodeContent(db: Database, nodeId: string, input: Upd
     content: input.content ?? existing.content,
     metadata: input.metadata ?? (existing.metadata as Record<string, unknown>),
   };
-  unsafePrepareNodes([merged], DEFAULT_MAX_CONTENT_LENGTH, DEFAULT_MAX_METADATA_LENGTH);
+  unsafePrepareNodes([merged], DEFAULT_MAX_CONTENT_LENGTH, DEFAULT_MAX_METADATA_LENGTH, DEFAULT_MAX_TITLE_LENGTH);
 
   const { ingestRunId, result } = await withHumanIngestRun(db, (run) => upsertNodes(db, run, [merged]));
   const row = result.rows[0];

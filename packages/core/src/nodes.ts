@@ -8,6 +8,7 @@ import {
   InvalidNodeInputError,
   MetadataTooLargeError,
   NodeUpsertFailedError,
+  TitleTooLargeError,
 } from "./errors.js";
 import type { IngestRunHandle } from "./ingest-runs.js";
 import { asPgError, chunk, formatPgInfo, sqlArray } from "./sql-helpers.js";
@@ -42,6 +43,25 @@ export const DEFAULT_MAX_CONTENT_LENGTH = 1_000_000;
  */
 export const DEFAULT_MAX_METADATA_LENGTH = 50_000;
 
+/**
+ * Default cap on a node's `title` length, in UTF-16 code units (bd-hmd.3
+ * review).
+ *
+ * `title` had no length check at all before this — `unsafePrepareNodes`
+ * validated `content.length` and never `title.length`. That is a sharper
+ * problem than it looks: unlike `content` (which only appears in full on
+ * a direct `getNodes` lookup), `title` is returned whole by every
+ * *listing* path — every hit in a search result, every row in
+ * `getStoreSummary`'s `recentNodes` — so one oversized title inflates
+ * every response that lists it, not just a lookup of that one node. 500
+ * characters is generous for any real heading/title (the longest title
+ * in the seeded corpus is under 50) while catching the failure mode this
+ * closes — a whole document, or an attacker-supplied payload, pasted
+ * into `title` instead of `content`. Override per call via
+ * `UpsertNodesOptions.maxTitleLength` if a source genuinely needs more.
+ */
+export const DEFAULT_MAX_TITLE_LENGTH = 500;
+
 /** Default chunk size for the `unnest(...)` batch upsert — see design.md "Writes". */
 export const DEFAULT_NODE_CHUNK_SIZE = 1000;
 
@@ -61,6 +81,8 @@ export interface UpsertNodesOptions {
   maxContentLength?: number;
   /** Max serialized `metadata` length, in characters. Default `DEFAULT_MAX_METADATA_LENGTH`. */
   maxMetadataLength?: number;
+  /** Max `title` length, in characters. Default `DEFAULT_MAX_TITLE_LENGTH`. */
+  maxTitleLength?: number;
 }
 
 export type NodeUpsertAction = "created" | "updated" | "unchanged";
@@ -156,7 +178,12 @@ function findControlChar(value: string): { charPosition: number; codePoint: numb
  * check — `nodes` has no CHECK constraint backing it. See the "Unsafe
  * internals" banner above.
  */
-export function unsafePrepareNodes(input: readonly NodeInput[], maxContentLength: number, maxMetadataLength: number): PreparedNode[] {
+export function unsafePrepareNodes(
+  input: readonly NodeInput[],
+  maxContentLength: number,
+  maxMetadataLength: number,
+  maxTitleLength: number = DEFAULT_MAX_TITLE_LENGTH,
+): PreparedNode[] {
   const prepared: PreparedNode[] = [];
   const seen = new Map<string, number>();
 
@@ -176,6 +203,13 @@ export function unsafePrepareNodes(input: readonly NodeInput[], maxContentLength
 
     const title = n.title ?? "";
     const content = n.content ?? "";
+    // See DEFAULT_MAX_TITLE_LENGTH: title is returned in full by every
+    // listing path (search hits, getStoreSummary's recentNodes), not
+    // just a single-node lookup, so this must be checked here — the same
+    // place content's own cap is checked — not left unbounded.
+    if (title.length > maxTitleLength) {
+      throw new TitleTooLargeError(index, sourceSystem, externalId, title.length, maxTitleLength);
+    }
     if (content.length > maxContentLength) {
       throw new ContentTooLargeError(index, sourceSystem, externalId, content.length, maxContentLength);
     }
@@ -360,10 +394,11 @@ export async function upsertNodes(
   const chunkSize = options.chunkSize ?? DEFAULT_NODE_CHUNK_SIZE;
   const maxContentLength = options.maxContentLength ?? DEFAULT_MAX_CONTENT_LENGTH;
   const maxMetadataLength = options.maxMetadataLength ?? DEFAULT_MAX_METADATA_LENGTH;
+  const maxTitleLength = options.maxTitleLength ?? DEFAULT_MAX_TITLE_LENGTH;
 
   // Validate and hash the whole batch before any SQL runs — see
   // unsafePrepareNodes.
-  const prepared = unsafePrepareNodes(input, maxContentLength, maxMetadataLength);
+  const prepared = unsafePrepareNodes(input, maxContentLength, maxMetadataLength, maxTitleLength);
   const chunks = chunk(prepared, chunkSize);
 
   const result: UpsertNodesResult = { created: 0, updated: 0, unchanged: 0, rows: [] };

@@ -25,6 +25,7 @@
     "@types/react-dom": "19.2.5",
     "@vitejs/plugin-react": "6.1.1",
     "concurrently": "10.0.5",
+    "drizzle-orm": "0.45.2",
     "tailwindcss": "4.3.3",
     "tsx": "4.23.13",
     "typescript": "5.9.3",

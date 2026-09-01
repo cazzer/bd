@@ -56,6 +56,27 @@ export const DEFAULT_NODE_BUDGET = 40;
 export const DEFAULT_DECAY = 0.6;
 export const DEFAULT_RECENT_NODES_LIMIT = 10;
 
+/**
+ * Hard ceilings on `seedLimit`/`fanout`/`nodeBudget`/`recentNodesLimit`
+ * (bd-hmd.3 review). Before these existed, `resolveRetrievalParams`
+ * accepted any positive integer and spliced it straight into
+ * `buildRetrievalQuery`'s `LIMIT ...::int` clauses — a caller-supplied
+ * value like `3_000_000_000` overflows Postgres `int4` (max
+ * 2,147,483,647) and the query fails at bind time with a database error,
+ * not a caller-input error, exactly the same shape of bug
+ * `MAX_NEIGHBOR_LIMIT` (lookup.ts) already exists to prevent for
+ * `getNeighbors`'s `limit`. 1000 mirrors that precedent and every other
+ * "how many rows can one call ask for" cap in this codebase
+ * (`MAX_NEIGHBOR_LIMIT`, `apps/mcp`'s `MAX_BATCH_ITEMS`) — comfortably
+ * above any legitimate default (10/25/40/10) while nowhere near int4's
+ * range, so the crash this closes cannot recur through a smaller,
+ * still-generous door.
+ */
+export const MAX_SEED_LIMIT = 1000;
+export const MAX_FANOUT = 1000;
+export const MAX_NODE_BUDGET = 1000;
+export const MAX_RECENT_NODES_LIMIT = 1000;
+
 export type SeedStrategy = "exact" | "fuzzy";
 
 // --- Public option / result types -------------------------------------------
@@ -577,9 +598,13 @@ function mapFoundResult(envelope: RawRetrievalEnvelope): RetrievalResultFound {
 
 // --- Option validation -------------------------------------------------------
 
-function requirePositiveInteger(option: string, value: number): void {
+/** `max` is a hard ceiling — see MAX_SEED_LIMIT's comment for why one is required, not just a lower-bound check. */
+function requirePositiveInteger(option: string, value: number, max: number): void {
   if (!Number.isInteger(value) || value <= 0) {
     throw new InvalidRetrievalOptionError(option, value, "must be a positive integer");
+  }
+  if (value > max) {
+    throw new InvalidRetrievalOptionError(option, value, `must be at most ${max}`);
   }
 }
 
@@ -611,7 +636,7 @@ type ResolvedRetrievalParams = Omit<BuildRetrievalQueryParams, "seedStrategy" | 
 /** Validates and defaults `RetrieveOptions`, throwing `InvalidRetrievalOptionError` on the first problem found. */
 function resolveRetrievalParams(options: RetrieveOptions): ResolvedRetrievalParams {
   const seedLimit = options.seedLimit ?? DEFAULT_SEED_LIMIT;
-  requirePositiveInteger("seedLimit", seedLimit);
+  requirePositiveInteger("seedLimit", seedLimit, MAX_SEED_LIMIT);
 
   const minRelevance = options.minRelevance ?? DEFAULT_MIN_RELEVANCE;
   if (!Number.isFinite(minRelevance) || minRelevance <= 0) {
@@ -628,10 +653,10 @@ function resolveRetrievalParams(options: RetrieveOptions): ResolvedRetrievalPara
   }
 
   const fanout = options.fanout ?? DEFAULT_FANOUT;
-  requirePositiveInteger("fanout", fanout);
+  requirePositiveInteger("fanout", fanout, MAX_FANOUT);
 
   const nodeBudget = options.nodeBudget ?? DEFAULT_NODE_BUDGET;
-  requirePositiveInteger("nodeBudget", nodeBudget);
+  requirePositiveInteger("nodeBudget", nodeBudget, MAX_NODE_BUDGET);
 
   const decay = options.decay ?? DEFAULT_DECAY;
   if (!Number.isFinite(decay) || decay <= 0 || decay > 1) {
@@ -828,6 +853,13 @@ export async function getStoreSummary(db: Database, options: StoreSummaryOptions
   const recentNodesLimit = options.recentNodesLimit ?? DEFAULT_RECENT_NODES_LIMIT;
   if (!Number.isInteger(recentNodesLimit) || recentNodesLimit <= 0) {
     throw new InvalidRetrievalOptionError("recentNodesLimit", recentNodesLimit, "must be a positive integer");
+  }
+  // See MAX_RECENT_NODES_LIMIT's comment: without a ceiling this value
+  // binds straight into buildStoreSummaryQuery's `LIMIT ...::int`, and a
+  // large-enough caller value overflows Postgres int4 as a database
+  // failure rather than a caller-input one.
+  if (recentNodesLimit > MAX_RECENT_NODES_LIMIT) {
+    throw new InvalidRetrievalOptionError("recentNodesLimit", recentNodesLimit, `must be at most ${MAX_RECENT_NODES_LIMIT}`);
   }
 
   let result: { rows: { result: RawStoreSummary }[] };

@@ -7,14 +7,28 @@
 // resolver runs, and never interpolated as anything but a literal
 // value/parameter by the core functions these call (there is no SQL
 // passthrough anywhere in this server).
+//
+// bd-hmd.3 review, two fixes here:
+//   - `title` had no length cap anywhere — not in Zod, not in core's
+//     unsafePrepareNodes (fixed separately in packages/core; see
+//     DEFAULT_MAX_TITLE_LENGTH's comment there). titleSchema below is
+//     this layer's defense-in-depth counterpart, same relationship
+//     metadataSchema already has to core's MetadataTooLargeError.
+//   - `targetNodeId`/`nodeId` used a bare `z.string().min(1)` while the
+//     edge procedures used the stricter uuid regex below — inconsistent
+//     for no reason, since every one of these ids is a node id. Both now
+//     use `uuidField`.
 
-import { annotateNode, assertEdge, createNote, DEFAULT_MAX_METADATA_LENGTH, retractEdge, reweightEdge, updateNodeContent } from "@breakdown/core";
+import { annotateNode, assertEdge, createNote, DEFAULT_MAX_METADATA_LENGTH, DEFAULT_MAX_TITLE_LENGTH, retractEdge, reweightEdge, updateNodeContent } from "@breakdown/core";
 import { z } from "zod";
 import { mapCoreError } from "../errors.js";
 import { publicProcedure, router } from "../trpc.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const uuidField = z.string().regex(UUID_RE, "must be a valid uuid");
+
+/** Zod-layer counterpart to core's `TitleTooLargeError` (`DEFAULT_MAX_TITLE_LENGTH`) — see the module header. */
+const titleSchema = z.string().max(DEFAULT_MAX_TITLE_LENGTH, `title must be at most ${DEFAULT_MAX_TITLE_LENGTH} characters`);
 
 /**
  * A `Record<string, unknown>` field capped at `DEFAULT_MAX_METADATA_LENGTH`
@@ -33,8 +47,8 @@ const metadataSchema = z
 
 // --- createNote --------------------------------------------------------
 
-const createNoteInputSchema = z.object({
-  title: z.string().optional(),
+export const createNoteInputSchema = z.object({
+  title: titleSchema.optional(),
   content: z.string().optional(),
   metadata: metadataSchema.optional(),
 });
@@ -49,9 +63,9 @@ const createNoteProcedure = publicProcedure.input(createNoteInputSchema).mutatio
 
 // --- annotateNode --------------------------------------------------------
 
-const annotateNodeInputSchema = z.object({
-  targetNodeId: z.string().min(1, "must not be empty"),
-  title: z.string().optional(),
+export const annotateNodeInputSchema = z.object({
+  targetNodeId: uuidField,
+  title: titleSchema.optional(),
   content: z.string().optional(),
   metadata: metadataSchema.optional(),
 });
@@ -66,9 +80,9 @@ const annotateNodeProcedure = publicProcedure.input(annotateNodeInputSchema).mut
 
 // --- updateNodeContent --------------------------------------------------
 
-const updateNodeContentInputSchema = z.object({
-  nodeId: z.string().min(1, "must not be empty"),
-  title: z.string().optional(),
+export const updateNodeContentInputSchema = z.object({
+  nodeId: uuidField,
+  title: titleSchema.optional(),
   content: z.string().optional(),
   metadata: metadataSchema.optional(),
 });

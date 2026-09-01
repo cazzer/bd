@@ -17,6 +17,10 @@ import {
   DEFAULT_MIN_RELEVANCE,
   DEFAULT_SEED_LIMIT,
   getStoreSummary,
+  MAX_FANOUT,
+  MAX_NODE_BUDGET,
+  MAX_RECENT_NODES_LIMIT,
+  MAX_SEED_LIMIT,
   retrieve,
   type BuildRetrievalQueryParams,
 } from "./retrieval.js";
@@ -670,6 +674,46 @@ describe("retrieve", () => {
   it("rejects an empty filter array, since [] ('match nothing') and omitted/null ('no filter') are different intents", async () => {
     await expect(retrieve(db, "anything", { nodeTypes: [] })).rejects.toBeInstanceOf(InvalidRetrievalOptionError);
   });
+
+  // bd-hmd.3 review: seedLimit/fanout/nodeBudget had no ceiling before
+  // this — only a positive-integer check. A caller value that overflows
+  // Postgres int4 (max 2,147,483,647) bound straight into
+  // buildRetrievalQuery's `LIMIT ...::int` and failed as a *database*
+  // error, not a caller-input one — the review's exact repro was
+  // `nodeBudget: 3_000_000_000`. These assert the rejection happens
+  // before any SQL runs at all (countExecuteCalls === 0), the same way
+  // the existing minRelevance/maxDepth boundary tests above do.
+  it("rejects a seedLimit beyond MAX_SEED_LIMIT with InvalidRetrievalOptionError, before any SQL runs", async () => {
+    const { result: rejection, count } = await countExecuteCalls(() =>
+      retrieve(db, "anything", { seedLimit: MAX_SEED_LIMIT + 1 }).catch((err: unknown) => err),
+    );
+    expect(rejection).toBeInstanceOf(InvalidRetrievalOptionError);
+    expect(count).toBe(0);
+  });
+
+  it("rejects a fanout beyond MAX_FANOUT with InvalidRetrievalOptionError, before any SQL runs", async () => {
+    const { result: rejection, count } = await countExecuteCalls(() =>
+      retrieve(db, "anything", { fanout: MAX_FANOUT + 1 }).catch((err: unknown) => err),
+    );
+    expect(rejection).toBeInstanceOf(InvalidRetrievalOptionError);
+    expect(count).toBe(0);
+  });
+
+  it("rejects a nodeBudget beyond MAX_NODE_BUDGET with InvalidRetrievalOptionError, before any SQL runs", async () => {
+    const { result: rejection, count } = await countExecuteCalls(() =>
+      retrieve(db, "anything", { nodeBudget: MAX_NODE_BUDGET + 1 }).catch((err: unknown) => err),
+    );
+    expect(rejection).toBeInstanceOf(InvalidRetrievalOptionError);
+    expect(count).toBe(0);
+  });
+
+  it("rejects a nodeBudget that would overflow Postgres int4 with InvalidRetrievalOptionError, not a database failure (bd-hmd.3 review's exact repro)", async () => {
+    const { result: rejection, count } = await countExecuteCalls(() =>
+      retrieve(db, "anything", { nodeBudget: 3_000_000_000 }).catch((err: unknown) => err),
+    );
+    expect(rejection).toBeInstanceOf(InvalidRetrievalOptionError);
+    expect(count).toBe(0);
+  });
 });
 
 // --- degree (bd-hmd.1, retrieval spec "Results carry each node's degree") --
@@ -889,5 +933,13 @@ describe("getStoreSummary", () => {
 
   it("rejects a non-positive recentNodesLimit with InvalidRetrievalOptionError", async () => {
     await expect(getStoreSummary(db, { recentNodesLimit: 0 })).rejects.toBeInstanceOf(InvalidRetrievalOptionError);
+  });
+
+  it("rejects a recentNodesLimit beyond MAX_RECENT_NODES_LIMIT with InvalidRetrievalOptionError (bd-hmd.3 review: this had no ceiling before)", async () => {
+    await expect(getStoreSummary(db, { recentNodesLimit: MAX_RECENT_NODES_LIMIT + 1 })).rejects.toBeInstanceOf(InvalidRetrievalOptionError);
+  });
+
+  it("rejects a recentNodesLimit that would overflow Postgres int4 with InvalidRetrievalOptionError, not a database failure", async () => {
+    await expect(getStoreSummary(db, { recentNodesLimit: 3_000_000_000 })).rejects.toBeInstanceOf(InvalidRetrievalOptionError);
   });
 });

@@ -29,11 +29,12 @@
 // keeps "one predicate, one place" (the UI still never re-derives
 // `sourceSystem === "repo"` itself) without that bundling hazard.
 
-import { isEditableSourceSystem, type LookedUpNode, type RecentNode, type RetrievedNode } from "@breakdown/core";
+import { isEditableSourceSystem, type LookedUpNode, type Neighbor, type RecentNode, type RetrievedNode } from "@breakdown/core";
 
 export type RetrievedNodeDto = Omit<RetrievedNode, "updatedAt"> & { updatedAt: string; isEditable: boolean };
 export type LookedUpNodeDto = Omit<LookedUpNode, "createdAt" | "updatedAt"> & { createdAt: string; updatedAt: string; isEditable: boolean };
 export type RecentNodeDto = Omit<RecentNode, "updatedAt"> & { updatedAt: string; isEditable: boolean };
+export type NeighborDto = Neighbor & { isEditable: boolean };
 
 export function toRetrievedNodeDto(node: RetrievedNode): RetrievedNodeDto {
   return { ...node, updatedAt: node.updatedAt.toISOString(), isEditable: isEditableSourceSystem(node.sourceSystem) };
@@ -45,4 +46,18 @@ export function toLookedUpNodeDto(node: LookedUpNode): LookedUpNodeDto {
 
 export function toRecentNodeDto(node: RecentNode): RecentNodeDto {
   return { ...node, updatedAt: node.updatedAt.toISOString(), isEditable: isEditableSourceSystem(node.sourceSystem) };
+}
+
+/**
+ * `isEditable` here reflects the *neighboring* node's own source system
+ * (`nodeSourceSystem`) — not `edgeSourceSystem`, which is who asserted
+ * the relationship, a different question (bd-hmd.3 review: bd-hmd.4
+ * calls `getNeighbors` to render a node's surroundings and needs this
+ * the same way every other read path already gets it, or it either
+ * re-derives `sourceSystem === 'repo'` client-side — breaking the
+ * one-predicate rule — or makes a redundant `getNodes` call for a
+ * boolean).
+ */
+export function toNeighborDto(neighbor: Neighbor): NeighborDto {
+  return { ...neighbor, isEditable: isEditableSourceSystem(neighbor.nodeSourceSystem) };
 }

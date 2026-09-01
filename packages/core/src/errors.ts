@@ -59,6 +59,32 @@ export class ContentTooLargeError extends KnowledgeStoreError {
 }
 
 /**
+ * A node's `title` exceeds the configured maximum length (see
+ * `DEFAULT_MAX_TITLE_LENGTH` / `UpsertNodesOptions.maxTitleLength`).
+ * Same treatment and same reason as `ContentTooLargeError` — deliberately
+ * not a database CHECK constraint (see nodes.ts) — but a distinct error
+ * because `title`, unlike `content`, is returned in full by every read
+ * path that lists nodes (search results, `getStoreSummary`'s
+ * `recentNodes`), not just single-node lookups: before this existed, an
+ * unbounded title inflated every one of those list responses, not just
+ * the one node that carried it (bd-hmd.3 review).
+ */
+export class TitleTooLargeError extends KnowledgeStoreError {
+  constructor(
+    readonly index: number,
+    readonly sourceSystem: string,
+    readonly externalId: string,
+    readonly length: number,
+    readonly maxLength: number,
+  ) {
+    super(
+      `node ${sourceSystem}/${externalId} (batch index ${index}) has a title of length ${length}, ` +
+        `which exceeds the maximum of ${maxLength} (see UpsertNodesOptions.maxTitleLength)`,
+    );
+  }
+}
+
+/**
  * A node's `metadata` serializes to more than the configured maximum
  * length (see `DEFAULT_MAX_METADATA_LENGTH` /
  * `UpsertNodesOptions.maxMetadataLength`). `metadata` is meant for small

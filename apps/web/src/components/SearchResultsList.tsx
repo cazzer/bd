@@ -21,6 +21,48 @@ function ScoreBadge({ score }: { score: number }) {
   return <span className="tabular-nums text-xs font-medium text-slate-500">{score.toFixed(4)}</span>;
 }
 
+interface SnippetSegment {
+  text: string;
+  highlighted: boolean;
+}
+
+/**
+ * Splits `ts_headline`'s `[[matched]]` delimiters (StartSel/StopSel,
+ * configured in packages/core/src/retrieval.ts) into segments for plain
+ * React rendering — bd-hmd.3 review, stored XSS: `ts_headline` wraps
+ * *matched* lexemes in `[[`/`]]` but does not HTML-escape the rest of
+ * the snippet, and nothing in core rejects `<`/`>` in title/content (only
+ * C0 control characters are blocked — see nodes.ts's `findControlChar`).
+ * A title of `xsstest <img src=x onerror=alert(1)>` therefore came back
+ * byte-for-byte in `snippet` and, via the `dangerouslySetInnerHTML` this
+ * replaces, executed in the page with the tRPC client's full access.
+ *
+ * This function does no HTML parsing at all — it only recognizes the two
+ * literal delimiter strings and splits on them. Every other character,
+ * `<`/`>` included, becomes part of a segment's `text` and is rendered
+ * below as JSX text content, which React escapes unconditionally. There
+ * is no code path from ingested content to executed markup here anymore.
+ */
+function parseSnippetSegments(snippet: string): SnippetSegment[] {
+  const segments: SnippetSegment[] = [];
+  const parts = snippet.split(/(\[\[|\]\])/);
+  let highlighted = false;
+  for (const part of parts) {
+    if (part === "[[") {
+      highlighted = true;
+      continue;
+    }
+    if (part === "]]") {
+      highlighted = false;
+      continue;
+    }
+    if (part.length > 0) {
+      segments.push({ text: part, highlighted });
+    }
+  }
+  return segments;
+}
+
 function ResultRow({ node }: { node: SearchResultNode }) {
   const editable = node.isEditable;
 
@@ -48,13 +90,17 @@ function ResultRow({ node }: { node: SearchResultNode }) {
           <span>degree: {node.degree}</span>
         </div>
         {node.snippet && (
-          <p
-            className="mt-1 truncate text-xs text-slate-400 [&_mark]:bg-yellow-100 [&_mark]:text-slate-700"
-            // The snippet is server-generated ts_headline output (plain
-            // `[[`/`]]` delimiters, converted to <mark> below) — never
-            // raw stored content rendered as HTML.
-            dangerouslySetInnerHTML={{ __html: node.snippet.replaceAll("[[", "<mark>").replaceAll("]]", "</mark>") }}
-          />
+          <p className="mt-1 truncate text-xs text-slate-400">
+            {parseSnippetSegments(node.snippet).map((segment, i) =>
+              segment.highlighted ? (
+                <mark key={i} className="bg-yellow-100 text-slate-700">
+                  {segment.text}
+                </mark>
+              ) : (
+                <span key={i}>{segment.text}</span>
+              ),
+            )}
+          </p>
         )}
       </div>
       <ScoreBadge score={node.score} />

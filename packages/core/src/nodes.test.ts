@@ -2,7 +2,7 @@ import { eq, inArray } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database } from "@breakdown/db";
 import { ingestRuns, nodes } from "@breakdown/db";
-import { ContentTooLargeError, DuplicateNodeInBatchError, InvalidNodeContentError, MetadataTooLargeError, NodeUpsertFailedError } from "./errors.js";
+import { ContentTooLargeError, DuplicateNodeInBatchError, InvalidNodeContentError, MetadataTooLargeError, NodeUpsertFailedError, TitleTooLargeError } from "./errors.js";
 import { openIngestRun, type IngestRunHandle } from "./ingest-runs.js";
 import { upsertNodes } from "./nodes.js";
 import { connectTestDb, type TestPool, uniqueSuffix } from "./test-helpers.js";
@@ -356,6 +356,41 @@ describe("upsertNodes", () => {
 
     expect(thrown).toBeInstanceOf(ContentTooLargeError);
     const err = thrown as ContentTooLargeError;
+    expect(err.sourceSystem).toBe(run.sourceSystem);
+    expect(err.externalId).toBe(externalId);
+    expect(err.length).toBe(100);
+    expect(err.maxLength).toBe(10);
+    expect(err.message).toContain(externalId);
+
+    const persisted = await db.select({ id: nodes.id }).from(nodes).where(eq(nodes.sourceSystem, run.sourceSystem));
+    expect(persisted).toHaveLength(0);
+  });
+
+  // bd-hmd.3 review: title had no length check at all before this — only
+  // content.length was validated. title is returned in full by every
+  // listing path (search hits, getStoreSummary's recentNodes), not just
+  // a single-node lookup, so an unbounded title inflates every response
+  // that lists it. This mirrors the content-cap test above exactly,
+  // including "persists nothing" — the whole point of validating before
+  // any SQL runs is that a rejected write leaves zero rows behind.
+  it("rejects title over the configured limit by name on a single-node batch, and persists nothing", async () => {
+    const run = await newRun();
+    const externalId = `title-too-long-${uniqueSuffix()}`;
+
+    let thrown: unknown;
+    try {
+      await upsertNodes(
+        db,
+        run,
+        [{ nodeType: "doc", sourceSystem: run.sourceSystem, externalId, title: "z".repeat(100) }],
+        { maxTitleLength: 10 },
+      );
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(thrown).toBeInstanceOf(TitleTooLargeError);
+    const err = thrown as TitleTooLargeError;
     expect(err.sourceSystem).toBe(run.sourceSystem);
     expect(err.externalId).toBe(externalId);
     expect(err.length).toBe(100);

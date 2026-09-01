@@ -5,6 +5,27 @@
 // scoring, traversal, merge folding, degree, pagination — lives in
 // `packages/core`, not here. Every core call is wrapped so a thrown
 // `KnowledgeStoreError` becomes a safe `TRPCError` (see ../errors.ts).
+//
+// bd-hmd.3 review, two defense-in-depth layers added here on top of the
+// core-level fixes:
+//   - seedLimit/fanout/nodeBudget/limit/recentNodesLimit are capped here
+//     too (mirroring the new MAX_SEED_LIMIT/MAX_FANOUT/MAX_NODE_BUDGET/
+//     MAX_NEIGHBOR_LIMIT/MAX_RECENT_NODES_LIMIT ceilings packages/core now
+//     enforces) so an out-of-range value is rejected by Zod, naming the
+//     field, before it ever reaches a core call.
+//   - nodeTypes/sourceSystems/edgeTypes filter arrays are capped at
+//     MAX_FILTER_VALUES: nothing bounded these before, and a filter list
+//     is a set of distinct vocabulary terms, not a document — dozens is
+//     already generous (getStoreSummary's own nodeTypes/sourceSystems/
+//     edgeTypes counts, the closest thing to "how many distinct values
+//     exist", are all single digits in the seeded corpus).
+//
+// Response-size budgeting (bd-hmd.3 review, defect 4): `search.nodes`,
+// `getNodes.nodes`, and `getStoreSummary.recentNodes` are all bounded via
+// ../budget.ts (ported from apps/mcp/src/budget.ts) — see that file's
+// header for the concrete finding (three ~999,000-character notes alone
+// produced a ~3MB response with no truncation, and the schema's own
+// ceiling put a ~1GB response within reach before this).
 
 import {
   DEFAULT_DECAY,
@@ -19,29 +40,41 @@ import {
   getNodes,
   getStoreSummary,
   MAX_ALLOWED_DEPTH,
+  MAX_FANOUT,
   MAX_NEIGHBOR_LIMIT,
+  MAX_NODE_BUDGET,
+  MAX_RECENT_NODES_LIMIT,
+  MAX_SEED_LIMIT,
   retrieve,
   type NeighborsCursor,
   type RetrieveOptions,
 } from "@breakdown/core";
 import { z } from "zod";
-import { toLookedUpNodeDto, toRecentNodeDto, toRetrievedNodeDto } from "../dto.js";
+import { boundResponse } from "../budget.js";
+import { toLookedUpNodeDto, toNeighborDto, toRecentNodeDto, toRetrievedNodeDto } from "../dto.js";
 import { mapCoreError } from "../errors.js";
 import { publicProcedure, router } from "../trpc.js";
 
+/** See the module header — bounds the nodeTypes/sourceSystems/edgeTypes filter arrays. */
+const MAX_FILTER_VALUES = 50;
+
+function filterArraySchema() {
+  return z.array(z.string().min(1)).min(1).max(MAX_FILTER_VALUES, `must contain at most ${MAX_FILTER_VALUES} values`);
+}
+
 // --- search (retrieve) ------------------------------------------------------
 
-const searchInputSchema = z.object({
+export const searchInputSchema = z.object({
   query: z.string().min(1, "must not be empty"),
-  seedLimit: z.number().int().positive().optional(),
+  seedLimit: z.number().int().positive().max(MAX_SEED_LIMIT).optional(),
   minRelevance: z.number().positive().optional(),
   maxDepth: z.number().int().min(0).max(MAX_ALLOWED_DEPTH).optional(),
-  fanout: z.number().int().positive().optional(),
-  nodeBudget: z.number().int().positive().optional(),
+  fanout: z.number().int().positive().max(MAX_FANOUT).optional(),
+  nodeBudget: z.number().int().positive().max(MAX_NODE_BUDGET).optional(),
   decay: z.number().gt(0).max(1).optional(),
-  nodeTypes: z.array(z.string().min(1)).min(1).optional(),
-  sourceSystems: z.array(z.string().min(1)).min(1).optional(),
-  edgeTypes: z.array(z.string().min(1)).min(1).optional(),
+  nodeTypes: filterArraySchema().optional(),
+  sourceSystems: filterArraySchema().optional(),
+  edgeTypes: filterArraySchema().optional(),
   /** ISO-8601 instant; only nodes updated at or after this are considered. */
   updatedSince: z.string().datetime({ offset: true }).optional(),
 });
@@ -80,15 +113,32 @@ const searchProcedure = publicProcedure.input(searchInputSchema).query(async ({ 
     return { mode: "empty" as const, triedModes: result.triedModes, defaultsUsed, nodes: [], edges: [] };
   }
 
-  return {
-    mode: result.mode,
-    seedCount: result.seedCount,
-    nodeCount: result.nodeCount,
-    truncated: result.truncated,
-    defaultsUsed,
-    nodes: result.nodes.map(toRetrievedNodeDto),
-    edges: result.edges,
-  };
+  const dtoNodes = result.nodes.map(toRetrievedNodeDto);
+
+  return boundResponse(
+    dtoNodes,
+    (n) => n.id,
+    (kept, meta) => {
+      const keptIds = new Set(kept.map((n) => n.id));
+      return {
+        mode: result.mode,
+        seedCount: result.seedCount,
+        nodeCount: kept.length,
+        // Either the query's own nodeBudget truncated the neighborhood, or
+        // this response's own character budget did — both are worth
+        // surfacing under the one flag callers already check.
+        truncated: result.truncated || meta.truncated,
+        defaultsUsed,
+        droppedNodeIds: meta.droppedIds,
+        shrunkNodeIds: meta.shrunkIds,
+        nodes: kept,
+        // Edges are filtered to the nodes actually kept in this response —
+        // an edge naming a dropped node would be a dangling reference the
+        // client can't render anyway.
+        edges: result.edges.filter((e) => keptIds.has(e.srcNodeId) && keptIds.has(e.dstNodeId)),
+      };
+    },
+  );
 });
 
 // --- getNeighbors ------------------------------------------------------------
@@ -100,7 +150,7 @@ const neighborsCursorSchema = z.object({
   edgeId: z.string().min(1),
 }) satisfies z.ZodType<NeighborsCursor>;
 
-const getNeighborsInputSchema = z.object({
+export const getNeighborsInputSchema = z.object({
   id: z.string().min(1, "must not be empty"),
   limit: z.number().int().positive().max(MAX_NEIGHBOR_LIMIT).optional(),
   cursor: neighborsCursorSchema.optional(),
@@ -112,7 +162,7 @@ const getNeighborsProcedure = publicProcedure.input(getNeighborsInputSchema).que
     return {
       requestedId: result.requestedId,
       canonicalId: result.canonicalId,
-      neighbors: result.neighbors,
+      neighbors: result.neighbors.map(toNeighborDto),
       hasMore: result.hasMore,
       nextCursor: result.nextCursor,
       defaultsUsed: { limit: input.limit ?? DEFAULT_NEIGHBOR_LIMIT },
@@ -124,43 +174,68 @@ const getNeighborsProcedure = publicProcedure.input(getNeighborsInputSchema).que
 
 // --- getNodes ------------------------------------------------------------
 
-const getNodesInputSchema = z.object({
+export const getNodesInputSchema = z.object({
   ids: z.array(z.string().min(1)).min(1, "must contain at least one id").max(1000, "must contain at most 1000 ids"),
 });
 
 const getNodesProcedure = publicProcedure.input(getNodesInputSchema).query(async ({ ctx, input }) => {
+  let result;
   try {
-    const result = await getNodes(ctx.db, input.ids);
-    return { nodes: result.nodes.map(toLookedUpNodeDto), notFoundIds: result.notFoundIds };
+    result = await getNodes(ctx.db, input.ids);
   } catch (err) {
     throw mapCoreError("getNodes", err);
   }
+
+  const dtoNodes = result.nodes.map(toLookedUpNodeDto);
+
+  return boundResponse(
+    dtoNodes,
+    (n) => n.id,
+    (kept, meta) => ({
+      nodes: kept,
+      notFoundIds: result.notFoundIds,
+      truncated: meta.truncated,
+      droppedNodeIds: meta.droppedIds,
+      shrunkNodeIds: meta.shrunkIds,
+    }),
+  );
 });
 
 // --- getStoreSummary -------------------------------------------------------
 
-const getStoreSummaryInputSchema = z
+export const getStoreSummaryInputSchema = z
   .object({
-    recentNodesLimit: z.number().int().positive().optional(),
+    recentNodesLimit: z.number().int().positive().max(MAX_RECENT_NODES_LIMIT).optional(),
   })
   .optional();
 
 const getStoreSummaryProcedure = publicProcedure.input(getStoreSummaryInputSchema).query(async ({ ctx, input }) => {
   const recentNodesLimit = input?.recentNodesLimit;
+  let summary;
   try {
-    const summary = await getStoreSummary(ctx.db, { recentNodesLimit });
-    return {
+    summary = await getStoreSummary(ctx.db, { recentNodesLimit });
+  } catch (err) {
+    throw mapCoreError("getStoreSummary", err);
+  }
+
+  const dtoRecentNodes = summary.recentNodes.map(toRecentNodeDto);
+
+  return boundResponse(
+    dtoRecentNodes,
+    (n) => n.id,
+    (kept, meta) => ({
       totalNodes: summary.totalNodes,
       totalEdges: summary.totalEdges,
       nodeTypes: summary.nodeTypes,
       sourceSystems: summary.sourceSystems,
       edgeTypes: summary.edgeTypes,
-      recentNodes: summary.recentNodes.map(toRecentNodeDto),
+      recentNodes: kept,
       defaultsUsed: { recentNodesLimit: recentNodesLimit ?? DEFAULT_RECENT_NODES_LIMIT },
-    };
-  } catch (err) {
-    throw mapCoreError("getStoreSummary", err);
-  }
+      truncated: meta.truncated,
+      droppedNodeIds: meta.droppedIds,
+      shrunkNodeIds: meta.shrunkIds,
+    }),
+  );
 });
 
 export const readRouter = router({
