@@ -18,13 +18,13 @@
 
 ## 3. Local server and web app skeleton
 
-- [ ] 3.1 Scaffold `apps/web`: Vite, React, TypeScript, Tailwind, wired into the pnpm workspace and the root `typecheck` script
-- [ ] 3.2 Add the tRPC server bound to loopback only, with startup validation that exits naming the connection target when the database is unreachable
-- [ ] 3.3 Define the read procedures — search, bounded neighbours, node fetch, store summary — as thin calls into `packages/core`
-- [ ] 3.4 Define the write procedures — create note, annotate, update content, assert/retract/reweight edge — each attributed to a human ingest run
-- [ ] 3.5 Map core's error taxonomy to responses that name the offending field and never leak a stack trace, an internal path, or the connection string
-- [ ] 3.6 Wire the typed client into the React app and prove end-to-end inference: change a procedure's return type, confirm typechecking fails at the caller, revert
-- [ ] 3.7 Render a plain list of search results — no graph yet — and confirm a real query returns real rows from the seeded corpus
+- [x] 3.1 Scaffold `apps/web`: Vite, React, TypeScript, Tailwind, wired into the pnpm workspace and the root `typecheck` script
+- [x] 3.2 Add the tRPC server bound to loopback only, with startup validation that exits naming the connection target when the database is unreachable
+- [x] 3.3 Define the read procedures — search, bounded neighbours, node fetch, store summary — as thin calls into `packages/core`
+- [x] 3.4 Define the write procedures — create note, annotate, update content, assert/retract/reweight edge — each attributed to a human ingest run
+- [x] 3.5 Map core's error taxonomy to responses that name the offending field and never leak a stack trace, an internal path, or the connection string
+- [x] 3.6 Wire the typed client into the React app and prove end-to-end inference: change a procedure's return type, confirm typechecking fails at the caller, revert
+- [x] 3.7 Render a plain list of search results — no graph yet — and confirm a real query returns real rows from the seeded corpus
 
 ## 4. The graph canvas
 
