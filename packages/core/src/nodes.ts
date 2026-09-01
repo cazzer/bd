@@ -79,7 +79,7 @@ export interface UpsertNodesResult {
   rows: NodeUpsertResultRow[];
 }
 
-interface PreparedNode {
+export interface PreparedNode {
   index: number;
   nodeType: string;
   sourceSystem: string;
@@ -125,8 +125,15 @@ function findControlChar(value: string): { charPosition: number; codePoint: numb
  * violation — and so an invalid batch never touches the database at all
  * (the strongest form of "the whole batch is rejected, nothing is
  * persisted").
+ *
+ * Exported so `human-writes.ts`'s `annotateNode` can validate/hash a note
+ * this exact way while composing it into a hand-built transaction
+ * alongside an edge insert — reusing this function (not reimplementing
+ * it) is what keeps that path subject to the same validation as every
+ * other node write, per the knowledge-store spec's "A person's write is
+ * validated like any other".
  */
-function prepareNodes(input: readonly NodeInput[], maxContentLength: number, maxMetadataLength: number): PreparedNode[] {
+export function prepareNodes(input: readonly NodeInput[], maxContentLength: number, maxMetadataLength: number): PreparedNode[] {
   const prepared: PreparedNode[] = [];
   const seen = new Map<string, number>();
 
@@ -190,14 +197,14 @@ function prepareNodes(input: readonly NodeInput[], maxContentLength: number, max
   return prepared;
 }
 
-type UpsertNodeRow = {
+export type UpsertNodeRow = {
   id: string;
   source_system: string;
   external_id: string;
   action: NodeUpsertAction;
 }
 
-function buildUpsertNodesQuery(rows: readonly PreparedNode[], ingestRunId: string) {
+export function buildUpsertNodesQuery(rows: readonly PreparedNode[], ingestRunId: string) {
   return sql`
     WITH input(node_type, source_system, external_id, title, content, content_hash, metadata) AS (
       SELECT * FROM unnest(
@@ -275,7 +282,7 @@ function buildUpsertNodesQuery(rows: readonly PreparedNode[], ingestRunId: strin
   `;
 }
 
-function wrapNodeWriteError(err: unknown, rows: readonly PreparedNode[]): NodeUpsertFailedError {
+export function wrapNodeWriteError(err: unknown, rows: readonly PreparedNode[]): NodeUpsertFailedError {
   const start = rows[0]?.index ?? -1;
   const end = rows[rows.length - 1]?.index ?? -1;
   const pgInfo = formatPgInfo(asPgError(err));

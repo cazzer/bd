@@ -26,6 +26,8 @@ export {
   InvalidLookupIdError,
   LookupFailedError,
   InvalidLookupOptionError,
+  NodeNotEditableError,
+  EdgeNotFoundError,
 } from "./errors.js";
 
 // `asPgError`/`PgErrorLike` are re-exported (not just used internally) so
@@ -115,6 +117,37 @@ export {
   type GetNeighborsResult,
   type BuildGetNeighborsQueryParams,
 } from "./lookup.js";
+
+export { isEditableSourceSystem } from "./editability.js";
+
+// The human write surface (bd-hmd.2): every write attributed to an ingest
+// run with source_system: 'human', reusing upsertNodes/upsertEdges (or,
+// for annotateNode, the exact validation/query-building internals those
+// are built on) rather than bypassing them. See human-writes.ts's module
+// header.
+export {
+  createNote,
+  annotateNode,
+  updateNodeContent,
+  assertEdge,
+  retractEdge,
+  reweightEdge,
+  HUMAN_SOURCE_SYSTEM,
+  NOTE_NODE_TYPE,
+  ANNOTATES_EDGE_TYPE,
+  type CreateNoteInput,
+  type CreateNoteResult,
+  type AnnotateNodeInput,
+  type AnnotateNodeResult,
+  type UpdateNodeContentInput,
+  type UpdateNodeContentResult,
+  type AssertEdgeInput,
+  type AssertEdgeResult,
+  type RetractEdgeInput,
+  type RetractEdgeResult,
+  type ReweightEdgeInput,
+  type ReweightEdgeResult,
+} from "./human-writes.js";
 
 // Pure helpers for the repo-markdown seed script (bd-vt2.6, task 6.1) —
 // not write-path or retrieval behavior, just how src/seed.ts decides a

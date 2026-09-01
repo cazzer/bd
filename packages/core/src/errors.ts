@@ -205,6 +205,25 @@ export class EdgeUpsertFailedError extends KnowledgeStoreError {
   }
 }
 
+/**
+ * `reweightEdge` was asked to change the weight of an edge that does not
+ * exist asserted by the calling source system (bd-hmd.2). Distinct from
+ * `retractEdge`, which treats "nothing to remove" as an idempotent no-op —
+ * silently doing nothing to a weight change the caller believes just
+ * happened would be a silent failure (role lens: "fail loudly"), so this
+ * is a named error instead.
+ */
+export class EdgeNotFoundError extends KnowledgeStoreError {
+  constructor(
+    readonly srcId: string,
+    readonly dstId: string,
+    readonly edgeType: string,
+    readonly sourceSystem: string,
+  ) {
+    super(`edge ${srcId} -[${edgeType}]-> ${dstId} (source_system=${sourceSystem}) does not exist`);
+  }
+}
+
 // --- Merge -----------------------------------------------------------------
 
 /** `mergeNodes` was called with a node id that does not exist. */
@@ -361,5 +380,26 @@ export class InvalidLookupOptionError extends KnowledgeStoreError {
     reason: string,
   ) {
     super(`invalid lookup option ${option} (got ${JSON.stringify(value)}): ${reason}`);
+  }
+}
+
+// --- Human write surface (bd-hmd.2) ---------------------------------------
+
+/**
+ * `updateNodeContent` was asked to edit a node whose `source_system` is
+ * not `"human"` or `"agent"` — see `isEditableSourceSystem` in
+ * editability.ts, the single place this whitelist is defined. Names the
+ * node and its actual source system rather than a generic failure, so a
+ * caller (the tRPC layer, the UI) knows exactly why the edit was refused.
+ */
+export class NodeNotEditableError extends KnowledgeStoreError {
+  constructor(
+    readonly nodeId: string,
+    readonly sourceSystem: string,
+  ) {
+    super(
+      `node ${nodeId} is not editable: its source_system is ${JSON.stringify(sourceSystem)}, which is file-backed ` +
+        `(only nodes whose source_system is "human" or "agent" can be edited — see isEditableSourceSystem)`,
+    );
   }
 }

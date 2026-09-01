@@ -9,12 +9,12 @@
 
 ## 2. Human write surface in core
 
-- [ ] 2.1 Add note creation — standalone or annotating an existing node — attributed to an ingest run with `source_system: 'human'`, reusing the existing validation and attribution path
-- [ ] 2.2 Add annotation: create the note and its `annotates` edge in one transaction, leaving the annotated node's content and hash untouched
-- [ ] 2.3 Add content update for an editable node, rejecting any node whose source system marks it as file-backed
-- [ ] 2.4 Add edge assert, retract, and reweight, where retraction removes only the calling source system's assertion
-- [ ] 2.5 Write tests for the knowledge-store scenarios: hand-authored content is separable from agent and loader content, a person's oversized or control-character content is rejected identically, annotating a file-backed node leaves it unchanged, re-loading an annotated source preserves the annotation, retracting a human edge leaves a loader's assertion intact, re-asserting an existing edge is a no-op
-- [ ] 2.6 Export the new functions from `packages/core` and confirm `pnpm check` is green across all packages
+- [x] 2.1 Add note creation — standalone or annotating an existing node — attributed to an ingest run with `source_system: 'human'`, reusing the existing validation and attribution path
+- [x] 2.2 Add annotation: create the note and its `annotates` edge in one transaction, leaving the annotated node's content and hash untouched
+- [x] 2.3 Add content update for an editable node, rejecting any node whose source system marks it as file-backed
+- [x] 2.4 Add edge assert, retract, and reweight, where retraction removes only the calling source system's assertion
+- [x] 2.5 Write tests for the knowledge-store scenarios: hand-authored content is separable from agent and loader content, a person's oversized or control-character content is rejected identically, annotating a file-backed node leaves it unchanged, re-loading an annotated source preserves the annotation, retracting a human edge leaves a loader's assertion intact, re-asserting an existing edge is a no-op
+- [x] 2.6 Export the new functions from `packages/core` and confirm `pnpm check` is green across all packages
 
 ## 3. Local server and web app skeleton
 

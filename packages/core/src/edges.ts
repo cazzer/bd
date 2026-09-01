@@ -46,7 +46,7 @@ export interface UpsertEdgesResult {
   rows: EdgeUpsertResultRow[];
 }
 
-interface PreparedEdge {
+export interface PreparedEdge {
   index: number;
   srcId: string;
   dstId: string;
@@ -62,8 +62,15 @@ interface PreparedEdge {
  * database with an error that names the offending edge" (a bare
  * `edges_weight_range_check` violation is not actionable enough for an
  * agent calling this over MCP).
+ *
+ * Exported (alongside `buildUpsertEdgesQuery`/`wrapEdgeWriteError`) so
+ * `human-writes.ts`'s `annotateNode` and `reweightEdge`/`retractEdge` can
+ * reuse this exact validation — including `InvalidEdgeWeightError`'s
+ * "naming the edge" contract — rather than re-deriving it, and so
+ * `annotateNode` can compose a note insert and its edge insert into one
+ * hand-built transaction (upsertEdges always opens its own).
  */
-function prepareEdges(input: readonly EdgeInput[]): PreparedEdge[] {
+export function prepareEdges(input: readonly EdgeInput[]): PreparedEdge[] {
   const prepared: PreparedEdge[] = [];
   const seen = new Map<string, number>();
 
@@ -112,7 +119,7 @@ function prepareEdges(input: readonly EdgeInput[]): PreparedEdge[] {
   return prepared;
 }
 
-type UpsertEdgeRow = {
+export type UpsertEdgeRow = {
   id: string;
   src_id: string;
   dst_id: string;
@@ -121,7 +128,7 @@ type UpsertEdgeRow = {
   action: EdgeUpsertAction;
 }
 
-function buildUpsertEdgesQuery(rows: readonly PreparedEdge[], ingestRunId: string) {
+export function buildUpsertEdgesQuery(rows: readonly PreparedEdge[], ingestRunId: string) {
   return sql`
     WITH input(src_id, dst_id, edge_type, source_system, weight, props) AS (
       SELECT * FROM unnest(
@@ -161,7 +168,7 @@ function buildUpsertEdgesQuery(rows: readonly PreparedEdge[], ingestRunId: strin
  * Postgres's own error detail (`Key (src_id)=(<uuid>) is not present...`)
  * rather than surfacing only the constraint name.
  */
-function wrapEdgeWriteError(err: unknown, rows: readonly PreparedEdge[]): EdgeUpsertFailedError {
+export function wrapEdgeWriteError(err: unknown, rows: readonly PreparedEdge[]): EdgeUpsertFailedError {
   const start = rows[0]?.index ?? -1;
   const end = rows[rows.length - 1]?.index ?? -1;
   const pg = asPgError(err);
