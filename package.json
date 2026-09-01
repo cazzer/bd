@@ -1,0 +1,23 @@
+{
+  "name": "breakdown",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=22.23.1"
+  },
+  "scripts": {
+    "db:up": "docker compose up -d --wait",
+    "db:down": "docker compose down",
+    "db:generate": "pnpm --filter @breakdown/db db:generate",
+    "db:migrate": "pnpm --filter @breakdown/db db:migrate",
+    "typecheck": "pnpm -r run typecheck",
+    "test": "vitest run",
+    "check": "pnpm typecheck && pnpm test"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "vitest": "4.1.11",
+    "@types/node": "22.20.1"
+  }
+}

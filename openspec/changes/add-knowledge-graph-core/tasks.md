@@ -1,9 +1,9 @@
 ## 1. Workspace and database
 
-- [ ] 1.1 Create the pnpm workspace: root `package.json`, `pnpm-workspace.yaml`, shared `tsconfig.base.json` (ESM, Node 22, strict), vitest config, and `packages/db`, `packages/core`, `apps/mcp` stubs
-- [ ] 1.2 Add `docker-compose.yml` running `pgvector/pgvector:pg16` (no vector column yet — keeps embeddings additive later), plus `.env.example` with `DATABASE_URL`, and `db:up` / `db:down` scripts
-- [ ] 1.3 Add drizzle-orm + drizzle-kit to `packages/db` with a `db:migrate` script that applies generated SQL migrations against `DATABASE_URL`
-- [ ] 1.4 Add a root `check` script (typecheck + test) and confirm `pnpm db:up && pnpm db:migrate` succeeds on an empty database
+- [x] 1.1 Create the pnpm workspace: root `package.json`, `pnpm-workspace.yaml`, shared `tsconfig.base.json` (ESM, Node 22, strict), vitest config, and `packages/db`, `packages/core`, `apps/mcp` stubs
+- [x] 1.2 Add `docker-compose.yml` running `pgvector/pgvector:pg16` (no vector column yet — keeps embeddings additive later), plus `.env.example` with `DATABASE_URL`, and `db:up` / `db:down` scripts
+- [x] 1.3 Add drizzle-orm + drizzle-kit to `packages/db` with a `db:migrate` script that applies generated SQL migrations against `DATABASE_URL`
+- [x] 1.4 Add a root `check` script (typecheck + test) and confirm `pnpm db:up && pnpm db:migrate` succeeds on an empty database
 
 ## 2. Schema
 
