@@ -109,3 +109,18 @@ export {
   type Neighbor,
   type GetNeighborsResult,
 } from "./lookup.js";
+
+// Pure helpers for the repo-markdown seed script (bd-vt2.6, task 6.1) —
+// not write-path or retrieval behavior, just how src/seed.ts decides a
+// node's type/title and derives edges from file structure. See corpus.ts.
+export {
+  deriveNodeType,
+  deriveTitle,
+  extractMarkdownLinkTargets,
+  deriveStructuralEdges,
+  combineEdgeCandidates,
+  PART_OF_CHANGE_WEIGHT,
+  SIBLING_WEIGHT,
+  LINKS_TO_WEIGHT,
+  type EdgeCandidate,
+} from "./corpus.js";

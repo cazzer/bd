@@ -8,7 +8,7 @@ There are no embeddings and no model calls in the read path. An agent on a model
 
 ## Status
 
-Nothing is implemented yet. The first change is fully specced.
+Schema, write path, retrieval, and the MCP server are implemented and seeded with the repo's own docs (see Quickstart below). Dogfooding the MCP tools from a live session is next.
 
 - Background and decisions: [`docs/architecture-handoff.md`](docs/architecture-handoff.md)
 - Current change: [`openspec/changes/add-knowledge-graph-core/`](openspec/changes/add-knowledge-graph-core/)
@@ -24,6 +24,95 @@ packages/core   batch writes, full-text + graph retrieval
 apps/mcp        MCP server (stdio)
 apps/web        later
 ```
+
+## Quickstart
+
+Requires Docker, Node ≥22.23.1, and pnpm (`packageManager` in `package.json` pins the exact version — `corepack enable` will pick it up).
+
+### 1. Install and start Postgres
+
+```bash
+pnpm install
+pnpm db:up        # starts pgvector/pgvector:pg16 on localhost:5442, waits for healthy
+pnpm db:migrate   # applies schema migrations
+```
+
+`pnpm db:up`/`db:migrate` read `DATABASE_URL` from `.env` (copy `.env.example` if `.env` doesn't exist yet — the default already matches `docker-compose.yml`).
+
+### 2. Seed the brain with this repo's own docs
+
+```bash
+pnpm db:seed
+```
+
+`db:seed` loads every `*.md` file under `docs/` and `openspec/` as a node, and derives edges from real structure: a markdown link between two ingested files becomes a `links-to` edge (weight 0.9), and OpenSpec's own directory convention — a change's `proposal.md`/`design.md`/`tasks.md`/`README.md` are the same change, and each capability's `specs/*/spec.md` belongs to that change's proposal, design, and tasks — becomes `part-of-change` edges (0.6); two files sharing a plain directory with no stronger signal get a `sibling` edge (0.3). It's idempotent — re-running it reports the same nodes as `unchanged` and creates no duplicate rows. Real output from this repo:
+
+```
+[seed] found 9 markdown file(s) under docs/, openspec/
+[seed] nodes: 9 created, 0 updated, 0 unchanged
+[seed] edges: 16 created, 0 updated (0 markdown link target(s) found, 0 resolved to an in-corpus node)
+[seed]   by type: part-of-change=15, sibling=1
+[seed] ingest run 93caa584-dcc2-439c-8577-4ca6c8f5fd4d (source_system=repo) closed: 9 nodes, 16 edges attributed
+[seed] store totals: 9 nodes, 16 edges
+[seed]   node types: openspec-spec=3, doc=2, openspec-design=1, openspec-proposal=1, openspec-readme=1, openspec-tasks=1
+[seed]   edge types: part-of-change=15, sibling=1
+```
+
+Running it again reports `nodes: 0 created, 0 updated, 9 unchanged` and the same store totals (9 nodes, 16 edges) — edges have no `unchanged` state in the write path (an existing node/edge with no change still reports `updated`), but no row count grows.
+
+### 3. Register the MCP server
+
+`.mcp.json` at the repo root already registers it for Claude Code:
+
+```json
+{
+  "mcpServers": {
+    "brain": {
+      "command": "pnpm",
+      "args": ["--filter", "@breakdown/mcp", "run", "start"]
+    }
+  }
+}
+```
+
+Opening this repo in Claude Code picks this up automatically — no extra step. For another MCP client (e.g. Claude Desktop), add the same `command`/`args` (with `cwd` set to this repo) to that client's own server config. The server needs only `DATABASE_URL`; startup fails fast with an actionable message if the database is unreachable. Set `BRAIN_READ_ONLY=1` to disable `brain_write`/`brain_link`/`brain_merge`.
+
+### 4. First query
+
+Ask Claude something the seeded docs actually answer — e.g. "search the brain for why there are no embeddings." Claude calls `brain_search`; real output from this repo, trimmed for length:
+
+```jsonc
+{
+  "mode": "exact",
+  "seedCount": 4,
+  "nodeCount": 9,
+  "truncated": false,
+  "nodes": [
+    {
+      "nodeType": "openspec-design",
+      "externalId": "openspec/changes/add-knowledge-graph-core/design.md",
+      "title": "add-knowledge-graph-core: Design",
+      "score": 2,
+      "isSeed": true,
+      "snippet": "### No [[embeddings]]; full-text search plus explicit edges\n\nRetrieval seeds come from Postgres full..."
+    },
+    {
+      "nodeType": "doc",
+      "externalId": "docs/architecture-handoff.md",
+      "title": "Personal Brain — Architecture Handoff",
+      "score": 1.6,
+      "isSeed": true,
+      "snippet": "No [[embeddings]]. No model calls in the read path... no re-[[embedding]] when models change."
+    },
+    { "nodeType": "openspec-proposal", "externalId": "openspec/changes/add-knowledge-graph-core/proposal.md", "score": 0.8, "isSeed": true },
+    { "nodeType": "openspec-spec", "externalId": "openspec/changes/add-knowledge-graph-core/specs/brain-mcp/spec.md", "score": 0.72, "isSeed": false, "edgePath": ["part-of-change"] }
+    // ... 5 more nodes reached by traversal (README, the other two capability specs,
+    // tasks.md, and docs/retrieval-query-design.md via the sibling edge), 16 edges total
+  ]
+}
+```
+
+The top two hits are exact full-text matches on `design.md` and `architecture-handoff.md` (both discuss "no embeddings" directly); everything else was reached by following `part-of-change`/`sibling` edges outward — no vector search involved.
 
 ## Working on it
 

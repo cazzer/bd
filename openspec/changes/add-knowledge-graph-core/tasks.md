@@ -44,6 +44,6 @@
 
 ## 6. Dogfood
 
-- [ ] 6.1 Write a `db:seed` script loading `docs/` and `openspec/` markdown as nodes with `mentions` edges, so the brain has real content before any agent writes to it
-- [ ] 6.2 Write the README quickstart: clone, `db:up`, `db:migrate`, `db:seed`, register MCP, first query
+- [x] 6.1 Write a `db:seed` script loading `docs/` and `openspec/` markdown as nodes with `mentions` edges, so the brain has real content before any agent writes to it
+- [x] 6.2 Write the README quickstart: clone, `db:up`, `db:migrate`, `db:seed`, register MCP, first query
 - [ ] 6.3 Have a Claude session load a real source through `brain_write`/`brain_link`, then query it back, and file follow-up beads for what retrieval gets wrong
