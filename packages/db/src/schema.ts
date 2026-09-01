@@ -18,7 +18,7 @@ import {
  * Application schema for the knowledge store (bd-vt2.2): `ingest_runs`,
  * `nodes`, `edges`, and the `resolved_nodes` view.
  *
- * Three constructs below cannot be expressed through drizzle-orm's
+ * Four constructs below cannot be expressed through drizzle-orm's
  * pg-core column/index builders and are instead hand-written directly
  * into the generated migration SQL (see migrations/0000_*.sql):
  *
@@ -34,6 +34,10 @@ import {
  *   3. `resolved_nodes` — declared below as an `existing()` view purely
  *      for typed query access; its DDL is hand-written (see the comment
  *      on the declaration).
+ *   4. A trigger enforcing the one-hop merge invariant on
+ *      `nodes.merged_into` (see the comment on that column). pg-core has
+ *      no trigger builder at all, and this is a cross-row rule a CHECK
+ *      constraint cannot express.
  *
  * Everything else (tables, columns, PK/FK/UNIQUE/CHECK constraints, and
  * the two plain B-tree lookup indexes on `edges`) round-trips through
@@ -62,7 +66,11 @@ export const nodes = pgTable(
     nodeType: text("node_type").notNull(),
     sourceSystem: text("source_system").notNull(),
     externalId: text("external_id").notNull(),
-    title: text("title"),
+    // NOT NULL DEFAULT '' rather than nullable: the spec says every node
+    // "SHALL have ... a title", and a null/empty/value three-state
+    // distinction buys nothing here. The generated column below still
+    // coalesces it — harmless, and robust if that ever changes.
+    title: text("title").notNull().default(""),
     content: text("content").notNull().default(""),
     contentHash: text("content_hash").notNull(),
     metadata: jsonb("metadata").notNull().default(sql`'{}'::jsonb`),
@@ -71,11 +79,25 @@ export const nodes = pgTable(
     // still point at it should fail loudly, not silently cascade or
     // null out the merge (see the resolved_nodes comment below for the
     // invariant this maintains).
+    //
+    // That invariant — merged_into always points directly at a
+    // canonical node — is enforced by a hand-written trigger
+    // (nodes_merged_into_must_be_canonical, see migrations/0000_*.sql),
+    // not a CHECK: rejecting a chained merge requires reading the
+    // target row, which a CHECK constraint cannot do. This is a
+    // database invariant, not business logic — the failure mode
+    // without it (a chained merge silently drops search results with
+    // no error anywhere) is exactly what triggers exist to prevent.
     mergedInto: uuid("merged_into").references((): AnyPgColumn => nodes.id),
     // No onDelete action, for the same reason: deleting an ingest run
     // that nodes still reference should fail visibly rather than
-    // silently orphaning provenance.
-    ingestRunId: uuid("ingest_run_id").references(() => ingestRuns.id),
+    // silently orphaning provenance. NOT NULL: every write is
+    // attributable to a run (knowledge-store spec, "Writes are
+    // attributable to an ingest run") — a nullable column would let an
+    // unattributable row defeat that requirement silently.
+    ingestRunId: uuid("ingest_run_id")
+      .notNull()
+      .references(() => ingestRuns.id),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -104,6 +126,16 @@ export const edges = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     // Cascade: an edge is meaningless once either endpoint is gone.
+    //
+    // src_id/dst_id point at whatever node was asserted at write time,
+    // which may since have been merged away. Edges attached to a
+    // merged-away node must stay reachable from its survivor (spec:
+    // "Edges attached to the merged node SHALL be reachable from the
+    // survivor without losing their original provenance"), so
+    // traversal (bd-vt2.4) must fold both endpoints through
+    // coalesce(merged_into, id) — the same canonical_id resolution
+    // documented on resolved_nodes below — not just src_id/dst_id
+    // as stored.
     srcId: uuid("src_id")
       .notNull()
       .references(() => nodes.id, { onDelete: "cascade" }),
@@ -114,7 +146,10 @@ export const edges = pgTable(
     weight: real("weight").notNull().default(1.0),
     sourceSystem: text("source_system").notNull(),
     // No onDelete action — same reasoning as nodes.ingestRunId above.
-    ingestRunId: uuid("ingest_run_id").references(() => ingestRuns.id),
+    // NOT NULL for the same audit-trail reason as nodes.ingestRunId.
+    ingestRunId: uuid("ingest_run_id")
+      .notNull()
+      .references(() => ingestRuns.id),
     props: jsonb("props").notNull().default(sql`'{}'::jsonb`),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
@@ -174,12 +209,12 @@ export const resolvedNodes = pgView("resolved_nodes", {
   nodeType: text("node_type").notNull(),
   sourceSystem: text("source_system").notNull(),
   externalId: text("external_id").notNull(),
-  title: text("title"),
+  title: text("title").notNull(),
   content: text("content").notNull(),
   contentHash: text("content_hash").notNull(),
   metadata: jsonb("metadata").notNull(),
   mergedInto: uuid("merged_into"),
-  ingestRunId: uuid("ingest_run_id"),
+  ingestRunId: uuid("ingest_run_id").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
 }).existing();

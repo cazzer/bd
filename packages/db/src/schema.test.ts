@@ -4,24 +4,38 @@ import type { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDb, createPool, type Database } from "./client.js";
 import { resolveDatabaseUrl } from "./env.js";
-import { edges, nodes, resolvedNodes } from "./schema.js";
+import { edges, ingestRuns, nodes, resolvedNodes } from "./schema.js";
 
 /**
  * Integration tests against the real Postgres instance (no mocking) —
- * they exercise the constraints and generated columns the migration in
- * ./migrations/0000_great_black_cat.sql creates, per bd-vt2.2. Every test
+ * they exercise the constraints, generated columns, and trigger the
+ * migration in ./migrations/0000_*.sql creates, per bd-vt2.2. Every test
  * creates and tears down its own rows so the suite is re-runnable.
+ *
+ * `nodes.ingest_run_id` and `edges.ingest_run_id` are NOT NULL, so every
+ * test attributes its rows to one shared ingest run created in
+ * beforeAll/torn down in afterAll — the same shape the real write path
+ * uses (open a run, write attributed to it).
  */
 
 let pool: Pool;
 let db: Database;
+let testRunId: string;
 
-beforeAll(() => {
+beforeAll(async () => {
   pool = createPool(resolveDatabaseUrl());
   db = createDb(pool);
+
+  const [run] = await db
+    .insert(ingestRuns)
+    .values({ sourceSystem: "schema-test-suite" })
+    .returning();
+  if (!run) throw new Error("setup failed to insert ingest run");
+  testRunId = run.id;
 });
 
 afterAll(async () => {
+  await db.delete(ingestRuns).where(eq(ingestRuns.id, testRunId));
   await pool.end();
 });
 
@@ -36,6 +50,7 @@ function nodeRow(
     externalId: `test-ext-${suffix}`,
     content: "",
     contentHash: `test-hash-${suffix}`,
+    ingestRunId: testRunId,
     ...overrides,
   };
 }
@@ -64,6 +79,7 @@ describe("edges", () => {
           edgeType: "mentions",
           sourceSystem: "github",
           weight: 0.5,
+          ingestRunId: testRunId,
         })
         .onConflictDoUpdate({ target, set: { weight: 0.5 } });
       await db
@@ -74,6 +90,7 @@ describe("edges", () => {
           edgeType: "mentions",
           sourceSystem: "github",
           weight: 0.9,
+          ingestRunId: testRunId,
         })
         .onConflictDoUpdate({ target, set: { weight: 0.9 } });
 
@@ -103,8 +120,20 @@ describe("edges", () => {
 
     try {
       await db.insert(edges).values([
-        { srcId: a.id, dstId: b.id, edgeType: "mentions", sourceSystem: "github" },
-        { srcId: a.id, dstId: b.id, edgeType: "mentions", sourceSystem: "slack" },
+        {
+          srcId: a.id,
+          dstId: b.id,
+          edgeType: "mentions",
+          sourceSystem: "github",
+          ingestRunId: testRunId,
+        },
+        {
+          srcId: a.id,
+          dstId: b.id,
+          edgeType: "mentions",
+          sourceSystem: "slack",
+          ingestRunId: testRunId,
+        },
       ]);
 
       const rows = await db
@@ -141,6 +170,7 @@ describe("edges", () => {
           edgeType: "mentions",
           sourceSystem: "github",
           weight: 1.4,
+          ingestRunId: testRunId,
         });
       } catch (err) {
         thrown = err;
@@ -267,6 +297,51 @@ describe("resolved_nodes", () => {
       // the child (loser) must be deleted before the parent (survivor).
       await db.delete(nodes).where(eq(nodes.id, loser.id));
       await db.delete(nodes).where(eq(nodes.id, survivor.id));
+    }
+  });
+});
+
+describe("nodes.merged_into (one-hop merge invariant)", () => {
+  it("rejects a chained merge onto an already-merged-away node", async () => {
+    const [root] = await db.insert(nodes).values(nodeRow()).returning();
+    const [mid] = await db.insert(nodes).values(nodeRow()).returning();
+    const [leaf] = await db.insert(nodes).values(nodeRow()).returning();
+    if (!root || !mid || !leaf) throw new Error("setup failed to insert nodes");
+
+    try {
+      // mid merges directly into root (canonical) — this is the valid,
+      // one-hop shape and must succeed.
+      await db
+        .update(nodes)
+        .set({ mergedInto: root.id })
+        .where(eq(nodes.id, mid.id));
+
+      // leaf attempts to merge into mid, which is itself merged away
+      // (mid.merged_into IS NOT NULL) — the trigger must reject this
+      // rather than let a chain form silently.
+      let thrown: unknown;
+      try {
+        await db
+          .update(nodes)
+          .set({ mergedInto: mid.id })
+          .where(eq(nodes.id, leaf.id));
+      } catch (err) {
+        thrown = err;
+      }
+
+      expect(thrown).toBeDefined();
+
+      const [reloaded] = await db
+        .select({ mergedInto: nodes.mergedInto })
+        .from(nodes)
+        .where(eq(nodes.id, leaf.id));
+      expect(reloaded?.mergedInto).toBeNull();
+    } finally {
+      // Deletion order follows the merge_into references: leaf (never
+      // merged) and mid (references root) must go before root.
+      await db.delete(nodes).where(eq(nodes.id, leaf.id));
+      await db.delete(nodes).where(eq(nodes.id, mid.id));
+      await db.delete(nodes).where(eq(nodes.id, root.id));
     }
   });
 });

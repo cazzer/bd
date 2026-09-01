@@ -1,5 +1,5 @@
 {
-  "id": "59e4308d-d22f-4e9b-9d9e-7b39ef36a518",
+  "id": "0defc959-0894-4ba5-99ff-662e0bda733a",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -50,7 +50,7 @@
           "name": "ingest_run_id",
           "type": "uuid",
           "primaryKey": false,
-          "notNull": false
+          "notNull": true
         },
         "props": {
           "name": "props",
@@ -267,7 +267,8 @@
           "name": "title",
           "type": "text",
           "primaryKey": false,
-          "notNull": false
+          "notNull": true,
+          "default": "''"
         },
         "content": {
           "name": "content",
@@ -299,7 +300,7 @@
           "name": "ingest_run_id",
           "type": "uuid",
           "primaryKey": false,
-          "notNull": false
+          "notNull": true
         },
         "created_at": {
           "name": "created_at",
@@ -397,7 +398,7 @@
           "name": "title",
           "type": "text",
           "primaryKey": false,
-          "notNull": false
+          "notNull": true
         },
         "content": {
           "name": "content",
@@ -427,7 +428,7 @@
           "name": "ingest_run_id",
           "type": "uuid",
           "primaryKey": false,
-          "notNull": false
+          "notNull": true
         },
         "created_at": {
           "name": "created_at",
