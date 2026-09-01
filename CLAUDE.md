@@ -58,20 +58,48 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 <!-- END BEADS INTEGRATION -->
 
 
+## Project
+
+**breakdown** — a personal knowledge system ("personal brain") that Claude writes into and queries for progressive context discovery. Background and the decision log: `docs/architecture-handoff.md`.
+
+## Workflow
+
+Specs are driven by **OpenSpec**, work is tracked by **beads**. Both are deliberately temporary — absorbing them into breakdown itself is an explicit goal (`bd-98d`).
+
+- Spec of record: `openspec/changes/<change>/` — proposal, capability specs, design, tasks. Run `openspec list`, `openspec status --change <name>`, `openspec validate <name> --strict`.
+- Work of record: `bd ready` to find available work, `bd show <id>`, `bd update <id> --claim`, `bd close <id>`.
+- Beads carry `--spec-id <change-name>` linking them back to the OpenSpec change. A task group in `tasks.md` maps to one bead; the checkbox list inside the group is the detail.
+- New feature work starts with `/opsx:propose`, not with code.
+
 ## Build & Test
 
-_Add your build and test commands here_
-
 ```bash
-# Example:
-# npm install
-# npm test
+pnpm install
+pnpm db:up        # docker: pgvector/pgvector:pg16 on :5432
+pnpm db:migrate
+pnpm check        # typecheck + tests
 ```
+
+_Nothing is implemented yet — the first change (`add-knowledge-graph-core`) defines these scripts._
 
 ## Architecture Overview
 
-_Add a brief overview of your project architecture_
+pnpm monorepo, TypeScript, ESM, Node 22.
+
+- `packages/db` — schema (drizzle) and SQL migrations. Postgres 16; the pgvector image is used only to keep embeddings additive later.
+- `packages/core` — batch write path, full-text + graph retrieval.
+- `apps/mcp` — MCP server over stdio; the first client of the brain.
+- `apps/web` — later; React editor writing to the node store.
+
+Data model: typed `nodes` joined by `edges` that carry provenance (source system, ingest run) and a confidence weight, because most edges are agent-asserted. Node title and content are indexed by a generated `tsvector` column. Retrieval is one SQL statement: full-text search picks seeds, a recursive CTE expands a bounded, score-decayed subgraph.
+
+**No embeddings, and no model call in the read path.** The agent is the loading mechanism, not a runtime dependency — it reads source material, decides what matters, and writes nodes and explicit edges through MCP. Serving a query is pure Postgres, needing no credential beyond `DATABASE_URL`.
 
 ## Conventions & Patterns
 
-_Add your project-specific conventions here_
+- Writes are bulk-first: batched upsert keyed on `(source_system, external_id)`, idempotent across re-ingestion. Never row-at-a-time in an ingest path.
+- `content_hash` drives the created/updated/unchanged counts reported back to a writing agent — never diff content in application code.
+- A batch write is all-or-nothing. Partial success leaves an agent unable to tell what to retry.
+- `node_type` is open text, not an enum — new kinds of node must not require a migration.
+- Every read path resolves `merged_into` through the `resolved_nodes` view, never at the call site.
+- No SQL passthrough tool is ever exposed to a model. New retrieval needs become real, validated tools.

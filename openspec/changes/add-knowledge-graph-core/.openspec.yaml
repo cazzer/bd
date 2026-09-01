@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-08-31
+goal: Claude can write nodes/edges into breakdown and retrieve a relevant
+  subgraph in one hybrid query

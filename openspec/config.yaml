@@ -1,0 +1,33 @@
+schema: spec-driven
+
+context: |
+  Project: breakdown — a personal knowledge system ("personal brain") that Claude
+  writes into (ingestion from repos, Slack, Notion) and queries for progressive
+  context discovery.
+
+  Stack: TypeScript (Node 22, ESM), pnpm monorepo. Postgres 16 + pgvector, run
+  locally in a plain Docker container (not the Supabase CLI stack). Cloud path is
+  any managed Postgres. Model Context Protocol server is the first client; a
+  React web app with a markdown-serializing editor comes later.
+
+  Layout: packages/db (schema + migrations), packages/core (ingest + query),
+  apps/mcp (MCP server), apps/web (later).
+
+  Core model: nodes + edges. Edges carry provenance (source system, ingest run)
+  and a weight, because many are LLM-inferred rather than declared. Retrieval is
+  hybrid: vector similarity finds candidates, recursive CTE traversal expands the
+  subgraph, ideally in one query.
+
+  Background and the decision log live in docs/architecture-handoff.md.
+
+  Process: OpenSpec is the spec of record; beads (`bd`) is the work of record.
+  Both are intentionally temporary — breakdown is meant to eventually hold its
+  own work and context state.
+
+rules:
+  proposal:
+    - Side-project scope. Prefer the smallest slice that can be dogfooded.
+    - Name the alternative that was rejected, not just the choice.
+  tasks:
+    - Each task should be completable in one session.
+    - Every task group should end in something runnable or verifiable.
