@@ -22,6 +22,8 @@ export {
   InvalidRetrievalOptionError,
   EmptyQueryError,
   RetrievalFailedError,
+  InvalidLookupIdError,
+  LookupFailedError,
 } from "./errors.js";
 
 export {
@@ -84,3 +86,15 @@ export {
   type RecentNode,
   type StoreSummary,
 } from "./retrieval.js";
+
+export {
+  getNodes,
+  buildGetNodesQuery,
+  getNeighbors,
+  buildGetNeighborsQuery,
+  type LookedUpNode,
+  type GetNodesResult,
+  type NeighborDirection,
+  type Neighbor,
+  type GetNeighborsResult,
+} from "./lookup.js";

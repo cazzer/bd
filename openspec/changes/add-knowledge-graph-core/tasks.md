@@ -34,13 +34,13 @@
 
 ## 5. MCP server
 
-- [ ] 5.1 Scaffold the stdio MCP server with startup validation that exits with an actionable message when the database is unreachable, requiring no credential beyond `DATABASE_URL`
-- [ ] 5.2 Implement `brain_search`, `brain_get`, `brain_neighbors`, and `brain_map` with Zod-validated arguments and documented defaults echoed in the response
-- [ ] 5.3 Implement `brain_write` and `brain_link` accepting either a single item or a batch, attributing writes to an ingest run with `source_system = 'agent'` and reporting created/updated/unchanged counts
-- [ ] 5.4 Implement `brain_merge`, idempotent when the merge already holds
-- [ ] 5.5 Implement read-only mode: write, link, and merge tools unadvertised and refused with an explanatory error
-- [ ] 5.6 Implement response budgeting: keep highest-scoring items, state that truncation occurred, and return the means to fetch the remainder
-- [ ] 5.7 Register the server in the repo's `.mcp.json` and smoke-test every tool from a Claude Code session
+- [x] 5.1 Scaffold the stdio MCP server with startup validation that exits with an actionable message when the database is unreachable, requiring no credential beyond `DATABASE_URL`
+- [x] 5.2 Implement `brain_search`, `brain_get`, `brain_neighbors`, and `brain_map` with Zod-validated arguments and documented defaults echoed in the response
+- [x] 5.3 Implement `brain_write` and `brain_link` accepting either a single item or a batch, attributing writes to an ingest run with `source_system = 'agent'` and reporting created/updated/unchanged counts
+- [x] 5.4 Implement `brain_merge`, idempotent when the merge already holds
+- [x] 5.5 Implement read-only mode: write, link, and merge tools unadvertised and refused with an explanatory error
+- [x] 5.6 Implement response budgeting: keep highest-scoring items, state that truncation occurred, and return the means to fetch the remainder
+- [x] 5.7 Register the server in the repo's `.mcp.json` and smoke-test every tool from a Claude Code session
 
 ## 6. Dogfood
 

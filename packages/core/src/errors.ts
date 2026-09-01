@@ -282,3 +282,41 @@ export class RetrievalFailedError extends KnowledgeStoreError {
     super(message, options);
   }
 }
+
+// --- Lookup (bd-vt2.5: brain_get / brain_neighbors) -------------------------
+
+/**
+ * `getNodes()` / `getNeighbors()` received an id that is not a
+ * syntactically valid uuid, or an empty `ids` array. Rejected before any
+ * SQL runs, naming the offending value — distinct from a syntactically
+ * valid id that simply matches no node, which `getNodes()` reports back
+ * in `notFoundIds` rather than throwing (per the brain-mcp spec: "Report
+ * ids that matched nothing rather than silently omitting them") and
+ * `getNeighbors()` reports via `NodeNotFoundError` (a single required id,
+ * same treatment as `mergeNodes`).
+ */
+export class InvalidLookupIdError extends KnowledgeStoreError {
+  constructor(
+    readonly value: unknown,
+    reason: string,
+  ) {
+    super(`invalid node id ${JSON.stringify(value)}: ${reason}`);
+  }
+}
+
+/**
+ * `getNodes()` / `getNeighbors()` failed at the database after passing
+ * boundary validation — a genuine driver/Postgres failure, not a caller
+ * mistake `InvalidLookupIdError` / `NodeNotFoundError` would already have
+ * caught. Wraps the original error as `cause` so every error either
+ * function can throw is a `KnowledgeStoreError`.
+ */
+export class LookupFailedError extends KnowledgeStoreError {
+  constructor(
+    message: string,
+    readonly operation: "getNodes" | "getNeighbors",
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+  }
+}
