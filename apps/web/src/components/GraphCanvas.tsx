@@ -18,6 +18,7 @@
 import { useEffect, useRef, useState } from "react";
 import ForceGraph2D from "react-force-graph-2d";
 import type { GraphCanvasData, GraphLink, GraphNode } from "../graph/encoding.js";
+import { placeLabels, type LabelCandidate, type LabelPlacement } from "../graph/labelPlacement.js";
 import { buildLinkTooltip, buildNodeTooltip } from "../graph/tooltip.js";
 
 /**
@@ -46,11 +47,42 @@ const LABEL_COLOR = "#1e293b"; // slate-800 — matches the rest of the app's te
  * legible away from it too.
  */
 const LABEL_FONT_SIZE_PX = 12;
-const LABEL_GAP_PX = 2;
 
 type DrawableNode = GraphNode & { x?: number; y?: number };
 
-function drawNode(node: DrawableNode, ctx: CanvasRenderingContext2D, globalScale: number): void {
+/**
+ * Which nodes get an on-canvas label this frame, and where — computed
+ * once per frame (GraphCanvas's `onRenderFramePre`, before any node is
+ * drawn) by graph/labelPlacement.ts's pure `placeLabels`, then read back
+ * per node by `drawNode` below. Doing the placement pass once for the
+ * WHOLE node set (rather than each node deciding its own offset in
+ * isolation inside `nodeCanvasObject`) is what lets a crowded node avoid
+ * a neighbour's label instead of just its own default slot — see
+ * labelPlacement.ts's header for the full rationale (bd-hmd.4 follow-up
+ * review: labels were overlapping in the corpus's densest cluster).
+ */
+function computeLabelPlacements(nodes: readonly DrawableNode[], globalScale: number, hoveredNodeId: string | null): Map<string, LabelPlacement> {
+  const fontSize = LABEL_FONT_SIZE_PX / globalScale;
+  const candidates: LabelCandidate[] = nodes.map((node) => ({
+    id: node.id,
+    x: node.x ?? 0,
+    y: node.y ?? 0,
+    radius: node.radius,
+    text: node.title || "(untitled)",
+    // A seed's or the hovered node's label must never disappear —
+    // losing the label on the thing just searched for (or pointed at)
+    // would be worse than an overlap. See labelPlacement.ts's header
+    // and palette.ts's comment on why this also keeps that module's
+    // six-node-type colour-plus-label mitigation honest for these
+    // nodes specifically.
+    alwaysShow: node.provenance.kind === "seed" || node.id === hoveredNodeId,
+    priority: node.degree,
+  }));
+  const placements = placeLabels(candidates, fontSize);
+  return new Map(placements.map((p) => [p.id, p]));
+}
+
+function drawNode(node: DrawableNode, ctx: CanvasRenderingContext2D, globalScale: number, placements: Map<string, LabelPlacement>): void {
   const x = node.x ?? 0;
   const y = node.y ?? 0;
 
@@ -70,13 +102,18 @@ function drawNode(node: DrawableNode, ctx: CanvasRenderingContext2D, globalScale
   ctx.fillStyle = node.color;
   ctx.fill();
 
+  const placement = placements.get(node.id);
+  if (!placement || !placement.visible) {
+    return; // dropped for this frame — still one hover away via nodeLabel's tooltip, never gone
+  }
+
   const label = node.title || "(untitled)";
   const fontSize = LABEL_FONT_SIZE_PX / globalScale;
   ctx.font = `${fontSize}px sans-serif`;
   ctx.textAlign = "center";
   ctx.textBaseline = "top";
   ctx.fillStyle = LABEL_COLOR;
-  ctx.fillText(label, x, y + node.radius + LABEL_GAP_PX);
+  ctx.fillText(label, x + placement.dx, y + placement.dy);
 }
 
 /** Hit-test region for a node — must match `drawNode`'s circle so hover/click land where the node is actually drawn, per react-force-graph-2d's own convention for custom nodeCanvasObject. */
@@ -114,6 +151,13 @@ export function GraphCanvas({ data }: { data: GraphCanvasData }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
 
+  // Both refs, not React state: they feed the per-frame canvas draw, not
+  // the component tree, so updating them must never trigger a React
+  // re-render (that would fight force-graph's own animation loop for no
+  // benefit — nothing here is rendered by React).
+  const labelPlacementsRef = useRef<Map<string, LabelPlacement>>(new Map());
+  const hoveredNodeIdRef = useRef<string | null>(null);
+
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -138,7 +182,17 @@ export function GraphCanvas({ data }: { data: GraphCanvasData }) {
           linkSource="source"
           linkTarget="target"
           backgroundColor="#ffffff"
-          nodeCanvasObject={drawNode}
+          // Recomputed once per frame, before any node is drawn —
+          // force-graph mutates x/y directly onto the same node objects
+          // in `data.nodes`, so reading them here reflects this frame's
+          // actual layout. See computeLabelPlacements' own doc comment.
+          onRenderFramePre={(ctx, globalScale) => {
+            labelPlacementsRef.current = computeLabelPlacements(data.nodes as DrawableNode[], globalScale, hoveredNodeIdRef.current);
+          }}
+          onNodeHover={(node) => {
+            hoveredNodeIdRef.current = (node as DrawableNode | null)?.id ?? null;
+          }}
+          nodeCanvasObject={(node, ctx, globalScale) => drawNode(node, ctx, globalScale, labelPlacementsRef.current)}
           nodePointerAreaPaint={paintNodePointerArea}
           nodeLabel={nodeTooltip}
           linkColor={(link) => link.color}

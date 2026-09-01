@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="breakdown">
+  <circle cx="16" cy="16" r="16" fill="#0f172a"/>
+  <g stroke="#2a78d6" stroke-width="2" fill="none">
+    <line x1="10" y1="20" x2="16" y2="10"/>
+    <line x1="16" y1="10" x2="23" y2="14"/>
+    <line x1="16" y1="10" x2="14" y2="23"/>
+  </g>
+  <circle cx="16" cy="10" r="3.4" fill="#2a78d6"/>
+  <circle cx="10" cy="20" r="2.6" fill="#1baf7a"/>
+  <circle cx="23" cy="14" r="2.6" fill="#eb6834"/>
+  <circle cx="14" cy="23" r="2.6" fill="#eda100"/>
+</svg>

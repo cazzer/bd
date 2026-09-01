@@ -34,12 +34,32 @@
 // pass; the `--pairs all` gate fails as documented (worst CVD pair
 // #008300<->#eb6834 ΔE 3.2 protan, worst normal-vision pair
 // #e87ba4<->#eb6834 ΔE 12.9) — the palette doc's own escape valve is
-// "legal ONLY with secondary encoding: direct labels ... or texture",
-// which this ticket already provides unconditionally (tasks.md 4.3:
-// every node's title is drawn as a label, and node_type/source_system
-// are always in the hover tooltip) — colour is never the only channel
-// carrying a node's category here. `source_system` has three known
-// values, inside the three-slot cap, and passes `--pairs all` outright.
+// "legal ONLY with secondary encoding: direct labels ... or texture".
+// `source_system` has three known values, inside the three-slot cap,
+// and passes `--pairs all` outright — no secondary encoding needed
+// there.
+//
+// COUPLING (bd-hmd.4 follow-up review — read this before touching
+// either module): the node_type mitigation above is NOT "every node is
+// always labelled." graph/labelPlacement.ts hides a label when its node
+// is crowded and not a seed/hovered — the fix for labels overlapping in
+// the corpus's densest cluster, which unconditional per-node labels
+// caused. A hidden-label node's type is still one hover away
+// (graph/tooltip.ts's tooltip always states node_type/source_system as
+// text), but hover-only identity is weaker than an always-visible
+// label — it requires the person to act, not just look, so the
+// mitigation is now conditional rather than universal. Two things keep
+// it honest rather than quietly regressing: (1) `labelPlacement.ts`
+// marks every seed node's label `alwaysShow` — the CVD-hardest pairs
+// above are exactly the pairs a person is most likely staring at right
+// after a search, and those never lose their label; (2) if hidden
+// labels turn out to strand real confusion at higher density (more
+// likely once bd-hmd.5 adds expansion), the next lever is biasing
+// `labelPlacement.ts`'s `priority` by colour-confusability instead of
+// raw degree — not implemented now; degree already tracks "the node
+// most worth a persistent label" well enough for this corpus, and
+// doing more than that without evidence of an actual problem would be
+// solving a problem this ticket hasn't observed.
 export const CATEGORICAL_PALETTE = [
   "#2a78d6", // 1 blue
   "#eb6834", // 2 orange
