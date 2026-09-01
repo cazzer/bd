@@ -6,6 +6,7 @@
 // an operator instead.
 
 import {
+  asPgError,
   ContentTooLargeError,
   DuplicateEdgeInBatchError,
   DuplicateNodeInBatchError,
@@ -21,6 +22,7 @@ import {
   KnowledgeStoreError,
   LookupFailedError,
   MergeFailedError,
+  MetadataTooLargeError,
   NodeNotFoundError,
   NodeUpsertFailedError,
   RetrievalFailedError,
@@ -39,6 +41,22 @@ function actionable(err: KnowledgeStoreError, hint: string): CallToolResult {
 }
 
 const RETRY_HINT = "This is a database problem, not a problem with your input — you may retry the call.";
+
+/** Postgres SQLSTATE for a foreign-key violation — see the EdgeUpsertFailedError branch below. */
+const POSTGRES_FOREIGN_KEY_VIOLATION = "23503";
+
+/**
+ * True when `err` (an `EdgeUpsertFailedError`) wraps a foreign-key
+ * violation — i.e. `srcId`/`dstId` named a node that does not exist. This
+ * is an input problem, not a database problem: unlike a genuine
+ * connectivity/deadlock failure, retrying the exact same call fails
+ * again, deterministically, until the ids are fixed (bd-vt2.5 review: the
+ * un-conditioned message told the model both "retry" and "verify the
+ * ids," which sends it into a retry loop that can never succeed).
+ */
+function isForeignKeyViolation(err: EdgeUpsertFailedError): boolean {
+  return asPgError(err.cause)?.code === POSTGRES_FOREIGN_KEY_VIOLATION;
+}
 
 export function formatZodError(toolName: string, err: ZodError): CallToolResult {
   const issues = err.issues.map((i) => `${i.path.length ? i.path.join(".") : "(root)"}: ${i.message}`).join("; ");
@@ -59,6 +77,9 @@ export function mapError(toolName: string, err: unknown): CallToolResult {
   // --- Nodes (brain_write) ---
   if (err instanceof ContentTooLargeError) {
     return actionable(err, "Shorten the content, or split it into multiple nodes, then retry.");
+  }
+  if (err instanceof MetadataTooLargeError) {
+    return actionable(err, "metadata is for small structured data, not documents — shorten it, move large values into content instead, or split across multiple nodes, then retry.");
   }
   if (err instanceof InvalidNodeContentError) {
     return actionable(err, "Remove the disallowed control character from that field and retry.");
@@ -84,7 +105,10 @@ export function mapError(toolName: string, err: unknown): CallToolResult {
     return actionable(err, "Fix that field on the named edge and retry. If srcId/dstId look right but are rejected, confirm them with brain_get first.");
   }
   if (err instanceof EdgeUpsertFailedError) {
-    return actionable(err, `${RETRY_HINT} If the message mentions a missing key, verify srcId/dstId reference existing nodes with brain_get first.`);
+    if (isForeignKeyViolation(err)) {
+      return actionable(err, "srcId and/or dstId do not reference an existing node — this is an input problem, not a database one; retrying with the same ids will fail again. Verify both ids with brain_get (or find the right ones with brain_search/brain_map), then retry with corrected ids.");
+    }
+    return actionable(err, RETRY_HINT);
   }
 
   // --- Merge (brain_merge) ---

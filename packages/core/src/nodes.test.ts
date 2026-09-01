@@ -2,7 +2,7 @@ import { eq, inArray } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database } from "@breakdown/db";
 import { ingestRuns, nodes } from "@breakdown/db";
-import { ContentTooLargeError, DuplicateNodeInBatchError, InvalidNodeContentError, NodeUpsertFailedError } from "./errors.js";
+import { ContentTooLargeError, DuplicateNodeInBatchError, InvalidNodeContentError, MetadataTooLargeError, NodeUpsertFailedError } from "./errors.js";
 import { openIngestRun, type IngestRunHandle } from "./ingest-runs.js";
 import { upsertNodes } from "./nodes.js";
 import { connectTestDb, type TestPool, uniqueSuffix } from "./test-helpers.js";
@@ -364,6 +364,46 @@ describe("upsertNodes", () => {
 
     const persisted = await db.select({ id: nodes.id }).from(nodes).where(eq(nodes.sourceSystem, run.sourceSystem));
     expect(persisted).toHaveLength(0);
+  });
+
+  it("rejects metadata over the configured limit by name on a single-node batch (bd-vt2.5 review: metadata was unbounded)", async () => {
+    const run = await newRun();
+    const externalId = `metadata-too-long-${uniqueSuffix()}`;
+
+    let thrown: unknown;
+    try {
+      await upsertNodes(
+        db,
+        run,
+        [{ nodeType: "doc", sourceSystem: run.sourceSystem, externalId, metadata: { blob: "z".repeat(100) } }],
+        { maxMetadataLength: 10 },
+      );
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(thrown).toBeInstanceOf(MetadataTooLargeError);
+    const err = thrown as MetadataTooLargeError;
+    expect(err.sourceSystem).toBe(run.sourceSystem);
+    expect(err.externalId).toBe(externalId);
+    expect(err.maxLength).toBe(10);
+    expect(err.length).toBeGreaterThan(10);
+    expect(err.message).toContain(externalId);
+
+    const persisted = await db.select({ id: nodes.id }).from(nodes).where(eq(nodes.sourceSystem, run.sourceSystem));
+    expect(persisted).toHaveLength(0);
+  });
+
+  it("rejects metadata larger than DEFAULT_MAX_METADATA_LENGTH when no override is given (the landmine case: a multi-megabyte value with no explicit option set)", async () => {
+    const run = await newRun();
+    const externalId = `metadata-default-cap-${uniqueSuffix()}`;
+
+    // Comfortably larger than DEFAULT_MAX_METADATA_LENGTH (50,000 chars).
+    const hugeMetadata = { blob: "m".repeat(200_000) };
+
+    await expect(
+      upsertNodes(db, run, [{ nodeType: "doc", sourceSystem: run.sourceSystem, externalId, metadata: hugeMetadata }]),
+    ).rejects.toBeInstanceOf(MetadataTooLargeError);
   });
 
   it("rejects a batch with two rows sharing (source_system, external_id)", async () => {

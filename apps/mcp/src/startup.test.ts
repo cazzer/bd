@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { createPool, resolveDatabaseUrl } from "@breakdown/db";
 import { afterAll, describe, expect, it } from "vitest";
-import { describeConnectionTarget, verifyDatabaseConnection } from "./startup.js";
+import { describeConnectionError, describeConnectionTarget, verifyDatabaseConnection } from "./startup.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -56,6 +56,29 @@ describe("verifyDatabaseConnection", () => {
   });
 });
 
+describe("describeConnectionError", () => {
+  it("uses a plain Error's own message", () => {
+    expect(describeConnectionError(new Error("connect ECONNREFUSED 127.0.0.1:1"))).toBe("connect ECONNREFUSED 127.0.0.1:1");
+  });
+
+  it("unwraps an AggregateError by joining its inner errors' messages (bd-vt2.5 review: AggregateError#message is '' — a dual-stack host, exactly what localhost is, produces exactly this)", () => {
+    const agg = new AggregateError([new Error("connect ECONNREFUSED ::1:1"), new Error("connect ECONNREFUSED 127.0.0.1:1")], "");
+    expect(agg.message).toBe(""); // pin the actual Node behavior this function exists to work around
+    const described = describeConnectionError(agg);
+    expect(described).toContain("connect ECONNREFUSED ::1:1");
+    expect(described).toContain("connect ECONNREFUSED 127.0.0.1:1");
+  });
+
+  it("falls back to the AggregateError's own message/name if its inner errors are somehow all blank", () => {
+    const agg = new AggregateError([new Error(""), new Error("")], "");
+    expect(describeConnectionError(agg)).toBe("AggregateError (no further detail)");
+  });
+
+  it("stringifies a non-Error thrown value without crashing", () => {
+    expect(describeConnectionError("a plain string")).toBe("a plain string");
+  });
+});
+
 describe("server process: fails fast on an unreachable database", () => {
   const mcpRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const tsxBin = path.join(mcpRoot, "node_modules", ".bin", "tsx");
@@ -87,6 +110,43 @@ describe("server process: fails fast on an unreachable database", () => {
     expect(stderr).toContain("127.0.0.1:1/breakdown");
     expect(stderr).toMatch(/unreachable|cannot start/i);
     expect(stderr).toMatch(/DATABASE_URL/);
+  }, 20_000);
+
+  it("names the actual connection failure (not an empty detail) when the host is localhost — the dual-stack case .env.example ships and every real setup here uses (bd-vt2.5 review: 127.0.0.1 alone never exercises this)", async () => {
+    // Deliberately the realistic case, not 127.0.0.1: a dual-stack
+    // `localhost` makes Node try both ::1 and 127.0.0.1 in parallel and,
+    // when both fail, reject with a bare AggregateError whose own
+    // `.message` is `""` — the spec's "names ... the failure" silently
+    // failed for exactly this input, which is the only one a real user
+    // hits (see describeConnectionError's own unit tests above for the
+    // isolated behavior this end-to-end test confirms index.ts actually
+    // wires up).
+    const deadUrl = "postgres://breakdown:breakdown@localhost:1/breakdown";
+
+    let stderr = "";
+    let code: number | null = 0;
+    try {
+      await execFileAsync(tsxBin, [entry], {
+        env: { ...process.env, DATABASE_URL: deadUrl },
+        timeout: 15_000,
+      });
+      throw new Error("expected the process to exit non-zero, but it succeeded");
+    } catch (err) {
+      const e = err as { code?: number | null; stderr?: string; killed?: boolean; signal?: string | null };
+      if (e.killed) {
+        throw new Error(`process was killed (signal ${e.signal}) instead of exiting on its own — stderr so far: ${e.stderr}`);
+      }
+      code = e.code ?? null;
+      stderr = e.stderr ?? "";
+    }
+
+    expect(code).not.toBe(0);
+    expect(stderr).toContain("localhost:1/breakdown");
+    // The actual regression: the parenthesized detail must not be empty
+    // ("... is unreachable ()") — it must carry the real ECONNREFUSED
+    // detail from at least one of the parallel connection attempts.
+    expect(stderr).toMatch(/ECONNREFUSED/);
+    expect(stderr).not.toMatch(/unreachable \(\)/);
   }, 20_000);
 
   // A "DATABASE_URL entirely unset" variant is not exercised here:

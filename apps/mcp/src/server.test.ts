@@ -179,6 +179,14 @@ describe("brain_get", () => {
     expect(raw.isError).toBe(true);
     expect(firstText(raw)).toMatch(/not-a-uuid/);
   });
+
+  it("rejects a batch larger than the 1000-id ceiling before it ever reaches the database", async () => {
+    const { client } = await connectClient();
+    const ids = Array.from({ length: 1001 }, () => BOGUS_ID);
+    const raw = await client.callTool({ name: "brain_get", arguments: { ids } });
+    expect(raw.isError).toBe(true);
+    expect(firstText(raw)).toMatch(/1000/);
+  });
 });
 
 // --- brain_neighbors (spec: "Agent follows an edge") --------------------------
@@ -361,6 +369,15 @@ describe("brain_write", () => {
     expect(firstText(raw)).toMatch(/items/);
     expect(firstText(raw)).not.toMatch(/\s+at\s+\S+\s+\(/);
   });
+
+  it("rejects a batch larger than the 1000-item ceiling before it ever reaches the database (bd-vt2.5 review: an unbounded 30,000-item batch previously succeeded)", async () => {
+    const { client } = await connectClient();
+    const suffix = uniqueSuffix();
+    const items = Array.from({ length: 1001 }, (_, i) => ({ nodeType: "doc", externalId: `batch-cap-${i}-${suffix}` }));
+    const raw = await client.callTool({ name: "brain_write", arguments: { items } });
+    expect(raw.isError).toBe(true);
+    expect(firstText(raw)).toMatch(/1000/);
+  });
 });
 
 // --- brain_link (spec: "Agent links two existing nodes") ----------------------
@@ -401,6 +418,15 @@ describe("brain_link", () => {
     });
     expect(raw.isError).toBe(true);
     expect(firstText(raw)).toMatch(/weight/);
+  });
+
+  it("rejects a batch larger than the 1000-item ceiling before it ever reaches the database", async () => {
+    const { client } = await connectClient();
+    const bogusId = "00000000-0000-0000-0000-000000000000";
+    const items = Array.from({ length: 1001 }, (_, i) => ({ srcId: bogusId, dstId: bogusId, edgeType: `e${i}` }));
+    const raw = await client.callTool({ name: "brain_link", arguments: { items } });
+    expect(raw.isError).toBe(true);
+    expect(firstText(raw)).toMatch(/1000/);
   });
 });
 
@@ -516,24 +542,82 @@ describe("bounded responses", () => {
 
   it("truncates an oversized brain_get response the same way", async () => {
     const run = await newRun();
+    // Content sized to individually fit under the budget below (so this
+    // exercises plain "keep one, drop the other" truncation) — the
+    // dedicated shrink-in-place path (a single item bigger than the
+    // whole budget on its own) is covered separately below.
     const nodeMap = await makeNodes(run, [
       { nodeType: "doc", externalId: "big1", content: "x".repeat(2000) },
       { nodeType: "doc", externalId: "big2", content: "y".repeat(2000) },
     ]);
     const bigIds = [nodeMap.get("big1")!, nodeMap.get("big2")!];
-    const { client } = await connectClient({ responseCharBudget: 1000 });
+    const { client } = await connectClient({ responseCharBudget: 3000 });
     const raw = await client.callTool({ name: "brain_get", arguments: { ids: bigIds } });
     const result = parseText(raw);
 
     expect(result.truncated).toBe(true);
     expect(result.nodes).toHaveLength(1);
     expect(result.droppedNodeIds).toHaveLength(1);
+    expect(result.shrunkNodeIds).toEqual([]);
     // brain_get has no relevance score to rank by, so getNodes() returns a
     // deterministic id order rather than a meaningful "best first" one —
     // only assert the two requested ids partition into kept/dropped, not
     // which specific one lands where.
     const allIds = [...result.nodes.map((n: { id: string }) => n.id), ...result.droppedNodeIds];
     expect(new Set(allIds)).toEqual(new Set(bigIds));
+  });
+
+  it("rejects a brain_write item with pathologically large metadata at the argument schema, before it ever reaches core (bd-vt2.5 MUST-FIX review)", async () => {
+    const { client } = await connectClient();
+    const suffix = uniqueSuffix();
+    const raw = await client.callTool({
+      name: "brain_write",
+      arguments: {
+        items: {
+          nodeType: "doc",
+          externalId: `landmine-${suffix}`,
+          sourceSystem: `mcp-landmine-${suffix}`,
+          // 5MB, matching the review's reproduction exactly.
+          metadata: { blob: "m".repeat(5_000_000) },
+        },
+      },
+    });
+    expect(raw.isError).toBe(true);
+    expect(firstText(raw)).toMatch(/metadata/i);
+    expect(firstText(raw)).toMatch(/characters/i);
+  });
+
+  it("a node with oversized metadata that bypasses the write-time cap (a landmine written before this fix, or by a future direct-core caller) is defused by brain_get's response shrinking, not returned whole", async () => {
+    // Simulates exactly what the review measured: writes directly through
+    // core with the cap explicitly raised (standing in for a pre-existing
+    // row, or any writer other than this MCP server's own schema), then
+    // proves the READ side is the actual backstop — brain_get must still
+    // keep the response bounded even though nothing at write time caught
+    // this particular row.
+    const run = await newRun();
+    const hugeMetadata = { blob: "m".repeat(5_000_000) };
+    const writeResult = await upsertNodes(
+      db,
+      run,
+      [{ nodeType: "doc", sourceSystem: run.sourceSystem, externalId: "landmine-bypass", title: "Landmine", content: "short content", metadata: hugeMetadata }],
+      { maxMetadataLength: Number.MAX_SAFE_INTEGER },
+    );
+    const landmineId = writeResult.rows[0]!.id;
+
+    const { client } = await connectClient();
+    const raw = await client.callTool({ name: "brain_get", arguments: { ids: [landmineId] } });
+
+    // Measured against the exact wire bytes, the same way the server
+    // itself will send it.
+    const wireBytes = JSON.stringify(raw).length;
+    expect(wireBytes).toBeLessThan(200_000); // nowhere near the ~5,000,545 chars this landmine used to produce
+    const result = parseText(raw);
+    expect(result.shrunkNodeIds).toEqual([landmineId]);
+    expect(result.nodes).toHaveLength(1);
+    expect(result.nodes[0].id).toBe(landmineId);
+    expect(result.nodes[0].title).toBe("Landmine"); // small fields survive untouched
+    expect(typeof result.nodes[0].metadata).toBe("string"); // the oversized field, replaced with a placeholder
+    expect(result.nodes[0].metadata).toContain("omitted");
   });
 });
 

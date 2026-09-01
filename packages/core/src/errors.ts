@@ -59,6 +59,33 @@ export class ContentTooLargeError extends KnowledgeStoreError {
 }
 
 /**
+ * A node's `metadata` serializes to more than the configured maximum
+ * length (see `DEFAULT_MAX_METADATA_LENGTH` /
+ * `UpsertNodesOptions.maxMetadataLength`). `metadata` is meant for small
+ * structured key/value data, not document content — nothing else in the
+ * write path bounds it, so an oversized value would otherwise write
+ * successfully and then reappear whole in every `brain_get` response that
+ * returns it (bd-vt2.5 review: a 5MB metadata value round-tripped through
+ * `brain_get` at ~200x the MCP response budget). Same treatment as
+ * `ContentTooLargeError`: rejected before the batch reaches the database,
+ * naming the offending row.
+ */
+export class MetadataTooLargeError extends KnowledgeStoreError {
+  constructor(
+    readonly index: number,
+    readonly sourceSystem: string,
+    readonly externalId: string,
+    readonly length: number,
+    readonly maxLength: number,
+  ) {
+    super(
+      `node ${sourceSystem}/${externalId} (batch index ${index}) has metadata that serializes to ${length} characters, ` +
+        `which exceeds the maximum of ${maxLength} (see UpsertNodesOptions.maxMetadataLength)`,
+    );
+  }
+}
+
+/**
  * A node's `title` or `content` contains a NUL byte or other C0 control
  * character (other than tab/newline/carriage return). Postgres `text`
  * columns cannot store a literal NUL at all, and other control bytes are

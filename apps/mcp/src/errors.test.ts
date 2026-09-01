@@ -97,10 +97,30 @@ describe("mapError", () => {
     expect(text).toMatch(/brain_get/);
   });
 
-  it("maps EdgeUpsertFailedError: tells the model to retry and check endpoints with brain_get", () => {
-    const text = textOf(mapError("brain_link", new EdgeUpsertFailedError("fk violation", 0, 1, { cause: new Error("fk") })));
+  it("maps EdgeUpsertFailedError wrapping a genuine database failure (no pg foreign-key code): tells the model to retry, no brain_get steer", () => {
+    // A deadlock or connectivity failure — not a caller mistake, so
+    // retrying the same call can succeed once the transient condition
+    // clears, unlike a foreign-key violation (see the next test).
+    const text = textOf(mapError("brain_link", new EdgeUpsertFailedError("deadlock detected", 0, 1, { cause: { code: "40P01" } })));
     expect(text).toMatch(/database problem/i);
+    expect(text).toMatch(/retry/i);
+    expect(text).not.toMatch(/brain_get/);
+  });
+
+  it("maps EdgeUpsertFailedError wrapping a postgres foreign-key violation (23503) to input-fixing guidance, not a contradictory retry hint (bd-vt2.5 review: the two sentences disagreed)", () => {
+    const text = textOf(
+      mapError(
+        "brain_link",
+        new EdgeUpsertFailedError("insert failed", 0, 1, {
+          cause: { code: "23503", constraint: "edges_src_id_fkey", detail: 'Key (src_id)=(00000000-0000-0000-0000-000000000000) is not present in table "nodes".' },
+        }),
+      ),
+    );
     expect(text).toMatch(/brain_get/);
+    expect(text).toMatch(/input problem/i);
+    // The contradiction the review found: telling the model to retry a
+    // call that will deterministically fail again with the same ids.
+    expect(text).not.toMatch(/you may retry the call/i);
   });
 
   it("maps SelfMergeError: suggests a different survivorId", () => {

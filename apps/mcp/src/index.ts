@@ -11,7 +11,7 @@ import { createDb, createPool, DatabaseUrlNotSetError, resolveDatabaseUrl } from
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { parseReadOnly } from "./config.js";
 import { createServer } from "./server.js";
-import { describeConnectionTarget, verifyDatabaseConnection } from "./startup.js";
+import { describeConnectionError, describeConnectionTarget, verifyDatabaseConnection } from "./startup.js";
 
 async function main(): Promise<void> {
   let databaseUrl: string;
@@ -33,7 +33,7 @@ async function main(): Promise<void> {
     await verifyDatabaseConnection(pool);
   } catch (err) {
     const target = describeConnectionTarget(databaseUrl);
-    const detail = err instanceof Error ? err.message : String(err);
+    const detail = describeConnectionError(err);
     console.error(
       `[breakdown-brain] cannot start: database at ${target} is unreachable (${detail}). ` +
         "Check that it is running and that DATABASE_URL is correct (see .env.example), then retry.",

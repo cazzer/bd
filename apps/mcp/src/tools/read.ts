@@ -21,8 +21,11 @@ import {
   type RetrieveOptions,
 } from "@breakdown/core";
 import { z } from "zod";
-import { boundList } from "../budget.js";
+import { boundResponse } from "../budget.js";
 import type { ToolContext, ToolDef } from "../types.js";
+
+/** Same batch ceiling as brain_write/brain_link — see tools/write.ts for the rationale. */
+const MAX_BATCH_ITEMS = 1000;
 
 // --- brain_search ------------------------------------------------------
 
@@ -73,69 +76,93 @@ export const searchTool: ToolDef<typeof searchSchema> = {
     const result = await retrieve(ctx.db, args.query, options);
 
     if (result.mode === "empty") {
-      return { mode: "empty", triedModes: result.triedModes, defaultsUsed, truncated: false, droppedNodeIds: [], nodes: [], edges: [] };
+      return { mode: "empty", triedModes: result.triedModes, defaultsUsed, truncated: false, droppedNodeIds: [], shrunkNodeIds: [], nodes: [], edges: [] };
     }
 
     // retrieve() already bounded to defaultsUsed.nodeBudget (its own
-    // truncated flag reflects that). This is a second, response-size pass
-    // on top: even nodeBudget-many nodes can exceed the response budget if
-    // their content is large, so it can truncate further — but never
-    // silently, and always with the dropped ids so they remain fetchable
-    // via brain_get.
-    const bounded = boundList(result.nodes, (n) => n.id, ctx.responseCharBudget);
-    const keptIds = new Set(bounded.kept.map((n) => n.id));
-    const edges = result.edges.filter((e) => keptIds.has(e.srcNodeId) && keptIds.has(e.dstNodeId));
+    // truncated flag reflects that). boundResponse is a second,
+    // response-size pass on top: even nodeBudget-many nodes can exceed
+    // the response budget if their content is large, so it can truncate
+    // further — but never silently, and always with the dropped/shrunk
+    // ids so the rest stays reachable via brain_get. It also verifies
+    // against the *exact* bytes of the assembled envelope (including
+    // `edges`, which boundList's own list-local pass never sees), not an
+    // estimate of the node list's share of the budget.
+    return boundResponse(
+      result.nodes,
+      (n) => n.id,
+      (kept, meta) => {
+        const keptIds = new Set(kept.map((n) => n.id));
+        const edges = result.edges.filter((e) => keptIds.has(e.srcNodeId) && keptIds.has(e.dstNodeId));
 
-    const truncated = result.truncated || bounded.truncated;
-    const notes: string[] = [];
-    if (result.truncated) {
-      notes.push(`The server-side node budget (${defaultsUsed.nodeBudget}) was reached before all reachable nodes were included; call again with a larger nodeBudget to see more, or narrow the query.`);
-    }
-    if (bounded.truncated) {
-      notes.push(`The response-size budget was reached; ${bounded.droppedIds.length} lower-scoring node(s) were dropped from this response. Fetch them individually with brain_get using the ids in droppedNodeIds.`);
-    }
+        const truncated = result.truncated || meta.truncated;
+        const notes: string[] = [];
+        if (result.truncated) {
+          notes.push(`The server-side node budget (${defaultsUsed.nodeBudget}) was reached before all reachable nodes were included; call again with a larger nodeBudget to see more, or narrow the query.`);
+        }
+        if (meta.droppedIds.length > 0) {
+          notes.push(`The response-size budget was reached; ${meta.droppedIds.length} lower-scoring node(s) were dropped from this response. Fetch them individually with brain_get using the ids in droppedNodeIds.`);
+        }
+        if (meta.shrunkIds.length > 0) {
+          notes.push(`${meta.shrunkIds.length} node(s) were kept but had oversized fields (e.g. content/metadata) truncated in place; brain_get on the same id will return the same truncated value if it alone exceeds the response budget.`);
+        }
 
-    return {
-      mode: result.mode,
-      seedCount: result.seedCount,
-      nodeCount: bounded.kept.length,
-      defaultsUsed,
-      truncated,
-      ...(notes.length > 0 ? { truncationNote: notes.join(" ") } : {}),
-      droppedNodeIds: bounded.droppedIds,
-      nodes: bounded.kept,
-      edges,
-    };
+        return {
+          mode: result.mode,
+          seedCount: result.seedCount,
+          nodeCount: kept.length,
+          defaultsUsed,
+          truncated,
+          ...(notes.length > 0 ? { truncationNote: notes.join(" ") } : {}),
+          droppedNodeIds: meta.droppedIds,
+          shrunkNodeIds: meta.shrunkIds,
+          nodes: kept,
+          edges,
+        };
+      },
+      ctx.responseCharBudget,
+    );
   },
 };
 
 // --- brain_get -----------------------------------------------------------
 
 const getSchema = z.object({
-  ids: z.array(z.string().min(1)).min(1, "must contain at least one id"),
+  ids: z
+    .array(z.string().min(1))
+    .min(1, "must contain at least one id")
+    .max(MAX_BATCH_ITEMS, `must contain at most ${MAX_BATCH_ITEMS} ids`),
 });
 
 export const getTool: ToolDef<typeof getSchema> = {
   name: "brain_get",
   description:
-    "Fetch one or more nodes by id, with full title/content/metadata. An id naming a node that was merged away resolves to its survivor's content. Ids that match nothing are reported in notFoundIds, never silently omitted.",
+    "Fetch one or more nodes by id (up to 1000 per call), with full title/content/metadata. An id naming a node that was merged away resolves to its survivor's content. Ids that match nothing are reported in notFoundIds, never silently omitted.",
   schema: getSchema,
   isWrite: false,
   async handler(ctx: ToolContext, args) {
     const result = await getNodes(ctx.db, args.ids);
-    const bounded = boundList(result.nodes, (n) => n.id, ctx.responseCharBudget);
 
-    return {
-      nodes: bounded.kept,
-      notFoundIds: result.notFoundIds,
-      truncated: bounded.truncated,
-      ...(bounded.truncated
-        ? {
-            truncationNote: `The response-size budget was reached; ${bounded.droppedIds.length} node(s) were dropped from this response. Re-fetch them with brain_get in a smaller batch, using the ids in droppedNodeIds.`,
-          }
-        : {}),
-      droppedNodeIds: bounded.droppedIds,
-    };
+    return boundResponse(
+      result.nodes,
+      (n) => n.id,
+      (kept, meta) => ({
+        nodes: kept,
+        notFoundIds: result.notFoundIds,
+        truncated: meta.truncated,
+        ...(meta.truncated
+          ? {
+              truncationNote:
+                (meta.droppedIds.length > 0
+                  ? `The response-size budget was reached; ${meta.droppedIds.length} node(s) were dropped from this response. Re-fetch them with brain_get in a smaller batch, using the ids in droppedNodeIds. `
+                  : "") + (meta.shrunkIds.length > 0 ? `${meta.shrunkIds.length} node(s) were kept but had oversized fields (content/metadata) truncated in place — there is no larger view available for a single item that big via this tool.` : ""),
+            }
+          : {}),
+        droppedNodeIds: meta.droppedIds,
+        shrunkNodeIds: meta.shrunkIds,
+      }),
+      ctx.responseCharBudget,
+    );
   },
 };
 
@@ -153,21 +180,26 @@ export const neighborsTool: ToolDef<typeof neighborsSchema> = {
   isWrite: false,
   async handler(ctx: ToolContext, args) {
     const result = await getNeighbors(ctx.db, args.id);
-    const bounded = boundList(result.neighbors, (n) => n.nodeId, ctx.responseCharBudget);
 
-    return {
-      requestedId: result.requestedId,
-      canonicalId: result.canonicalId,
-      resolvedFromMerge: result.canonicalId !== result.requestedId,
-      neighbors: bounded.kept,
-      truncated: bounded.truncated,
-      ...(bounded.truncated
-        ? {
-            truncationNote: `The response-size budget was reached; ${bounded.droppedIds.length} lower-weight neighbor(s) were dropped. Fetch their content with brain_get using the ids in droppedNodeIds.`,
-          }
-        : {}),
-      droppedNodeIds: bounded.droppedIds,
-    };
+    return boundResponse(
+      result.neighbors,
+      (n) => n.nodeId,
+      (kept, meta) => ({
+        requestedId: result.requestedId,
+        canonicalId: result.canonicalId,
+        resolvedFromMerge: result.canonicalId !== result.requestedId,
+        neighbors: kept,
+        truncated: meta.truncated,
+        ...(meta.truncated
+          ? {
+              truncationNote: `The response-size budget was reached; ${meta.droppedIds.length} lower-weight neighbor(s) were dropped. Fetch their content with brain_get using the ids in droppedNodeIds.`,
+            }
+          : {}),
+        droppedNodeIds: meta.droppedIds,
+        shrunkNodeIds: meta.shrunkIds,
+      }),
+      ctx.responseCharBudget,
+    );
   },
 };
 
@@ -186,22 +218,27 @@ export const mapTool: ToolDef<typeof mapSchema> = {
   async handler(ctx: ToolContext, args) {
     const defaultsUsed = { recentNodesLimit: args.recentNodesLimit ?? DEFAULT_RECENT_NODES_LIMIT };
     const summary = await getStoreSummary(ctx.db, { recentNodesLimit: args.recentNodesLimit });
-    const bounded = boundList(summary.recentNodes, (n) => n.id, ctx.responseCharBudget);
 
-    return {
-      totalNodes: summary.totalNodes,
-      totalEdges: summary.totalEdges,
-      nodeTypes: summary.nodeTypes,
-      sourceSystems: summary.sourceSystems,
-      edgeTypes: summary.edgeTypes,
-      recentNodes: bounded.kept,
-      defaultsUsed,
-      truncated: bounded.truncated,
-      ...(bounded.truncated
-        ? { truncationNote: `The response-size budget was reached; ${bounded.droppedIds.length} recently-updated node(s) were dropped. Fetch them with brain_get using the ids in droppedNodeIds, or call brain_map again with a smaller recentNodesLimit.` }
-        : {}),
-      droppedNodeIds: bounded.droppedIds,
-    };
+    return boundResponse(
+      summary.recentNodes,
+      (n) => n.id,
+      (kept, meta) => ({
+        totalNodes: summary.totalNodes,
+        totalEdges: summary.totalEdges,
+        nodeTypes: summary.nodeTypes,
+        sourceSystems: summary.sourceSystems,
+        edgeTypes: summary.edgeTypes,
+        recentNodes: kept,
+        defaultsUsed,
+        truncated: meta.truncated,
+        ...(meta.truncated
+          ? { truncationNote: `The response-size budget was reached; ${meta.droppedIds.length} recently-updated node(s) were dropped. Fetch them with brain_get using the ids in droppedNodeIds, or call brain_map again with a smaller recentNodesLimit.` }
+          : {}),
+        droppedNodeIds: meta.droppedIds,
+        shrunkNodeIds: meta.shrunkIds,
+      }),
+      ctx.responseCharBudget,
+    );
   },
 };
 

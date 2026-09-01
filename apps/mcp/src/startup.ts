@@ -29,3 +29,30 @@ export function describeConnectionTarget(databaseUrl: string): string {
 export async function verifyDatabaseConnection(pool: Pool): Promise<void> {
   await pool.query("SELECT 1");
 }
+
+/**
+ * Renders the actual failure detail from whatever `verifyDatabaseConnection`
+ * (or a bare pool connection) threw, for an actionable startup message.
+ *
+ * `err.message` is not enough on its own: a dual-stack host — exactly
+ * what `localhost` is, and what `.env.example`/every real setup here
+ * uses — makes Node's `net`/`pg` connection attempt both the IPv6 and
+ * IPv4 addresses in parallel and, when both fail, reject with a plain
+ * `AggregateError` whose own `.message` is `""`. The real detail
+ * ("connect ECONNREFUSED ::1:1", "connect ECONNREFUSED 127.0.0.1:1") is
+ * one message per attempt in `.errors`, not on the aggregate itself (bd-
+ * vt2.5 review: verified — a single-address failure like `127.0.0.1:1`
+ * does carry a normal `.message` and never exercises this path, which is
+ * exactly why a test against only that address missed the bug).
+ */
+export function describeConnectionError(err: unknown): string {
+  if (err instanceof AggregateError) {
+    const inner = err.errors.map((e) => (e instanceof Error ? e.message : String(e))).filter((m) => m.length > 0);
+    if (inner.length > 0) return inner.join("; ");
+    return err.message || `${err.constructor.name} (no further detail)`;
+  }
+  if (err instanceof Error) {
+    return err.message || err.constructor.name;
+  }
+  return String(err);
+}

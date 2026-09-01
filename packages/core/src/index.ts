@@ -9,6 +9,7 @@ export {
   InvalidIngestRunError,
   InvalidNodeInputError,
   ContentTooLargeError,
+  MetadataTooLargeError,
   InvalidNodeContentError,
   DuplicateNodeInBatchError,
   NodeUpsertFailedError,
@@ -26,6 +27,15 @@ export {
   LookupFailedError,
 } from "./errors.js";
 
+// `asPgError`/`PgErrorLike` are re-exported (not just used internally) so
+// the MCP layer (apps/mcp/src/errors.ts) can distinguish a genuine
+// database failure's Postgres error code (e.g. 23503 foreign_key_violation
+// on an EdgeUpsertFailedError) from a generic one, without reimplementing
+// the drizzle/node-postgres error-unwrapping this package already does —
+// that unwrapping is infrastructure, not business logic, and duplicating
+// it at the MCP boundary would be the actual layering violation.
+export { asPgError, type PgErrorLike } from "./sql-helpers.js";
+
 export {
   openIngestRun,
   closeIngestRun,
@@ -38,6 +48,7 @@ export {
 export {
   upsertNodes,
   DEFAULT_MAX_CONTENT_LENGTH,
+  DEFAULT_MAX_METADATA_LENGTH,
   DEFAULT_NODE_CHUNK_SIZE,
   type NodeInput,
   type UpsertNodesOptions,
