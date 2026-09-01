@@ -1,5 +1,185 @@
-// Application tables (ingest_runs, nodes, edges, resolved_nodes) arrive in
-// bd-vt2.2. This file intentionally exports nothing yet — it exists so
-// drizzle-kit has a schema entry point to generate (empty) migrations
-// against, and so packages/db typechecks as a real workspace member.
-export {};
+import { sql } from "drizzle-orm";
+import {
+  type AnyPgColumn,
+  check,
+  index,
+  integer,
+  jsonb,
+  pgTable,
+  pgView,
+  real,
+  text,
+  timestamp,
+  unique,
+  uuid,
+} from "drizzle-orm/pg-core";
+
+/**
+ * Application schema for the knowledge store (bd-vt2.2): `ingest_runs`,
+ * `nodes`, `edges`, and the `resolved_nodes` view.
+ *
+ * Three constructs below cannot be expressed through drizzle-orm's
+ * pg-core column/index builders and are instead hand-written directly
+ * into the generated migration SQL (see migrations/0000_*.sql):
+ *
+ *   1. `nodes.search` — a `GENERATED ALWAYS AS (...) STORED` tsvector
+ *      column. pg-core has no `tsvector` column type and no builder for
+ *      STORED generated expressions, so this column is absent from the
+ *      `nodes` table below.
+ *   2. The `pg_trgm` extension and the GIN indexes it backs: the
+ *      full-text GIN index on `nodes.search` (which needs #1 to exist
+ *      first) and the trigram GIN indexes on `nodes.title` /
+ *      `nodes.content`. All three are hand-written together in the
+ *      migration immediately after the generated column.
+ *   3. `resolved_nodes` — declared below as an `existing()` view purely
+ *      for typed query access; its DDL is hand-written (see the comment
+ *      on the declaration).
+ *
+ * Everything else (tables, columns, PK/FK/UNIQUE/CHECK constraints, and
+ * the two plain B-tree lookup indexes on `edges`) round-trips through
+ * `drizzle-kit generate` unmodified.
+ */
+
+export const ingestRuns = pgTable("ingest_runs", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  sourceSystem: text("source_system").notNull(),
+  startedAt: timestamp("started_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+  finishedAt: timestamp("finished_at", { withTimezone: true }),
+  nodeCount: integer("node_count").notNull().default(0),
+  edgeCount: integer("edge_count").notNull().default(0),
+  stats: jsonb("stats").notNull().default(sql`'{}'::jsonb`),
+});
+
+export const nodes = pgTable(
+  "nodes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    // Open discriminator, not a Postgres enum: new node types (work
+    // items, specs, conversations, ...) must never require a migration
+    // (knowledge-store spec, "Unrecognized node type").
+    nodeType: text("node_type").notNull(),
+    sourceSystem: text("source_system").notNull(),
+    externalId: text("external_id").notNull(),
+    title: text("title"),
+    content: text("content").notNull().default(""),
+    contentHash: text("content_hash").notNull(),
+    metadata: jsonb("metadata").notNull().default(sql`'{}'::jsonb`),
+    // Merge pointer: set on the loser, points at the survivor. No
+    // onDelete action — a survivor being deleted while merged-away rows
+    // still point at it should fail loudly, not silently cascade or
+    // null out the merge (see the resolved_nodes comment below for the
+    // invariant this maintains).
+    mergedInto: uuid("merged_into").references((): AnyPgColumn => nodes.id),
+    // No onDelete action, for the same reason: deleting an ingest run
+    // that nodes still reference should fail visibly rather than
+    // silently orphaning provenance.
+    ingestRunId: uuid("ingest_run_id").references(() => ingestRuns.id),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    // Bumped by the write path (bd-vt2.3) on every upsert that changes a
+    // row; not trigger-maintained here — an UPDATE-timestamp trigger
+    // would be enforcing write-path behavior, not a database invariant.
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    // `search` (generated tsvector, GIN-indexed) is hand-written into
+    // the migration SQL — see the file header comment.
+  },
+  (table) => [
+    // The deterministic dedup key the idempotent-write story rests on.
+    unique("nodes_source_system_external_id_key").on(
+      table.sourceSystem,
+      table.externalId,
+    ),
+    // Trigram GIN indexes on title/content are hand-written alongside
+    // the pg_trgm extension — see the file header comment.
+  ],
+);
+
+export const edges = pgTable(
+  "edges",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    // Cascade: an edge is meaningless once either endpoint is gone.
+    srcId: uuid("src_id")
+      .notNull()
+      .references(() => nodes.id, { onDelete: "cascade" }),
+    dstId: uuid("dst_id")
+      .notNull()
+      .references(() => nodes.id, { onDelete: "cascade" }),
+    edgeType: text("edge_type").notNull(),
+    weight: real("weight").notNull().default(1.0),
+    sourceSystem: text("source_system").notNull(),
+    // No onDelete action — same reasoning as nodes.ingestRunId above.
+    ingestRunId: uuid("ingest_run_id").references(() => ingestRuns.id),
+    props: jsonb("props").notNull().default(sql`'{}'::jsonb`),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    // Collapses re-assertion by one source system; independent
+    // assertions of the same edge by different systems are distinct
+    // rows (knowledge-store spec, "Same relationship asserted by two
+    // systems").
+    unique("edges_src_dst_type_source_key").on(
+      table.srcId,
+      table.dstId,
+      table.edgeType,
+      table.sourceSystem,
+    ),
+    // Traversal follows edges in both directions (retrieval spec,
+    // "Bounded subgraph expansion") — one lookup index per direction,
+    // each covering the edge_type filter used during expansion.
+    index("edges_src_id_edge_type_idx").on(table.srcId, table.edgeType),
+    index("edges_dst_id_edge_type_idx").on(table.dstId, table.edgeType),
+    check(
+      "edges_weight_range_check",
+      sql`${table.weight} >= 0 AND ${table.weight} <= 1`,
+    ),
+  ],
+);
+
+/**
+ * `resolved_nodes` — canonical rows only (`WHERE merged_into IS NULL`).
+ *
+ * Invariant this view is built on: `merged_into` always points directly
+ * at a canonical node (a node whose own `merged_into` IS NULL). Merge
+ * chains are collapsed at write time (bd-vt2.3's mergeNodes), so no
+ * reader — this view included — ever needs to walk more than one hop.
+ *
+ * This does not by itself solve search-over-merged-nodes: the
+ * retrieval spec requires that a match on a merged-away node's content
+ * surface its survivor once, not the merged-away row. That requires
+ * scanning all of `nodes` (not just this view) and folding each match
+ * onto `coalesce(merged_into, id)` — the `canonical_id` resolution
+ * handle. That fold is a caller-side expression, not a second view or
+ * function, so it is not defined here; bd-vt2.4's retrieval query is
+ * where `coalesce(merged_into, id)` gets used.
+ *
+ * DDL is hand-written in the migration (see migrations/0000_*.sql)
+ * because it is a plain `SELECT * FROM nodes WHERE merged_into IS
+ * NULL` with the invariant comment attached to it; drizzle-kit has no
+ * way to generate a `CREATE VIEW` from a `.existing()` declaration, and
+ * driving it through `.as(sql...)` would just be this same raw SQL
+ * wrapped in another layer. Declared here as `.existing()` so
+ * downstream packages get typed `db.select().from(resolvedNodes)`
+ * access without drizzle-kit trying to manage/regenerate the view.
+ */
+export const resolvedNodes = pgView("resolved_nodes", {
+  id: uuid("id").notNull(),
+  nodeType: text("node_type").notNull(),
+  sourceSystem: text("source_system").notNull(),
+  externalId: text("external_id").notNull(),
+  title: text("title"),
+  content: text("content").notNull(),
+  contentHash: text("content_hash").notNull(),
+  metadata: jsonb("metadata").notNull(),
+  mergedInto: uuid("merged_into"),
+  ingestRunId: uuid("ingest_run_id"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+}).existing();

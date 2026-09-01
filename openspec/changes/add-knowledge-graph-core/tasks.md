@@ -7,12 +7,12 @@
 
 ## 2. Schema
 
-- [ ] 2.1 Define `ingest_runs` and `nodes` (unique on `source_system, external_id`; `node_type` as open text; `title`, `content`, `content_hash`, `metadata`, `merged_into` self-reference)
-- [ ] 2.2 Hand-add the generated `search` tsvector column to the migration — `setweight(to_tsvector('english', title),'A') || setweight(to_tsvector('english', content),'B')` — with its GIN index
-- [ ] 2.3 Enable `pg_trgm` and add trigram indexes on `title` and `content` for the fuzzy fallback path
-- [ ] 2.4 Define `edges` with the unique constraint on `(src_id, dst_id, edge_type, source_system)`, the `weight BETWEEN 0 AND 1` check, and both directional lookup indexes
-- [ ] 2.5 Add the `resolved_nodes` view that follows `merged_into` and excludes merged-away rows, so every read path resolves merges in one place
-- [ ] 2.6 Write schema tests: duplicate edge from one source collapses, same edge from two sources is retained, out-of-range weight is rejected, generated tsvector updates on content change, title match outranks body match
+- [x] 2.1 Define `ingest_runs` and `nodes` (unique on `source_system, external_id`; `node_type` as open text; `title`, `content`, `content_hash`, `metadata`, `merged_into` self-reference)
+- [x] 2.2 Hand-add the generated `search` tsvector column to the migration — `setweight(to_tsvector('english', title),'A') || setweight(to_tsvector('english', content),'B')` — with its GIN index
+- [x] 2.3 Enable `pg_trgm` and add trigram indexes on `title` and `content` for the fuzzy fallback path
+- [x] 2.4 Define `edges` with the unique constraint on `(src_id, dst_id, edge_type, source_system)`, the `weight BETWEEN 0 AND 1` check, and both directional lookup indexes
+- [x] 2.5 Add the `resolved_nodes` view that follows `merged_into` and excludes merged-away rows, so every read path resolves merges in one place
+- [x] 2.6 Write schema tests: duplicate edge from one source collapses, same edge from two sources is retained, out-of-range weight is rejected, generated tsvector updates on content change, title match outranks body match
 
 ## 3. Write path
 
