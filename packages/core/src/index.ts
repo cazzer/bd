@@ -105,6 +105,7 @@ export {
   getNeighbors,
   buildGetNeighborsQuery,
   DEFAULT_NEIGHBOR_LIMIT,
+  MAX_NEIGHBOR_LIMIT,
   type LookedUpNode,
   type GetNodesResult,
   type NeighborDirection,

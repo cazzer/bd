@@ -31,15 +31,22 @@
  *     edges, and returning all of them defeats the point of a "look at one
  *     node" call. Results are ordered by weight descending with `node_id`
  *     then `edge_id` as deterministic tie-breaks, capped at `limit`
- *     (default `DEFAULT_NEIGHBOR_LIMIT`), and `hasMore`/`nextCursor` report
- *     whether more exist and how to fetch them. Pagination is keyset
- *     (`cursor` carries the last row's `weight`/`nodeId`/`edgeId`), not
- *     offset — an offset page is defined relative to a row count that
- *     shifts under concurrent writes (a new higher-weight edge asserted
- *     between pages shifts every later offset, silently repeating or
- *     skipping a neighbor), where a keyset page is defined relative to the
- *     last row actually seen and is unaffected by writes elsewhere in the
- *     order.
+ *     (default `DEFAULT_NEIGHBOR_LIMIT`, hard ceiling `MAX_NEIGHBOR_LIMIT`
+ *     — see that constant's comment for why a cap is load-bearing, not
+ *     just tidy), and `hasMore`/`nextCursor` report whether more exist and
+ *     how to fetch them. Pagination is keyset (`cursor` carries the last
+ *     row's `weight`/`nodeId`/`edgeId`, plus the `canonicalId` it was
+ *     minted for), not offset — an offset page is defined relative to a
+ *     row count that shifts under concurrent writes (a new higher-weight
+ *     edge asserted between pages shifts every later offset, silently
+ *     repeating or skipping a neighbor), where a keyset page is defined
+ *     relative to the last row actually seen and is unaffected by writes
+ *     elsewhere in the order. `canonicalId` binds a cursor to the node it
+ *     came from: replaying one node's cursor against another (e.g. a UI
+ *     that switches the selected node mid-fetch) throws
+ *     `InvalidLookupOptionError` rather than silently applying the wrong
+ *     node's keyset filter and dropping neighbors with no signal
+ *     (bd-hmd.1 review).
  */
 
 import { sql, type SQL } from "drizzle-orm";
@@ -212,17 +219,25 @@ export interface Neighbor {
   title: string;
 }
 
-/** Opaque-to-the-caller paging position: the last neighbor row seen, in listing order. */
+/**
+ * Opaque-to-the-caller paging position: the last neighbor row seen, in
+ * listing order, plus the canonical id of the node it was minted for.
+ * `canonicalId` exists so a cursor cannot silently be replayed against a
+ * different node — `getNeighbors` rejects a mismatch (bd-hmd.1 review)
+ * rather than quietly applying the wrong node's keyset filter, which
+ * would drop neighbors with no error and no signal.
+ */
 export interface NeighborsCursor {
+  canonicalId: string;
   weight: number;
   nodeId: string;
   edgeId: string;
 }
 
 export interface GetNeighborsOptions {
-  /** Max neighbors to return in this page. Default `DEFAULT_NEIGHBOR_LIMIT` (25). */
+  /** Max neighbors to return in this page. Default `DEFAULT_NEIGHBOR_LIMIT` (25); hard ceiling `MAX_NEIGHBOR_LIMIT`. */
   limit?: number;
-  /** Continue after a previous call's `nextCursor`. Omit or pass `null` for the first page. */
+  /** Continue after a previous call's `nextCursor`. Omit or pass `null` for the first page. Must have been minted for the same node (its `canonicalId` must match) — see `NeighborsCursor`. */
   cursor?: NeighborsCursor | null;
 }
 
@@ -367,6 +382,22 @@ interface RawGetNeighborsResult {
 /** Default page size for `getNeighbors` — same order of magnitude as `DEFAULT_FANOUT` (retrieval.ts's per-node traversal cap), for the same reason: a hub's true neighbor count is unbounded, this call's cost per page should not be. */
 export const DEFAULT_NEIGHBOR_LIMIT = 25;
 
+/**
+ * Hard ceiling on `limit`, mirroring `MAX_ALLOWED_DEPTH`'s precedent in
+ * retrieval.ts (bd-hmd.1 review): without a cap, `buildGetNeighborsQuery`
+ * computes `limit + 1` in JS before binding it as `::int`, so a caller
+ * passing e.g. `Number.MAX_SAFE_INTEGER` overflows Postgres's `int4` at
+ * bind time. That throws `LookupFailedError` whose `.cause` embeds the
+ * *entire* SQL statement — every inline comment, every bound param — which
+ * is exactly what `InvalidLookupOptionError`'s "rejected before any SQL
+ * runs" contract exists to prevent a bad option from reaching. Rejecting
+ * an out-of-range limit here, before `buildGetNeighborsQuery` is ever
+ * called, keeps that contract and keeps query text out of a caller-facing
+ * error (relevant once bd-hmd.3 puts a tRPC error formatter in front of
+ * this).
+ */
+export const MAX_NEIGHBOR_LIMIT = 1000;
+
 function mapNeighbor(row: RawNeighbor): Neighbor {
   return {
     edgeId: row.edge_id,
@@ -385,14 +416,17 @@ function mapNeighbor(row: RawNeighbor): Neighbor {
 /** Validates `limit`/`cursor`, throwing `InvalidLookupOptionError` on the first problem found — before any SQL runs, same convention as retrieval.ts's `resolveRetrievalParams`. */
 function resolveGetNeighborsOptions(options: GetNeighborsOptions): { limit: number; cursor: NeighborsCursor | null } {
   const limit = options.limit ?? DEFAULT_NEIGHBOR_LIMIT;
-  if (!Number.isInteger(limit) || limit <= 0) {
-    throw new InvalidLookupOptionError("limit", limit, "must be a positive integer");
+  if (!Number.isInteger(limit) || limit <= 0 || limit > MAX_NEIGHBOR_LIMIT) {
+    throw new InvalidLookupOptionError("limit", limit, `must be a positive integer no greater than ${MAX_NEIGHBOR_LIMIT}`);
   }
 
   const cursor = options.cursor ?? null;
   if (cursor !== null) {
     if (typeof cursor !== "object") {
-      throw new InvalidLookupOptionError("cursor", cursor, "must be an object with weight, nodeId, and edgeId, or null");
+      throw new InvalidLookupOptionError("cursor", cursor, "must be an object with canonicalId, weight, nodeId, and edgeId, or null");
+    }
+    if (typeof cursor.canonicalId !== "string" || !UUID_RE.test(cursor.canonicalId.trim())) {
+      throw new InvalidLookupOptionError("cursor", cursor, "cursor.canonicalId must be a valid uuid");
     }
     if (!Number.isFinite(cursor.weight)) {
       throw new InvalidLookupOptionError("cursor", cursor, "cursor.weight must be a finite number");
@@ -445,6 +479,23 @@ export async function getNeighbors(db: Database, id: string, options: GetNeighbo
   if (!row.result.found || row.result.canonical_id === null) {
     throw new NodeNotFoundError(trimmed);
   }
+  // A cursor is only valid replayed against the node it was minted for
+  // (see NeighborsCursor). The comparison needs the canonical id the
+  // query just resolved — not `trimmed`/`id`, which may be a pre-merge
+  // alias — so this can only be checked here, after the single round
+  // trip, the same way NodeNotFoundError above is: existence and
+  // identity both require DB truth. The query already ran with the
+  // (possibly mismatched) cursor bound into its keyset filter; on a
+  // mismatch that result is simply discarded in favor of throwing —
+  // it's a read-only SELECT, so running it was harmless.
+  if (cursor !== null && cursor.canonicalId !== row.result.canonical_id) {
+    throw new InvalidLookupOptionError(
+      "cursor",
+      cursor,
+      `cursor.canonicalId (${cursor.canonicalId}) does not match the node being listed (${row.result.canonical_id}) — ` +
+        "this cursor was minted for a different node and cannot be replayed here",
+    );
+  }
 
   const neighbors = row.result.neighbors.map(mapNeighbor);
   const last = neighbors[neighbors.length - 1];
@@ -455,6 +506,6 @@ export async function getNeighbors(db: Database, id: string, options: GetNeighbo
     canonicalId: row.result.canonical_id,
     neighbors,
     hasMore,
-    nextCursor: hasMore && last ? { weight: last.weight, nodeId: last.nodeId, edgeId: last.edgeId } : null,
+    nextCursor: hasMore && last ? { canonicalId: row.result.canonical_id, weight: last.weight, nodeId: last.nodeId, edgeId: last.edgeId } : null,
   };
 }

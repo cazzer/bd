@@ -10,7 +10,15 @@ import { openIngestRun, type IngestRunHandle } from "./ingest-runs.js";
 import { mergeNodes } from "./merge.js";
 import type { NodeInput } from "./nodes.js";
 import { upsertNodes } from "./nodes.js";
-import { buildGetNeighborsQuery, buildGetNodesQuery, DEFAULT_NEIGHBOR_LIMIT, getNeighbors, getNodes, type NeighborsCursor } from "./lookup.js";
+import {
+  buildGetNeighborsQuery,
+  buildGetNodesQuery,
+  DEFAULT_NEIGHBOR_LIMIT,
+  getNeighbors,
+  getNodes,
+  MAX_NEIGHBOR_LIMIT,
+  type NeighborsCursor,
+} from "./lookup.js";
 import { connectTestDb, type TestPool, uniqueSuffix } from "./test-helpers.js";
 
 let pool: TestPool;
@@ -108,7 +116,7 @@ describe("buildGetNeighborsQuery", () => {
     expect(unset.sql).toContain("NULL::double precision");
     expect(unset.sql).toContain("NULL::uuid");
 
-    const withCursor = { id: BOGUS_ID, limit: 10, cursor: { weight: 0.5, nodeId: BOGUS_ID, edgeId: BOGUS_ID } };
+    const withCursor = { id: BOGUS_ID, limit: 10, cursor: { canonicalId: BOGUS_ID, weight: 0.5, nodeId: BOGUS_ID, edgeId: BOGUS_ID } };
     const cursored = dialect.sqlToQuery(buildGetNeighborsQuery(withCursor));
     expect(cursored.sql).not.toContain("NULL::double precision");
     expect(cursored.params).toContain(0.5);
@@ -491,11 +499,133 @@ describe("getNeighbors — bounded and ordered", () => {
     const id = nodeMap.get("n1")!;
     // @ts-expect-error deliberately malformed for the runtime check
     await expect(getNeighbors(db, id, { cursor: { weight: 0.5 } })).rejects.toBeInstanceOf(InvalidLookupOptionError);
-    await expect(getNeighbors(db, id, { cursor: { weight: 0.5, nodeId: "not-a-uuid", edgeId: BOGUS_ID } })).rejects.toBeInstanceOf(
-      InvalidLookupOptionError,
-    );
-    await expect(getNeighbors(db, id, { cursor: { weight: Number.NaN, nodeId: BOGUS_ID, edgeId: BOGUS_ID } })).rejects.toBeInstanceOf(
-      InvalidLookupOptionError,
-    );
+    await expect(
+      getNeighbors(db, id, { cursor: { canonicalId: id, weight: 0.5, nodeId: "not-a-uuid", edgeId: BOGUS_ID } }),
+    ).rejects.toBeInstanceOf(InvalidLookupOptionError);
+    await expect(
+      getNeighbors(db, id, { cursor: { canonicalId: id, weight: Number.NaN, nodeId: BOGUS_ID, edgeId: BOGUS_ID } }),
+    ).rejects.toBeInstanceOf(InvalidLookupOptionError);
+    await expect(
+      getNeighbors(db, id, { cursor: { canonicalId: "not-a-uuid", weight: 0.5, nodeId: BOGUS_ID, edgeId: BOGUS_ID } }),
+    ).rejects.toBeInstanceOf(InvalidLookupOptionError);
+  });
+
+  // --- bd-hmd.1 review: must-fix 1 — limit has no upper bound -------------
+
+  it("rejects a limit above MAX_NEIGHBOR_LIMIT with InvalidLookupOptionError, before any SQL runs — an unbounded limit overflows Postgres int4 (limit + 1) and would otherwise leak the whole query (comments included) in LookupFailedError.cause", async () => {
+    const run = await newRun();
+    const nodeMap = await makeNodes(run, [{ nodeType: "doc", externalId: "n1", title: "N1", content: "c" }]);
+    const id = nodeMap.get("n1")!;
+
+    await expect(getNeighbors(db, id, { limit: MAX_NEIGHBOR_LIMIT + 1 })).rejects.toBeInstanceOf(InvalidLookupOptionError);
+    // The overflow value from the review: 2^31 - 1, Postgres int4's max.
+    await expect(getNeighbors(db, id, { limit: 2147483647 })).rejects.toBeInstanceOf(InvalidLookupOptionError);
+    // A limit at the ceiling is still accepted.
+    await expect(getNeighbors(db, id, { limit: MAX_NEIGHBOR_LIMIT })).resolves.toBeDefined();
+  });
+
+  // --- bd-hmd.1 review: must-fix 2 — an unbound cursor can be replayed against the wrong node ---
+
+  it("rejects a cursor minted for a different node with InvalidLookupOptionError, rather than silently applying its keyset filter and dropping neighbours (bd-hmd.5's per-node pagination state can hold a stale cursor after the selected node changes)", async () => {
+    const run = await newRun();
+    const nodeMap = await makeNodes(run, [
+      { nodeType: "doc", externalId: "hubA", title: "Hub A", content: "c" },
+      { nodeType: "doc", externalId: "hubB", title: "Hub B", content: "c" },
+      { nodeType: "doc", externalId: "a1", title: "A1", content: "c" },
+      { nodeType: "doc", externalId: "a2", title: "A2", content: "c" },
+      { nodeType: "doc", externalId: "b1", title: "B1", content: "c" }, // highest weight on B — must not be dropped
+      { nodeType: "doc", externalId: "b2", title: "B2", content: "c" },
+    ]);
+    const hubAId = nodeMap.get("hubA")!;
+    const hubBId = nodeMap.get("hubB")!;
+    await makeEdges(run, [
+      { srcId: hubAId, dstId: nodeMap.get("a1")!, edgeType: "e", weight: 0.9 },
+      { srcId: hubAId, dstId: nodeMap.get("a2")!, edgeType: "e", weight: 0.1 },
+      { srcId: hubBId, dstId: nodeMap.get("b1")!, edgeType: "e", weight: 1.0 },
+      { srcId: hubBId, dstId: nodeMap.get("b2")!, edgeType: "e", weight: 0.2 },
+    ]);
+
+    const pageA = await getNeighbors(db, hubAId, { limit: 1 });
+    expect(pageA.hasMore).toBe(true);
+    expect(pageA.nextCursor).not.toBeNull();
+    const staleCursor = pageA.nextCursor!;
+    expect(staleCursor.canonicalId).toBe(hubAId);
+
+    // Replaying hub A's cursor against hub B must fail loudly, not
+    // silently filter B's neighbors by A's weight (which would drop B's
+    // weight-1.0 neighbour with no error and hasMore: false).
+    await expect(getNeighbors(db, hubBId, { limit: 1, cursor: staleCursor })).rejects.toBeInstanceOf(InvalidLookupOptionError);
+
+    // Sanity: without the stale cursor, B's own top neighbour is returned correctly.
+    const freshB = await getNeighbors(db, hubBId, { limit: 1 });
+    expect(freshB.neighbors[0]!.nodeId).toBe(nodeMap.get("b1")!);
+  });
+
+  // --- bd-hmd.1 review: regression coverage requested for guarantees with no guard ---
+
+  it("(regression) ties spanning multiple page boundaries: a 10-way tie block paged 3-at-a-time collects every neighbour exactly once, in the same order as a single unpaged fetch", async () => {
+    const run = await newRun();
+    const specs: Omit<NodeInput, "sourceSystem">[] = [{ nodeType: "doc", externalId: "tie-hub2", title: "Hub", content: "c" }];
+    for (let i = 1; i <= 10; i++) specs.push({ nodeType: "doc", externalId: `tie2-n${i}`, title: `Neighbor ${i}`, content: "c" });
+    const nodeMap = await makeNodes(run, specs);
+    const hubId = nodeMap.get("tie-hub2")!;
+    const edgeSpecs: Omit<EdgeInput, "sourceSystem">[] = [];
+    for (let i = 1; i <= 10; i++) edgeSpecs.push({ srcId: hubId, dstId: nodeMap.get(`tie2-n${i}`)!, edgeType: "e", weight: 0.5 });
+    await makeEdges(run, edgeSpecs);
+
+    const groundTruth = await getNeighbors(db, hubId, { limit: 10 });
+    expect(groundTruth.hasMore).toBe(false);
+    expect(groundTruth.neighbors).toHaveLength(10);
+
+    const collected: string[] = [];
+    let cursor: NeighborsCursor | null = null;
+    let pageCount = 0;
+    for (;;) {
+      // Page size 3 against a 10-way tie: boundaries fall at 3/6/9, so
+      // every page but the last splits the tied block mid-tie.
+      const page = await getNeighbors(db, hubId, { limit: 3, cursor });
+      collected.push(...page.neighbors.map((n) => n.nodeId));
+      pageCount++;
+      if (!page.hasMore) break;
+      cursor = page.nextCursor;
+      if (pageCount > 10) throw new Error("pagination did not terminate");
+    }
+
+    expect(pageCount).toBe(4); // 3 + 3 + 3 + 1
+    expect(collected).toHaveLength(10);
+    expect(new Set(collected).size).toBe(10);
+    expect(collected).toEqual(groundTruth.neighbors.map((n) => n.nodeId));
+  });
+
+  it("(regression) a cursor pointing past a since-deleted edge still paginates correctly — the keyset predicate compares values, not row existence", async () => {
+    const run = await newRun();
+    const nodeMap = await makeNodes(run, [
+      { nodeType: "doc", externalId: "del-hub", title: "Hub", content: "c" },
+      { nodeType: "doc", externalId: "d1", title: "D1", content: "c" },
+      { nodeType: "doc", externalId: "d2", title: "D2", content: "c" },
+      { nodeType: "doc", externalId: "d3", title: "D3", content: "c" },
+      { nodeType: "doc", externalId: "d4", title: "D4", content: "c" },
+    ]);
+    const hubId = nodeMap.get("del-hub")!;
+    await makeEdges(run, [
+      { srcId: hubId, dstId: nodeMap.get("d1")!, edgeType: "e", weight: 0.9 },
+      { srcId: hubId, dstId: nodeMap.get("d2")!, edgeType: "e", weight: 0.7 },
+      { srcId: hubId, dstId: nodeMap.get("d3")!, edgeType: "e", weight: 0.5 },
+      { srcId: hubId, dstId: nodeMap.get("d4")!, edgeType: "e", weight: 0.3 },
+    ]);
+
+    const page1 = await getNeighbors(db, hubId, { limit: 2 });
+    expect(page1.neighbors.map((n) => n.externalId)).toEqual(["d1", "d2"]);
+    expect(page1.hasMore).toBe(true);
+    const staleCursor = page1.nextCursor!; // minted from d2's row
+
+    // Delete the edge d2's row was built from — the cursor's values
+    // (weight/nodeId/edgeId) now name a row that no longer exists.
+    const d2EdgeId = page1.neighbors[1]!.edgeId;
+    await db.delete(edges).where(inArray(edges.id, [d2EdgeId]));
+
+    const page2 = await getNeighbors(db, hubId, { limit: 2, cursor: staleCursor });
+    expect(page2.neighbors.map((n) => n.externalId)).toEqual(["d3", "d4"]);
+    expect(page2.hasMore).toBe(false);
   });
 });

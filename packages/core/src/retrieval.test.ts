@@ -1,4 +1,4 @@
-import { inArray } from "drizzle-orm";
+import { inArray, sql } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database } from "@breakdown/db";
@@ -10,7 +10,16 @@ import { openIngestRun, type IngestRunHandle } from "./ingest-runs.js";
 import { mergeNodes } from "./merge.js";
 import type { NodeInput } from "./nodes.js";
 import { upsertNodes } from "./nodes.js";
-import { buildRetrievalQuery, getStoreSummary, retrieve, type BuildRetrievalQueryParams } from "./retrieval.js";
+import {
+  buildRetrievalQuery,
+  DEFAULT_DECAY,
+  DEFAULT_MAX_DEPTH,
+  DEFAULT_MIN_RELEVANCE,
+  DEFAULT_SEED_LIMIT,
+  getStoreSummary,
+  retrieve,
+  type BuildRetrievalQueryParams,
+} from "./retrieval.js";
 import { connectTestDb, type TestPool, uniqueSuffix } from "./test-helpers.js";
 
 let pool: TestPool;
@@ -758,6 +767,91 @@ describe("retrieve — degree", () => {
     const lonely = result.nodes.find((n) => n.id === lonelyId)!;
     expect(lonely).toBeDefined();
     expect(lonely.degree).toBe(0);
+  });
+
+  // --- bd-hmd.1 review: regression coverage requested for guarantees with no guard ---
+
+  it("(regression) a node reached via both the survivor's own edge and its merged-away alias's edge counts once, not twice", async () => {
+    const run = await newRun();
+    const nodeMap = await makeNodes(run, [
+      { nodeType: "doc", externalId: "survivor", title: "Degree dual survivor", content: "degree dual connection unique phrase omega" },
+      { nodeType: "doc", externalId: "loser", title: "Degree dual loser", content: "unrelated content" },
+      { nodeType: "doc", externalId: "far", title: "Far", content: "unrelated" },
+    ]);
+    const survivorId = nodeMap.get("survivor")!;
+    const loserId = nodeMap.get("loser")!;
+    const farId = nodeMap.get("far")!;
+    // The SAME far node is connected from both the survivor and the
+    // (about to be merged-away) loser — after the merge this must count
+    // once, not twice, per COUNT(DISTINCT far.canonical_id) deduping
+    // across the two UNION ALL branches.
+    await makeEdges(run, [
+      { srcId: survivorId, dstId: farId, edgeType: "rel", weight: 0.8 },
+      { srcId: loserId, dstId: farId, edgeType: "rel2", weight: 0.6 },
+    ]);
+    await mergeNodes(db, loserId, survivorId);
+
+    const result = await retrieve(db, "degree dual connection omega", { sourceSystems: [run.sourceSystem] });
+    if (result.mode === "empty") throw new Error("expected a found result");
+    const survivor = result.nodes.find((n) => n.id === survivorId)!;
+    expect(survivor.degree).toBe(1);
+  });
+
+  it("(regression) resolves via edges_dst_id_edge_type_idx, not a sequential scan of edges, when the kept set exceeds 100 nodes (previously measured only at 26 kept nodes)", async () => {
+    const run = await newRun();
+    const NEIGHBOR_COUNT = 200;
+    const NODE_BUDGET = 150;
+    const specs: Omit<NodeInput, "sourceSystem">[] = [
+      { nodeType: "doc", externalId: "hub", title: "Index regression hub", content: "index regression unique phrase psi" },
+    ];
+    for (let i = 1; i <= NEIGHBOR_COUNT; i++) {
+      specs.push({ nodeType: "doc", externalId: `ixnbr${i}`, title: `Index neighbor ${i}`, content: `index neighbor ${i}` });
+    }
+    const nodeMap = await makeNodes(run, specs);
+    const hubId = nodeMap.get("hub")!;
+    const edgeSpecs: Omit<EdgeInput, "sourceSystem">[] = [];
+    for (let i = 1; i <= NEIGHBOR_COUNT; i++) {
+      edgeSpecs.push({ srcId: hubId, dstId: nodeMap.get(`ixnbr${i}`)!, edgeType: "hub_edge", weight: i / NEIGHBOR_COUNT });
+    }
+    await makeEdges(run, edgeSpecs);
+
+    const result = await retrieve(db, "index regression psi", { fanout: NEIGHBOR_COUNT, nodeBudget: NODE_BUDGET, sourceSystems: [run.sourceSystem] });
+    if (result.mode === "empty") throw new Error("expected a found result");
+    expect(result.nodeCount).toBeGreaterThanOrEqual(100);
+    expect(hubId).toBeTruthy();
+
+    const params: BuildRetrievalQueryParams = {
+      seedStrategy: "exact",
+      queryText: "index regression psi",
+      seedLimit: DEFAULT_SEED_LIMIT,
+      minRelevance: DEFAULT_MIN_RELEVANCE,
+      maxDepth: DEFAULT_MAX_DEPTH,
+      fanout: NEIGHBOR_COUNT,
+      nodeBudget: NODE_BUDGET,
+      decay: DEFAULT_DECAY,
+      nodeTypes: null,
+      sourceSystems: [run.sourceSystem],
+      edgeTypes: null,
+      updatedSince: null,
+    };
+
+    await db.transaction(async (tx) => {
+      // Forces the planner off sequential scans wherever an index
+      // exists, so this holds deterministically regardless of the live
+      // table's size at test time — a fast, environment-independent
+      // proxy for "this predicate is still sargable via our two edge
+      // indexes," not a cost-based measurement (that was done by hand at
+      // 20k/24k-row scale; see docs/retrieval-query-design.md).
+      await tx.execute(sql`SET LOCAL enable_seqscan = off`);
+      const explain = await tx.execute<{ "QUERY PLAN": string }>(sql`EXPLAIN (ANALYZE, BUFFERS) ${buildRetrievalQuery(params)}`);
+      const planText = explain.rows.map((r) => r["QUERY PLAN"]).join("\n");
+      expect(planText).not.toContain("Seq Scan on edges");
+      // edges_dst_id_edge_type_idx is the only index covering dst_id —
+      // unlike the src_id branch, which could also legitimately use the
+      // (src_id, dst_id, edge_type, source_system) unique index, so this
+      // is the one index name safe to assert on by exact text.
+      expect(planText).toContain("edges_dst_id_edge_type_idx");
+    });
   });
 });
 
