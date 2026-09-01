@@ -186,18 +186,42 @@ describe("retrieve", () => {
     }
   });
 
-  it("matches the positive term and excludes documents containing the excluded term (spec: Phrase and exclusion syntax)", async () => {
+  it("supports exclusion, quoted phrase, and alternation syntax (spec: Phrase and exclusion syntax)", async () => {
     const run = await newRun();
     await makeNodes(run, [
       { nodeType: "doc", externalId: "n1", title: "Postgres notes", content: "postgres is a relational database" },
       { nodeType: "doc", externalId: "n2", title: "Postgres and supabase", content: "postgres paired with supabase for hosting" },
+      // Contains both "relational" and "database" as separate, non-adjacent
+      // words — the negative control for the quoted-phrase assertion below:
+      // a phrase match requires adjacency, not just co-occurrence.
+      { nodeType: "doc", externalId: "n3", title: "Database theory", content: "the theory is relational but this is not directly about a database" },
     ]);
 
-    const result = await retrieve(db, "postgres -supabase", { sourceSystems: [run.sourceSystem] });
-    if (result.mode === "empty") throw new Error("expected a found result");
-    const externalIds = result.nodes.map((n) => n.externalId);
-    expect(externalIds).toContain("n1");
-    expect(externalIds).not.toContain("n2");
+    // Exclusion: matches the positive term, excludes documents containing
+    // the excluded term.
+    const exclusion = await retrieve(db, "postgres -supabase", { sourceSystems: [run.sourceSystem] });
+    if (exclusion.mode === "empty") throw new Error("expected a found result");
+    const exclusionIds = exclusion.nodes.map((n) => n.externalId);
+    expect(exclusionIds).toContain("n1");
+    expect(exclusionIds).not.toContain("n2");
+
+    // Quoted phrase: requires the terms adjacent and in order, so it
+    // matches n1 ("relational database") but not n3 (same two words,
+    // apart).
+    const phrase = await retrieve(db, '"relational database"', { sourceSystems: [run.sourceSystem] });
+    if (phrase.mode === "empty") throw new Error("expected a found result");
+    const phraseIds = phrase.nodes.map((n) => n.externalId);
+    expect(phraseIds).toContain("n1");
+    expect(phraseIds).not.toContain("n3");
+
+    // Alternation: unions documents matching either term, so it matches
+    // n1 (via "relational") and n2 (via "hosting") even though neither
+    // contains both terms.
+    const alternation = await retrieve(db, "relational or hosting", { sourceSystems: [run.sourceSystem] });
+    if (alternation.mode === "empty") throw new Error("expected a found result");
+    const alternationIds = alternation.nodes.map((n) => n.externalId);
+    expect(alternationIds).toContain("n1");
+    expect(alternationIds).toContain("n2");
   });
 
   it("returns an empty seed set without error when every candidate scores below minRelevance (spec: Query below the relevance floor)", async () => {
@@ -284,6 +308,30 @@ describe("retrieve", () => {
     expect(externalIds).toEqual(new Set(["n1", "n2", "n3"]));
   });
 
+  it("succeeds at maxDepth: 3, the hard ceiling — nothing else drives that bound to its actual limit", async () => {
+    const run = await newRun();
+    const nodeMap = await makeNodes(run, [
+      { nodeType: "doc", externalId: "n1", title: "Ceiling chain root", content: "ceiling chain root unique phrase omega" },
+      { nodeType: "doc", externalId: "n2", title: "Ceiling hop one", content: "ceiling hop one" },
+      { nodeType: "doc", externalId: "n3", title: "Ceiling hop two", content: "ceiling hop two" },
+      { nodeType: "doc", externalId: "n4", title: "Ceiling hop three", content: "ceiling hop three" },
+      { nodeType: "doc", externalId: "n5", title: "Ceiling hop four", content: "ceiling hop four" },
+    ]);
+    await makeEdges(run, [
+      { srcId: nodeMap.get("n1")!, dstId: nodeMap.get("n2")!, edgeType: "next", weight: 1 },
+      { srcId: nodeMap.get("n2")!, dstId: nodeMap.get("n3")!, edgeType: "next", weight: 1 },
+      { srcId: nodeMap.get("n3")!, dstId: nodeMap.get("n4")!, edgeType: "next", weight: 1 },
+      { srcId: nodeMap.get("n4")!, dstId: nodeMap.get("n5")!, edgeType: "next", weight: 1 },
+    ]);
+
+    const result = await retrieve(db, "ceiling chain root omega", { maxDepth: 3, nodeBudget: 40, sourceSystems: [run.sourceSystem] });
+    if (result.mode === "empty") throw new Error("expected a found result");
+    const externalIds = new Set(result.nodes.map((n) => n.externalId));
+    // Exactly one hop further than the maxDepth: 2 test above — n4 (depth
+    // 3) is now included, n5 (depth 4) still is not.
+    expect(externalIds).toEqual(new Set(["n1", "n2", "n3", "n4"]));
+  });
+
   it("keeps exactly nodeBudget nodes, retaining the highest scoring ones, when the neighborhood is larger (spec: Node budget reached)", async () => {
     const run = await newRun();
     const specs: Omit<NodeInput, "sourceSystem">[] = [
@@ -348,6 +396,34 @@ describe("retrieve", () => {
     expect(neighbors).toHaveLength(3);
     const externalIds = new Set(neighbors.map((n) => n.externalId));
     expect(externalIds).toEqual(new Set(["nbr12", "nbr11", "nbr10"]));
+  });
+
+  it("caps a hub node's neighbors at fanout even with hundreds of candidates (spec: Hub node with many neighbors, at review-tested scale — 500 neighbours against a cap of 10)", async () => {
+    const run = await newRun();
+    const NEIGHBOR_COUNT = 500;
+    const FANOUT = 10;
+    const specs: Omit<NodeInput, "sourceSystem">[] = [
+      { nodeType: "doc", externalId: "hub", title: "Mega hub root", content: "mega hub root unique phrase omicron" },
+    ];
+    for (let i = 1; i <= NEIGHBOR_COUNT; i++) {
+      specs.push({ nodeType: "doc", externalId: `mnbr${i}`, title: `Mega neighbor ${i}`, content: `mega neighbor ${i}` });
+    }
+    const nodeMap = await makeNodes(run, specs);
+    const edgeSpecs: Omit<EdgeInput, "sourceSystem">[] = [];
+    for (let i = 1; i <= NEIGHBOR_COUNT; i++) {
+      // Distinct weights so the top-FANOUT set is unambiguous.
+      edgeSpecs.push({ srcId: nodeMap.get("hub")!, dstId: nodeMap.get(`mnbr${i}`)!, edgeType: "hub_edge", weight: i / NEIGHBOR_COUNT });
+    }
+    await makeEdges(run, edgeSpecs);
+
+    const result = await retrieve(db, "mega hub root omicron", { fanout: FANOUT, nodeBudget: 40, sourceSystems: [run.sourceSystem] });
+    if (result.mode === "empty") throw new Error("expected a found result");
+    const neighbors = result.nodes.filter((n) => n.externalId.startsWith("mnbr"));
+    expect(neighbors).toHaveLength(FANOUT);
+    const expectedTop = new Set(
+      Array.from({ length: FANOUT }, (_, i) => `mnbr${NEIGHBOR_COUNT - i}`), // mnbr500..mnbr491: highest weights
+    );
+    expect(new Set(neighbors.map((n) => n.externalId))).toEqual(expectedTop);
   });
 
   it("returns byte-identical serialized results for the same query run twice, compared as the envelope itself rather than a re-sorted copy (spec: Repeated identical query; extra test 3)", async () => {
@@ -428,6 +504,26 @@ describe("retrieve", () => {
     expect(externalIds).toEqual(new Set(["n1"]));
   });
 
+  it("excludes a text-matching node from seed selection itself when its type is filtered out, not merely from expansion afterward", async () => {
+    const run = await newRun();
+    await makeNodes(run, [
+      { nodeType: "excluded-type", externalId: "n1", title: "Seed selection filter probe", content: "seed selection filter probe unique phrase pi" },
+      { nodeType: "kept-type", externalId: "n2", title: "Unrelated kept node", content: "completely unrelated content" },
+    ]);
+
+    const result = await retrieve(db, "seed selection filter probe pi", {
+      nodeTypes: ["kept-type"],
+      sourceSystems: [run.sourceSystem],
+    });
+    // n1 is the only node whose content matches the query text at all,
+    // but its type is filtered out. There is no edge here for traversal
+    // to run through — n1 can only be excluded by the filter applying
+    // inside seed SELECTION itself (the `seeds` CTE), not by a later
+    // expansion-only filter, so the whole call must come back empty
+    // rather than returning n1 as an (unfiltered) seed.
+    expect(result).toEqual({ mode: "empty", triedModes: ["exact", "fuzzy"], nodes: [], edges: [] });
+  });
+
   it("returns an empty seed set, not an arbitrary slice of the store, for a query with only an exclusion term (spec: Query matching only excluded terms)", async () => {
     const run = await newRun();
     await makeNodes(run, [{ nodeType: "doc", externalId: "n1", title: "Some content", content: "some content without the excluded term" }]);
@@ -486,16 +582,68 @@ describe("retrieve", () => {
     expect(result.nodes.some((n) => n.id === loserId)).toBe(false);
   });
 
+  it("returns the survivor as a seed via its merged-away alias when only the loser's content matches (proves the fold, not coincidence — the survivor's own content does not match)", async () => {
+    const run = await newRun();
+    const nodeMap = await makeNodes(run, [
+      { nodeType: "doc", externalId: "survivor", title: "Merge fold survivor only", content: "gardening and cooking tips, nothing about the search term at all" },
+      { nodeType: "doc", externalId: "loser", title: "Merge fold loser only", content: "merge fold loser-only unique phrase rho" },
+    ]);
+    const survivorId = nodeMap.get("survivor")!;
+    const loserId = nodeMap.get("loser")!;
+    await mergeNodes(db, loserId, survivorId);
+
+    const result = await retrieve(db, "merge fold loser-only rho", { sourceSystems: [run.sourceSystem] });
+    if (result.mode === "empty") throw new Error("expected a found result");
+    const matches = result.nodes.filter((n) => n.id === survivorId);
+    expect(matches).toHaveLength(1);
+    const match = matches[0]!;
+    expect(match.isSeed).toBe(true);
+    // The row that actually matched is the loser, not the survivor's own
+    // (unrelated) content — this is what distinguishes a real fold from
+    // the survivor happening to match on its own.
+    expect(match.matchedNodeId).toBe(loserId);
+    expect(match.snippet).toContain("[[");
+    expect(result.nodes.some((n) => n.id === loserId)).toBe(false);
+  });
+
+  it("excludes a merge-induced self-loop from result_edges: L -[rel]-> S folds to a self-reference once L is merged into S, and that must not be returned", async () => {
+    const run = await newRun();
+    const nodeMap = await makeNodes(run, [
+      { nodeType: "doc", externalId: "loser", title: "Self loop loser", content: "self loop unique phrase sigma loser side" },
+      { nodeType: "doc", externalId: "survivor", title: "Self loop survivor", content: "self loop unique phrase sigma survivor side" },
+    ]);
+    const loserId = nodeMap.get("loser")!;
+    const survivorId = nodeMap.get("survivor")!;
+    await makeEdges(run, [{ srcId: loserId, dstId: survivorId, edgeType: "mentions", weight: 0.9 }]);
+    await mergeNodes(db, loserId, survivorId);
+
+    // Query matches the survivor directly, so the survivor is a seed and
+    // the (now folded) loser->survivor edge is in scope for result_edges
+    // via the alias probe on the survivor's own kept_probe row.
+    const result = await retrieve(db, "self loop sigma survivor", { sourceSystems: [run.sourceSystem] });
+    if (result.mode === "empty") throw new Error("expected a found result");
+    expect(result.nodes.some((n) => n.id === survivorId)).toBe(true);
+    const selfLoops = result.edges.filter((e) => e.srcNodeId === e.dstNodeId);
+    expect(selfLoops).toEqual([]);
+  });
+
   it("rejects the empty/whitespace-only query with EmptyQueryError, before any SQL runs", async () => {
     await expect(retrieve(db, "   ")).rejects.toBeInstanceOf(EmptyQueryError);
   });
 
-  it("rejects a query that parses to zero tsquery nodes (stopwords only) with EmptyQueryError", async () => {
+  it("rejects a query that parses to zero tsquery nodes (stopwords only) with EmptyQueryError, in exactly one statement", async () => {
     // "the of and" are all English stopwords: websearch_to_tsquery parses
     // this down to zero lexemes (numnode = 0) — see
     // docs/retrieval-query-design.md, "Implementation notes", and the
-    // EmptyQueryError doc comment in errors.ts.
-    await expect(retrieve(db, "the of and")).rejects.toBeInstanceOf(EmptyQueryError);
+    // EmptyQueryError doc comment in errors.ts. Detection rides on the
+    // exact statement's own envelope (`query_node_count`), specifically
+    // so this does not cost a preliminary round trip — asserted here at
+    // the driver level, not just by reading the SQL.
+    const { result: rejection, count } = await countExecuteCalls(() =>
+      retrieve(db, "the of and").catch((err: unknown) => err),
+    );
+    expect(rejection).toBeInstanceOf(EmptyQueryError);
+    expect(count).toBe(1);
   });
 
   it("rejects a non-positive minRelevance with InvalidRetrievalOptionError, before any SQL runs", async () => {

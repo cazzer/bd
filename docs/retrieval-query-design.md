@@ -160,6 +160,15 @@ result_edges AS (
   JOIN edges e ON e.src_id = ANY (kp.probe_ids)
   JOIN nodes dn ON dn.id = e.dst_id
   WHERE COALESCE(dn.merged_into, dn.id) IN (SELECT node_id FROM kept)
+    -- Merge-induced self-loop guard, same shape as `c.canonical_id <>
+    -- f.node_id` in the LATERAL above: if L -[rel]-> S existed and L was
+    -- later merged into S, this fold produces src_node_id === dst_node_id
+    -- (both S) without this line. The LATERAL guards traversal; this
+    -- guards the induced-subgraph edge listing, which the LATERAL's guard
+    -- does not reach since result_edges is built independently from
+    -- kept_probe, not from expand. (Found in review of bd-vt2.4's
+    -- implementation — the raw edge is unaffected in the database.)
+    AND COALESCE(dn.merged_into, dn.id) <> kp.node_id
     AND (:edge_types IS NULL OR e.edge_type = ANY(:edge_types))
 ),
 

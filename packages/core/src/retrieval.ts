@@ -385,6 +385,16 @@ result_edges AS (
   JOIN edges e ON e.src_id = ANY (kp.probe_ids)
   JOIN nodes dn ON dn.id = e.dst_id
   WHERE COALESCE(dn.merged_into, dn.id) IN (SELECT node_id FROM kept)
+    -- Merge-induced self-loop guard: if L -[rel]-> S existed and L was
+    -- later merged into S, this fold would otherwise produce
+    -- src_node_id === dst_node_id === S — an edge saying a node relates
+    -- to itself, which teaches a consuming agent nothing. The traversal
+    -- LATERAL guards the identical shape via \`c.canonical_id <> f.node_id\`
+    -- (see the recursive step above) — this is that guard's counterpart
+    -- for the induced-subgraph edge listing. The raw edge is untouched in
+    -- the database — raw_src_id/raw_dst_id above still carry it — this
+    -- only excludes it from the returned result.
+    AND COALESCE(dn.merged_into, dn.id) <> kp.node_id
     AND (${edgeTypesArr} IS NULL OR e.edge_type = ANY(${edgeTypesArr}))
 ),
 
