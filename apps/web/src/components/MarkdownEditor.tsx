@@ -34,10 +34,20 @@
 // `<img>`, `<iframe>`, or raw-HTML-passthrough node at all, so those tags
 // contribute no node; their text content, if any, is extracted as inert
 // text, never executed). The one schema mark that touches a URL, Link, is
-// tiptap's default build, whose `isAllowedUri` allow-lists
-// http/https/ftp/ftps/mailto/tel/callto/sms/cid/xmpp and strips any other
-// `href` (so `javascript:`/`data:` links are dropped, not rendered) — see
-// this ticket's report for the verbatim source checked.
+// tiptap's default build (`@tiptap/extension-link`, read directly rather
+// than assumed). Its `isAllowedUri` guard (allow-listing
+// http/https/ftp/ftps/mailto/tel/callto/sms/cid/xmpp) is a RENDER-time
+// guarantee, not a parse-time one — `renderHTML` calls it unconditionally
+// and strips any `href` that fails, regardless of how that href got into
+// the document: a markdown-syntax link's own `parseMarkdown` handler
+// builds the link mark with whatever href was written, no filtering at
+// all (a `javascript:` URL parses in just fine); the raw-HTML `parseHTML`
+// path happens to also gate on `isAllowedUri`, but that is redundant with
+// render, not a second load-bearing check — if `renderHTML`'s gate were
+// ever removed, an unfiltered href from the markdown-syntax path would
+// render live. The one guarantee actually being relied on here is
+// render-time and unconditional, which is what makes it hold regardless
+// of which parse path produced the href.
 //
 // Once parsed, EVERY node/mark is rendered by ProseMirror's own `toDOM`
 // for that type — real `document.createElement`/`textContent` calls the

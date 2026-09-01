@@ -5,16 +5,24 @@
 //     unchanged
 //   - "Editing an editable node": the new content is searchable
 //   - "Creating a standalone note": findable by search despite no edges
+//   - "Connecting two nodes by hand" / "Reweighting an edge": a full
+//     assert -> confirm-via-getNeighbors -> reweight -> retract round
+//     trip through the router (review follow-up: write.test.ts only
+//     covers assertEdge/retractEdge/reweightEdge's REJECTION paths — a
+//     bad weight, a nonexistent edge — so nothing anywhere drove a
+//     successful sequence through Zod validation and mapCoreError for
+//     these three procedures before this).
 //
 // packages/core/src/human-writes.test.ts already covers the underlying
 // write functions in isolation (annotate leaves content unchanged,
-// updateNodeContent refuses a repo-sourced node, etc. — trusted, not
-// re-proven here per this ticket's "trust internal code" boundary).
-// These tests instead prove the same behaviour holds through the actual
-// tRPC router the UI calls — Zod validation, mapCoreError, and
-// server/dto.ts's `isEditable` flag — which is the boundary the client
-// actually depends on and that this ticket's own code (dto.ts,
-// routers/read.ts's new `listUnlinkedNotes`) adds.
+// updateNodeContent refuses a repo-sourced node, assert/retract/reweight
+// edge semantics, etc. — trusted, not re-proven here per this ticket's
+// "trust internal code" boundary). These tests instead prove the same
+// behaviour holds through the actual tRPC router the UI calls — Zod
+// validation, mapCoreError, and server/dto.ts's `isEditable` flag —
+// which is the boundary the client actually depends on and that this
+// ticket's own code (dto.ts, routers/read.ts's new `listUnlinkedNotes`)
+// adds.
 //
 // Fixtures and cleanup follow packages/core/src/human-writes.test.ts's
 // established convention exactly: every fixture/write is tracked by id
@@ -157,5 +165,46 @@ describe("a standalone note is findable despite having no edges (graph-explorer/
 
     const result = await caller().listUnlinkedNotes();
     expect(result.notes.some((n) => n.id === created.id)).toBe(true);
+  });
+});
+
+describe("a hand edge's full round trip through the router (graph-explorer/spec.md, 'Connecting two nodes by hand' / 'Reweighting an edge')", () => {
+  it("assert -> confirmed via getNeighbors -> reweight -> confirmed -> retract -> confirmed gone", async () => {
+    const srcId = await makeRepoFixtureNode("hand-edge fixture src");
+    const dstId = await makeRepoFixtureNode("hand-edge fixture dst");
+    const edgeType = `bd-hmd6-e2e-relates-to-${randomUUID()}`;
+
+    // Assert, through the router — DetailPanel.tsx's ConnectForm.
+    const asserted = await caller().assertEdge({ srcId, dstId, edgeType, weight: 0.65 });
+    createdRunIds.push(asserted.ingestRunId);
+    expect(asserted.action).toBe("created");
+
+    // Confirmed via getNeighbors — the same read path the canvas uses to
+    // draw it: a `human`-sourced edge to dstId at the asserted weight.
+    // `weight` is checked separately with `toBeCloseTo`, not folded into
+    // the `toMatchObject` above: `edges.weight` is Postgres `real`
+    // (float4, packages/db/src/schema.ts), so 0.65 round-trips as
+    // 0.6499999761581421 — an exact-equality check on it would be
+    // asserting on float4 rounding, not on this router's behaviour.
+    const afterAssert = await caller().getNeighbors({ id: srcId });
+    const neighborAfterAssert = afterAssert.neighbors.find((n) => n.nodeId === dstId && n.edgeType === edgeType);
+    expect(neighborAfterAssert).toMatchObject({ edgeSourceSystem: "human", direction: "outgoing" });
+    expect(neighborAfterAssert?.weight).toBeCloseTo(0.65, 5);
+
+    // Reweight, through the router — DetailPanel.tsx's EdgeRow.
+    const reweighted = await caller().reweightEdge({ srcId, dstId, edgeType, weight: 0.1 });
+    createdRunIds.push(reweighted.ingestRunId);
+    expect(reweighted.weight).toBeCloseTo(0.1, 5);
+
+    const afterReweight = await caller().getNeighbors({ id: srcId });
+    const neighborAfterReweight = afterReweight.neighbors.find((n) => n.nodeId === dstId && n.edgeType === edgeType);
+    expect(neighborAfterReweight?.weight).toBeCloseTo(0.1, 5);
+
+    // Retract, through the router — DetailPanel.tsx's EdgeRow "Retract".
+    const retracted = await caller().retractEdge({ srcId, dstId, edgeType });
+    expect(retracted.retracted).toBe(true);
+
+    const afterRetract = await caller().getNeighbors({ id: srcId });
+    expect(afterRetract.neighbors.some((n) => n.nodeId === dstId && n.edgeType === edgeType)).toBe(false);
   });
 });

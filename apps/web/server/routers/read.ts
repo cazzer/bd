@@ -45,6 +45,7 @@ import {
   MAX_NODE_BUDGET,
   MAX_RECENT_NODES_LIMIT,
   MAX_SEED_LIMIT,
+  NodeNotFoundError,
   NOTE_NODE_TYPE,
   retrieve,
   type NeighborsCursor,
@@ -272,7 +273,16 @@ const getStoreSummaryProcedure = publicProcedure.input(getStoreSummaryInputSchem
 // total could in principle have an even-older, never-updated note fall
 // outside this scan; `scanTruncated` below reports that possibility
 // rather than hiding it.
-
+//
+// `noteCandidates` is a SNAPSHOT (from `getStoreSummary`, above); the
+// per-candidate `getNeighbors` calls below happen after it, so a note
+// deleted or merged away in between (another write racing this read —
+// concretely observed as a test-suite flake: concurrently-run test files
+// sharing one database, one deleting a human-authored note this scan had
+// already snapshotted) makes `getNeighbors` throw `NodeNotFoundError`.
+// That candidate is simply no longer a real answer to "what's unlinked"
+// — skipped, not a reason to fail the whole listing for every OTHER
+// candidate that's still perfectly fine to report.
 export const listUnlinkedNotesInputSchema = z.object({}).optional();
 
 const listUnlinkedNotesProcedure = publicProcedure.input(listUnlinkedNotesInputSchema).query(async ({ ctx }) => {
@@ -291,6 +301,9 @@ const listUnlinkedNotesProcedure = publicProcedure.input(listUnlinkedNotesInputS
     try {
       neighbors = await getNeighbors(ctx.db, note.id, { limit: 1 });
     } catch (err) {
+      if (err instanceof NodeNotFoundError) {
+        continue; // raced away since the snapshot above — see this block's own header
+      }
       throw mapCoreError("listUnlinkedNotes", err);
     }
     if (neighbors.neighbors.length === 0) {
