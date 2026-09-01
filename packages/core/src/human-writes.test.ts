@@ -25,8 +25,8 @@ import {
   updateNodeContent,
 } from "./human-writes.js";
 import { closeIngestRun, getIngestRunContents, openIngestRun, type IngestRunHandle } from "./ingest-runs.js";
-import { upsertEdges } from "./edges.js";
-import { upsertNodes } from "./nodes.js";
+import { unsafeBuildUpsertEdgesQuery, unsafePrepareEdges, upsertEdges } from "./edges.js";
+import { DEFAULT_MAX_CONTENT_LENGTH, DEFAULT_MAX_METADATA_LENGTH, unsafeBuildUpsertNodesQuery, unsafePrepareNodes, upsertNodes } from "./nodes.js";
 import { connectTestDb, type TestPool, uniqueSuffix } from "./test-helpers.js";
 
 let pool: TestPool;
@@ -74,6 +74,24 @@ async function newFixtureRun(label: string): Promise<IngestRunHandle> {
   const run = await openIngestRun(db, `human-writes-test-${label}-${uniqueSuffix()}`);
   createdRunIds.push(run.id);
   return run;
+}
+
+/**
+ * Counts `ingest_runs` rows attributed to `HUMAN_SOURCE_SYSTEM` with zero
+ * node/edge counts — the exact signature a rejected human write left
+ * behind before the review fix (validate/check-existence, then open the
+ * run only if the write is actually going to be attempted). Used as a
+ * before/after delta around a call expected to fail, never as an
+ * absolute count — this module is the only writer of
+ * `source_system='human'` rows anywhere in the test suite, so a delta of
+ * zero is a precise, non-flaky assertion that call opened no new one.
+ */
+async function countEmptyHumanRuns(): Promise<number> {
+  const rows = await db
+    .select({ id: ingestRuns.id })
+    .from(ingestRuns)
+    .where(and(eq(ingestRuns.sourceSystem, HUMAN_SOURCE_SYSTEM), eq(ingestRuns.nodeCount, 0), eq(ingestRuns.edgeCount, 0)));
+  return rows.length;
 }
 
 /**
@@ -148,9 +166,14 @@ describe("createNote", () => {
     expect(a.id).not.toBe(b.id);
   });
 
-  it("rejects oversized content the same way upsertNodes does, and persists nothing", async () => {
+  it("rejects oversized content the same way upsertNodes does, persists nothing, and opens no ingest run", async () => {
     const oversized = "x".repeat(2_000_000);
+    const before = await countEmptyHumanRuns();
     await expect(createNote(db, { content: oversized })).rejects.toBeInstanceOf(ContentTooLargeError);
+    // Validation (unsafePrepareNodes) is pure and runs before
+    // withHumanIngestRun opens anything — a rejected write must not
+    // leave a permanent empty run in the audit trail (review fix).
+    expect(await countEmptyHumanRuns()).toBe(before);
   });
 
   it("rejects a control character in content the same way upsertNodes does", async () => {
@@ -226,29 +249,55 @@ describe("annotateNode", () => {
     expect(after?.contentHash).toBe(before?.contentHash);
   });
 
-  it("a failed annotation (missing target) leaves no orphan note behind", async () => {
+  it("a failed annotation (missing target) leaves no orphan note behind, and opens no ingest run", async () => {
     // A target id that is syntactically a uuid but doesn't exist: passes
-    // the boundary uuid-shape check, so the transaction actually opens
-    // and runs its existence check inside it, which throws
-    // NodeNotFoundError and aborts the transaction before the note
-    // insert — the same all-or-nothing guarantee that protects the
-    // (harder to trigger deterministically, since every field the edge
-    // insert uses is derived from already-validated data) case where the
-    // note insert succeeds but the edge insert fails afterward: either
-    // way, the whole db.transaction(...) callback throws, so Postgres
-    // rolls back everything the callback did, and no orphan note is ever
-    // visible to another transaction.
+    // the boundary uuid-shape check, so annotateNode's target-existence
+    // SELECT actually runs — and, since it runs before any ingest run
+    // opens (review fix: "open the run only once the write is going to
+    // be attempted"), finds nothing and throws NodeNotFoundError before
+    // any run, transaction, or insert happens at all.
     const bogusTarget = "00000000-0000-0000-0000-000000000000";
+    const before = await countEmptyHumanRuns();
 
     await expect(annotateNode(db, bogusTarget, { content: "orphan?" })).rejects.toBeInstanceOf(NodeNotFoundError);
 
     // No note was left behind carrying this call's (unique) content.
     const orphan = await db.select({ id: nodes.id }).from(nodes).where(eq(nodes.content, "orphan?"));
     expect(orphan).toHaveLength(0);
+    // And no permanent empty run was left in the audit trail either.
+    expect(await countEmptyHumanRuns()).toBe(before);
   });
 
   it("rejects a malformed target id before touching the database", async () => {
     await expect(annotateNode(db, "not-a-uuid", { content: "x" })).rejects.toBeInstanceOf(InvalidLookupIdError);
+  });
+
+  it("rejects oversized annotation content the same way createNote does, before opening a run", async () => {
+    const target = await makeFixtureNode("loader-fixture");
+    const before = await countEmptyHumanRuns();
+
+    await expect(annotateNode(db, target.id, { content: "x".repeat(2_000_000) })).rejects.toBeInstanceOf(ContentTooLargeError);
+
+    expect(await countEmptyHumanRuns()).toBe(before);
+    // The target itself was never touched.
+    const touching = await db.select({ id: edges.id }).from(edges).where(eq(edges.dstId, target.id));
+    expect(touching).toHaveLength(0);
+  });
+
+  it("rejects a control character in annotation content the same way createNote does", async () => {
+    const target = await makeFixtureNode("loader-fixture");
+
+    let thrown: unknown;
+    try {
+      await annotateNode(db, target.id, { content: `before${String.fromCharCode(0)}after` });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(InvalidNodeContentError);
+    expect((thrown as InvalidNodeContentError).field).toBe("content");
+
+    const touching = await db.select({ id: edges.id }).from(edges).where(eq(edges.dstId, target.id));
+    expect(touching).toHaveLength(0);
   });
 
   it("standalone note has no edges (contrast case)", async () => {
@@ -257,6 +306,64 @@ describe("annotateNode", () => {
     createdRunIds.push(note.ingestRunId);
     const edgeRows = await db.select({ id: edges.id }).from(edges).where(eq(edges.srcId, note.id));
     expect(edgeRows).toHaveLength(0);
+  });
+});
+
+describe("annotateNode's transaction mechanism (white-box)", () => {
+  it("rolls back a committed note insert when the edge insert genuinely fails with a real FK violation", async () => {
+    // Reproduces the shape annotateNode's own transaction uses, but calls
+    // the unsafe internals directly and skips the target-existence
+    // pre-check entirely — the point is to prove the ROLLBACK itself,
+    // deterministically, for the case that matters: a note insert that
+    // has already succeeded inside the transaction, followed by an edge
+    // insert that genuinely fails (a dstId with no backing row — the
+    // same FK violation the review's adversarial test forced). The
+    // public annotateNode() can no longer reach this path directly since
+    // its own existence check now runs before the transaction opens
+    // (correctly, per the fix above); this test exercises the mechanism
+    // that check is a fast-path in front of, not a replacement for.
+    const run = await newFixtureRun("white-box-rollback");
+    const bogusDst = "00000000-0000-0000-0000-000000000000";
+    const uniqueContent = `white-box-rollback-${uniqueSuffix()}`;
+
+    const preparedNote = unsafePrepareNodes(
+      [{ nodeType: NOTE_NODE_TYPE, sourceSystem: HUMAN_SOURCE_SYSTEM, externalId: `note-${uniqueSuffix()}`, content: uniqueContent }],
+      DEFAULT_MAX_CONTENT_LENGTH,
+      DEFAULT_MAX_METADATA_LENGTH,
+    );
+
+    let thrown: unknown;
+    let noteIdInsideTransaction: string | undefined;
+    try {
+      await db.transaction(async (tx) => {
+        const noteResult = await tx.execute<{ id: string }>(unsafeBuildUpsertNodesQuery(preparedNote, run.id));
+        noteIdInsideTransaction = noteResult.rows[0]?.id;
+        // Proves the note really did commit to this transaction's view
+        // before the edge insert is attempted — this isn't a no-op.
+        expect(noteIdInsideTransaction).toBeTruthy();
+
+        const preparedEdge = unsafePrepareEdges([
+          { srcId: noteIdInsideTransaction!, dstId: bogusDst, edgeType: ANNOTATES_EDGE_TYPE, sourceSystem: HUMAN_SOURCE_SYSTEM },
+        ]);
+        // No backing row for bogusDst: this INSERT fails with a genuine
+        // 23503 foreign_key_violation.
+        await tx.execute(unsafeBuildUpsertEdgesQuery(preparedEdge, run.id));
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(thrown).toBeDefined();
+    expect(noteIdInsideTransaction).toBeTruthy();
+
+    // The transaction rolled back: the note that visibly existed INSIDE
+    // the transaction is not visible from outside it at all.
+    const afterRollback = await db.select({ id: nodes.id }).from(nodes).where(eq(nodes.content, uniqueContent));
+    expect(afterRollback).toHaveLength(0);
+    if (noteIdInsideTransaction) {
+      const byId = await db.select({ id: nodes.id }).from(nodes).where(eq(nodes.id, noteIdInsideTransaction));
+      expect(byId).toHaveLength(0);
+    }
   });
 });
 
@@ -368,12 +475,14 @@ describe("updateNodeContent", () => {
     await expect(updateNodeContent(db, repoNodeId, { content: "hijacked" })).rejects.toBeInstanceOf(NodeNotEditableError);
   });
 
-  it("rejects oversized content on an editable node identically to any other writer", async () => {
+  it("rejects oversized content on an editable node identically to any other writer, and opens no ingest run", async () => {
     const note = await createNote(db, { content: "small" });
     createdNodeIds.push(note.id);
     createdRunIds.push(note.ingestRunId);
 
+    const before = await countEmptyHumanRuns();
     await expect(updateNodeContent(db, note.id, { content: "x".repeat(2_000_000) })).rejects.toBeInstanceOf(ContentTooLargeError);
+    expect(await countEmptyHumanRuns()).toBe(before);
   });
 
   it("throws NodeNotFoundError for a node that does not exist", async () => {
@@ -403,6 +512,29 @@ describe("assertEdge / retractEdge / reweightEdge", () => {
       .from(edges)
       .where(and(eq(edges.srcId, a.id), eq(edges.dstId, b.id), eq(edges.edgeType, "relates-to"), eq(edges.sourceSystem, HUMAN_SOURCE_SYSTEM)));
     expect(rows).toHaveLength(1);
+  });
+
+  it("assertEdge rejects an out-of-range weight, naming the edge, and opens no ingest run", async () => {
+    const a = await makeFixtureNode("edge-fixture");
+    const b = await makeFixtureNode("edge-fixture");
+
+    const before = await countEmptyHumanRuns();
+    let thrown: unknown;
+    try {
+      await assertEdge(db, { srcId: a.id, dstId: b.id, edgeType: "relates-to", weight: 999.9 });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(InvalidEdgeWeightError);
+    const err = thrown as InvalidEdgeWeightError;
+    expect(err.srcId).toBe(a.id);
+    expect(err.dstId).toBe(b.id);
+    // Validated (unsafePrepareEdges) before withHumanIngestRun opens
+    // anything — same review fix as createNote's oversized-content test.
+    expect(await countEmptyHumanRuns()).toBe(before);
+
+    const rows = await db.select({ id: edges.id }).from(edges).where(and(eq(edges.srcId, a.id), eq(edges.dstId, b.id)));
+    expect(rows).toHaveLength(0);
   });
 
   it("retracting a hand-authored edge leaves a loader's assertion of the same relationship intact", async () => {
@@ -465,6 +597,7 @@ describe("assertEdge / retractEdge / reweightEdge", () => {
     createdEdgeIds.push(asserted.id);
     createdRunIds.push(asserted.ingestRunId);
 
+    const before = await countEmptyHumanRuns();
     let thrown: unknown;
     try {
       await reweightEdge(db, { srcId: a.id, dstId: b.id, edgeType: "relates-to", weight: 1.5 });
@@ -477,15 +610,21 @@ describe("assertEdge / retractEdge / reweightEdge", () => {
     expect(err.dstId).toBe(b.id);
     expect(err.edgeType).toBe("relates-to");
     expect(err.message).toContain(a.id);
+    expect(await countEmptyHumanRuns()).toBe(before);
 
     const [row] = await db.select({ weight: edges.weight }).from(edges).where(eq(edges.id, asserted.id));
     expect(row?.weight).toBeCloseTo(1.0);
   });
 
-  it("throws EdgeNotFoundError reweighting an edge that was never asserted by a human", async () => {
+  it("throws EdgeNotFoundError reweighting an edge that was never asserted by a human, and opens no ingest run", async () => {
     const a = await makeFixtureNode("edge-fixture");
     const b = await makeFixtureNode("edge-fixture");
 
+    const before = await countEmptyHumanRuns();
     await expect(reweightEdge(db, { srcId: a.id, dstId: b.id, edgeType: "never-asserted", weight: 0.5 })).rejects.toBeInstanceOf(EdgeNotFoundError);
+    // The existence check (review fix) runs before withHumanIngestRun
+    // opens anything — a typo'd edge must not leave a permanent empty
+    // run in the audit trail on every call.
+    expect(await countEmptyHumanRuns()).toBe(before);
   });
 });

@@ -13,9 +13,21 @@
  * (`upsertNodes`/`upsertEdges`, or — for `annotateNode`, which needs a
  * note and its edge to commit or roll back together — the exact
  * validation/query-building internals those two functions are built on,
- * `prepareNodes`/`buildUpsertNodesQuery`/`prepareEdges`/
- * `buildUpsertEdgesQuery`). Nothing here hand-rolls an INSERT/UPDATE that
- * bypasses that validation, deduplication, or attribution.
+ * `unsafePrepareNodes`/`unsafeBuildUpsertNodesQuery`/`unsafePrepareEdges`/
+ * `unsafeBuildUpsertEdgesQuery`; see nodes.ts/edges.ts's "Unsafe internals"
+ * banners for why those carry that marker — this is the one file allowed
+ * to call them). Nothing here hand-rolls an INSERT/UPDATE that bypasses
+ * that validation, deduplication, or attribution.
+ *
+ * Every function validates (and, where relevant, confirms the node/edge
+ * it targets exists) before opening an ingest run — never after.
+ * `unsafePrepareNodes`/`unsafePrepareEdges` are pure, so a caller mistake
+ * (oversized content, a control character, a bogus id) is knowable
+ * without a database round trip, and a write that's certain to fail must
+ * not still leave a permanent empty `ingest_runs` row behind: in the UI,
+ * every rejected paste or typo'd edge would otherwise pollute the audit
+ * trail forever. `retractEdge` opens no run at all — a `DELETE` leaves no
+ * row to attribute one to.
  */
 
 import { randomUUID } from "node:crypto";
@@ -32,19 +44,19 @@ import {
   NodeUpsertFailedError,
 } from "./errors.js";
 import {
-  buildUpsertEdgesQuery,
-  prepareEdges,
+  unsafeBuildUpsertEdgesQuery,
+  unsafePrepareEdges,
   upsertEdges,
-  wrapEdgeWriteError,
+  unsafeWrapEdgeWriteError,
   type EdgeUpsertAction,
   type UpsertEdgeRow,
 } from "./edges.js";
 import { closeIngestRun, openIngestRun, type IngestRunHandle } from "./ingest-runs.js";
 import {
-  buildUpsertNodesQuery,
-  prepareNodes,
+  unsafeBuildUpsertNodesQuery,
+  unsafePrepareNodes,
   upsertNodes,
-  wrapNodeWriteError,
+  unsafeWrapNodeWriteError,
   DEFAULT_MAX_CONTENT_LENGTH,
   DEFAULT_MAX_METADATA_LENGTH,
   type NodeInput,
@@ -130,6 +142,15 @@ export interface CreateNoteResult {
  * For a note that annotates an existing node, use `annotateNode` instead
  * — it creates the note and its `annotates` edge together, in one
  * transaction.
+ *
+ * Validates (`unsafePrepareNodes`, pure — no database access) before
+ * opening an ingest run: a rejected write must not leave a permanent
+ * empty run in the audit trail. In the UI this matters concretely — every
+ * paste over the size cap would otherwise open-and-close a real
+ * `ingest_runs` row for nothing (`upsertNodes` below re-validates the
+ * same data as part of its own contract; that second pass is redundant
+ * but cheap, and keeps this going through the same public entry point
+ * every other node write does).
  */
 export async function createNote(db: Database, input: CreateNoteInput = {}): Promise<CreateNoteResult> {
   const externalId = generateNoteExternalId();
@@ -141,6 +162,7 @@ export async function createNote(db: Database, input: CreateNoteInput = {}): Pro
     content: input.content,
     metadata: input.metadata,
   };
+  unsafePrepareNodes([nodeInput], DEFAULT_MAX_CONTENT_LENGTH, DEFAULT_MAX_METADATA_LENGTH);
 
   const { ingestRunId, result } = await withHumanIngestRun(db, (run) => upsertNodes(db, run, [nodeInput]));
   const row = result.rows[0];
@@ -189,15 +211,27 @@ export interface AnnotateNodeResult {
  *
  * Throws `NodeNotFoundError` if `targetNodeId` does not exist. Note
  * validation (content length, control characters, metadata size) reuses
- * `prepareNodes` — the exact function `upsertNodes` itself validates
- * with — and edge validation reuses `prepareEdges` the same way, so
+ * `unsafePrepareNodes` — the exact function `upsertNodes` itself validates
+ * with — and edge validation reuses `unsafePrepareEdges` the same way, so
  * nothing here bypasses that path.
+ *
+ * Both the content validation and the target-existence check run before
+ * any ingest run opens: a missing target guarantees this write fails, so
+ * — like an oversized/control-character rejection — it must not leave a
+ * permanent empty run behind either. This does trade something away: if
+ * the target is deleted in the narrow window between that check and the
+ * transaction below, the failure surfaces as `EdgeUpsertFailedError` (the
+ * edge insert's own FK violation) rather than `NodeNotFoundError`. The
+ * transaction still rolls back the note correctly either way — the
+ * database's FK constraint is the real backstop, this check is just the
+ * fast, friendly path for the case that happens on every keystroke, not
+ * the race that happens never.
  */
 export async function annotateNode(db: Database, targetNodeId: string, input: AnnotateNodeInput = {}): Promise<AnnotateNodeResult> {
   const trimmedTarget = trimmedUuid(targetNodeId, "targetNodeId");
 
   const externalId = generateNoteExternalId();
-  const preparedNotes = prepareNodes(
+  const preparedNotes = unsafePrepareNodes(
     [
       {
         nodeType: NOTE_NODE_TYPE,
@@ -212,40 +246,37 @@ export async function annotateNode(db: Database, targetNodeId: string, input: An
     DEFAULT_MAX_METADATA_LENGTH,
   );
 
+  const targetRows = await db.select({ id: nodes.id }).from(nodes).where(eq(nodes.id, trimmedTarget));
+  if (targetRows.length === 0) {
+    throw new NodeNotFoundError(trimmedTarget);
+  }
+
   const { ingestRunId, result } = await withHumanIngestRun(db, (run) =>
     db.transaction(async (tx) => {
-      // Boundary check before creating anything: a named NodeNotFoundError,
-      // not an opaque foreign-key violation surfacing out of the edge
-      // insert below.
-      const targetRows = await tx.select({ id: nodes.id }).from(nodes).where(eq(nodes.id, trimmedTarget));
-      if (targetRows.length === 0) {
-        throw new NodeNotFoundError(trimmedTarget);
-      }
-
       let noteQueryResult: { rows: UpsertNodeRow[] };
       try {
-        noteQueryResult = await tx.execute<UpsertNodeRow>(buildUpsertNodesQuery(preparedNotes, run.id));
+        noteQueryResult = await tx.execute<UpsertNodeRow>(unsafeBuildUpsertNodesQuery(preparedNotes, run.id));
       } catch (err) {
-        throw wrapNodeWriteError(err, preparedNotes);
+        throw unsafeWrapNodeWriteError(err, preparedNotes);
       }
       const noteRow = noteQueryResult.rows[0];
       if (!noteRow) {
         throw new NodeUpsertFailedError(`annotateNode: note upsert returned no row for external_id ${externalId}`, 0, 0);
       }
 
-      const preparedEdges = prepareEdges([
+      const preparedEdges = unsafePrepareEdges([
         { srcId: noteRow.id, dstId: trimmedTarget, edgeType: ANNOTATES_EDGE_TYPE, sourceSystem: HUMAN_SOURCE_SYSTEM },
       ]);
 
       let edgeQueryResult: { rows: UpsertEdgeRow[] };
       try {
-        edgeQueryResult = await tx.execute<UpsertEdgeRow>(buildUpsertEdgesQuery(preparedEdges, run.id));
+        edgeQueryResult = await tx.execute<UpsertEdgeRow>(unsafeBuildUpsertEdgesQuery(preparedEdges, run.id));
       } catch (err) {
         // Rethrown, not caught-and-swallowed: this throw is what makes the
         // surrounding db.transaction() roll back, undoing the note insert
         // above. Nothing about that node ever becomes visible to another
         // transaction.
-        throw wrapEdgeWriteError(err, preparedEdges);
+        throw unsafeWrapEdgeWriteError(err, preparedEdges);
       }
       const edgeRow = edgeQueryResult.rows[0];
       if (!edgeRow) {
@@ -287,6 +318,11 @@ export interface UpdateNodeContentResult {
  * `created`/`updated`/`unchanged` classification), which is what keeps a
  * human edit and a loader's re-write of the same node consistent with
  * each other.
+ *
+ * Existence, editability, and content validation (via `unsafePrepareNodes`,
+ * pure — no database access) all run before an ingest run opens, so a
+ * missing node, a refused file-backed node, or oversized/control-character
+ * content never leaves a permanent empty run in the audit trail.
  */
 export async function updateNodeContent(db: Database, nodeId: string, input: UpdateNodeContentInput = {}): Promise<UpdateNodeContentResult> {
   const trimmedId = trimmedUuid(nodeId, "nodeId");
@@ -317,6 +353,7 @@ export async function updateNodeContent(db: Database, nodeId: string, input: Upd
     content: input.content ?? existing.content,
     metadata: input.metadata ?? (existing.metadata as Record<string, unknown>),
   };
+  unsafePrepareNodes([merged], DEFAULT_MAX_CONTENT_LENGTH, DEFAULT_MAX_METADATA_LENGTH);
 
   const { ingestRunId, result } = await withHumanIngestRun(db, (run) => upsertNodes(db, run, [merged]));
   const row = result.rows[0];
@@ -354,11 +391,14 @@ export interface AssertEdgeResult {
  * same source").
  */
 export async function assertEdge(db: Database, input: AssertEdgeInput): Promise<AssertEdgeResult> {
-  const { ingestRunId, result } = await withHumanIngestRun(db, (run) =>
-    upsertEdges(db, run, [
-      { srcId: input.srcId, dstId: input.dstId, edgeType: input.edgeType, sourceSystem: HUMAN_SOURCE_SYSTEM, weight: input.weight, props: input.props },
-    ]),
-  );
+  const edgeInput = { srcId: input.srcId, dstId: input.dstId, edgeType: input.edgeType, sourceSystem: HUMAN_SOURCE_SYSTEM, weight: input.weight, props: input.props };
+  // Validated (pure, no database access) before an ingest run opens — see
+  // createNote's doc comment for why a rejected write must not leave a
+  // permanent empty run behind (upsertEdges re-validates the same data
+  // internally; redundant but cheap).
+  unsafePrepareEdges([edgeInput]);
+
+  const { ingestRunId, result } = await withHumanIngestRun(db, (run) => upsertEdges(db, run, [edgeInput]));
   const row = result.rows[0];
   if (!row) {
     throw new EdgeUpsertFailedError("assertEdge: upsert returned no row", 0, 0);
@@ -396,10 +436,10 @@ export interface RetractEdgeResult {
  * `ingest_run_id`; nothing is opened here to attribute it to.
  */
 export async function retractEdge(db: Database, input: RetractEdgeInput): Promise<RetractEdgeResult> {
-  // Reuses prepareEdges purely for its boundary validation (uuid shape,
+  // Reuses unsafePrepareEdges purely for its boundary validation (uuid shape,
   // non-empty edgeType) — the weight it fills in with a default is
   // irrelevant here and never used.
-  const [prepared] = prepareEdges([{ srcId: input.srcId, dstId: input.dstId, edgeType: input.edgeType, sourceSystem: HUMAN_SOURCE_SYSTEM }]);
+  const [prepared] = unsafePrepareEdges([{ srcId: input.srcId, dstId: input.dstId, edgeType: input.edgeType, sourceSystem: HUMAN_SOURCE_SYSTEM }]);
   if (!prepared) {
     throw new EdgeUpsertFailedError("retractEdge: validation produced no row", 0, 0);
   }
@@ -435,39 +475,55 @@ export interface ReweightEdgeResult {
 
 /**
  * Changes the weight of an edge the caller (`HUMAN_SOURCE_SYSTEM`)
- * asserted. An out-of-range weight is rejected by `prepareEdges` — the
+ * asserted. An out-of-range weight is rejected by `unsafePrepareEdges` — the
  * same `InvalidEdgeWeightError` `upsertEdges` throws, naming the edge —
  * before any SQL runs. Unlike `assertEdge`, this never creates a row: if
  * no edge asserted by a person matches `(srcId, dstId, edgeType)`, it
  * throws `EdgeNotFoundError` rather than silently asserting a new one —
  * a caller reweighting an edge they believe already exists deserves a
  * loud failure, not a surprise creation (role lens: "fail loudly").
+ *
+ * Both the weight-range validation and the existence check run before an
+ * ingest run opens — a typo'd `(srcId, dstId, edgeType)` is a routine
+ * mistake, not something that should leave a permanent empty run in the
+ * audit trail every time it happens. The rare race (edge retracted
+ * between the check and the `UPDATE`) is still caught — the `UPDATE`
+ * itself would then affect zero rows, and that failure path throws the
+ * same `EdgeNotFoundError` without leaving a stale row set.
  */
 export async function reweightEdge(db: Database, input: ReweightEdgeInput): Promise<ReweightEdgeResult> {
-  const [prepared] = prepareEdges([
+  const [prepared] = unsafePrepareEdges([
     { srcId: input.srcId, dstId: input.dstId, edgeType: input.edgeType, sourceSystem: HUMAN_SOURCE_SYSTEM, weight: input.weight },
   ]);
   if (!prepared) {
     throw new EdgeUpsertFailedError("reweightEdge: validation produced no row", 0, 0);
   }
 
+  const humanEdgeFilter = and(
+    eq(edges.srcId, prepared.srcId),
+    eq(edges.dstId, prepared.dstId),
+    eq(edges.edgeType, prepared.edgeType),
+    eq(edges.sourceSystem, HUMAN_SOURCE_SYSTEM),
+  );
+
+  const existingRows = await db.select({ id: edges.id }).from(edges).where(humanEdgeFilter);
+  if (existingRows.length === 0) {
+    throw new EdgeNotFoundError(prepared.srcId, prepared.dstId, prepared.edgeType, HUMAN_SOURCE_SYSTEM);
+  }
+
   const { ingestRunId, result } = await withHumanIngestRun(db, async (run) => {
     const [row] = await db
       .update(edges)
       .set({ weight: prepared.weight, ingestRunId: run.id })
-      .where(
-        and(
-          eq(edges.srcId, prepared.srcId),
-          eq(edges.dstId, prepared.dstId),
-          eq(edges.edgeType, prepared.edgeType),
-          eq(edges.sourceSystem, HUMAN_SOURCE_SYSTEM),
-        ),
-      )
+      .where(humanEdgeFilter)
       .returning({ id: edges.id, weight: edges.weight });
     return row;
   });
 
   if (!result) {
+    // Extremely rare race: retracted between the check above and the
+    // UPDATE. Still correct — just no longer the routine path (a typo'd
+    // edge) that would otherwise pollute the audit trail on every call.
     throw new EdgeNotFoundError(prepared.srcId, prepared.dstId, prepared.edgeType, HUMAN_SOURCE_SYSTEM);
   }
 

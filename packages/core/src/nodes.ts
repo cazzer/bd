@@ -79,6 +79,25 @@ export interface UpsertNodesResult {
   rows: NodeUpsertResultRow[];
 }
 
+// --- Unsafe internals (exported for human-writes.ts's annotateNode only) ---
+//
+// Everything below named `unsafe*` — PreparedNode, unsafePrepareNodes,
+// unsafeBuildUpsertNodesQuery, unsafeWrapNodeWriteError — exists to let
+// `annotateNode` compose a note insert and its edge insert into one
+// transaction (upsertNodes always opens its own, which would defeat the
+// point). It is NOT a second public write API.
+//
+// The `unsafe` marker is load-bearing, not decorative: the `nodes` table
+// has zero CHECK constraints on content length or control characters —
+// unlike `edges_weight_range_check`, there is NO database-level backstop
+// here. `unsafePrepareNodes` is the ENTIRE validation for those
+// properties. Call `unsafeBuildUpsertNodesQuery` with a `PreparedNode`
+// that didn't come from `unsafePrepareNodes` — e.g. hand-built with a
+// fabricated `contentHash` and no length check — and it writes verbatim,
+// nothing thrown, nothing caught, at any size, with any byte. Always call
+// `unsafePrepareNodes` first and pass its own output straight through.
+// Never call any of these from outside this package; use `upsertNodes`.
+
 export interface PreparedNode {
   index: number;
   nodeType: string;
@@ -126,14 +145,18 @@ function findControlChar(value: string): { charPosition: number; codePoint: numb
  * (the strongest form of "the whole batch is rejected, nothing is
  * persisted").
  *
- * Exported so `human-writes.ts`'s `annotateNode` can validate/hash a note
- * this exact way while composing it into a hand-built transaction
- * alongside an edge insert — reusing this function (not reimplementing
- * it) is what keeps that path subject to the same validation as every
- * other node write, per the knowledge-store spec's "A person's write is
- * validated like any other".
+ * Exported (as `unsafePrepareNodes`) so `human-writes.ts`'s `annotateNode`
+ * can validate/hash a note this exact way while composing it into a
+ * hand-built transaction alongside an edge insert — reusing this
+ * function (not reimplementing it) is what keeps that path subject to
+ * the same validation as every other node write, per the knowledge-store
+ * spec's "A person's write is validated like any other".
+ *
+ * UNSAFE outside this package: this IS the content-length/control-character
+ * check — `nodes` has no CHECK constraint backing it. See the "Unsafe
+ * internals" banner above.
  */
-export function prepareNodes(input: readonly NodeInput[], maxContentLength: number, maxMetadataLength: number): PreparedNode[] {
+export function unsafePrepareNodes(input: readonly NodeInput[], maxContentLength: number, maxMetadataLength: number): PreparedNode[] {
   const prepared: PreparedNode[] = [];
   const seen = new Map<string, number>();
 
@@ -204,7 +227,17 @@ export type UpsertNodeRow = {
   action: NodeUpsertAction;
 }
 
-export function buildUpsertNodesQuery(rows: readonly PreparedNode[], ingestRunId: string) {
+/**
+ * UNSAFE: writes `rows` to the database verbatim, trusting `contentHash`
+ * and every length/control-character property is already correct — it
+ * does not re-validate. `nodes` has no CHECK constraint on content
+ * length or control characters, so calling this with a `PreparedNode`
+ * that did not come from `unsafePrepareNodes` (e.g. hand-built with a
+ * fabricated hash) writes that data at any size, with any byte, nothing
+ * thrown. Always call `unsafePrepareNodes` first and pass its output
+ * straight through. See the "Unsafe internals" banner above.
+ */
+export function unsafeBuildUpsertNodesQuery(rows: readonly PreparedNode[], ingestRunId: string) {
   return sql`
     WITH input(node_type, source_system, external_id, title, content, content_hash, metadata) AS (
       SELECT * FROM unnest(
@@ -282,7 +315,15 @@ export function buildUpsertNodesQuery(rows: readonly PreparedNode[], ingestRunId
   `;
 }
 
-export function wrapNodeWriteError(err: unknown, rows: readonly PreparedNode[]): NodeUpsertFailedError {
+/**
+ * UNSAFE-adjacent: not itself a validation gap, but part of the same
+ * exported kit (see the "Unsafe internals" banner above) — carries the
+ * `unsafe` marker so nothing in this group reads as an ordinary public
+ * helper. Wraps a genuine database failure from `unsafeBuildUpsertNodesQuery`
+ * as a typed `NodeUpsertFailedError`, identical to what `upsertNodes` does
+ * internally.
+ */
+export function unsafeWrapNodeWriteError(err: unknown, rows: readonly PreparedNode[]): NodeUpsertFailedError {
   const start = rows[0]?.index ?? -1;
   const end = rows[rows.length - 1]?.index ?? -1;
   const pgInfo = formatPgInfo(asPgError(err));
@@ -303,7 +344,7 @@ export function wrapNodeWriteError(err: unknown, rows: readonly PreparedNode[]):
  *
  * `content_hash` is computed here from `title`/`content`; callers never
  * supply it. Every returned row is classified `created` / `updated` /
- * `unchanged` by SQL (see buildUpsertNodesQuery) — `unchanged` rows do
+ * `unchanged` by SQL (see unsafeBuildUpsertNodesQuery) — `unchanged` rows do
  * not advance `updated_at`.
  */
 export async function upsertNodes(
@@ -321,8 +362,8 @@ export async function upsertNodes(
   const maxMetadataLength = options.maxMetadataLength ?? DEFAULT_MAX_METADATA_LENGTH;
 
   // Validate and hash the whole batch before any SQL runs — see
-  // prepareNodes.
-  const prepared = prepareNodes(input, maxContentLength, maxMetadataLength);
+  // unsafePrepareNodes.
+  const prepared = unsafePrepareNodes(input, maxContentLength, maxMetadataLength);
   const chunks = chunk(prepared, chunkSize);
 
   const result: UpsertNodesResult = { created: 0, updated: 0, unchanged: 0, rows: [] };
@@ -331,9 +372,9 @@ export async function upsertNodes(
     for (const rows of chunks) {
       let queryResult: { rows: UpsertNodeRow[] };
       try {
-        queryResult = await tx.execute<UpsertNodeRow>(buildUpsertNodesQuery(rows, run.id));
+        queryResult = await tx.execute<UpsertNodeRow>(unsafeBuildUpsertNodesQuery(rows, run.id));
       } catch (err) {
-        throw wrapNodeWriteError(err, rows);
+        throw unsafeWrapNodeWriteError(err, rows);
       }
 
       for (const row of queryResult.rows) {
