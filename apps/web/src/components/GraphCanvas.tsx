@@ -11,14 +11,18 @@
 // the canvas APIs. Nothing here is unit-tested (DOM/canvas assertions
 // can't reach it) by design — see encoding.test.ts's header.
 //
-// No node click handler: expansion-on-click is bd-hmd.5, not this
-// ticket (see the ticket's "Hard constraints"). Hover tooltips are
-// read-only info, not an editing affordance.
+// Node click handler expands that node's neighbours (bd-hmd.5): fetching
+// and merging the result is App.tsx's job (it owns the graph state and
+// the tRPC client); this file's only new responsibility is dispatching
+// the click and, on settle, releasing the position pins bd-hmd.5's merge
+// applies — see graph/expansion.ts's header for the full pin/release
+// trace. Hover tooltips remain read-only info, not an editing affordance.
 
 import { useEffect, useRef, useState } from "react";
 import ForceGraph2D from "react-force-graph-2d";
 import { graphAriaSummary, nodeAccessibleDescription } from "../graph/accessibility.js";
 import type { GraphCanvasData, GraphLink, GraphNode } from "../graph/encoding.js";
+import { releasePins, type PositionedNode } from "../graph/expansion.js";
 import { placeLabels, type LabelCandidate, type LabelPlacement } from "../graph/labelPlacement.js";
 import { buildLinkTooltip, buildNodeTooltip } from "../graph/tooltip.js";
 
@@ -37,6 +41,23 @@ const SEED_HIGHLIGHT_COLOR = "#111827";
 const SEED_HIGHLIGHT_RING_GAP = 3;
 const SEED_HIGHLIGHT_LINE_WIDTH = 2;
 const SEED_HIGHLIGHT_DASH: [number, number] = [4, 2];
+
+/**
+ * "+" badge marking a node whose neighbours were withheld by
+ * `getNeighbors`'s bound (graph-explorer/spec.md, "Hub expansion is
+ * bounded": "the explorer SHALL say so"). A GLYPH, not a colour alone —
+ * same reasoning as the seed ring's dash pattern (palette.ts's header):
+ * this must be distinguishable without relying on hue discrimination,
+ * and must coexist visually with a node that is ALSO a seed (the two
+ * conditions are independent — a seed can easily have more neighbours
+ * than the bound too), which a second concentric ring could not do
+ * legibly. Fixed pixel size on screen (divided by globalScale, the same
+ * idiom LABEL_FONT_SIZE_PX below uses) rather than scaling with the
+ * node's own radius — it is a status indicator, not part of the node's
+ * size encoding (degreeToRadius owns that, exclusively).
+ */
+const EXPANDABLE_BADGE_COLOR = "#b45309"; // amber-700 — outside palette.ts's categorical set, same reasoning as SEED_HIGHLIGHT_COLOR
+const EXPANDABLE_BADGE_RADIUS_PX = 6;
 
 const LABEL_COLOR = "#1e293b"; // slate-800 — matches the rest of the app's text colour
 /**
@@ -98,7 +119,7 @@ function computeLabelPlacements(nodes: readonly DrawableNode[], globalScale: num
   return new Map(placements.map((p) => [p.id, p]));
 }
 
-function drawNode(node: DrawableNode, ctx: CanvasRenderingContext2D, globalScale: number, placements: Map<string, LabelPlacement>): void {
+function drawNode(node: DrawableNode, ctx: CanvasRenderingContext2D, globalScale: number, placements: Map<string, LabelPlacement>, expandableNodeIds: ReadonlySet<string>): void {
   const x = node.x ?? 0;
   const y = node.y ?? 0;
 
@@ -117,6 +138,24 @@ function drawNode(node: DrawableNode, ctx: CanvasRenderingContext2D, globalScale
   ctx.arc(x, y, node.radius, 0, 2 * Math.PI);
   ctx.fillStyle = node.color;
   ctx.fill();
+
+  if (expandableNodeIds.has(node.id)) {
+    const badgeRadius = EXPANDABLE_BADGE_RADIUS_PX / globalScale;
+    const bx = x + node.radius * Math.SQRT1_2;
+    const by = y - node.radius * Math.SQRT1_2;
+    ctx.beginPath();
+    ctx.arc(bx, by, badgeRadius, 0, 2 * Math.PI);
+    ctx.fillStyle = EXPANDABLE_BADGE_COLOR;
+    ctx.fill();
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = 1 / globalScale;
+    ctx.stroke();
+    ctx.fillStyle = "#ffffff";
+    ctx.font = `${badgeRadius * 1.4}px sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("+", bx, by + 0.5 / globalScale);
+  }
 
   const placement = placements.get(node.id);
   if (!placement || !placement.visible) {
@@ -163,7 +202,17 @@ function linkTooltip(link: GraphLink): string {
   return buildLinkTooltip(link) as unknown as string;
 }
 
-export function GraphCanvas({ data }: { data: GraphCanvasData }) {
+export interface GraphCanvasProps {
+  data: GraphCanvasData;
+  /** Called on node click — App.tsx's `expandNode` (bd-hmd.5). Optional so this component still renders sensibly with no expansion wired up (e.g. a future read-only embed). */
+  onNodeExpand?: (node: GraphNode) => void;
+  /** Node ids with neighbours withheld by `getNeighbors`'s bound — drives both the on-canvas "+" badge and the sr-only list's text. See graph/expansion.ts's `expandableNodeIds`. */
+  expandableNodeIds?: ReadonlySet<string>;
+}
+
+const NO_EXPANDABLE_NODES: ReadonlySet<string> = new Set();
+
+export function GraphCanvas({ data, onNodeExpand, expandableNodeIds = NO_EXPANDABLE_NODES }: GraphCanvasProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
 
@@ -223,9 +272,21 @@ export function GraphCanvas({ data }: { data: GraphCanvasData }) {
             onRenderFramePre={(ctx, globalScale) => {
               labelPlacementsRef.current = computeLabelPlacements(data.nodes as DrawableNode[], globalScale);
             }}
-            nodeCanvasObject={(node, ctx, globalScale) => drawNode(node, ctx, globalScale, labelPlacementsRef.current)}
+            nodeCanvasObject={(node, ctx, globalScale) => drawNode(node, ctx, globalScale, labelPlacementsRef.current, expandableNodeIds)}
             nodePointerAreaPaint={paintNodePointerArea}
             nodeLabel={nodeTooltip}
+            onNodeClick={(node) => onNodeExpand?.(node as GraphNode)}
+            // Release (bd-hmd.5): fires once the simulation actually stops
+            // ticking — bounded by `cooldownTicks` below, so this is
+            // neither "too early" (before an expansion's new nodes have
+            // settled) nor "never" (a fixed cooldown always arrives). A
+            // fresh closure every render reading the CURRENT `data.nodes`
+            // is fine here — `onEngineStop` has `triggerUpdate: false`
+            // (verified in the installed force-graph source), so handing
+            // it a new function reference does not itself provoke another
+            // reheat. See graph/expansion.ts's header for why this must be
+            // `releasePins`'s in-place mutation and not a `setGraph` call.
+            onEngineStop={() => releasePins(data.nodes as PositionedNode[])}
             linkColor={(link) => link.color}
             linkWidth={(link) => link.width}
             linkLabel={linkTooltip}
@@ -235,7 +296,7 @@ export function GraphCanvas({ data }: { data: GraphCanvasData }) {
       </div>
       <ul className="sr-only" aria-label="Nodes in this graph">
         {data.nodes.map((node) => (
-          <li key={node.id}>{nodeAccessibleDescription(node)}</li>
+          <li key={node.id}>{nodeAccessibleDescription(node, expandableNodeIds.has(node.id))}</li>
         ))}
       </ul>
     </div>

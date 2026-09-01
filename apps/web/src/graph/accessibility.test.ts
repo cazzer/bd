@@ -62,4 +62,17 @@ describe("nodeAccessibleDescription", () => {
     const node = makeGraphNode({ id: "a", provenance: { kind: "path", edgePath: ["sibling"] } });
     expect(nodeAccessibleDescription(node)).not.toContain("relevance");
   });
+
+  // bd-hmd.5, graph-explorer/spec.md "Hub expansion is bounded": "the
+  // explorer SHALL say so" when neighbours were withheld.
+  it("states that more neighbours are available when hasMoreNeighbors is true", () => {
+    const node = makeGraphNode({ id: "a", title: "Hub node" });
+    expect(nodeAccessibleDescription(node, true)).toBe("Hub node, type doc, source repo, degree 2, more neighbours available");
+  });
+
+  it("says nothing about more neighbours by default (hasMoreNeighbors omitted) or when explicitly false", () => {
+    const node = makeGraphNode({ id: "a" });
+    expect(nodeAccessibleDescription(node)).not.toContain("more neighbours");
+    expect(nodeAccessibleDescription(node, false)).not.toContain("more neighbours");
+  });
 });

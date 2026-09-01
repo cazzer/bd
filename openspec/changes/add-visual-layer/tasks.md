@@ -37,12 +37,12 @@
 
 ## 5. Progressive expansion
 
-- [ ] 5.1 Expand a node's neighbours on click, merging them into the running simulation
-- [ ] 5.2 Preserve layout on merge: reuse existing node objects rather than reconstructing the array, seed new nodes at the expanded node's coordinates, and reheat with `alphaTarget` decaying to zero rather than `restart()`
-- [ ] 5.3 Bound each expansion by the neighbour limit, indicate when neighbours were withheld, and offer a way to draw the next tranche
-- [ ] 5.4 Handle expanding onto an already-drawn node: no duplicate, draw the connecting edge
-- [ ] 5.5 Test the layout-stability scenarios: placed nodes stay within tolerance of their previous positions across an expansion, and new nodes enter adjacent to their parent
-- [ ] 5.6 Verify the empty-result path leaves the canvas intact and states that both search modes were tried
+- [x] 5.1 Expand a node's neighbours on click, merging them into the running simulation
+- [x] 5.2 Preserve layout on merge: reuse existing node objects rather than reconstructing the array, seed new nodes at the expanded node's coordinates, and reheat with `alphaTarget` decaying to zero rather than `restart()`
+- [x] 5.3 Bound each expansion by the neighbour limit, indicate when neighbours were withheld, and offer a way to draw the next tranche
+- [x] 5.4 Handle expanding onto an already-drawn node: no duplicate, draw the connecting edge
+- [x] 5.5 Test the layout-stability scenarios: placed nodes stay within tolerance of their previous positions across an expansion, and new nodes enter adjacent to their parent
+- [x] 5.6 Verify the empty-result path leaves the canvas intact and states that both search modes were tried
 
 ## 6. Editing, annotation, and creation
 
