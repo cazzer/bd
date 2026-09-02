@@ -70,6 +70,16 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 /** The `source_system` every function in this module attributes its ingest run — and, for note/edge creation, the row itself — to. See the module header. */
 export const HUMAN_SOURCE_SYSTEM = "human";
 
+/**
+ * The `actor` recorded on every run this module opens. A distinct constant
+ * from `HUMAN_SOURCE_SYSTEM` even though the two share a value today:
+ * source system is the provenance of the content, actor is who drove the
+ * write (knowledge-store spec, "Writes are attributable to an ingest
+ * run"), and the web app has no per-person identity to record beyond
+ * "a person".
+ */
+const HUMAN_ACTOR = "human";
+
 /** `node_type` for a person-authored note. Requires no migration — `node_type` is open text by design (see design.md, "Repo-sourced nodes are read-only"). */
 export const NOTE_NODE_TYPE = "note";
 
@@ -77,14 +87,15 @@ export const NOTE_NODE_TYPE = "note";
 export const ANNOTATES_EDGE_TYPE = "annotates";
 
 /**
- * Opens an ingest run attributed to `HUMAN_SOURCE_SYSTEM`, runs `fn` with
- * the handle, and always closes the run afterward — including when `fn`
- * throws — mirroring `apps/mcp/src/attribution.ts`'s `withAgentIngestRun`
- * exactly, so a human write and an agent write are revertible-as-a-unit
- * the same way.
+ * Opens an ingest run attributed to `HUMAN_SOURCE_SYSTEM` with
+ * `HUMAN_ACTOR` as its actor, runs `fn` with the handle, and always closes
+ * the run afterward — including when `fn` throws — the same shape as
+ * `apps/mcp/src/attribution.ts`'s `withAgentIngestRun` (which records the
+ * connected client as actor instead), so a human write and an agent write
+ * are revertible-as-a-unit the same way.
  */
 async function withHumanIngestRun<T>(db: Database, fn: (run: IngestRunHandle) => Promise<T>): Promise<{ ingestRunId: string; result: T }> {
-  const run = await openIngestRun(db, HUMAN_SOURCE_SYSTEM);
+  const run = await openIngestRun(db, HUMAN_SOURCE_SYSTEM, { actor: HUMAN_ACTOR });
   try {
     const result = await fn(run);
     return { ingestRunId: run.id, result };

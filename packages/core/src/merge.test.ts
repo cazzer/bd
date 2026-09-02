@@ -61,7 +61,7 @@ describe("mergeNodes", () => {
     const [survivor, loser] = await makeNodes(run, 2);
     if (!survivor || !loser) throw new Error("setup failed");
 
-    const result = await mergeNodes(db, loser, survivor);
+    const result = await mergeNodes(db, loser, survivor, run);
 
     expect(result.survivorId).toBe(survivor);
     expect(result.mergedNodeIds).toEqual([loser]);
@@ -85,11 +85,11 @@ describe("mergeNodes", () => {
     const [a, b, c] = await makeNodes(run, 3);
     if (!a || !b || !c) throw new Error("setup failed");
 
-    const m1 = await mergeNodes(db, c, b);
+    const m1 = await mergeNodes(db, c, b, run);
     expect(m1.survivorId).toBe(b);
     expect(m1.mergedNodeIds).toEqual([c]);
 
-    const m2 = await mergeNodes(db, b, a);
+    const m2 = await mergeNodes(db, b, a, run);
     expect(m2.survivorId).toBe(a);
     expect(new Set(m2.mergedNodeIds)).toEqual(new Set([b, c]));
 
@@ -109,12 +109,12 @@ describe("mergeNodes", () => {
     const [survivor, loser] = await makeNodes(run, 2);
     if (!survivor || !loser) throw new Error("setup failed");
 
-    const first = await mergeNodes(db, loser, survivor);
+    const first = await mergeNodes(db, loser, survivor, run);
     expect(first.mergedNodeIds).toEqual([loser]);
 
     const [before] = await db.select({ mergedInto: nodes.mergedInto }).from(nodes).where(eq(nodes.id, loser));
 
-    const second = await mergeNodes(db, loser, survivor);
+    const second = await mergeNodes(db, loser, survivor, run);
     expect(second.survivorId).toBe(survivor);
     expect(second.mergedNodeIds).toEqual([]);
 
@@ -127,10 +127,10 @@ describe("mergeNodes", () => {
     const [a, b, c] = await makeNodes(run, 3);
     if (!a || !b || !c) throw new Error("setup failed");
 
-    await mergeNodes(db, c, b);
-    await mergeNodes(db, b, a);
+    await mergeNodes(db, c, b, run);
+    await mergeNodes(db, b, a, run);
 
-    const again = await mergeNodes(db, c, b);
+    const again = await mergeNodes(db, c, b, run);
     expect(again.survivorId).toBe(a);
     expect(again.mergedNodeIds).toEqual([]);
 
@@ -143,7 +143,7 @@ describe("mergeNodes", () => {
     const [a] = await makeNodes(run, 1);
     if (!a) throw new Error("setup failed");
 
-    await expect(mergeNodes(db, a, a)).rejects.toBeInstanceOf(SelfMergeError);
+    await expect(mergeNodes(db, a, a, run)).rejects.toBeInstanceOf(SelfMergeError);
   });
 
   it("rejects a merge that resolves into a self-merge (survivor already transitively merged into the loser)", async () => {
@@ -152,11 +152,11 @@ describe("mergeNodes", () => {
     if (!a || !b) throw new Error("setup failed");
 
     // b is merged into a.
-    await mergeNodes(db, b, a);
+    await mergeNodes(db, b, a, run);
 
     // Now try to merge a into b — b resolves to a, so this is
     // asking to merge a into a.
-    await expect(mergeNodes(db, a, b)).rejects.toBeInstanceOf(SelfMergeError);
+    await expect(mergeNodes(db, a, b, run)).rejects.toBeInstanceOf(SelfMergeError);
   });
 
   it("rejects a merge naming a node that does not exist", async () => {
@@ -165,8 +165,8 @@ describe("mergeNodes", () => {
     if (!a) throw new Error("setup failed");
     const bogus = "00000000-0000-0000-0000-000000000000";
 
-    await expect(mergeNodes(db, bogus, a)).rejects.toBeInstanceOf(NodeNotFoundError);
-    await expect(mergeNodes(db, a, bogus)).rejects.toBeInstanceOf(NodeNotFoundError);
+    await expect(mergeNodes(db, bogus, a, run)).rejects.toBeInstanceOf(NodeNotFoundError);
+    await expect(mergeNodes(db, a, bogus, run)).rejects.toBeInstanceOf(NodeNotFoundError);
   });
 
   it("wraps a genuine database failure as MergeFailedError, not a raw driver error", async () => {
@@ -184,7 +184,7 @@ describe("mergeNodes", () => {
 
     let thrown: unknown;
     try {
-      await mergeNodes(db, "not-a-uuid", a);
+      await mergeNodes(db, "not-a-uuid", a, run);
     } catch (err) {
       thrown = err;
     }
@@ -194,6 +194,31 @@ describe("mergeNodes", () => {
     expect(err.loserId).toBe("not-a-uuid");
     expect(err.survivorId).toBe(a);
     expect(err.cause).toBeDefined();
+  });
+
+  it("stamps the loser and every chain member with the merging run's id, and an idempotent no-op merge stamps nothing (spec: a merge is attributed)", async () => {
+    const run = await newRun();
+    const [a, b, c] = await makeNodes(run, 3);
+    if (!a || !b || !c) throw new Error("setup failed");
+    await mergeNodes(db, c, b, run);
+
+    const mergingRun = await newRun();
+    const result = await mergeNodes(db, b, a, mergingRun);
+    expect(new Set(result.mergedNodeIds)).toEqual(new Set([b, c]));
+
+    const rows = await db.select({ id: nodes.id, ingestRunId: nodes.ingestRunId }).from(nodes).where(inArray(nodes.id, [a, b, c]));
+    const runById = new Map(rows.map((r) => [r.id, r.ingestRunId]));
+    // The survivor was not written by this merge; the loser and the chain
+    // member repointed by it both were.
+    expect(runById.get(a)).toBe(run.id);
+    expect(runById.get(b)).toBe(mergingRun.id);
+    expect(runById.get(c)).toBe(mergingRun.id);
+
+    const noOpRun = await newRun();
+    const again = await mergeNodes(db, b, a, noOpRun);
+    expect(again.mergedNodeIds).toEqual([]);
+    const [bAfter] = await db.select({ ingestRunId: nodes.ingestRunId }).from(nodes).where(eq(nodes.id, b));
+    expect(bAfter?.ingestRunId).toBe(mergingRun.id);
   });
 
   it("lets the merged-away node's original source keep updating it, with the merge still in effect", async () => {
@@ -209,7 +234,7 @@ describe("mergeNodes", () => {
     const loser = loserResult.rows[0]?.id;
     if (!loser) throw new Error("setup failed");
 
-    await mergeNodes(db, loser, survivor);
+    await mergeNodes(db, loser, survivor, run);
 
     // The original source (same source_system/external_id) writes the
     // merged-away node again with new content.

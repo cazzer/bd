@@ -161,7 +161,7 @@ describe("brain_get", () => {
     ]);
     const survivorId = nodeMap.get("survivor")!;
     const loserId = nodeMap.get("loser")!;
-    await mergeNodes(db, loserId, survivorId);
+    await mergeNodes(db, loserId, survivorId, run);
 
     const { client } = await connectClient();
     const raw = await client.callTool({ name: "brain_get", arguments: { ids: [loserId, BOGUS_ID] } });
@@ -223,7 +223,7 @@ describe("brain_neighbors", () => {
     const loserId = nodeMap.get("loser")!;
     const survivorId = nodeMap.get("survivor")!;
     await makeEdges(run, [{ srcId: loserId, dstId: survivorId, edgeType: "mentions", weight: 0.9 }]);
-    await mergeNodes(db, loserId, survivorId);
+    await mergeNodes(db, loserId, survivorId, run);
 
     const { client } = await connectClient();
     const raw = await client.callTool({ name: "brain_neighbors", arguments: { id: loserId } });
@@ -442,6 +442,11 @@ describe("brain_merge", () => {
     const { client } = await connectClient();
 
     const first = parseText(await client.callTool({ name: "brain_merge", arguments: { loserId: nodeMap.get("b")!, survivorId: nodeMap.get("a")! } }));
+    // The merge is attributed to an agent run whose id comes back. That
+    // run has node_count 1 (the loser is stamped with it), so afterEach's
+    // orphan sweep will not catch it — track it for cleanup explicitly.
+    expect(typeof first.ingestRunId).toBe("string");
+    openRunIds.push(first.ingestRunId);
     expect(first.survivorId).toBe(nodeMap.get("a"));
     expect(first.noOp).toBe(false);
     expect(first.mergedNodeIds).toEqual([nodeMap.get("b")]);

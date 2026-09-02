@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import type { Database } from "@breakdown/db";
 import { MergeFailedError, NodeNotFoundError, SelfMergeError } from "./errors.js";
+import type { IngestRunHandle } from "./ingest-runs.js";
 import { asPgError, formatPgInfo } from "./sql-helpers.js";
 
 export interface MergeResult {
@@ -67,15 +68,26 @@ const MAX_DEADLOCK_RETRIES = 3;
  * not surfacing it), and otherwise is wrapped as `MergeFailedError` so
  * every error this function can throw is a `KnowledgeStoreError` a caller
  * can catch by type, never a raw driver error.
+ *
+ * `run` is required, not optional: a merge is a write like any other
+ * (knowledge-store spec, "Writes are attributable to an ingest run"), and
+ * the UPDATE stamps `ingest_run_id = run.id` on every row it repoints —
+ * the loser and any chain members — in the same statement that sets
+ * `merged_into`. The history trigger (migrations/0002_*.sql) attributes
+ * the revision it records to `NEW.ingest_run_id`; without the stamp, a
+ * merge's revision would name whichever run last happened to write the
+ * node, not the run that merged it. The idempotent no-op path writes
+ * nothing and so stamps nothing. `updated_at` is not bumped by a merge
+ * (unchanged from before; out of scope here).
  */
-export async function mergeNodes(db: Database, loserId: string, survivorId: string): Promise<MergeResult> {
+export async function mergeNodes(db: Database, loserId: string, survivorId: string, run: IngestRunHandle): Promise<MergeResult> {
   if (loserId === survivorId) {
     throw new SelfMergeError(loserId, survivorId);
   }
 
   for (let attempt = 1; ; attempt += 1) {
     try {
-      return await runMergeTransaction(db, loserId, survivorId);
+      return await runMergeTransaction(db, loserId, survivorId, run);
     } catch (err) {
       if (err instanceof NodeNotFoundError || err instanceof SelfMergeError) {
         throw err;
@@ -94,7 +106,7 @@ export async function mergeNodes(db: Database, loserId: string, survivorId: stri
   }
 }
 
-async function runMergeTransaction(db: Database, loserId: string, survivorId: string): Promise<MergeResult> {
+async function runMergeTransaction(db: Database, loserId: string, survivorId: string, run: IngestRunHandle): Promise<MergeResult> {
   return db.transaction(async (tx) => {
     const lookup = await tx.execute<NodeMergeRow>(sql`
       SELECT id, merged_into FROM nodes WHERE id = ${loserId} OR id = ${survivorId} FOR UPDATE
@@ -139,9 +151,12 @@ async function runMergeTransaction(db: Database, loserId: string, survivorId: st
       SELECT id FROM nodes WHERE id = ${loserId} OR merged_into = ${loserId} FOR UPDATE
     `);
 
+    // ingest_run_id is stamped in the same statement as merged_into so the
+    // history trigger's revision names this run — see the doc comment on
+    // mergeNodes. Chain members are stamped too: this merge changed them.
     const updated = await tx.execute<{ id: string }>(sql`
       UPDATE nodes
-      SET merged_into = ${canonicalId}
+      SET merged_into = ${canonicalId}, ingest_run_id = ${run.id}
       WHERE id = ${loserId} OR merged_into = ${loserId}
       RETURNING id
     `);

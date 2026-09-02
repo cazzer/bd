@@ -585,7 +585,7 @@ describe("retrieve", () => {
     ]);
     const survivorId = nodeMap.get("survivor")!;
     const loserId = nodeMap.get("loser")!;
-    await mergeNodes(db, loserId, survivorId);
+    await mergeNodes(db, loserId, survivorId, run);
 
     const result = await retrieve(db, "merge fold lambda", { sourceSystems: [run.sourceSystem] });
     if (result.mode === "empty") throw new Error("expected a found result");
@@ -603,7 +603,7 @@ describe("retrieve", () => {
     ]);
     const survivorId = nodeMap.get("survivor")!;
     const loserId = nodeMap.get("loser")!;
-    await mergeNodes(db, loserId, survivorId);
+    await mergeNodes(db, loserId, survivorId, run);
 
     const result = await retrieve(db, "merge fold loser-only rho", { sourceSystems: [run.sourceSystem] });
     if (result.mode === "empty") throw new Error("expected a found result");
@@ -628,7 +628,7 @@ describe("retrieve", () => {
     const loserId = nodeMap.get("loser")!;
     const survivorId = nodeMap.get("survivor")!;
     await makeEdges(run, [{ srcId: loserId, dstId: survivorId, edgeType: "mentions", weight: 0.9 }]);
-    await mergeNodes(db, loserId, survivorId);
+    await mergeNodes(db, loserId, survivorId, run);
 
     // Query matches the survivor directly, so the survivor is a seed and
     // the (now folded) loser->survivor edge is in scope for result_edges
@@ -766,7 +766,7 @@ describe("retrieve — degree", () => {
       { srcId: loserId, dstId: farAId, edgeType: "rel2", weight: 0.8 },
       { srcId: loserId, dstId: farBId, edgeType: "rel3", weight: 0.7 },
     ]);
-    await mergeNodes(db, loserId, survivorId);
+    await mergeNodes(db, loserId, survivorId, run);
 
     const result = await retrieve(db, "degree merge tau", { sourceSystems: [run.sourceSystem] });
     if (result.mode === "empty") throw new Error("expected a found result");
@@ -788,7 +788,7 @@ describe("retrieve — degree", () => {
       { srcId: loserId, dstId: survivorId, edgeType: "mentions", weight: 0.9 }, // becomes a self-loop once merged
       { srcId: survivorId, dstId: farCId, edgeType: "rel", weight: 0.5 }, // a real, non-self connection
     ]);
-    await mergeNodes(db, loserId, survivorId);
+    await mergeNodes(db, loserId, survivorId, run);
 
     const result = await retrieve(db, "degree self loop phi", { sourceSystems: [run.sourceSystem] });
     if (result.mode === "empty") throw new Error("expected a found result");
@@ -833,7 +833,7 @@ describe("retrieve — degree", () => {
       { srcId: survivorId, dstId: farId, edgeType: "rel", weight: 0.8 },
       { srcId: loserId, dstId: farId, edgeType: "rel2", weight: 0.6 },
     ]);
-    await mergeNodes(db, loserId, survivorId);
+    await mergeNodes(db, loserId, survivorId, run);
 
     const result = await retrieve(db, "degree dual connection omega", { sourceSystems: [run.sourceSystem] });
     if (result.mode === "empty") throw new Error("expected a found result");

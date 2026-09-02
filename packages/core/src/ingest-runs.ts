@@ -24,6 +24,8 @@ export interface IngestRunHandle {
 export interface ClosedIngestRun {
   id: string;
   sourceSystem: string;
+  /** Who or what drove the run, as recorded at open — see `OpenIngestRunOptions.actor`. `null` when the run was opened without one. */
+  actor: string | null;
   startedAt: Date;
   finishedAt: Date;
   nodeCount: number;
@@ -36,8 +38,22 @@ export interface IngestRunContents {
   edges: (typeof edges.$inferSelect)[];
 }
 
+export interface OpenIngestRunOptions {
+  /**
+   * Who or what drove the run — the connected MCP client's `name version`,
+   * `human` from the web app, a loader's script name. Attribution, not
+   * authentication: recorded as given (trimmed). Distinct from
+   * `sourceSystem`, which is the provenance of the content: one source
+   * system can be written by many actors (knowledge-store spec, "Two agents
+   * writing under one source system"). Empty/whitespace records no actor
+   * rather than refusing the write — a missing identity is not a reason to
+   * lose the data it came with.
+   */
+  actor?: string;
+}
+
 /** Opens a new ingest run for `sourceSystem`. Every batch write needs one. */
-export async function openIngestRun(db: Database, sourceSystem: string): Promise<IngestRunHandle> {
+export async function openIngestRun(db: Database, sourceSystem: string, options: OpenIngestRunOptions = {}): Promise<IngestRunHandle> {
   const trimmed = sourceSystem.trim();
   if (!trimmed) {
     throw new InvalidIngestRunError("sourceSystem must be a non-empty string");
@@ -45,7 +61,7 @@ export async function openIngestRun(db: Database, sourceSystem: string): Promise
 
   const [row] = await db
     .insert(ingestRuns)
-    .values({ sourceSystem: trimmed })
+    .values({ sourceSystem: trimmed, actor: options.actor?.trim() || null })
     .returning({ id: ingestRuns.id, sourceSystem: ingestRuns.sourceSystem });
   if (!row) {
     throw new InvalidIngestRunError("openIngestRun: insert returned no row");
@@ -65,6 +81,7 @@ export async function openIngestRun(db: Database, sourceSystem: string): Promise
 type ClosedIngestRunRow = {
   id: string;
   source_system: string;
+  actor: string | null;
   started_at: string;
   finished_at: string;
   node_count: number;
@@ -98,7 +115,7 @@ export async function closeIngestRun(
         edge_count = (SELECT count(*)::int FROM edges WHERE edges.ingest_run_id = ingest_runs.id),
         stats = COALESCE(${stats ? JSON.stringify(stats) : null}::jsonb, ingest_runs.stats)
     WHERE id = ${run.id}
-    RETURNING id, source_system, started_at, finished_at, node_count, edge_count, stats
+    RETURNING id, source_system, actor, started_at, finished_at, node_count, edge_count, stats
   `);
 
   const row = result.rows[0];
@@ -109,6 +126,7 @@ export async function closeIngestRun(
   return {
     id: row.id,
     sourceSystem: row.source_system,
+    actor: row.actor,
     startedAt: new Date(row.started_at),
     // `finished_at` was just set by this statement's `now()`, so it is
     // never null here.

@@ -117,7 +117,8 @@ async function main(): Promise<void> {
   const db = createDb(pool);
 
   try {
-    const run = await openIngestRun(db, SOURCE_SYSTEM);
+    // actor = the pnpm script name a person actually types.
+    const run = await openIngestRun(db, SOURCE_SYSTEM, { actor: "db:seed" });
 
     const nodeInputs: NodeInput[] = files.map((f) => ({
       nodeType: deriveNodeType(f.relPath),

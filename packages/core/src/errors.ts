@@ -252,7 +252,12 @@ export class EdgeNotFoundError extends KnowledgeStoreError {
 
 // --- Merge -----------------------------------------------------------------
 
-/** `mergeNodes` was called with a node id that does not exist. */
+/**
+ * A single required node id names no node: `mergeNodes` (either id),
+ * `getNeighbors`, or `getNodeHistory`. `getNodeHistory` does not fold
+ * merges (history is per node as stored), so for it this means the id
+ * matches no row at all, merged-away or otherwise.
+ */
 export class NodeNotFoundError extends KnowledgeStoreError {
   constructor(readonly nodeId: string) {
     super(`node ${nodeId} does not exist`);
@@ -358,14 +363,15 @@ export class RetrievalFailedError extends KnowledgeStoreError {
 // --- Lookup (bd-vt2.5: brain_get / brain_neighbors) -------------------------
 
 /**
- * `getNodes()` / `getNeighbors()` received an id that is not a
- * syntactically valid uuid, or an empty `ids` array. Rejected before any
- * SQL runs, naming the offending value — distinct from a syntactically
- * valid id that simply matches no node, which `getNodes()` reports back
- * in `notFoundIds` rather than throwing (per the brain-mcp spec: "Report
- * ids that matched nothing rather than silently omitting them") and
- * `getNeighbors()` reports via `NodeNotFoundError` (a single required id,
- * same treatment as `mergeNodes`).
+ * `getNodes()` / `getNeighbors()` / `getNodeHistory()` received an id
+ * that is not a syntactically valid uuid, or an empty `ids` array.
+ * Rejected before any SQL runs, naming the offending value — distinct
+ * from a syntactically valid id that simply matches no node, which
+ * `getNodes()` reports back in `notFoundIds` rather than throwing (per
+ * the brain-mcp spec: "Report ids that matched nothing rather than
+ * silently omitting them") and `getNeighbors()` / `getNodeHistory()`
+ * report via `NodeNotFoundError` (a single required id, same treatment
+ * as `mergeNodes`).
  */
 export class InvalidLookupIdError extends KnowledgeStoreError {
   constructor(
@@ -377,16 +383,17 @@ export class InvalidLookupIdError extends KnowledgeStoreError {
 }
 
 /**
- * `getNodes()` / `getNeighbors()` failed at the database after passing
- * boundary validation — a genuine driver/Postgres failure, not a caller
- * mistake `InvalidLookupIdError` / `NodeNotFoundError` would already have
- * caught. Wraps the original error as `cause` so every error either
- * function can throw is a `KnowledgeStoreError`.
+ * `getNodes()` / `getNeighbors()` / `getNodeHistory()` failed at the
+ * database after passing boundary validation — a genuine driver/Postgres
+ * failure, not a caller mistake `InvalidLookupIdError` /
+ * `NodeNotFoundError` would already have caught. Wraps the original error
+ * as `cause` so every error any of these functions can throw is a
+ * `KnowledgeStoreError`.
  */
 export class LookupFailedError extends KnowledgeStoreError {
   constructor(
     message: string,
-    readonly operation: "getNodes" | "getNeighbors",
+    readonly operation: "getNodes" | "getNeighbors" | "getNodeHistory",
     options?: ErrorOptions,
   ) {
     super(message, options);
@@ -395,7 +402,8 @@ export class LookupFailedError extends KnowledgeStoreError {
 
 /**
  * `getNeighbors()` received an out-of-range `limit` or a malformed
- * `cursor` (bd-hmd.1) — rejected before any SQL runs, naming the
+ * `cursor` (bd-hmd.1), or `getNodeHistory()` received an out-of-range
+ * `limit` or `before` — rejected before any SQL runs, naming the
  * offending option. Distinct from `InvalidLookupIdError`, which is about
  * the required `id` argument, not the optional paging options.
  */

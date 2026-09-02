@@ -45,6 +45,7 @@ export {
   closeIngestRun,
   getIngestRunContents,
   type IngestRunHandle,
+  type OpenIngestRunOptions,
   type ClosedIngestRun,
   type IngestRunContents,
 } from "./ingest-runs.js";
@@ -123,6 +124,23 @@ export {
   type GetNeighborsResult,
   type BuildGetNeighborsQueryParams,
 } from "./lookup.js";
+
+// Per-node revision history (node-history change): what the triggers in
+// migrations/0002_*.sql recorded, newest first, with what changed between
+// revisions computed on read. See history.ts's module header.
+export {
+  getNodeHistory,
+  buildNodeHistoryQuery,
+  DEFAULT_HISTORY_LIMIT,
+  MAX_HISTORY_LIMIT,
+  type NodeRevision,
+  type RevisionField,
+  type RevisionIngestRun,
+  type MetadataKeyChange,
+  type GetNodeHistoryOptions,
+  type GetNodeHistoryResult,
+  type BuildNodeHistoryQueryParams,
+} from "./history.js";
 
 export { isEditableSourceSystem } from "./editability.js";
 

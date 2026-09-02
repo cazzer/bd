@@ -1,4 +1,4 @@
-import { inArray } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Database } from "@breakdown/db";
 import { edges, ingestRuns, nodes } from "@breakdown/db";
@@ -71,6 +71,58 @@ describe("openIngestRun / closeIngestRun", () => {
       expect(second.edgeCount).toBe(first.edgeCount);
     } finally {
       await cleanupRuns([run.sourceSystem], [run.id]);
+    }
+  });
+});
+
+describe("actor (spec: writes are attributable to an ingest run)", () => {
+  it("opening a run with only a source system records no actor and closeIngestRun reports actor null (spec: a run opened without an actor)", async () => {
+    const run = await openIngestRun(db, `test-src-${uniqueSuffix()}`);
+    try {
+      const [row] = await db.select({ actor: ingestRuns.actor }).from(ingestRuns).where(eq(ingestRuns.id, run.id));
+      expect(row?.actor).toBeNull();
+
+      const closed = await closeIngestRun(db, run);
+      expect(closed.actor).toBeNull();
+    } finally {
+      await cleanupRuns([run.sourceSystem], [run.id]);
+    }
+  });
+
+  it("records the actor as given, trimmed, and treats an empty/whitespace actor as none rather than refusing the run", async () => {
+    const withActor = await openIngestRun(db, `test-src-${uniqueSuffix()}`, { actor: "  claude-code 2.1.0  " });
+    const blank = await openIngestRun(db, `test-src-${uniqueSuffix()}`, { actor: "   " });
+    try {
+      expect((await closeIngestRun(db, withActor)).actor).toBe("claude-code 2.1.0");
+      expect((await closeIngestRun(db, blank)).actor).toBeNull();
+    } finally {
+      await cleanupRuns([withActor.sourceSystem, blank.sourceSystem], [withActor.id, blank.id]);
+    }
+  });
+
+  it("two runs under one source system with different actors each record their own actor, and a node written by one is attributed to that run only (spec: two agents writing under one source system)", async () => {
+    const sourceSystem = `test-src-${uniqueSuffix()}`;
+    const runA = await openIngestRun(db, sourceSystem, { actor: "claude-code 2.1.0" });
+    const runB = await openIngestRun(db, sourceSystem, { actor: "cursor 1.4.0" });
+    try {
+      const written = await upsertNodes(db, runA, [{ nodeType: "t", sourceSystem, externalId: `n-${uniqueSuffix()}` }]);
+      const nodeId = written.rows[0]?.id;
+      if (!nodeId) throw new Error("setup failed to upsert node");
+
+      const closedA = await closeIngestRun(db, runA);
+      const closedB = await closeIngestRun(db, runB);
+      expect(closedA.sourceSystem).toBe(sourceSystem);
+      expect(closedB.sourceSystem).toBe(sourceSystem);
+      expect(closedA.actor).toBe("claude-code 2.1.0");
+      expect(closedB.actor).toBe("cursor 1.4.0");
+      expect(closedA.nodeCount).toBe(1);
+      expect(closedB.nodeCount).toBe(0);
+
+      const [node] = await db.select({ ingestRunId: nodes.ingestRunId }).from(nodes).where(eq(nodes.id, nodeId));
+      expect(node?.ingestRunId).toBe(runA.id);
+      expect((await getIngestRunContents(db, runB.id)).nodes).toEqual([]);
+    } finally {
+      await cleanupRuns([sourceSystem], [runA.id, runB.id]);
     }
   });
 });

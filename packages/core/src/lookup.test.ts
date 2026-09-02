@@ -164,7 +164,7 @@ describe("getNodes", () => {
     ]);
     const survivorId = nodeMap.get("survivor")!;
     const loserId = nodeMap.get("loser")!;
-    await mergeNodes(db, loserId, survivorId);
+    await mergeNodes(db, loserId, survivorId, run);
 
     const result = await getNodes(db, [loserId]);
 
@@ -195,7 +195,7 @@ describe("getNodes", () => {
     ]);
     const survivorId = nodeMap.get("survivor")!;
     const loserId = nodeMap.get("loser")!;
-    await mergeNodes(db, loserId, survivorId);
+    await mergeNodes(db, loserId, survivorId, run);
 
     const result = await getNodes(db, [loserId, survivorId]);
 
@@ -288,7 +288,7 @@ describe("getNeighbors", () => {
     // The edge is asserted on the loser BEFORE the merge — it must still
     // surface as the survivor's neighbor afterward.
     await makeEdges(run, [{ srcId: loserId, dstId: farId, edgeType: "relates_to", weight: 0.7 }]);
-    await mergeNodes(db, loserId, survivorId);
+    await mergeNodes(db, loserId, survivorId, run);
 
     const result = await getNeighbors(db, survivorId);
 
@@ -307,7 +307,7 @@ describe("getNeighbors", () => {
     const loserId = nodeMap.get("loser")!;
     const farId = nodeMap.get("far")!;
     await makeEdges(run, [{ srcId: survivorId, dstId: farId, edgeType: "relates_to", weight: 0.5 }]);
-    await mergeNodes(db, loserId, survivorId);
+    await mergeNodes(db, loserId, survivorId, run);
 
     const result = await getNeighbors(db, loserId);
 
@@ -325,7 +325,7 @@ describe("getNeighbors", () => {
     const loserId = nodeMap.get("loser")!;
     const survivorId = nodeMap.get("survivor")!;
     await makeEdges(run, [{ srcId: loserId, dstId: survivorId, edgeType: "mentions", weight: 0.9 }]);
-    await mergeNodes(db, loserId, survivorId);
+    await mergeNodes(db, loserId, survivorId, run);
 
     const result = await getNeighbors(db, survivorId);
 
@@ -344,7 +344,7 @@ describe("getNeighbors", () => {
     const nbrLoserId = nodeMap.get("nbr-loser")!;
     const nbrSurvivorId = nodeMap.get("nbr-survivor")!;
     await makeEdges(run, [{ srcId: centerId, dstId: nbrLoserId, edgeType: "mentions", weight: 0.6 }]);
-    await mergeNodes(db, nbrLoserId, nbrSurvivorId);
+    await mergeNodes(db, nbrLoserId, nbrSurvivorId, run);
 
     const result = await getNeighbors(db, centerId);
 
@@ -458,7 +458,7 @@ describe("getNeighbors — degree (bd-hmd.5 review)", () => {
       { srcId: loserId, dstId: farAId, edgeType: "rel2", weight: 0.8 }, // same farA, from the about-to-be-merged loser
       { srcId: loserId, dstId: farBId, edgeType: "rel3", weight: 0.7 },
     ]);
-    await mergeNodes(db, loserId, survivorId);
+    await mergeNodes(db, loserId, survivorId, run);
 
     const result = await getNeighbors(db, centerId);
     const survivor = result.neighbors.find((n) => n.nodeId === survivorId)!;
@@ -483,7 +483,7 @@ describe("getNeighbors — degree (bd-hmd.5 review)", () => {
       { srcId: loserId, dstId: survivorId, edgeType: "self-ish", weight: 0.9 }, // becomes a self-loop once merged
       { srcId: survivorId, dstId: farCId, edgeType: "rel", weight: 0.5 },
     ]);
-    await mergeNodes(db, loserId, survivorId);
+    await mergeNodes(db, loserId, survivorId, run);
 
     const result = await getNeighbors(db, centerId);
     const survivor = result.neighbors.find((n) => n.nodeId === survivorId)!;
@@ -509,7 +509,7 @@ describe("getNeighbors — degree (bd-hmd.5 review)", () => {
       { srcId: survivorId, dstId: farId, edgeType: "rel", weight: 0.8 },
       { srcId: loserId, dstId: farId, edgeType: "rel2", weight: 0.6 },
     ]);
-    await mergeNodes(db, loserId, survivorId);
+    await mergeNodes(db, loserId, survivorId, run);
 
     const result = await getNeighbors(db, centerId);
     const survivor = result.neighbors.find((n) => n.nodeId === survivorId)!;
@@ -561,7 +561,7 @@ describe("getNeighbors — degree (bd-hmd.5 review)", () => {
     // the nodes_merged_into_idx join the degree CTE's alias resolution
     // (neighbor_alias) needs — not just the plain edges lookups.
     const loserMap = await makeNodes(run, [{ nodeType: "doc", externalId: "alias-loser", title: "l", content: "c" }]);
-    await mergeNodes(db, loserMap.get("alias-loser")!, nodeMap.get("dnbr1")!);
+    await mergeNodes(db, loserMap.get("alias-loser")!, nodeMap.get("dnbr1")!, run);
 
     const params: BuildGetNeighborsQueryParams = { id: hubId, limit: DEFAULT_NEIGHBOR_LIMIT, cursor: null };
 

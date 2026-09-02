@@ -9,12 +9,12 @@
 
 ## 2. Attribution and history in core
 
-- [ ] 2.1 Give `openIngestRun` an optional options argument carrying `actor`, surface `actor` on `ClosedIngestRun`, and leave every existing call site compiling unchanged
-- [ ] 2.2 Make `mergeNodes` take a required `IngestRunHandle` and set `ingest_run_id` in the same `UPDATE` that sets `merged_into`; update its tests and the one MCP caller so `pnpm typecheck` stays green
-- [ ] 2.3 Pass actors: `human` from the human write path, and the script name from `seed.ts` and `ingest-github.ts`
-- [ ] 2.4 Add `packages/core/src/history.ts` with `buildNodeHistoryQuery` and `getNodeHistory`: revisions newest-first, `limit` with a default and a maximum, a `before` cursor on revision number, `includeContent` defaulting to false, `changedFields` via `LAG`, and `metadataChanges` as `{ key: { before, after } }` over the union of top-level keys; the first revision reports every present field as changed; an unknown id raises `NodeNotFoundError`
-- [ ] 2.5 Write tests for the readable-history scenarios: a `status` flip reports the key with both values and title/content unchanged; content omitted by default and present on request; paging past the limit continues without repeat or gap; a merged-away node returns its own history including the merge revision; unknown id errors naming it; a merge under a run is attributed to that run
-- [ ] 2.6 Export the new function, types, and any new error from `packages/core/src/index.ts`, and confirm `pnpm check` is green
+- [x] 2.1 Give `openIngestRun` an optional options argument carrying `actor`, surface `actor` on `ClosedIngestRun`, and leave every existing call site compiling unchanged
+- [x] 2.2 Make `mergeNodes` take a required `IngestRunHandle` and set `ingest_run_id` in the same `UPDATE` that sets `merged_into`; update its tests and the one MCP caller so `pnpm typecheck` stays green
+- [x] 2.3 Pass actors: `human` from the human write path, and the script name from `seed.ts` and `ingest-github.ts`
+- [x] 2.4 Add `packages/core/src/history.ts` with `buildNodeHistoryQuery` and `getNodeHistory`: revisions newest-first, `limit` with a default and a maximum, a `before` cursor on revision number, `includeContent` defaulting to false, `changedFields` via `LAG`, and `metadataChanges` as `{ key: { before, after } }` over the union of top-level keys; the first revision reports every present field as changed; an unknown id raises `NodeNotFoundError`
+- [x] 2.5 Write tests for the readable-history scenarios: a `status` flip reports the key with both values and title/content unchanged; content omitted by default and present on request; paging past the limit continues without repeat or gap; a merged-away node returns its own history including the merge revision; unknown id errors naming it; a merge under a run is attributed to that run
+- [x] 2.6 Export the new function, types, and any new error from `packages/core/src/index.ts`, and confirm `pnpm check` is green
 
 ## 3. brain_history and client attribution in the MCP server
 

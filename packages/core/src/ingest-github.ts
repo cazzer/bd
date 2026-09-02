@@ -201,7 +201,8 @@ async function main(): Promise<void> {
   const db = createDb(pool);
 
   try {
-    const run = await openIngestRun(db, GITHUB_SOURCE_SYSTEM);
+    // actor = the pnpm script name a person actually types.
+    const run = await openIngestRun(db, GITHUB_SOURCE_SYSTEM, { actor: "ingest:github" });
 
     const repoNodeInputs: NodeInput[] = repos.map((repo) => ({
       nodeType: REPO_NODE_TYPE,

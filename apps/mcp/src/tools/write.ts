@@ -185,12 +185,13 @@ const mergeSchema = z.object({
 export const mergeTool: ToolDef<typeof mergeSchema> = {
   name: "brain_merge",
   description:
-    "Merge a duplicate node (loserId) into a survivor (survivorId) — for when you notice two nodes describe the same thing (no similarity scoring runs automatically). Idempotent: merging a node that is already merged into the same survivor succeeds and changes nothing. Afterward, brain_get/brain_neighbors/brain_search on loserId resolve to survivorId.",
+    "Merge a duplicate node (loserId) into a survivor (survivorId) — for when you notice two nodes describe the same thing (no similarity scoring runs automatically). Idempotent: merging a node that is already merged into the same survivor succeeds and changes nothing. Afterward, brain_get/brain_neighbors/brain_search on loserId resolve to survivorId. The merge is attributed to an ingest run (source_system 'agent', actor = this client), whose id is returned.",
   schema: mergeSchema,
   isWrite: true,
   async handler(ctx: ToolContext, args) {
-    const result = await mergeNodes(ctx.db, args.loserId, args.survivorId);
+    const { ingestRunId, result } = await withAgentIngestRun(ctx.db, (run) => mergeNodes(ctx.db, args.loserId, args.survivorId, run));
     return {
+      ingestRunId,
       survivorId: result.survivorId,
       mergedNodeIds: result.mergedNodeIds,
       noOp: result.mergedNodeIds.length === 0,
