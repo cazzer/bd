@@ -65,6 +65,8 @@ export interface ListedNode {
   contentHash: string;
   createdAt: Date;
   updatedAt: Date;
+  /** This node's keyset position: pass as `cursor` to continue after it. Lets a caller that trims the page (the MCP response budget) still resume correctly. */
+  cursor: ListNodesCursor;
 }
 
 export interface ListNodesResult {
@@ -258,6 +260,7 @@ function mapRow(row: RawListedRow): ListedNode {
     contentHash: row.content_hash,
     createdAt: new Date(row.created_at),
     updatedAt: new Date(row.updated_at),
+    cursor: { updatedAt: row.updated_at_text, id: row.id },
   };
 }
 
@@ -277,11 +280,12 @@ export async function listNodes(db: Database, options: ListNodesOptions = {}): P
 
   const hasMore = result.rows.length > params.limit;
   const pageRows = hasMore ? result.rows.slice(0, params.limit) : result.rows;
-  const last = pageRows[pageRows.length - 1];
+  const page = pageRows.map(mapRow);
+  const last = page[page.length - 1];
 
   return {
-    nodes: pageRows.map(mapRow),
+    nodes: page,
     hasMore,
-    nextCursor: hasMore && last ? { updatedAt: last.updated_at_text, id: last.id } : null,
+    nextCursor: hasMore && last ? last.cursor : null,
   };
 }

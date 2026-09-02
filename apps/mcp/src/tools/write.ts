@@ -12,7 +12,22 @@
 // field's own union, not at the argument root.
 
 import type { EdgeInput, NodeInput } from "@breakdown/core";
-import { DEFAULT_MAX_METADATA_LENGTH, mergeNodes, upsertEdges, upsertNodes } from "@breakdown/core";
+import {
+  DEFAULT_MAX_METADATA_LENGTH,
+  MAX_ASSIGNEE_LENGTH,
+  MAX_CLOSED_REASON_LENGTH,
+  MAX_SPEC_ID_LENGTH,
+  MAX_WORK_ITEM_PRIORITY,
+  MIN_WORK_ITEM_PRIORITY,
+  mergeNodes,
+  normalizeWorkItemMetadata,
+  patchWorkItem,
+  upsertEdges,
+  upsertNodes,
+  WORK_ITEM_NODE_TYPE,
+  WORK_ITEM_STATUSES,
+  type WorkItemPatch,
+} from "@breakdown/core";
 import { z } from "zod";
 import { AGENT_SOURCE_SYSTEM, withAgentIngestRun } from "../attribution.js";
 import { boundResponse } from "../budget.js";
@@ -71,18 +86,21 @@ const writeSchema = z.object({
 export const writeTool: ToolDef<typeof writeSchema> = {
   name: "brain_write",
   description:
-    "Create or update one node, or a batch of nodes in one call (pass items as a single object or an array, up to 1000 items). Each item is upserted on (sourceSystem, externalId) — re-writing identical content is a no-op reported as 'unchanged'; changed content is 'updated'; a new key is 'created'. sourceSystem defaults to \"agent\" when omitted. All items in one call share a single ingest run attributed to source_system='agent' and to this client as actor, so this call's writes are identifiable and revertible as a unit.",
+    "Create or update one node, or a batch of nodes in one call (pass items as a single object or an array, up to 1000 items). Each item is upserted on (sourceSystem, externalId) — re-writing identical content is a no-op reported as 'unchanged'; changed content is 'updated'; a new key is 'created'. sourceSystem defaults to \"agent\" when omitted. All items in one call share a single ingest run attributed to source_system='agent' and to this client as actor, so this call's writes are identifiable and revertible as a unit. Items with nodeType \"work_item\" are validated against the work-item contract (metadata status/priority/assignee/closed_at/closed_reason/spec_id; missing status defaults to open, priority to 2) and one bad item rejects the whole batch.",
   schema: writeSchema,
   isWrite: true,
   async handler(ctx: ToolContext, args) {
     const items = toArray(args.items);
-    const input: NodeInput[] = items.map((item) => ({
+    const input: NodeInput[] = items.map((item, index) => ({
       nodeType: item.nodeType,
       externalId: item.externalId,
       sourceSystem: item.sourceSystem ?? AGENT_SOURCE_SYSTEM,
       title: item.title,
       content: item.content,
-      metadata: item.metadata,
+      // The work-item contract is enforced here, at the tool boundary, not
+      // in upsertNodes (work-items spec): a bad item rejects the whole batch
+      // before any run is opened, naming the item and field.
+      metadata: item.nodeType === WORK_ITEM_NODE_TYPE ? normalizeWorkItemMetadata(item.metadata, { index }) : item.metadata,
     }));
 
     const { ingestRunId, result } = await withAgentIngestRun(ctx.db, ctx.actor(), (run) => upsertNodes(ctx.db, run, input));
@@ -135,7 +153,7 @@ const linkSchema = z.object({
 export const linkTool: ToolDef<typeof linkSchema> = {
   name: "brain_link",
   description:
-    "Assert one edge, or a batch of edges in one call (pass items as a single object or an array, up to 1000 items), between existing node ids. Each edge is upserted on (srcId, dstId, edgeType, sourceSystem) — re-asserting the same edge just updates its weight/props. weight defaults to 1.0 when omitted; sourceSystem defaults to \"agent\". All edges in one call share a single ingest run attributed to source_system='agent' and to this client as actor.",
+    "Assert one edge, or a batch of edges in one call (pass items as a single object or an array, up to 1000 items), between existing node ids. Each edge is upserted on (srcId, dstId, edgeType, sourceSystem) — re-asserting the same edge just updates its weight/props. A `blocks` edge that would make a node transitively block itself is refused with the path, and nothing from the call is stored. weight defaults to 1.0 when omitted; sourceSystem defaults to \"agent\". All edges in one call share a single ingest run attributed to source_system='agent' and to this client as actor.",
   schema: linkSchema,
   isWrite: true,
   async handler(ctx: ToolContext, args) {
@@ -199,4 +217,49 @@ export const mergeTool: ToolDef<typeof mergeSchema> = {
   },
 };
 
-export const writeTools: ToolDef[] = [writeTool, linkTool, mergeTool];
+// --- brain_update_work_item ------------------------------------------------
+
+const nullableString = (max: number) => z.string().max(max).nullable().optional();
+
+const updateWorkItemSchema = z.object({
+  id: uuidField,
+  status: z.enum(WORK_ITEM_STATUSES).optional(),
+  priority: z.number().int().min(MIN_WORK_ITEM_PRIORITY).max(MAX_WORK_ITEM_PRIORITY).optional(),
+  assignee: nullableString(MAX_ASSIGNEE_LENGTH),
+  closedReason: nullableString(MAX_CLOSED_REASON_LENGTH),
+  specId: nullableString(MAX_SPEC_ID_LENGTH),
+  closedAt: z.string().datetime({ offset: true }).nullable().optional(),
+});
+
+export const updateWorkItemTool: ToolDef<typeof updateWorkItemSchema> = {
+  name: "brain_update_work_item",
+  description:
+    "Change specific fields of a work_item node without re-sending its title or content: status (open, in_progress, blocked, closed, deferred), priority (0 most urgent to 4), " +
+    "assignee, closedReason, specId, closedAt. Omitted fields are left alone; null removes a field. Closing stamps closedAt when you do not supply one; leaving closed clears " +
+    "closedAt and closedReason. Applied in one transaction under a row lock, attributed to an ingest run (source_system 'agent', actor = this client), and recorded in the node's " +
+    "history. An id naming a merged-away node patches its survivor. Refused for nodes that are not work items.",
+  schema: updateWorkItemSchema,
+  isWrite: true,
+  async handler(ctx: ToolContext, args) {
+    const patch: WorkItemPatch = {
+      status: args.status,
+      priority: args.priority,
+      assignee: args.assignee,
+      closedReason: args.closedReason,
+      specId: args.specId,
+      closedAt: args.closedAt,
+    };
+    const { ingestRunId, result } = await withAgentIngestRun(ctx.db, ctx.actor(), (run) => patchWorkItem(ctx.db, run, args.id, patch));
+    return {
+      ingestRunId,
+      id: result.id,
+      requestedId: result.requestedId,
+      resolvedFromMerge: result.id !== result.requestedId,
+      action: result.action,
+      before: result.before,
+      after: result.after,
+    };
+  },
+};
+
+export const writeTools: ToolDef[] = [writeTool, linkTool, mergeTool, updateWorkItemTool];

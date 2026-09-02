@@ -17,8 +17,18 @@ import {
   getNodeHistory,
   getNodes,
   getStoreSummary,
+  getWorkItemReadiness,
+  listNodes,
   MAX_ALLOWED_DEPTH,
   MAX_HISTORY_LIMIT,
+  MAX_LIST_LIMIT,
+  MAX_LIST_PREDICATES,
+  MAX_ONE_OF_VALUES,
+  MAX_PREDICATE_KEY_LENGTH,
+  MAX_PREDICATE_STRING_LENGTH,
+  MAX_READINESS_LIMIT,
+  MAX_SPEC_ID_LENGTH,
+  type MetadataPredicate,
   retrieve,
   type RetrieveOptions,
 } from "@breakdown/core";
@@ -308,4 +318,114 @@ export const historyTool: ToolDef<typeof historySchema> = {
   },
 };
 
-export const readTools: ToolDef[] = [searchTool, getTool, neighborsTool, mapTool, historyTool];
+// --- brain_list ------------------------------------------------------------
+
+const scalarSchema = z.union([z.string().max(MAX_PREDICATE_STRING_LENGTH), z.number().finite(), z.boolean(), z.null()]);
+const predicateKeySchema = z.string().min(1).max(MAX_PREDICATE_KEY_LENGTH);
+const predicateSchema = z.union([
+  z.object({ key: predicateKeySchema, op: z.literal("equals"), value: scalarSchema }),
+  z.object({ key: predicateKeySchema, op: z.literal("oneOf"), values: z.array(scalarSchema).min(1).max(MAX_ONE_OF_VALUES) }),
+]);
+
+const listSchema = z.object({
+  nodeTypes: z.array(z.string().min(1)).min(1).optional(),
+  sourceSystems: z.array(z.string().min(1)).min(1).optional(),
+  updatedSince: z.string().datetime({ offset: true }).optional(),
+  where: z.array(predicateSchema).max(MAX_LIST_PREDICATES).optional(),
+  limit: z.number().int().positive().max(MAX_LIST_LIMIT).optional(),
+  cursor: z.object({ updatedAt: z.string().min(1), id: z.string().min(1) }).optional(),
+});
+
+export const listTool: ToolDef<typeof listSchema> = {
+  name: "brain_list",
+  description:
+    "List nodes by structure, with no search text: filter by nodeTypes, sourceSystems, updatedSince, and `where` predicates on top-level metadata keys " +
+    "({ key, op: \"equals\", value } or { key, op: \"oneOf\", values: [...] }; values are strings, numbers, booleans, or null). Returns identity, title, and " +
+    "metadata but never content (use brain_get for that), newest-updated first, canonical nodes only. Paged: when hasMore is true, call again with cursor set " +
+    "to nextCursor. Typical use: brain_list with nodeTypes [\"work_item\"] and where [{ key: \"status\", op: \"equals\", value: \"open\" }].",
+  schema: listSchema,
+  isWrite: false,
+  async handler(ctx: ToolContext, args) {
+    const result = await listNodes(ctx.db, {
+      nodeTypes: args.nodeTypes ?? null,
+      sourceSystems: args.sourceSystems ?? null,
+      updatedSince: args.updatedSince ?? null,
+      where: (args.where as MetadataPredicate[] | undefined) ?? null,
+      limit: args.limit,
+      cursor: args.cursor ?? null,
+    });
+
+    return boundResponse(
+      result.nodes,
+      (n) => n.id,
+      (kept, meta) => {
+        // The budget drops from the tail (the oldest), so the cursor must
+        // come from what was actually returned, not from core's page.
+        const last = kept[kept.length - 1];
+        const hasMore = result.hasMore || meta.droppedIds.length > 0;
+        const nextCursor = hasMore && last ? last.cursor : null;
+        const notes: string[] = [];
+        if (hasMore) notes.push("More nodes match; call brain_list again with cursor set to nextCursor to continue.");
+        if (meta.droppedIds.length > 0) notes.push(`${meta.droppedIds.length} node(s) were dropped to fit the response-size budget; nextCursor already accounts for them, or use a smaller limit.`);
+        if (meta.shrunkIds.length > 0) notes.push(`${meta.shrunkIds.length} node(s) had oversized fields truncated in place.`);
+        return {
+          nodes: kept.map(({ cursor: _cursor, ...node }) => node),
+          hasMore,
+          nextCursor,
+          truncated: hasMore || meta.truncated,
+          ...(notes.length > 0 ? { truncationNote: notes.join(" ") } : {}),
+          droppedNodeIds: meta.droppedIds,
+          shrunkNodeIds: meta.shrunkIds,
+        };
+      },
+      ctx.responseCharBudget,
+    );
+  },
+};
+
+// --- brain_ready -----------------------------------------------------------
+
+const readySchema = z.object({
+  specId: z.string().min(1).max(MAX_SPEC_ID_LENGTH).optional(),
+  readyLimit: z.number().int().positive().max(MAX_READINESS_LIMIT).optional(),
+  blockedLimit: z.number().int().positive().max(MAX_READINESS_LIMIT).optional(),
+});
+
+export const readyTool: ToolDef<typeof readySchema> = {
+  name: "brain_ready",
+  description:
+    "The work-item readiness report: `ready` lists open work_item nodes with no open blocker (ordered by priority, then most recently updated); `blocked` lists open, " +
+    "in-progress, or blocked items with the ids of their open blockers (a `blocks` edge whose source is not a closed work item; a merged-away duplicate counts as its " +
+    "survivor); `cycleMemberIds` lists items that block themselves through other items and are never ready. Optional specId restricts the items reported, not the " +
+    "blockers considered. Equivalent to `bd ready` plus `bd blocked`.",
+  schema: readySchema,
+  isWrite: false,
+  async handler(ctx: ToolContext, args) {
+    const report = await getWorkItemReadiness(ctx.db, {
+      specId: args.specId ?? null,
+      readyLimit: args.readyLimit,
+      blockedLimit: args.blockedLimit,
+    });
+
+    return boundResponse(
+      report.ready,
+      (i) => i.id,
+      (kept, meta) => ({
+        ready: kept,
+        readyHasMore: report.readyHasMore || meta.droppedIds.length > 0,
+        blocked: report.blocked,
+        blockedHasMore: report.blockedHasMore,
+        cycleMemberIds: report.cycleMemberIds,
+        truncated: meta.truncated,
+        ...(meta.truncated
+          ? { truncationNote: `The response-size budget was reached; ${meta.droppedIds.length} lower-priority ready item(s) were dropped. Call again with a smaller readyLimit, or brain_list them with a status predicate.` }
+          : {}),
+        droppedNodeIds: meta.droppedIds,
+        shrunkNodeIds: meta.shrunkIds,
+      }),
+      ctx.responseCharBudget,
+    );
+  },
+};
+
+export const readTools: ToolDef[] = [searchTool, getTool, neighborsTool, mapTool, historyTool, listTool, readyTool];

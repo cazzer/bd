@@ -116,11 +116,11 @@ const BOGUS_ID = "00000000-0000-0000-0000-000000000000";
 // --- Tool listing (spec: "No arbitrary SQL from the model", "Read-only mode") ---
 
 describe("tool listing", () => {
-  it("advertises all eight tools with object-shaped input schemas, and no SQL passthrough tool", async () => {
+  it("advertises all eleven tools with object-shaped input schemas, and no SQL passthrough tool", async () => {
     const { client } = await connectClient();
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
-    expect(names).toEqual(["brain_get", "brain_history", "brain_link", "brain_map", "brain_merge", "brain_neighbors", "brain_search", "brain_write"]);
+    expect(names).toEqual(["brain_get", "brain_history", "brain_link", "brain_list", "brain_map", "brain_merge", "brain_neighbors", "brain_ready", "brain_search", "brain_update_work_item", "brain_write"]);
     for (const tool of tools) {
       expect(tool.inputSchema.type).toBe("object");
     }
@@ -658,7 +658,7 @@ describe("read-only mode", () => {
     const { client } = await connectClient({ readOnly: true });
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
-    expect(names).toEqual(["brain_get", "brain_history", "brain_map", "brain_neighbors", "brain_search"]);
+    expect(names).toEqual(["brain_get", "brain_history", "brain_list", "brain_map", "brain_neighbors", "brain_ready", "brain_search"]);
   });
 
   it("refuses brain_write with an explanatory error and persists nothing", async () => {
@@ -832,5 +832,211 @@ describe("error handling", () => {
     const raw = await client.callTool({ name: "brain_search", arguments: { query: "the of and" } });
     expect(raw.isError).toBe(true);
     expect(firstText(raw)).not.toMatch(/\s+at\s+\S+\s+\(/);
+  });
+});
+
+
+describe("brain_list", () => {
+  it("lists work items by type and a status predicate, newest first, and pages with the cursor (spec: agent lists open work items)", async () => {
+    const run = await newRun();
+    // Written one at a time so updated_at strictly increases.
+    const ids = new Map<string, string>();
+    for (const [externalId, status, priority] of [["a", "open", 1], ["b", "closed", 0], ["c", "open", 3]] as const) {
+      const m = await makeNodes(run, [{ nodeType: "work_item", externalId, title: externalId, content: "c", metadata: { status, priority } }]);
+      ids.set(externalId, m.get(externalId)!);
+    }
+    await makeNodes(run, [{ nodeType: "note", externalId: "n", title: "n", content: "c", metadata: { status: "open" } }]);
+    const { client } = await connectClient();
+
+    const result = parseText(
+      await client.callTool({
+        name: "brain_list",
+        arguments: { sourceSystems: [run.sourceSystem], nodeTypes: ["work_item"], where: [{ key: "status", op: "equals", value: "open" }] },
+      }),
+    );
+    expect(result.nodes.map((n: any) => n.externalId)).toEqual(["c", "a"]);
+    expect(result.nodes[0].metadata).toEqual({ status: "open", priority: 3 });
+    expect(result.nodes[0].content).toBeUndefined();
+    expect(result.nodes[0].cursor).toBeUndefined();
+    expect(result.hasMore).toBe(false);
+    expect(result.nextCursor).toBeNull();
+
+    const first = parseText(await client.callTool({ name: "brain_list", arguments: { sourceSystems: [run.sourceSystem], limit: 2 } }));
+    expect(first.nodes.map((n: any) => n.externalId)).toEqual(["n", "c"]);
+    expect(first.hasMore).toBe(true);
+    expect(first.truncationNote).toMatch(/nextCursor/);
+    const second = parseText(await client.callTool({ name: "brain_list", arguments: { sourceSystems: [run.sourceSystem], limit: 2, cursor: first.nextCursor } }));
+    expect(second.nodes.map((n: any) => n.externalId)).toEqual(["b", "a"]);
+    expect(second.hasMore).toBe(false);
+
+    const oneOf = parseText(await client.callTool({ name: "brain_list", arguments: { sourceSystems: [run.sourceSystem], where: [{ key: "priority", op: "oneOf", values: [0, 1] }] } }));
+    expect(oneOf.nodes.map((n: any) => n.externalId).sort()).toEqual(["a", "b"]);
+  });
+
+  it("rejects a malformed predicate naming it, and works in read-only mode", async () => {
+    const { client } = await connectClient({ readOnly: true });
+    const raw = await client.callTool({ name: "brain_list", arguments: { where: [{ key: "status", op: "like", value: "x" }] } });
+    expect(raw.isError).toBe(true);
+    expect(firstText(raw)).toMatch(/where/);
+
+    const ok = await client.callTool({ name: "brain_list", arguments: { sourceSystems: [`nothing-${uniqueSuffix()}`] } });
+    expect(ok.isError).toBeFalsy();
+    expect(parseText(ok).nodes).toEqual([]);
+  });
+
+  it("recomputes the cursor from what survived the response budget", async () => {
+    const run = await newRun();
+    for (const externalId of ["p1", "p2", "p3", "p4"]) {
+      await makeNodes(run, [{ nodeType: "doc", externalId, title: "t".repeat(400), content: "c" }]);
+    }
+    const { client } = await connectClient({ responseCharBudget: 1400 });
+    const page = parseText(await client.callTool({ name: "brain_list", arguments: { sourceSystems: [run.sourceSystem], limit: 4 } }));
+    expect(page.truncated).toBe(true);
+    expect(page.droppedNodeIds.length).toBeGreaterThan(0);
+    expect(page.hasMore).toBe(true);
+    // Each page fits fewer nodes than the limit, so walking to the end
+    // takes several calls; the cursor must follow what was actually kept.
+    const seen: string[] = page.nodes.map((n: any) => n.externalId);
+    let cursor = page.nextCursor;
+    let calls = 1;
+    while (cursor !== null) {
+      const next = parseText(await client.callTool({ name: "brain_list", arguments: { sourceSystems: [run.sourceSystem], limit: 4, cursor } }));
+      seen.push(...next.nodes.map((n: any) => n.externalId));
+      cursor = next.nextCursor;
+      calls += 1;
+      if (calls > 10) throw new Error("cursor did not converge");
+    }
+    expect(calls).toBeGreaterThan(2);
+    expect(seen).toEqual(["p4", "p3", "p2", "p1"]);
+  });
+});
+
+describe("brain_ready", () => {
+  it("reports ready and blocked items with their blockers, scoped by specId (spec: agent asks what is ready)", async () => {
+    const run = await newRun();
+    const spec = `spec-${uniqueSuffix()}`;
+    const m = await makeNodes(run, [
+      { nodeType: "work_item", externalId: "A", title: "A", content: "c", metadata: { status: "closed", priority: 2, spec_id: spec } },
+      { nodeType: "work_item", externalId: "B", title: "B", content: "c", metadata: { status: "open", priority: 0, spec_id: spec } },
+      { nodeType: "work_item", externalId: "C", title: "C", content: "c", metadata: { status: "open", priority: 1, spec_id: spec } },
+      { nodeType: "work_item", externalId: "D", title: "D", content: "c", metadata: { status: "open", priority: 2, spec_id: spec } },
+    ]);
+    await makeEdges(run, [
+      { srcId: m.get("A")!, dstId: m.get("B")!, edgeType: "blocks" },
+      { srcId: m.get("C")!, dstId: m.get("D")!, edgeType: "blocks" },
+    ]);
+    const { client } = await connectClient({ readOnly: true });
+
+    const report = parseText(await client.callTool({ name: "brain_ready", arguments: { specId: spec } }));
+    expect(report.ready.map((i: any) => i.externalId)).toEqual(["B", "C"]);
+    expect(report.blocked).toHaveLength(1);
+    expect(report.blocked[0]).toMatchObject({ externalId: "D", openBlockerIds: [m.get("C")], inCycle: false });
+    expect(report.cycleMemberIds).toEqual([]);
+    expect(report.truncated).toBe(false);
+  });
+});
+
+describe("brain_update_work_item", () => {
+  it("closes a work item, stamps closedAt, names its run, and the change shows in brain_history (spec: agent closes a work item)", async () => {
+    const src = `mcp-wi-${uniqueSuffix()}`;
+    usedSourceSystems.push(src);
+    const { client } = await connectClient(undefined, { name: "claude-code", version: "2.1.0" });
+
+    const written = parseText(await client.callTool({ name: "brain_write", arguments: { items: { nodeType: "work_item", sourceSystem: src, externalId: "wi", title: "Ship it", content: "body" } } }));
+    toolRunIds.push(written.ingestRunId);
+    const id = written.items[0].id;
+
+    const updated = parseText(await client.callTool({ name: "brain_update_work_item", arguments: { id, status: "closed", closedReason: "done" } }));
+    toolRunIds.push(updated.ingestRunId);
+    expect(updated).toMatchObject({ id, requestedId: id, resolvedFromMerge: false, action: "updated" });
+    expect(updated.before).toMatchObject({ status: "open", priority: 2 });
+    expect(updated.after).toMatchObject({ status: "closed", closedReason: "done" });
+    expect(typeof updated.after.closedAt).toBe("string");
+
+    const history = parseText(await client.callTool({ name: "brain_history", arguments: { id } }));
+    expect(history.revisions[0]).toMatchObject({
+      changedFields: ["metadata"],
+      ingestRun: { id: updated.ingestRunId, sourceSystem: "agent", actor: "claude-code 2.1.0" },
+    });
+    expect(history.revisions[0].metadataChanges.status).toEqual({ before: "open", after: "closed" });
+
+    const noop = parseText(await client.callTool({ name: "brain_update_work_item", arguments: { id, closedReason: "done" } }));
+    toolRunIds.push(noop.ingestRunId);
+    expect(noop.action).toBe("unchanged");
+  });
+
+  it("refuses a node that is not a work item, a bad patch, and read-only mode", async () => {
+    const run = await newRun();
+    const m = await makeNodes(run, [{ nodeType: "note", externalId: "n", title: "n", content: "c" }]);
+    const { client } = await connectClient();
+
+    const notItem = await client.callTool({ name: "brain_update_work_item", arguments: { id: m.get("n")!, status: "closed" } });
+    expect(notItem.isError).toBe(true);
+    expect(firstText(notItem)).toMatch(/not a work item/);
+
+    const bad = await client.callTool({ name: "brain_update_work_item", arguments: { id: m.get("n")!, priority: 9 } });
+    expect(bad.isError).toBe(true);
+
+    const { client: ro } = await connectClient({ readOnly: true });
+    const refused = await ro.callTool({ name: "brain_update_work_item", arguments: { id: m.get("n")!, status: "closed" } });
+    expect(refused.isError).toBe(true);
+    expect(firstText(refused)).toMatch(/read-only/i);
+  });
+});
+
+describe("work-item contract in brain_write and cycles in brain_link", () => {
+  it("rejects a batch containing a work item with a bad priority, naming the item and field, persisting nothing (spec: agent writes a work item with a bad priority)", async () => {
+    const src = `mcp-wi-${uniqueSuffix()}`;
+    usedSourceSystems.push(src);
+    const { client } = await connectClient();
+    const raw = await client.callTool({
+      name: "brain_write",
+      arguments: {
+        items: [
+          { nodeType: "work_item", sourceSystem: src, externalId: "good", title: "ok" },
+          { nodeType: "work_item", sourceSystem: src, externalId: "bad", title: "bad", metadata: { priority: 7 } },
+        ],
+      },
+    });
+    expect(raw.isError).toBe(true);
+    const text = firstText(raw);
+    expect(text).toMatch(/priority/);
+    expect(text).toMatch(/batch index 1/);
+    const persisted = await db.select({ id: nodes.id }).from(nodes).where(eq(nodes.sourceSystem, src));
+    expect(persisted).toHaveLength(0);
+  });
+
+  it("defaults a work item's status and priority on write", async () => {
+    const src = `mcp-wi-${uniqueSuffix()}`;
+    usedSourceSystems.push(src);
+    const { client } = await connectClient();
+    const written = parseText(await client.callTool({ name: "brain_write", arguments: { items: { nodeType: "work_item", sourceSystem: src, externalId: "d", title: "d" } } }));
+    toolRunIds.push(written.ingestRunId);
+    const got = parseText(await client.callTool({ name: "brain_get", arguments: { ids: [written.items[0].id] } }));
+    expect(got.nodes[0].metadata).toEqual({ status: "open", priority: 2 });
+  });
+
+  it("refuses a blocks edge that closes a cycle, naming the path, storing nothing from the call (spec: agent links a cycle)", async () => {
+    const run = await newRun();
+    const m = await makeNodes(run, [
+      { nodeType: "work_item", externalId: "A", title: "A", content: "c", metadata: { status: "open" } },
+      { nodeType: "work_item", externalId: "B", title: "B", content: "c", metadata: { status: "open" } },
+    ]);
+    const a = m.get("A")!;
+    const b = m.get("B")!;
+    const { client } = await connectClient();
+
+    const ok = parseText(await client.callTool({ name: "brain_link", arguments: { items: { srcId: a, dstId: b, edgeType: "blocks" } } }));
+    toolRunIds.push(ok.ingestRunId);
+    expect(ok.created).toBe(1);
+
+    const raw = await client.callTool({ name: "brain_link", arguments: { items: [{ srcId: b, dstId: a, edgeType: "blocks" }, { srcId: a, dstId: b, edgeType: "mentions" }] } });
+    expect(raw.isError).toBe(true);
+    const text = firstText(raw);
+    expect(text).toMatch(/cycle/);
+    expect(text).toContain(`${b} -> ${a} -> ${b}`);
+    expect(text).toMatch(/Nothing from this call was stored/);
+    const stored = await db.select({ id: edges.id }).from(edges).where(and(eq(edges.srcId, a), eq(edges.edgeType, "mentions")));
+    expect(stored).toHaveLength(0);
   });
 });

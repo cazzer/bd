@@ -15,17 +15,20 @@ import {
   InvalidEdgeInputError,
   InvalidEdgeWeightError,
   InvalidIngestRunError,
+  InvalidListOptionError,
   InvalidLookupIdError,
   InvalidLookupOptionError,
   InvalidNodeContentError,
   InvalidNodeInputError,
   InvalidRetrievalOptionError,
+  InvalidWorkItemError,
   KnowledgeStoreError,
   LookupFailedError,
   MergeFailedError,
   MetadataTooLargeError,
   NodeNotFoundError,
   NodeUpsertFailedError,
+  NotAWorkItemError,
   RetrievalFailedError,
   SelfMergeError,
 } from "@breakdown/core";
@@ -57,6 +60,20 @@ const POSTGRES_FOREIGN_KEY_VIOLATION = "23503";
  */
 function isForeignKeyViolation(err: EdgeUpsertFailedError): boolean {
   return asPgError(err.cause)?.code === POSTGRES_FOREIGN_KEY_VIOLATION;
+}
+
+/** Postgres SQLSTATE for a check violation: the blocks-acyclic trigger raises it (migrations/0003_*.sql). */
+const POSTGRES_CHECK_VIOLATION = "23514";
+
+/**
+ * True when `err` (an `EdgeUpsertFailedError`) wraps the blocks-acyclic
+ * trigger's rejection. Like a foreign-key violation this is an input
+ * problem: the same call fails again until the offending edge is removed.
+ * The weight range check is the only other CHECK on `edges`, and weight is
+ * validated before SQL, so a check violation here is the cycle trigger.
+ */
+function isBlocksCycle(err: EdgeUpsertFailedError): boolean {
+  return asPgError(err.cause)?.code === POSTGRES_CHECK_VIOLATION;
 }
 
 export function formatZodError(toolName: string, err: ZodError): CallToolResult {
@@ -106,6 +123,12 @@ export function mapError(toolName: string, err: unknown): CallToolResult {
     return actionable(err, "Fix that field on the named edge and retry. If srcId/dstId look right but are rejected, confirm them with brain_get first.");
   }
   if (err instanceof EdgeUpsertFailedError) {
+    if (isBlocksCycle(err)) {
+      return actionable(
+        err,
+        "A `blocks` edge in this call would make a node transitively block itself; the path is in the message above. Nothing from this call was stored. Remove or reverse that edge and retry. If the cycle already exists (a merge can create one), brain_ready lists its members.",
+      );
+    }
     if (isForeignKeyViolation(err)) {
       return actionable(err, "srcId and/or dstId do not reference an existing node — this is an input problem, not a database one; retrying with the same ids will fail again. Verify both ids with brain_get (or find the right ones with brain_search/brain_map), then retry with corrected ids.");
     }
@@ -148,6 +171,19 @@ export function mapError(toolName: string, err: unknown): CallToolResult {
   }
   if (err instanceof LookupFailedError) {
     return actionable(err, RETRY_HINT);
+  }
+
+  // --- Structured listing (brain_list) ---
+  if (err instanceof InvalidListOptionError) {
+    return actionable(err, "Fix that option and retry: predicates are { key, op: \"equals\", value } or { key, op: \"oneOf\", values }, values are scalars, cursor is a nextCursor from a previous brain_list response.");
+  }
+
+  // --- Work items (brain_write of a work_item, brain_update_work_item) ---
+  if (err instanceof InvalidWorkItemError) {
+    return actionable(err, "Fix that field on the named item and retry; nothing from this call was persisted. status is one of open, in_progress, blocked, closed, deferred; priority is an integer 0-4.");
+  }
+  if (err instanceof NotAWorkItemError) {
+    return actionable(err, "brain_update_work_item only patches nodes whose nodeType is work_item. Use brain_write to change other nodes, or write this one as a work_item first.");
   }
 
   // --- Attribution plumbing (should not surface in practice — the server

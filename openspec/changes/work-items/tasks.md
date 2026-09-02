@@ -16,13 +16,13 @@
 
 ## 3. MCP tools
 
-- [ ] 3.1 Add `brain_list` (read) in `apps/mcp/src/tools/read.ts`: nodeTypes, sourceSystems, updatedSince, `where` predicates, limit, cursor; bounded with a truncation note that says how to continue
-- [ ] 3.2 Add `brain_ready` (read): optional specId and limits; bounded over the ready list
-- [ ] 3.3 Add `brain_update_work_item` (write) in `apps/mcp/src/tools/write.ts`: id plus a patch of status, priority, assignee, closedReason, specId (null clears), attributed via `withAgentIngestRun`, returning action, before, after, ingestRunId
-- [ ] 3.4 Make `brain_write` normalize every `work_item` item through `normalizeWorkItemMetadata` before `upsertNodes`, so a bad item rejects the whole batch naming the item and field
-- [ ] 3.5 Map `InvalidWorkItemError`, `NotAWorkItemError`, `InvalidListOptionError`, and an `EdgeUpsertFailedError` whose cause is a `check_violation` from the cycle trigger to actionable messages in `apps/mcp/src/errors.ts`; update the instructions string and comments from eight tools to eleven
-- [ ] 3.6 Server tests: three tools advertised, `brain_list` and `brain_ready` work read-only and `brain_update_work_item` is refused; list with predicate and cursor; write of a bad work item rejects the batch; link closing a cycle is refused naming the path; close a work item and see it in `brain_history` attributed to the run; readiness after a merge-created cycle
-- [ ] 3.7 Add the work-item and dependency conventions to `CLAUDE.md`; `pnpm check` green
+- [x] 3.1 Add `brain_list` (read) in `apps/mcp/src/tools/read.ts`: nodeTypes, sourceSystems, updatedSince, `where` predicates, limit, cursor; bounded with a truncation note that says how to continue
+- [x] 3.2 Add `brain_ready` (read): optional specId and limits; bounded over the ready list
+- [x] 3.3 Add `brain_update_work_item` (write) in `apps/mcp/src/tools/write.ts`: id plus a patch of status, priority, assignee, closedReason, specId (null clears), attributed via `withAgentIngestRun`, returning action, before, after, ingestRunId
+- [x] 3.4 Make `brain_write` normalize every `work_item` item through `normalizeWorkItemMetadata` before `upsertNodes`, so a bad item rejects the whole batch naming the item and field
+- [x] 3.5 Map `InvalidWorkItemError`, `NotAWorkItemError`, `InvalidListOptionError`, and an `EdgeUpsertFailedError` whose cause is a `check_violation` from the cycle trigger to actionable messages in `apps/mcp/src/errors.ts`; update the instructions string and comments from eight tools to eleven
+- [x] 3.6 Server tests: three tools advertised, `brain_list` and `brain_ready` work read-only and `brain_update_work_item` is refused; list with predicate and cursor; write of a bad work item rejects the batch; link closing a cycle is refused naming the path; close a work item and see it in `brain_history` attributed to the run; readiness after a merge-created cycle
+- [x] 3.7 Add the work-item and dependency conventions to `CLAUDE.md`; `pnpm check` green
 
 ## 4. Beads importer and dogfood
 

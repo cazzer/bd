@@ -16,6 +16,9 @@ import {
   InvalidIngestRunError,
   InvalidLookupIdError,
   InvalidLookupOptionError,
+  NotAWorkItemError,
+  InvalidWorkItemError,
+  InvalidListOptionError,
   InvalidNodeContentError,
   InvalidNodeInputError,
   InvalidRetrievalOptionError,
@@ -217,5 +220,33 @@ describe("mapError", () => {
     const text = textOf(mapError("brain_search", "a plain string throw"));
     expect(text).toContain("a plain string throw");
     expect(text).not.toMatch(STACK_LINE);
+  });
+});
+
+
+describe("mapError: work-items change", () => {
+  it("maps the blocks-acyclic trigger's check violation to a cycle explanation that says nothing was stored", () => {
+    const pgError = Object.assign(new Error("blocks edge x -> y would form a cycle"), { code: "23514", detail: "path: y -> x -> y" });
+    const err = new EdgeUpsertFailedError("edge x -[blocks]-> y (batch index 0) failed to write (postgres: 23514 - path: y -> x -> y)", 0, 0, { cause: pgError });
+    const result = mapError("brain_link", err);
+    expect(result.isError).toBe(true);
+    const text = (result.content[0] as { text: string }).text;
+    expect(text).toMatch(/would make a node transitively block itself/);
+    expect(text).toMatch(/Nothing from this call was stored/);
+    expect(text).toContain("path: y -> x -> y");
+  });
+
+  it("maps InvalidListOptionError, InvalidWorkItemError, and NotAWorkItemError to actionable messages", () => {
+    const list = (mapError("brain_list", new InvalidListOptionError("where[0].op", "like", "must be equals or oneOf")).content[0] as { text: string }).text;
+    expect(list).toMatch(/where\[0\]\.op/);
+    expect(list).toMatch(/oneOf/);
+
+    const item = (mapError("brain_write", new InvalidWorkItemError("priority", 7, "must be an integer from 0 to 4", 1)).content[0] as { text: string }).text;
+    expect(item).toMatch(/batch index 1/);
+    expect(item).toMatch(/nothing from this call was persisted/i);
+
+    const notItem = (mapError("brain_update_work_item", new NotAWorkItemError("00000000-0000-4000-8000-000000000000", "note")).content[0] as { text: string }).text;
+    expect(notItem).toMatch(/not a work item/);
+    expect(notItem).toMatch(/brain_write/);
   });
 });

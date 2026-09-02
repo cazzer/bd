@@ -1,4 +1,4 @@
-// Entrypoint: fail-fast startup checks, then serve the eight brain_* tools
+// Entrypoint: fail-fast startup checks, then serve the eleven brain_* tools
 // over stdio (brain-mcp spec, "Fail fast on misconfiguration").
 //
 // Nothing above main() reads the environment or opens a connection —
