@@ -42,9 +42,23 @@ export interface TypePanelProps {
   focusedType: string | null;
   /** A row was activated — App.tsx decides whether that turns focus on or off. */
   onToggleFocus: (nodeType: string) => void;
+  /** App.tsx's store-wide type-colour rank map (bd-4ye, palette.ts's `assignTypeColors`) — the SAME map GraphCanvas and SearchBar read, so a row's swatch never disagrees with the canvas. */
+  typeColors: ReadonlyMap<string, string>;
 }
 
-function TypeRow({ nodeType, count, focused, onToggleFocus }: { nodeType: string; count: number; focused: boolean; onToggleFocus: (nodeType: string) => void }) {
+function TypeRow({
+  nodeType,
+  count,
+  focused,
+  onToggleFocus,
+  typeColors,
+}: {
+  nodeType: string;
+  count: number;
+  focused: boolean;
+  onToggleFocus: (nodeType: string) => void;
+  typeColors: ReadonlyMap<string, string>;
+}) {
   return (
     <li>
       <button
@@ -55,7 +69,7 @@ function TypeRow({ nodeType, count, focused, onToggleFocus }: { nodeType: string
           focused ? "border-accent bg-surface-strong" : "border-transparent hover:bg-surface-strong"
         }`}
       >
-        <span aria-hidden className="inline-block h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: colorForNodeType(nodeType) }} />
+        <span aria-hidden className="inline-block h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: colorForNodeType(nodeType, typeColors) }} />
         <span className="flex-1 truncate text-fg">{nodeType}</span>
         <span className="shrink-0 text-fg-muted">{count}</span>
       </button>
@@ -63,7 +77,7 @@ function TypeRow({ nodeType, count, focused, onToggleFocus }: { nodeType: string
   );
 }
 
-export function TypePanel({ storeTypes, selected, focusedType, onToggleFocus }: TypePanelProps) {
+export function TypePanel({ storeTypes, selected, focusedType, onToggleFocus, typeColors }: TypePanelProps) {
   const heading = selected ? `around ${selected.title || "(untitled)"}` : "Types";
   // `topStoreTypes(storeTypes, storeTypes.length)` — "top all of them" —
   // reuses the one tested sort/tie-break rather than re-sorting inline;
@@ -83,7 +97,7 @@ export function TypePanel({ storeTypes, selected, focusedType, onToggleFocus }: 
         <>
           <ul className="flex flex-col gap-0.5">
             {visible.map((row) => (
-              <TypeRow key={row.nodeType} nodeType={row.nodeType} count={row.count} focused={focusedType === row.nodeType} onToggleFocus={onToggleFocus} />
+              <TypeRow key={row.nodeType} nodeType={row.nodeType} count={row.count} focused={focusedType === row.nodeType} onToggleFocus={onToggleFocus} typeColors={typeColors} />
             ))}
           </ul>
           {rest.length > 0 && (
@@ -93,7 +107,7 @@ export function TypePanel({ storeTypes, selected, focusedType, onToggleFocus }: 
               </summary>
               <ul className="mt-1 flex flex-col gap-0.5">
                 {rest.map((row) => (
-                  <TypeRow key={row.nodeType} nodeType={row.nodeType} count={row.count} focused={focusedType === row.nodeType} onToggleFocus={onToggleFocus} />
+                  <TypeRow key={row.nodeType} nodeType={row.nodeType} count={row.count} focused={focusedType === row.nodeType} onToggleFocus={onToggleFocus} typeColors={typeColors} />
                 ))}
               </ul>
             </details>

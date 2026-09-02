@@ -79,60 +79,128 @@ describe("placeLabels — slot exhaustion at one point (5 coincident candidates,
     expect(byId.get("n4")).toEqual({ id: "n4", visible: false, dx: 0, dy: 0 });
   });
 
-  it("an alwaysShow candidate is placed even when every slot is already taken — never hidden", () => {
+  it("an alwaysShow candidate with no free slot left is ALSO hidden, not force-placed on top of another label (explorer-legibility review, hub-density fix)", () => {
+    // Before this fix, the fifth fell back to n0's already-claimed
+    // default slot instead of disappearing — exactly the overlap this
+    // review found at hub density (several seeds/neighbours converging
+    // on one node). With every candidate's priority and alwaysShow
+    // status equal here, the id tie-break still decides processing
+    // order, so the result is identical to the non-alwaysShow case
+    // above: alwaysShow no longer changes whether a candidate can be
+    // dropped, only that it's tried first (see the next describe block
+    // for what DOES still decide who wins a contested slot).
     const placements = placeLabels(fiveCoincident(true), FONT_SIZE);
-    expect(placements.every((p) => p.visible)).toBe(true);
-    // The fifth had nowhere free, so it falls back to the shared
-    // default slot — the same one n0 already claimed — rather than
-    // disappearing (graph-explorer/spec.md's "Query relevance is
-    // transient, never geometry" scenario's spirit extended here: a
-    // seed's own label must survive even a worst-case pile-up).
-    expect(placements.find((p) => p.id === "n4")).toEqual({ id: "n4", visible: true, dx: 0, dy: BELOW_DY });
-  });
-
-  it("mixed group: an alwaysShow node processed after all four slots are already filled by other alwaysShow neighbours still gets a label", () => {
-    // alwaysShow always sorts before non-alwaysShow regardless of id —
-    // so to actually exhaust an alwaysShow candidate's slots, the
-    // crowd filling them must also be alwaysShow (a lower-priority
-    // non-alwaysShow node can never "beat" a seed to a slot). This is
-    // the direct analogue of the review's real scenario: several seed
-    // nodes packed into one dense cluster, none of which may lose its
-    // label.
-    const candidates = [...Array.from({ length: 4 }, (_, i) => candidate({ id: `seed${i}`, alwaysShow: true })), candidate({ id: "last-seed", alwaysShow: true })];
-    const placements = placeLabels(candidates, FONT_SIZE);
-    expect(placements.every((p) => p.visible)).toBe(true);
+    const byId = new Map(placements.map((p) => [p.id, p]));
+    expect(byId.get("n0")).toEqual({ id: "n0", visible: true, dx: 0, dy: BELOW_DY });
+    expect(byId.get("n1")).toEqual({ id: "n1", visible: true, dx: 0, dy: ABOVE_DY });
+    expect(byId.get("n2")).toEqual({ id: "n2", visible: true, dx: 0, dy: BELOW_FAR_DY });
+    expect(byId.get("n3")).toEqual({ id: "n3", visible: true, dx: 0, dy: ABOVE_FAR_DY });
+    expect(byId.get("n4")).toEqual({ id: "n4", visible: false, dx: 0, dy: 0 });
   });
 });
 
-describe("placeLabels — the reviewed corpus scenario: a 7-node dense cluster where every node is a seed", () => {
+describe("placeLabels — priority decides who is dropped when two labels can't both fit (explorer-legibility review, finding 5)", () => {
+  // Three "filler" candidates (priority 1) are just enough to consume 3
+  // of the 4 geometrically-guaranteed slots at this coincident point,
+  // leaving exactly one slot contested between "high" (priority 2) and
+  // "low" (priority 0). Processing order (priority desc): high, then
+  // the three fillers, then low — high claims the slot first (nothing
+  // placed yet), the fillers claim the remaining three, and low finds
+  // every slot already taken.
+  it("two labels that cannot both fit: only the higher-priority one is placed, the lower-priority one is dropped", () => {
+    const high = candidate({ id: "high", priority: 2, alwaysShow: true });
+    const low = candidate({ id: "low", priority: 0, alwaysShow: true });
+    const fillers = ["filler-a", "filler-b", "filler-c"].map((id) => candidate({ id, priority: 1, alwaysShow: true }));
+    const placements = placeLabels([high, low, ...fillers], FONT_SIZE);
+    const byId = new Map(placements.map((p) => [p.id, p]));
+    expect(byId.get("high")).toEqual({ id: "high", visible: true, dx: 0, dy: BELOW_DY });
+    expect(byId.get("low")).toEqual({ id: "low", visible: false, dx: 0, dy: 0 });
+  });
+
+  it("unrelated labels are unaffected by that contest", () => {
+    const high = candidate({ id: "high", priority: 2, alwaysShow: true });
+    const low = candidate({ id: "low", priority: 0, alwaysShow: true });
+    const fillers = ["filler-a", "filler-b", "filler-c"].map((id) => candidate({ id, priority: 1, alwaysShow: true }));
+    const placements = placeLabels([high, low, ...fillers], FONT_SIZE);
+    const byId = new Map(placements.map((p) => [p.id, p]));
+    // The three fillers — not party to the high/low contest, just
+    // sharing the same point — all still get a slot, regardless of
+    // which of high/low won theirs.
+    expect(byId.get("filler-a")).toEqual({ id: "filler-a", visible: true, dx: 0, dy: ABOVE_DY });
+    expect(byId.get("filler-b")).toEqual({ id: "filler-b", visible: true, dx: 0, dy: BELOW_FAR_DY });
+    expect(byId.get("filler-c")).toEqual({ id: "filler-c", visible: true, dx: 0, dy: ABOVE_FAR_DY });
+    // A node far away from the contested point is unaffected too.
+    const distant = candidate({ id: "distant", x: 500, y: 0, alwaysShow: true, priority: 0 });
+    const withDistant = placeLabels([high, low, ...fillers, distant], FONT_SIZE);
+    expect(withDistant.find((p) => p.id === "distant")).toEqual({ id: "distant", visible: true, dx: 0, dy: BELOW_DY });
+  });
+});
+
+describe("placeLabels — the reviewed corpus scenario: a 7-node dense cluster, priority order settles who keeps a label", () => {
   // Loosely reproduces the add-knowledge-graph-core cluster from the
-  // review's screenshot: seven nodes within a ~40-unit box (all seeds,
-  // since the query that produced it matched every node directly) plus
-  // two isolated nodes far away. The fix's guarantee under test: no seed
-  // ever loses its label, no matter how tightly packed the cluster is.
-  it("every seed in the tight cluster keeps a visible label", () => {
-    const clusterPositions: Array<[number, number]> = [
-      [0, 0],
-      [8, -6],
-      [-7, -5],
-      [4, 8],
-      [-6, 7],
-      [10, 4],
-      [-3, 12],
-    ];
-    const cluster = clusterPositions.map(([x, y], i) => candidate({ id: `cluster-${i}`, x, y, radius: 6 + i, alwaysShow: true, priority: i }));
-    const isolated = [candidate({ id: "isolated-a", x: 1000, y: 0, alwaysShow: true }), candidate({ id: "isolated-b", x: 1000, y: 60, alwaysShow: true })];
+  // review's screenshot: seven nodes within a ~40-unit box, growing
+  // radius (a rough stand-in for degree), plus two isolated nodes far
+  // away. cluster-0 stands in for the selected node (priority 3); the
+  // rest stand in for seeds (priority 2, GraphCanvas's own tier order —
+  // see computeLabelPlacements' doc comment). Expected offsets below are
+  // the actual (fixed) algorithm's output for this exact geometry —
+  // computed via the same radius-dependent formulas BELOW_DY/etc. above
+  // generalize to (belowDy/aboveDy/belowFarDy/aboveFarDy, this block's
+  // own helpers), not asserted from first principles: a 7-body packing
+  // problem isn't hand-solvable the way the coincident-point cases above
+  // are, but the RESULT is still exactly reproducible from those same
+  // four formulas once each node's own radius is known.
+  const belowDy = (radius: number) => radius + DEFAULT_LABEL_GAP;
+  const aboveDy = (radius: number) => -(radius + DEFAULT_LABEL_GAP + LINE_HEIGHT);
+  const belowFarDy = (radius: number) => belowDy(radius) + LINE_HEIGHT + STACK_GAP;
+  const aboveFarDy = (radius: number) => aboveDy(radius) - LINE_HEIGHT - STACK_GAP;
 
-    const placements = placeLabels([...cluster, ...isolated], FONT_SIZE);
-    expect(placements.every((p) => p.visible)).toBe(true);
+  const clusterPositions: Array<[number, number]> = [
+    [0, 0],
+    [8, -6],
+    [-7, -5],
+    [4, 8],
+    [-6, 7],
+    [10, 4],
+    [-3, 12],
+  ];
+  const cluster = clusterPositions.map(([x, y], i) => candidate({ id: `cluster-${i}`, x, y, radius: 6 + i, alwaysShow: true, priority: i === 0 ? 3 : 2 }));
+  const isolated = [candidate({ id: "isolated-a", x: 1000, y: 0, alwaysShow: true }), candidate({ id: "isolated-b", x: 1000, y: 60, alwaysShow: true })];
+  const placements = placeLabels([...cluster, ...isolated], FONT_SIZE);
+  const byId = new Map(placements.map((p) => [p.id, p]));
+
+  it("the highest-priority node (selected, priority 3) still gets a slot, even if not its preferred one", () => {
+    expect(byId.get("cluster-0")).toEqual({ id: "cluster-0", visible: true, dx: 0, dy: belowFarDy(6) });
+  });
+
+  it("some same-priority (seed) nodes win a slot and some lose, not every one guaranteed anymore", () => {
+    expect(byId.get("cluster-1")).toEqual({ id: "cluster-1", visible: true, dx: 0, dy: aboveDy(7) });
+    expect(byId.get("cluster-2")).toEqual({ id: "cluster-2", visible: true, dx: 0, dy: aboveFarDy(8) });
+    expect(byId.get("cluster-3")).toEqual({ id: "cluster-3", visible: false, dx: 0, dy: 0 });
+    expect(byId.get("cluster-4")).toEqual({ id: "cluster-4", visible: false, dx: 0, dy: 0 });
+    expect(byId.get("cluster-5")).toEqual({ id: "cluster-5", visible: false, dx: 0, dy: 0 });
+    expect(byId.get("cluster-6")).toEqual({ id: "cluster-6", visible: true, dx: 0, dy: belowFarDy(12) });
+  });
+
+  it("nodes far outside the cluster are unaffected by its slot contest", () => {
+    expect(byId.get("isolated-a")).toEqual({ id: "isolated-a", visible: true, dx: 0, dy: belowDy(RADIUS) });
+    expect(byId.get("isolated-b")).toEqual({ id: "isolated-b", visible: true, dx: 0, dy: belowDy(RADIUS) });
   });
 });
 
-describe("placeLabels — a hovered (non-seed) node behaves like a seed", () => {
-  it("a non-seed, alwaysShow node (the currently-hovered node) is treated identically to a seed — always placed", () => {
+describe("placeLabels — a hovered (non-seed) node contests slots exactly like any other alwaysShow candidate", () => {
+  it("a non-seed, alwaysShow node with the lowest priority in a full crowd is dropped, not force-placed (explorer-legibility review)", () => {
+    // Before this fix, "always placed, never hidden" was alwaysShow's
+    // own guarantee regardless of priority — this exact geometry used to
+    // assert the opposite of what's asserted below. It no longer holds:
+    // alwaysShow now only decides processing ORDER (ahead of ambient
+    // nodes), not whether a candidate can lose a contest for the last
+    // slot.
     const crowd = Array.from({ length: 4 }, (_, i) => candidate({ id: `blocker${i}`, alwaysShow: true }));
-    const hovered = candidate({ id: "hovered-not-a-seed", alwaysShow: true, priority: -1 }); // lowest priority, still must be visible
+    const hovered = candidate({ id: "hovered-not-a-seed", alwaysShow: true, priority: -1 }); // lowest priority — processed last, finds nothing free
     const placements = placeLabels([...crowd, hovered], FONT_SIZE);
-    expect(placements.find((p) => p.id === "hovered-not-a-seed")!.visible).toBe(true);
+    expect(placements.find((p) => p.id === "hovered-not-a-seed")).toEqual({ id: "hovered-not-a-seed", visible: false, dx: 0, dy: 0 });
+    // The crowd that beat it is unaffected — still all four visible.
+    expect(placements.filter((p) => p.id.startsWith("blocker")).every((p) => p.visible)).toBe(true);
   });
 });

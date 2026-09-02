@@ -11,7 +11,7 @@
 // deliberately thin) drawing code.
 
 import type { trpc } from "../trpc.js";
-import { colorForNodeType, colorForSourceSystem } from "./palette.js";
+import { colorForSourceSystem } from "./palette.js";
 
 // --- API result types --------------------------------------------------
 //
@@ -53,8 +53,25 @@ export const NODE_RADIUS_SCALE = 4;
  */
 export const NODE_RADIUS_MIN = 3;
 
+/**
+ * Ceiling on a node's radius (bd-4ye, design.md decision 3: "adds a
+ * ceiling ... at roughly 3x NODE_RADIUS_MIN — the same 'about a factor
+ * of three, not ten' language the existing spec requirement already
+ * uses for a 10x-degree hub, now enforced as an actual cap rather than
+ * left as an emergent property of sqrt scaling that a large enough
+ * degree spread can still blow past"). Radius stays monotonic and
+ * sqrt-scaled up to this ceiling; a degree large enough to blow past it
+ * draws at exactly this value instead, same as any other node past the
+ * cap — graph-explorer/spec.md's "A hub above the cap is drawn at the
+ * cap radius" scenario. This never touches `degree` itself — a node's
+ * real, uncapped degree stays visible in the detail panel regardless of
+ * whether its drawn radius hit the ceiling (DetailPanel.tsx's meta row
+ * reads `degree` directly, never `radius`).
+ */
+export const NODE_RADIUS_MAX = NODE_RADIUS_MIN * 3;
+
 export function degreeToRadius(degree: number): number {
-  return Math.max(NODE_RADIUS_MIN, NODE_RADIUS_SCALE * Math.sqrt(Math.max(0, degree)));
+  return Math.min(NODE_RADIUS_MAX, Math.max(NODE_RADIUS_MIN, NODE_RADIUS_SCALE * Math.sqrt(Math.max(0, degree))));
 }
 
 // --- Edge thickness: weight -> line width --------------------------------
@@ -116,7 +133,22 @@ export interface GraphNode {
   sourceSystem: string;
   degree: number;
   radius: number;
-  color: string;
+  /**
+   * NOT populated by this module, or by graph/expansion.ts's node
+   * builders (bd-4ye) — unlike an edge's colour (`colorForSourceSystem`,
+   * a small fixed table, safe to bake in once), a node's TYPE colour now
+   * depends on the store's current rank ordering (palette.ts's
+   * `assignTypeColors`, design.md decision 2), which is session state
+   * these pure functions have no access to and shouldn't need threaded
+   * through every write path (search, expansion, annotation, standalone
+   * note...) just to keep one field honest. Left optional rather than
+   * removed so a fixture/caller may still set it; GraphCanvas.tsx is
+   * where a node's fill/halo colour is actually resolved, reading
+   * `node.nodeType` against the SAME `typeColors` map App.tsx computes
+   * once — the identical "look at node.nodeType against a prop, every
+   * frame" pattern that file already uses for `focusedNodeType`.
+   */
+  color?: string;
   isEditable: boolean;
   provenance: NodeProvenance;
 }
@@ -161,7 +193,6 @@ export function searchResultToGraphData(result: SearchResult | null): GraphCanva
     sourceSystem: node.sourceSystem,
     degree: node.degree,
     radius: degreeToRadius(node.degree),
-    color: colorForNodeType(node.nodeType),
     isEditable: node.isEditable,
     provenance: toProvenance(node),
   }));

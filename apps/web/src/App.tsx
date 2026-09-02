@@ -52,7 +52,7 @@
 //     render body below, never a `useEffect` — see graph/typePrevalence.ts
 //     and lib/typeMatch.ts, both pure functions over state already held.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { CreateNoteForm } from "./components/CreateNoteForm.js";
 import { DetailPanel } from "./components/DetailPanel.js";
 import { GraphCanvas } from "./components/GraphCanvas.js";
@@ -80,7 +80,8 @@ import {
   type ExpansionEntries,
   type UnlinkedNote,
 } from "./graph/expansion.js";
-import { rankNeighborTypes, type TypeCount } from "./graph/typePrevalence.js";
+import { assignTypeColors } from "./graph/palette.js";
+import { rankNeighborTypes, topStoreTypes, type TypeCount } from "./graph/typePrevalence.js";
 import { matchNodeTypes } from "./lib/typeMatch.js";
 import { trpc } from "./trpc.js";
 
@@ -94,6 +95,16 @@ type CreateNoteResult = Awaited<ReturnType<typeof trpc.createNote.mutate>>;
 /** bd-8ub review, should-fix 7: pairs the trigger's `aria-controls` with the popover's own `id` — an honest non-modal disclosure relationship, not `role="dialog"`/`aria-haspopup="dialog"` (there is no modal here: no focus trap, and outside-pointerdown closes it, wired below). */
 const NOTE_POPOVER_ID = "new-note-popover";
 
+// Right column sizing (bd-e9n, design.md decision 5) — pixel mirrors of
+// the Tailwind classes the column and DetailPanel actually use (`right-4`,
+// `w-80`, `w-96`), needed here only because GraphCanvas's `insetRight`
+// prop is a plain number, not a CSS value. Keep in sync with those
+// classes by hand — there is no single source of truth to derive them
+// from, the same trade-off any Tailwind-to-JS pixel mirror makes.
+const RIGHT_COLUMN_OFFSET_PX = 16; // right-4
+const RIGHT_COLUMN_SUMMARY_WIDTH_PX = 320; // w-80
+const RIGHT_COLUMN_EXPANDED_WIDTH_PX = 384; // w-96
+
 export function App() {
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState<Status>({ kind: "idle" });
@@ -106,6 +117,33 @@ export function App() {
   // stale relative to a write that changed that node's own fields (e.g.
   // a saved title — see `mergeNodePatch`).
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  // Whether the currently-open detail panel is in its expanded state
+  // (bd-e9n, design.md decision 6) — mirrors DetailPanel's own local
+  // state (reported up via `onExpandedChange`, called only from its
+  // "Show more"/"Show less" toggle, never on mount: DetailPanel remounts
+  // with a fresh `key={selectedNodeId}` on every new selection, so its
+  // own default `useState("summary")` already covers "a newly selected
+  // node opens as a summary" without this needing to be reset from an
+  // effect). Reset explicitly wherever `selectedNodeId` changes below,
+  // the same way `setFocusedType(null)` already resets alongside a fresh
+  // search's `setSelectedNodeId(null)` — kept in App rather than read
+  // out of DetailPanel because insetRight (below) needs it to size the
+  // shared right column, and DetailPanel has no reason to know about
+  // insetRight at all.
+  const [detailExpanded, setDetailExpanded] = useState(false);
+  // Bumped only when a search result lands (design.md decision 5, review
+  // follow-up: an earlier version also bumped this on every settled
+  // expansion, but the settle path bumps regardless of whether the fetch
+  // actually added anything, so the very first click on any node re-fit
+  // the whole view — expansion never re-fits now; new nodes enter near
+  // their parent per the existing "Expansion preserves the existing
+  // layout" requirement, and the person can pan) — GraphCanvas compares
+  // this against the id it last fit for, inside its own `onEngineStop`,
+  // so a fit never fires for any other graph-mutating write (annotate,
+  // connect, retract, reweight, a saved edit, an expansion) or for
+  // opening/closing a panel alone. See GraphCanvas.tsx's `fitRequestId`
+  // doc comment for the full reasoning.
+  const [fitRequestId, setFitRequestId] = useState(0);
   // Concurrency guard for expandNode, deliberately NOT React state (bd-hmd.1's
   // review, reapplied to this UI — see the ticket report): two clicks on the
   // SAME node fired in the same tick would both read the same, not-yet-
@@ -222,11 +260,15 @@ export function App() {
         // stale detail for a node the person can no longer see on
         // screen. Re-select by clicking it again if it's still present.
         setSelectedNodeId(null);
+        setDetailExpanded(false);
         // design.md's Open Question, resolved: type focus is a canvas-
         // reading aid for the CURRENT graph, so it clears the same way
         // selectedNodeId does the moment that graph is replaced — never
         // half-applied to a neighbourhood it was never focused against.
         setFocusedType(null);
+        // bd-e9n, design.md decision 5: a landed search result fits and
+        // centres the view — see GraphCanvas.tsx's `fitRequestId`.
+        setFitRequestId((id) => id + 1);
       }
     } catch (err) {
       // TRPCClientError#message is already the safe, hand-mapped message
@@ -287,11 +329,18 @@ export function App() {
       const parentPosition = parent && typeof parent.x === "number" && typeof parent.y === "number" ? { x: parent.x, y: parent.y } : undefined;
       return mergeExpansion(previous, { parentId: result.canonicalId, parentPosition, neighbors: result.neighbors });
     });
+    // bd-e9n, design.md decision 5, review follow-up: expansion does NOT
+    // bump `fitRequestId` — see that state's own doc comment above. An
+    // earlier version did, which re-fit the whole view on the first
+    // click of ANY node (the settle path fires whether or not the fetch
+    // actually added anything); a fit now happens only when a search
+    // result lands, in `runSearch` below.
   }
 
   /** "A click both expands and selects" — see this file's header. */
   function handleNodeClick(node: GraphNode) {
     setSelectedNodeId(node.id);
+    setDetailExpanded(false); // bd-e9n: a newly selected node always opens as a summary, even if the previously selected one was expanded
     void expandNode(node);
   }
 
@@ -353,6 +402,7 @@ export function App() {
     const node = buildStandaloneNoteNode(result, title);
     setGraph((previous) => mergeStandaloneNode(previous, node));
     setSelectedNodeId(result.id);
+    setDetailExpanded(false); // bd-e9n: opens as a summary, same as any other selection
     closeNoteForm();
     void refreshStoreSummary(); // a fresh note can carry a brand-new node_type (bd-14q/bd-73t)
   }
@@ -362,6 +412,7 @@ export function App() {
     const node = graphNodeFromUnlinkedNote(note);
     setGraph((previous) => mergeStandaloneNode(previous, node));
     setSelectedNodeId(note.id);
+    setDetailExpanded(false); // bd-e9n: opens as a summary, same as any other selection
   }
 
   /**
@@ -426,6 +477,48 @@ export function App() {
   // HERE, at the call site, per that function's own header.
   const typeSuggestions = matchNodeTypes(query, nodeTypeCounts).filter((t) => !chips.includes(t.nodeType));
 
+  /**
+   * Store-wide type-colour rank map (bd-4ye, design.md decision 2) —
+   * `nodeTypeCounts` ranked by count desc/name-asc (the SAME
+   * `topStoreTypes` comparator TypePanel's own default view already
+   * uses, reused rather than re-sorting a second way) and mapped onto
+   * palette.ts's categorical palette in that order. `useMemo`, not an
+   * effect: this is a pure derivation of state already held, recomputed
+   * only when `nodeTypeCounts` itself changes identity (on load, and
+   * after a write that could introduce a new node_type — the same
+   * cadence `refreshStoreSummary` already follows). Passed to
+   * GraphCanvas, TypePanel, and SearchBar so none of them can disagree
+   * about what colour a type is.
+   */
+  const typeColors = useMemo(() => {
+    const rankedTypeNames = topStoreTypes(nodeTypeCounts, nodeTypeCounts.length).map((t) => t.nodeType);
+    return assignTypeColors(rankedTypeNames);
+  }, [nodeTypeCounts]);
+
+  // Right column width + GraphCanvas's `insetRight` (bd-e9n, design.md
+  // decision 5) — a plain derivation of state already held, computed
+  // during render like `typePanelSelection`/`typeSuggestions` above, no
+  // effect and no DOM measurement (GraphCanvas's own doc comment on why
+  // a prop, not a ResizeObserver, is the right shape for this).
+  //
+  // The right column is ONE shared flex column (TypePanel, then
+  // DetailPanel when a node is selected) — task instruction: "the type
+  // control column should size to the detail panel's current width so
+  // the column stays aligned." So the column's width follows
+  // DetailPanel's own w-80 (summary)/w-96 (expanded) sizing exactly,
+  // defaulting to the narrower w-80 when nothing is selected (the same
+  // width a freshly opened panel would start at).
+  const rightColumnExpanded = Boolean(selectedNodeId) && detailExpanded;
+  const rightColumnWidthClass = rightColumnExpanded ? "w-96" : "w-80";
+  const rightColumnWidthPx = rightColumnExpanded ? RIGHT_COLUMN_EXPANDED_WIDTH_PX : RIGHT_COLUMN_SUMMARY_WIDTH_PX;
+  // The type control panel is always present when the store has any
+  // types (task instruction) — an empty store's "no types yet" panel
+  // contributes nothing to protect the fit from, so an empty
+  // `nodeTypeCounts` with no node selected leaves insetRight at 0, "no
+  // panels open," matching GraphCanvas's own `insetRight` doc comment.
+  const rightColumnOpen = nodeTypeCounts.length > 0 || Boolean(selectedNodeId);
+  const insetRight = rightColumnOpen ? RIGHT_COLUMN_OFFSET_PX + rightColumnWidthPx : 0;
+
   return (
     <div className="h-dvh w-screen overflow-hidden">
       {/*
@@ -441,7 +534,16 @@ export function App() {
 
       {/* The map is the page (design.md) — the canvas's own fixed, full-viewport layer, sized independently of every panel below. */}
       <div className="fixed inset-0">
-        <GraphCanvas data={graph} onNodeExpand={handleNodeClick} expandableNodeIds={expandableNodeIds(expansions)} focusedNodeType={focusedType} />
+        <GraphCanvas
+          data={graph}
+          onNodeExpand={handleNodeClick}
+          expandableNodeIds={expandableNodeIds(expansions)}
+          focusedNodeType={focusedType}
+          typeColors={typeColors}
+          selectedNodeId={selectedNodeId}
+          insetRight={insetRight}
+          fitRequestId={fitRequestId}
+        />
       </div>
 
       {/* Top-center: search bar + "New note" popover. */}
@@ -456,6 +558,7 @@ export function App() {
             chips={chips}
             onChooseSuggestion={handleChooseSuggestion}
             onRemoveChip={handleRemoveChip}
+            typeColors={typeColors}
             trailing={
               <div className="relative shrink-0">
                 <button
@@ -489,10 +592,16 @@ export function App() {
         </div>
       </div>
 
-      {/* Top-right column: type control (TypePanel) with the detail panel below it. */}
-      <div className="pointer-events-none fixed top-4 right-4 bottom-4 z-10 flex w-96 flex-col items-stretch gap-3">
+      {/*
+        Top-right column: type control (TypePanel) with the detail panel
+        below it. Width tracks the detail panel's own summary/expanded
+        state (bd-e9n, design.md decision 6) rather than a fixed `w-96` —
+        see `rightColumnWidthClass`'s own comment above — so the column
+        never has a gap between its own edge and DetailPanel's.
+      */}
+      <div className={`pointer-events-none fixed top-4 right-4 bottom-4 z-10 flex ${rightColumnWidthClass} flex-col items-stretch gap-3`}>
         <div className="glass pointer-events-auto shrink-0 p-3">
-          <TypePanel storeTypes={nodeTypeCounts} selected={typePanelSelection} focusedType={focusedType} onToggleFocus={handleToggleTypeFocus} />
+          <TypePanel storeTypes={nodeTypeCounts} selected={typePanelSelection} focusedType={focusedType} onToggleFocus={handleToggleTypeFocus} typeColors={typeColors} />
         </div>
         {selectedNodeId && (
           <div className="pointer-events-auto min-h-0 flex-1">
@@ -501,7 +610,11 @@ export function App() {
               nodeId={selectedNodeId}
               allNodes={graph.nodes}
               allLinks={graph.links}
-              onClose={() => setSelectedNodeId(null)}
+              onClose={() => {
+                setSelectedNodeId(null);
+                setDetailExpanded(false);
+              }}
+              onExpandedChange={setDetailExpanded}
               onContentSaved={handleContentSaved}
               onAnnotated={handleAnnotated}
               onEdgeAsserted={handleEdgeAsserted}

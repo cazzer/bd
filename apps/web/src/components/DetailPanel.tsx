@@ -40,15 +40,38 @@
 // isn't focusable by default) after capturing whatever was focused
 // beforehand (`previouslyFocusedRef`); closing it (× or Escape, both
 // routed through `handleClose` below) restores focus to that captured
-// element if it's still in the document, or to the search input
-// otherwise (its `aria-label` is this file's own lookup key, deliberately
-// not a new prop threaded down from App.tsx — see `handleClose`'s
-// comment).
+// element if it's still a real restoration target (bd-e9n review:
+// deliberately not just "still in the document" — see `handleClose`'s
+// own comment on why `document.body` itself has to be excluded), or the
+// search input, or — bd-e9n review's second fallback — the canvas
+// container, so a stale/absent capture never bottoms out on `<body>`.
+// Both fallback targets are looked up by a stable `id` (this file's own
+// lookup keys), deliberately not a new prop threaded down from App.tsx —
+// see `handleClose`'s comment.
+//
+// bd-e9n, design.md decision 6: opening a node now defaults to a
+// "summary" panelState (title, meta row, lib/firstParagraph.ts's excerpt
+// of the content — no editor, no annotate/edge controls) with a "Show
+// more" control expanding to everything this file already had
+// (ContentSection/editor, AnnotateSection, the edge list, ConnectForm).
+// `panelState` is local `useState`, defaulting to "summary" on every
+// mount — App.tsx already remounts this component per `key={nodeId}`
+// (see the doc comment above), so a fresh selection needs no explicit
+// reset here. Heading focus, the Escape handler, and the close button
+// are unchanged by any of this — they operate on the `<aside>` itself,
+// not on which state is showing inside it. Editing (ContentSection's
+// edit affordance) only renders in the expanded state; the excerpt shown
+// in summary is plain text, not routed through MarkdownRenderBoundary/
+// MarkdownEditor — a full editor instance is more than a one-paragraph
+// excerpt needs, and JSX text content already escapes it exactly the
+// way that boundary's own plain-text fallback does (see that file's
+// header).
 
 import { useEffect, useRef, useState } from "react";
 import { HUMAN_SOURCE_SYSTEM } from "../graph/expansion.js";
 import type { GraphLink, GraphNode } from "../graph/encoding.js";
 import { edgesTouchingNode, endpointId } from "../graph/nodeEdges.js";
+import { firstParagraph } from "../lib/firstParagraph.js";
 import { trpc } from "../trpc.js";
 import { MarkdownEditor } from "./MarkdownEditor.js";
 import { MarkdownRenderBoundary } from "./MarkdownRenderBoundary.js";
@@ -66,6 +89,17 @@ export interface DetailPanelProps {
   /** All currently-drawn links — filtered here (graph/nodeEdges.ts) to the ones touching this node. */
   allLinks: readonly GraphLink[];
   onClose: () => void;
+  /**
+   * The panel's summary/expanded state changed (bd-e9n, design.md
+   * decision 6) — called only from the "Show more"/"Show less" toggle
+   * below, never on mount: a fresh `nodeId` always starts in summary
+   * (this component's own `useState`), and App.tsx's `key={selectedNodeId}`
+   * on this component already guarantees a genuinely new mount per
+   * selection, so there is nothing to reset from an effect. App.tsx uses
+   * this only to size the shared right column and GraphCanvas's
+   * `insetRight` — DetailPanel itself is the sole owner of the state.
+   */
+  onExpandedChange?: (expanded: boolean) => void;
   /** A content/title edit was saved — App.tsx patches the canvas node's own title (graph/expansion.ts's `mergeNodePatch`). */
   onContentSaved: (nodeId: string, newTitle: string) => void;
   /** An annotation was created — App.tsx draws the note and its edge via `mergeExpansion` (task 6.3's required reuse). */
@@ -83,8 +117,31 @@ function closestEditable(target: EventTarget | null): HTMLElement | null {
   return editable instanceof HTMLElement ? editable : null;
 }
 
-/** App.tsx's SearchBar renders the one search input this whole app has, tagged with this exact `aria-label` — the fallback focus target when a panel closes and whatever was focused before it opened is gone (bd-8ub review, should-fix 6). A selector, not a new prop: threading a ref down from App.tsx for a single fallback lookup would be more surface for the same one-line answer. */
-const SEARCH_INPUT_SELECTOR = 'input[aria-label="Search the knowledge store"]';
+/**
+ * App.tsx's SearchBar renders the one search input this whole app has,
+ * tagged with this stable `id` — the first-choice fallback focus target
+ * when a panel closes and whatever was focused before it opened is gone
+ * (bd-8ub review, should-fix 6). A selector, not a new prop: threading a
+ * ref down from App.tsx for a single fallback lookup would be more
+ * surface for the same one-line answer. An `id` selector, not the
+ * aria-label attribute selector this used before (bd-e9n review): a
+ * stable identifier meant for exactly this lookup, rather than
+ * incidentally matching on copy that's free to change for i18n/wording
+ * reasons unrelated to this fallback.
+ */
+const SEARCH_INPUT_SELECTOR = "#search-input";
+
+/**
+ * GraphCanvas.tsx's own canvas container, tagged with this stable `id`
+ * (and made programmatically focusable there via `tabIndex={-1}`) — the
+ * LAST-resort fallback focus target (bd-e9n review) when closing this
+ * panel: the previously-focused element is gone AND, for whatever
+ * reason, the search input can't be found either. Restoring focus to
+ * SOMETHING inside the page beats leaving it to fall through to
+ * `<body>`, which swallows the next Tab press with no visible focus ring
+ * anywhere.
+ */
+const CANVAS_CONTAINER_SELECTOR = "#graph-canvas-container";
 
 function originLabel(node: LookedUpNode): string {
   // A file-backed node's origin IS its externalId — packages/core/src/seed.ts
@@ -423,12 +480,39 @@ function ConnectForm({ selfId, allNodes, onAsserted }: { selfId: string; allNode
   );
 }
 
-export function DetailPanel({ nodeId, allNodes, allLinks, onClose, onContentSaved, onAnnotated, onEdgeAsserted, onEdgeRetracted, onEdgeReweighted }: DetailPanelProps) {
+export function DetailPanel({ nodeId, allNodes, allLinks, onClose, onExpandedChange, onContentSaved, onAnnotated, onEdgeAsserted, onEdgeRetracted, onEdgeReweighted }: DetailPanelProps) {
   const [state, setState] = useState<FetchState>({ kind: "loading" });
+  // bd-e9n, design.md decision 6 — see this file's header. Defaults to
+  // "summary" on every mount (a fresh `nodeId`, per App.tsx's `key`).
+  const [panelState, setPanelState] = useState<"summary" | "expanded">("summary");
   const headingRef = useRef<HTMLHeadingElement | null>(null);
   // Captured on open, read on close — see `handleClose` below and this
   // file's header (bd-8ub review, should-fix 6).
   const previouslyFocusedRef = useRef<HTMLElement | null>(null);
+  const asideRef = useRef<HTMLElement | null>(null);
+
+  /**
+   * Toggles between summary and expanded, reporting the new state up
+   * (`onExpandedChange`'s own doc comment) — never called on mount, only
+   * from the "Show more"/"Show less" button below.
+   *
+   * `next` is computed from `panelState` here in the closure, and both
+   * setters are called from this plain event-handler body — NOT from
+   * inside `setPanelState`'s updater form. React invokes a `useState`
+   * updater during ITS OWN component's render (StrictMode double-invokes
+   * it specifically to catch this), so calling `onExpandedChange` (App's
+   * `setDetailExpanded`) from inside one is a call into a DIFFERENT
+   * component's setter while THIS component is rendering — exactly
+   * React's "Cannot update a component (App) while rendering a different
+   * component (DetailPanel)" warning. Plain sequential calls here run in
+   * the click handler, not in any render, so neither setter call is ever
+   * mid-render.
+   */
+  function toggleExpanded() {
+    const next = panelState === "summary" ? "expanded" : "summary";
+    setPanelState(next);
+    onExpandedChange?.(next === "expanded");
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -460,7 +544,15 @@ export function DetailPanel({ nodeId, allNodes, allLinks, onClose, onContentSave
   // focus somewhere reasonable inside it the way a layout-flow region
   // might.
   useEffect(() => {
-    previouslyFocusedRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    // StrictMode runs this effect twice on mount; by the second pass focus
+    // already sits on our own heading, and recording that would make the
+    // restore-on-close a no-op (round-2 review). Only capture focus that
+    // lives outside the panel.
+    const active = document.activeElement;
+    const insidePanel = asideRef.current?.contains(active) ?? false;
+    if (active instanceof HTMLElement && !insidePanel) {
+      previouslyFocusedRef.current = active;
+    }
     headingRef.current?.focus();
   }, [nodeId]);
 
@@ -468,15 +560,34 @@ export function DetailPanel({ nodeId, allNodes, allLinks, onClose, onContentSave
    * Routes both close affordances (the × button and Escape below) through
    * one place, so "restore focus on close" (bd-8ub review, should-fix 6)
    * can't be forgotten on one path — restores focus to whatever was
-   * captured on open if it's still in the document, otherwise to the
-   * search input (SEARCH_INPUT_SELECTOR's own comment).
+   * captured on open if it's still a real restoration target, otherwise
+   * the search input, otherwise the canvas.
+   *
+   * bd-e9n review: the "still in the document" check used to be
+   * `document.body.contains(previous)` alone, which is true for
+   * `document.body` itself (`Node.contains` includes the node it's
+   * called on) — so switching straight from one selected node's panel to
+   * another's, with focus inside the FIRST panel (e.g. "Show more"), let
+   * `previous` capture `document.body`: the new panel's own
+   * focus-capture effect runs after the old panel's focused element has
+   * already been removed from the DOM, and a browser resets
+   * `document.activeElement` to `body` the instant a focused element is
+   * detached — before that effect ever gets to read it. `body.contains(body)`
+   * then passed the old check, so `previous.focus()` called `body.focus()`,
+   * a no-op (body isn't focusable), which is exactly "Escape drops focus
+   * to `<body>`." Excluding `document.body` explicitly closes that gap;
+   * the canvas container is a new second fallback for the case the
+   * search input itself can't be found either, so this never bottoms out
+   * on `<body>` by omission.
    */
   function handleClose() {
     const previous = previouslyFocusedRef.current;
-    if (previous && document.body.contains(previous)) {
+    if (previous && previous !== document.body && document.body.contains(previous)) {
       previous.focus();
     } else {
-      document.querySelector<HTMLElement>(SEARCH_INPUT_SELECTOR)?.focus();
+      const fallback =
+        document.querySelector<HTMLElement>(SEARCH_INPUT_SELECTOR) ?? document.querySelector<HTMLElement>(CANVAS_CONTAINER_SELECTOR);
+      fallback?.focus();
     }
     onClose();
   }
@@ -487,9 +598,14 @@ export function DetailPanel({ nodeId, allNodes, allLinks, onClose, onContentSave
 
   return (
     <aside
+      ref={asideRef}
       role="complementary"
       aria-label="Node detail"
-      className="glass flex h-full w-96 flex-col overflow-y-auto p-4"
+      // bd-e9n, design.md decision 6: w-80 in summary (needs less room
+      // than an editor), w-96 once expanded — the canvas itself stays
+      // full-bleed regardless (GraphCanvas.tsx never reads this), only
+      // App.tsx's `insetRight` (via `onExpandedChange`) follows it.
+      className={`glass flex h-full ${panelState === "expanded" ? "w-96" : "w-80"} flex-col overflow-y-auto p-4`}
       // bd-bxr: the panel is now a floating overlay with no implicit
       // click-away boundary — Escape is the keyboard-accessible
       // equivalent of the explicit close button below.
@@ -536,32 +652,55 @@ export function DetailPanel({ nodeId, allNodes, allLinks, onClose, onContentSave
       {state.kind === "error" && <p className="rounded-lg border border-red-500/30 bg-red-500/10 px-2 py-1.5 text-xs text-red-300">{state.message}</p>}
       {state.kind === "ready" && (
         <>
-          <section className="mb-4">
-            <h3 className="mb-1 text-xs font-medium tracking-wide text-fg-muted uppercase">Content</h3>
-            <ContentSection node={state.node} onSaved={(title) => onContentSaved(nodeId, title)} />
-          </section>
+          {/*
+            bd-e9n, design.md decision 6: summary shows only this excerpt
+            — no editor, no annotate/edge controls (those, and the
+            ability to edit at all, are reachable only once expanded).
+            Plain text, not markdown-rendered — see this file's header on
+            why a full editor instance is more than a one-paragraph
+            excerpt needs; JSX text content already escapes it safely.
+          */}
+          {panelState === "summary" && <p className="mb-3 text-sm text-fg">{firstParagraph(state.node.content) || "No content yet."}</p>}
 
-          <section className="mb-4">
-            <h3 className="mb-1 text-xs font-medium tracking-wide text-fg-muted uppercase">Annotate</h3>
-            {graphNode && <AnnotateSection target={graphNode} onAnnotated={(result, title) => graphNode && onAnnotated(graphNode, result, title)} />}
-          </section>
+          <button
+            type="button"
+            onClick={toggleExpanded}
+            aria-expanded={panelState === "expanded"}
+            className="mb-4 rounded-lg border border-hairline px-3 py-1.5 text-xs font-medium text-fg hover:bg-surface-strong focus:outline-none focus:ring-2 focus:ring-accent"
+          >
+            {panelState === "summary" ? "Show more" : "Show less"}
+          </button>
 
-          <section>
-            <h3 className="mb-1 text-xs font-medium tracking-wide text-fg-muted uppercase">Edges ({edgeViews.length})</h3>
-            <ul className="mb-2 space-y-1.5">
-              {edgeViews.map((view) => (
-                <EdgeRow
-                  key={view.link.id}
-                  view={view}
-                  nodeTitleById={nodeTitleById}
-                  onRetracted={() => onEdgeRetracted(view.link.id)}
-                  onReweighted={(weight) => onEdgeReweighted(view.link.id, weight)}
-                />
-              ))}
-              {edgeViews.length === 0 && <p className="text-xs text-fg-muted">No edges drawn for this node yet.</p>}
-            </ul>
-            <ConnectForm selfId={nodeId} allNodes={allNodes} onAsserted={onEdgeAsserted} />
-          </section>
+          {panelState === "expanded" && (
+            <>
+              <section className="mb-4">
+                <h3 className="mb-1 text-xs font-medium tracking-wide text-fg-muted uppercase">Content</h3>
+                <ContentSection node={state.node} onSaved={(title) => onContentSaved(nodeId, title)} />
+              </section>
+
+              <section className="mb-4">
+                <h3 className="mb-1 text-xs font-medium tracking-wide text-fg-muted uppercase">Annotate</h3>
+                {graphNode && <AnnotateSection target={graphNode} onAnnotated={(result, title) => graphNode && onAnnotated(graphNode, result, title)} />}
+              </section>
+
+              <section>
+                <h3 className="mb-1 text-xs font-medium tracking-wide text-fg-muted uppercase">Edges ({edgeViews.length})</h3>
+                <ul className="mb-2 space-y-1.5">
+                  {edgeViews.map((view) => (
+                    <EdgeRow
+                      key={view.link.id}
+                      view={view}
+                      nodeTitleById={nodeTitleById}
+                      onRetracted={() => onEdgeRetracted(view.link.id)}
+                      onReweighted={(weight) => onEdgeReweighted(view.link.id, weight)}
+                    />
+                  ))}
+                  {edgeViews.length === 0 && <p className="text-xs text-fg-muted">No edges drawn for this node yet.</p>}
+                </ul>
+                <ConnectForm selfId={nodeId} allNodes={allNodes} onAsserted={onEdgeAsserted} />
+              </section>
+            </>
+          )}
         </>
       )}
 

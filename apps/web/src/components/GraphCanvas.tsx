@@ -4,12 +4,18 @@
 // why that package rather than the `react-force-graph` barrel: same
 // component, same maintainer, same underlying `force-graph` engine, but
 // without an unconditional static import of the unused 3D/VR/AR stack)
-// draws to a `<canvas>`. Everything that decides WHAT gets drawn —
-// radius, colour, width, highlight state — is computed ahead of time by
-// the pure functions in graph/encoding.ts and graph/palette.ts and
-// tested there; this file only hands those already-computed values to
-// the canvas APIs. Nothing here is unit-tested (DOM/canvas assertions
-// can't reach it) by design — see encoding.test.ts's header.
+// draws to a `<canvas>`. Most of what decides WHAT gets drawn — radius,
+// edge colour/width, highlight state — is computed ahead of time by the
+// pure functions in graph/encoding.ts and graph/palette.ts and tested
+// there; this file mostly only hands those already-computed values to
+// the canvas APIs. The one deliberate exception is a NODE's type colour
+// (bd-4ye): it is resolved HERE, live, per frame, against a `typeColors`
+// prop (App.tsx's store-wide rank map, palette.ts's `assignTypeColors`)
+// rather than baked into `GraphNode` at encode time — see
+// `DrawContext`'s and `drawNode`'s own comments for why, and
+// encoding.ts's `GraphNode.color` for the field this replaced. Nothing
+// here is unit-tested (DOM/canvas assertions can't reach it) by design —
+// see encoding.test.ts's header.
 //
 // Node click handler expands that node's neighbours (bd-hmd.5): fetching
 // and merging the result is App.tsx's job (it owns the graph state and
@@ -25,14 +31,42 @@
 // frame from the node's own `nodeType`/a small id->type Map, never a
 // second copy of `data` and never a change to any node's size or
 // position. See each helper's own comment for the per-frame cost.
+//
+// Relevance (bd-cfc, openspec/changes/explorer-legibility/design.md
+// decisions 1 and 4): a node's label (graph/labelPolicy.ts's
+// `shouldLabel`, via `computeLabelPlacements`) and its halo treatment
+// (`drawNode`'s `isRelevant`) both read the SAME four categories — seed,
+// selected, direct neighbour of the selection, type-focus match —
+// computed once per relevant node per frame, never a second
+// classification invented for either concern. The "direct neighbours of
+// the selected node" set itself is computed once per `(data,
+// selectedNodeId)` via `useMemo` (`neighborIdsOfSelected`, below), never
+// per frame.
+//
+// Free-area fit (bd-e9n, design.md decision 5): a search landing fits
+// and centres the view within the free area to the left of the open
+// right-column panels, not the full viewport - see the "Free-area fit"
+// section below (fitToFreeArea and its own header) for the algebra, and
+// fitRequestId's doc comment for how a settle caused by anything else
+// (an expansion, annotate, connect, a saved edit - all of which reheat
+// the same simulation) is told apart from one that should actually
+// re-fit. Review follow-up: an earlier version also fit on every settled
+// expansion, but the settle path fires whether or not the fetch actually
+// added anything, so the first click on ANY node re-centred and
+// re-scaled the whole view — expansion never re-fits now; new nodes
+// enter near their parent (the existing "Expansion preserves the
+// existing layout" requirement) and the person can pan.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import ForceGraph2D from "react-force-graph-2d";
+import ForceGraph2D, { type ForceGraphMethods } from "react-force-graph-2d";
 import { graphAriaSummary, nodeAccessibleDescription } from "../graph/accessibility.js";
 import type { GraphCanvasData, GraphLink, GraphNode } from "../graph/encoding.js";
 import { releasePins, type PositionedNode } from "../graph/expansion.js";
+import { robustBbox, ROBUST_BBOX_MIN_POINTS } from "../graph/fitBounds.js";
 import { placeLabels, type LabelCandidate, type LabelPlacement } from "../graph/labelPlacement.js";
-import { endpointId } from "../graph/nodeEdges.js";
+import { shouldLabel, truncateLabel } from "../graph/labelPolicy.js";
+import { edgesTouchingNode, endpointId } from "../graph/nodeEdges.js";
+import { colorForNodeType } from "../graph/palette.js";
 import { buildLinkTooltip, buildNodeTooltip } from "../graph/tooltip.js";
 
 /**
@@ -135,6 +169,20 @@ const FOCUSED_HALO_STOPS: ReadonlyArray<{ radiusScale: number; alpha: number }> 
   { radiusScale: 1.5, alpha: 0.34 },
 ];
 
+/**
+ * Halo for every node that is NOT currently relevant (bd-cfc, design.md
+ * decision 4: "Halos follow relevance too" — the same seed/selected/
+ * neighbour-of-selected/type-focus-match categories decision 1 already
+ * establishes for labels). ONE stop, not two, and fainter than either of
+ * `AMBIENT_HALO_STOPS`' own stops — an ambient cluster still reads as
+ * "there is more graph here" without the stacked-fill fog a uniform
+ * two-stop halo on every node produced at density. Applying the FULL
+ * (ambient or focused) halo only to relevant nodes, and this single ring
+ * to everything else, is what makes that trade — see drawNode's own
+ * `isRelevant` branch.
+ */
+const AMBIENT_SINGLE_RING_STOPS: ReadonlyArray<{ radiusScale: number; alpha: number }> = [{ radiusScale: 1.6, alpha: 0.08 }];
+
 /** Draws `stops`' concentric circles behind a node — see `AMBIENT_HALO_STOPS`'s own comment for why this shape (not shadowBlur, not a gradient) and its per-frame cost. */
 function drawHalo(ctx: CanvasRenderingContext2D, x: number, y: number, radius: number, color: string, stops: ReadonlyArray<{ radiusScale: number; alpha: number }>): void {
   for (const stop of stops) {
@@ -159,61 +207,131 @@ const LABEL_FONT_SIZE_PX = 12;
 type DrawableNode = GraphNode & { x?: number; y?: number };
 
 /**
+ * The truncated text actually drawn for a node's label (bd-cfc, design.md
+ * decision 1: "A drawn label is truncated to 40 characters with an
+ * ellipsis; the full title remains available through the existing hover
+ * tooltip ... and in the detail panel"). Shared by `computeLabelPlacements`
+ * (which needs the SAME text labelPlacement.ts's collision boxes are
+ * estimated against — see labelBox in that file) and `drawNode` (which
+ * draws it) so the two can never disagree about what text a placement's
+ * box was actually sized for.
+ */
+function labelText(node: DrawableNode): string {
+  return truncateLabel(node.title || "(untitled)");
+}
+
+/**
  * Which nodes get an on-canvas label this frame, and where — computed
  * once per frame (GraphCanvas's `onRenderFramePre`, before any node is
- * drawn) by graph/labelPlacement.ts's pure `placeLabels`, then read back
- * per node by `drawNode` below. Doing the placement pass once for the
- * WHOLE node set (rather than each node deciding its own offset in
- * isolation inside `nodeCanvasObject`) is what lets a crowded node avoid
- * a neighbour's label instead of just its own default slot — see
- * labelPlacement.ts's header for the full rationale (bd-hmd.4 follow-up
- * review: labels were overlapping in the corpus's densest cluster).
+ * drawn), then read back per node by `drawNode` below.
+ *
+ * Two passes, kept deliberately separate (design.md decision 1): first,
+ * graph/labelPolicy.ts's pure `shouldLabel` decides WHICH nodes are
+ * eligible to be labelled at all this frame (seed / selected / neighbour
+ * of the selection / hovered, always; an ambient node only once zoomed
+ * in past the threshold) — a node that fails this never becomes a
+ * `LabelCandidate` in the first place, so labelPlacement.ts's O(n²)
+ * collision pass only ever runs over the (typically much smaller)
+ * eligible subset, not every node in the view. Second,
+ * graph/labelPlacement.ts's pure `placeLabels` decides WHERE each
+ * survivor's label goes, avoiding overlap with node circles and other
+ * placed labels — see that file's header for the full rationale
+ * (bd-hmd.4 follow-up review: labels were overlapping in the corpus's
+ * densest cluster).
+ *
+ * `isHovered` is always passed as `false` here (bd-hmd.4 review,
+ * should-fix 4, still true after bd-cfc): a live per-hover redraw was
+ * already tried — a ref updated in onNodeHover, read here — and never
+ * actually took effect. force-graph's redraw is gated on
+ * `!autoPauseRedraw || needsRedraw || isEngineRunning() || photons`
+ * (traced through the installed source); once cooldownTicks elapses and
+ * the simulation stops, updating OUR OWN state on hover sets none of
+ * those, so nodeCanvasObject simply never runs again for a hover alone
+ * — true regardless of whether that state is a ref or React state, since
+ * the gate is inside force-graph's own engine, not anything React
+ * re-rendering this component can reach. Forcing a redraw on every hover
+ * means either disabling autoPauseRedraw (redraws every frame forever,
+ * for a label) or reheating the simulation (visibly disturbs the layout
+ * just to show a label) — both worse than the fix already in place: the
+ * DOM tooltip (`nodeTooltip`, below) shows a node's full, untruncated
+ * title on hover regardless of whether its on-canvas label is drawn.
+ * `shouldLabel`'s `isHovered` branch is real and tested
+ * (labelPolicy.test.ts) — it's simply never exercised by a live signal
+ * from this canvas today, the same honest state bd-hmd.4 left it in.
  */
-function computeLabelPlacements(nodes: readonly DrawableNode[], globalScale: number): Map<string, LabelPlacement> {
+function computeLabelPlacements(nodes: readonly DrawableNode[], globalScale: number, selectedNodeId: string | null | undefined, neighborIdsOfSelected: ReadonlySet<string>): Map<string, LabelPlacement> {
   const fontSize = LABEL_FONT_SIZE_PX / globalScale;
-  const candidates: LabelCandidate[] = nodes.map((node) => ({
-    id: node.id,
-    x: node.x ?? 0,
-    y: node.y ?? 0,
-    radius: node.radius,
-    text: node.title || "(untitled)",
-    // A seed's label must never disappear — losing the label on the
-    // thing just searched for would be worse than an overlap. See
-    // labelPlacement.ts's header and palette.ts's comment on why this
-    // also keeps that module's six-node-type colour-plus-label
-    // mitigation honest for seed nodes specifically.
-    //
-    // NOT also true of the hovered node (bd-hmd.4 review, should-fix
-    // 4): that was tried — a ref updated in onNodeHover, read here —
-    // but never actually took effect. force-graph's redraw is gated on
-    // `!autoPauseRedraw || needsRedraw || isEngineRunning() || photons`
-    // (traced through the installed source); once cooldownTicks elapses
-    // and the simulation stops, updating a ref on hover sets none of
-    // those, so nodeCanvasObject simply never runs again and the
-    // "hovered node keeps its label" branch could never fire — dead
-    // code that read as a working feature. Deleted rather than wired
-    // up: forcing a redraw on every hover means either disabling
-    // autoPauseRedraw (redraws every frame forever, for a label) or
-    // reheating the simulation (visibly disturbs the layout just to
-    // show a label) — both worse than the fix, which is that the DOM
-    // tooltip (nodeLabel, below) already shows a hidden node's title on
-    // hover regardless.
-    alwaysShow: node.provenance.kind === "seed",
-    priority: node.degree,
-  }));
+  const candidates: LabelCandidate[] = [];
+  for (const node of nodes) {
+    const isSeed = node.provenance.kind === "seed";
+    const isSelected = node.id === selectedNodeId;
+    const isNeighborOfSelected = neighborIdsOfSelected.has(node.id);
+    if (!shouldLabel({ isSeed, isSelected, isNeighborOfSelected, isHovered: false, globalScale })) {
+      continue; // not eligible this frame — still one hover away via nodeTooltip, never gone
+    }
+    candidates.push({
+      id: node.id,
+      x: node.x ?? 0,
+      y: node.y ?? 0,
+      radius: node.radius,
+      text: labelText(node),
+      // explorer-legibility review (hub-density follow-up): a relevant
+      // node's label is tried, and contests a slot, ahead of an ambient
+      // one — but it CAN still lose that contest and be dropped once
+      // every slot is genuinely taken (labelPlacement.ts's own header).
+      // An earlier version force-placed on top of whatever was already
+      // there instead, which is exactly the overlap this exists to
+      // prevent at hub density (several seeds/neighbours converging on
+      // one node).
+      alwaysShow: isSeed || isSelected || isNeighborOfSelected,
+      // Priority order (labelPlacement.ts's own doc comment): the
+      // selected node itself outranks a seed, which outranks a mere
+      // neighbour of the selection, which outranks everything else
+      // (an ambient node, eligible only once zoomed in past
+      // labelPolicy.ts's threshold) — NOT raw degree, which used to
+      // decide this and let a high-degree ambient node's label win a
+      // slot away from a lower-degree but more relevant one.
+      priority: isSelected ? 3 : isSeed ? 2 : isNeighborOfSelected ? 1 : 0,
+    });
+  }
   const placements = placeLabels(candidates, fontSize);
   return new Map(placements.map((p) => [p.id, p]));
 }
 
 /**
- * `focusedNodeType`, not a set of dimmed ids: every draw call already
- * knows its own `node.nodeType`, so "is this node dimmed" is a single
- * string comparison here rather than a per-frame Set built ahead of
- * time — see this file's module header on cost.
+ * Everything `drawNode` needs that is session/prop state rather than a
+ * per-node data field — bundled into one object (built once per React
+ * render in `GraphCanvas`'s body, NOT per frame or per node — see that
+ * component's own comment) purely to keep `drawNode`'s own parameter
+ * list from growing every time this file gains one more piece of
+ * relevance state, not because any of these are expensive to compute.
  */
-function drawNode(node: DrawableNode, ctx: CanvasRenderingContext2D, globalScale: number, placements: Map<string, LabelPlacement>, expandableNodeIds: ReadonlySet<string>, focusedNodeType: string | null | undefined): void {
+interface DrawContext {
+  /** App.tsx's store-wide rank map (bd-4ye) — the SAME map GraphCanvas, TypePanel, and SearchBar all read, so none of them can disagree about a type's colour. */
+  typeColors: ReadonlyMap<string, string>;
+  focusedNodeType: string | null | undefined;
+  selectedNodeId: string | null | undefined;
+  /** One-hop neighbours of `selectedNodeId`, computed once per (data, selectedNodeId) — see `GraphCanvas`'s own `useMemo`. */
+  neighborIdsOfSelected: ReadonlySet<string>;
+}
+
+/**
+ * `focusedNodeType`/`typeColors`/etc. arrive bundled in `context`, not a
+ * set of dimmed ids or a precomputed per-node colour: every draw call
+ * already knows its own `node.nodeType`, so "is this node dimmed" /
+ * "what colour is this node" are a single string comparison and a
+ * single `Map.get` here (colorForNodeType is an O(1) lookup, no
+ * allocation) rather than a per-frame Set/Map built ahead of time — see
+ * this file's module header on cost.
+ */
+function drawNode(node: DrawableNode, ctx: CanvasRenderingContext2D, globalScale: number, placements: Map<string, LabelPlacement>, expandableNodeIds: ReadonlySet<string>, context: DrawContext): void {
   const x = node.x ?? 0;
   const y = node.y ?? 0;
+  // bd-4ye: node-type colour is no longer a baked-in GraphNode field —
+  // see encoding.ts's GraphNode.color comment. Resolved here, live,
+  // against App.tsx's store-wide rank map, the same way `isFocusedMatch`
+  // below already resolves `focusedNodeType` live against `node.nodeType`.
+  const fillColor = colorForNodeType(node.nodeType, context.typeColors);
 
   // Wraps the WHOLE node draw — ring, fill, badge, label — in one
   // globalAlpha rather than only the fill: design.md's "reduced alpha on
@@ -223,16 +341,27 @@ function drawNode(node: DrawableNode, ctx: CanvasRenderingContext2D, globalScale
   // scopes this to just this node's draw calls, so it never leaks into
   // the next node or link drawn this frame.
   ctx.save();
-  const isFocusedMatch = Boolean(focusedNodeType) && node.nodeType === focusedNodeType;
-  if (focusedNodeType && !isFocusedMatch) {
+  const isFocusedMatch = Boolean(context.focusedNodeType) && node.nodeType === context.focusedNodeType;
+  if (context.focusedNodeType && !isFocusedMatch) {
     ctx.globalAlpha = DIMMED_ALPHA;
   }
 
-  // Drawn first, so it sits behind the seed ring, fill, badge, and label
-  // below — see AMBIENT_HALO_STOPS'/FOCUSED_HALO_STOPS' own comments.
-  drawHalo(ctx, x, y, node.radius, node.color, isFocusedMatch ? FOCUSED_HALO_STOPS : AMBIENT_HALO_STOPS);
+  const isSeed = node.provenance.kind === "seed";
+  // bd-cfc, design.md decision 4: "Halos follow relevance too" — reuses
+  // the SAME relevance categories decision 1 already establishes for
+  // labels, computed once here and read by both the halo branch below
+  // and (via computeLabelPlacements, called separately in
+  // onRenderFramePre) the label draw path.
+  const isSelected = node.id === context.selectedNodeId;
+  const isNeighborOfSelected = context.neighborIdsOfSelected.has(node.id);
+  const isRelevant = isSeed || isSelected || isNeighborOfSelected || isFocusedMatch;
 
-  if (node.provenance.kind === "seed") {
+  // Drawn first, so it sits behind the seed ring, fill, badge, and label
+  // below — see AMBIENT_HALO_STOPS'/FOCUSED_HALO_STOPS'/
+  // AMBIENT_SINGLE_RING_STOPS' own comments.
+  drawHalo(ctx, x, y, node.radius, fillColor, isRelevant ? (isFocusedMatch ? FOCUSED_HALO_STOPS : AMBIENT_HALO_STOPS) : AMBIENT_SINGLE_RING_STOPS);
+
+  if (isSeed) {
     ctx.save();
     ctx.setLineDash(SEED_HIGHLIGHT_DASH);
     ctx.beginPath();
@@ -245,7 +374,7 @@ function drawNode(node: DrawableNode, ctx: CanvasRenderingContext2D, globalScale
 
   ctx.beginPath();
   ctx.arc(x, y, node.radius, 0, 2 * Math.PI);
-  ctx.fillStyle = node.color;
+  ctx.fillStyle = fillColor;
   ctx.fill();
 
   if (expandableNodeIds.has(node.id)) {
@@ -272,7 +401,11 @@ function drawNode(node: DrawableNode, ctx: CanvasRenderingContext2D, globalScale
     return; // dropped for this frame — still one hover away via nodeLabel's tooltip, never gone
   }
 
-  const label = node.title || "(untitled)";
+  // Truncated (bd-cfc), the SAME text labelPlacement.ts's collision box
+  // was estimated against — see labelText's own comment. The full,
+  // untruncated title stays reachable via the hover tooltip
+  // (`nodeTooltip`, below) and the detail panel.
+  const label = labelText(node);
   const fontSize = LABEL_FONT_SIZE_PX / globalScale;
   ctx.font = `${fontSize}px sans-serif`;
   ctx.textAlign = "center";
@@ -368,6 +501,89 @@ function isLinkDimmed(link: GraphLink, focusedNodeType: string | null | undefine
   return srcType !== focusedNodeType && dstType !== focusedNodeType;
 }
 
+// --- Free-area fit (bd-e9n, design.md decision 5: "Fit-to-view respects
+// the panels") -------------------------------------------------------------
+//
+// force-graph's own `zoomToFit(durationMs, padding)` centres its fitted
+// bbox in the FULL viewport, symmetric padding on every side — there is
+// no "fit within this sub-rectangle" primitive. Rather than call it and
+// then correct the result (reading `zoom()`/`centerAt()` back mid-tween,
+// racing whatever `durationMs` the animation is still running), this
+// computes the same centre/zoom `zoomToFit` would (via the exposed
+// `getGraphBbox`) but against the FREE width (`width - insetRight`)
+// instead of the full width, then issues ONE animated `centerAt`+`zoom`
+// pair — a single settle, not a fit followed by a visible correction.
+//
+// The algebra behind "shift the centre by `+insetRight / (2 * scale)`":
+// zoomToFit centres its bbox in the full viewport, so before any shift
+// the bbox's screen-space margin is `padding` on every side. Shifting the
+// screen-space centre left by `insetRight / 2` px (equivalently, the
+// GRAPH-space centre right by `insetRight / (2 * scale)`, since
+// screen = graph * scale) turns that even `padding` margin into
+// `padding - insetRight / 2` on the left and within the free area on the
+// right — which is >= 0 (no clipping under the panel) as long as
+// `padding >= insetRight / 2`. `FIT_PADDING_PX` below is chosen with
+// exactly that margin, so the two calls below always land the bbox fully
+// inside `[0, width - insetRight]`, centred with `FIT_BASE_PADDING_PX`
+// clear on every side — never computed against the free width directly
+// (which would ALSO work, but would zoom in more aggressively than
+// today's `zoomToFit` padding contract does for the no-inset case this
+// still has to match when insetRight is 0).
+//
+// Same defensive clamp `zoomToFit` itself applies (traced in the
+// installed force-graph source, force-graph.js's own `zoomToFit`): a
+// degenerate bbox (a single node, or every node stacked at one point)
+// would otherwise divide by a zero-width/height span.
+//
+// Outlier-trimmed bbox (bd-e9n review, explorer-legibility finding 6):
+// `getGraphBbox`'s bbox is the LITERAL extent of every drawn node, so one
+// node that force-layout has drifted far from the rest shrinks the
+// fitted zoom for every other node just to keep that one on-screen. At
+// `ROBUST_BBOX_MIN_POINTS` nodes or more, this reaches for
+// `graph/fitBounds.ts`'s `robustBbox` instead — the same bbox shape,
+// computed from `data.nodes`' own x/y/radius and trimmed to the 5th-95th
+// percentile per axis — so a handful of outliers no longer dictate
+// everyone else's zoom level; those nodes can land off-screen, which is
+// an accepted trade (see that file's own header). Below that count,
+// `getGraphBbox` is used exactly as before — nothing changes for a
+// small graph, and this never diverges from `zoomToFit`'s own no-inset
+// padding contract for that case.
+const FIT_DURATION_MS = 400;
+const FIT_BASE_PADDING_PX = 48;
+const FIT_MIN_ZOOM = 1e-12;
+const FIT_MAX_ZOOM = 1e12;
+
+type FreeAreaFittable = Pick<ForceGraphMethods<GraphNode, GraphLink>, "getGraphBbox" | "centerAt" | "zoom">;
+
+/**
+ * Fits the current graph data within the free area to the left of the
+ * right-column panels, and centres it there — see this section's own
+ * header for the algebra. `nodes` is `data.nodes` at the moment the
+ * simulation settled — used ONLY for the outlier-trimmed bbox at
+ * `ROBUST_BBOX_MIN_POINTS`+ nodes (see that constant's own comment);
+ * below that count this reads `fg.getGraphBbox()` exactly as before and
+ * `nodes` goes unused. A no-op when there is nothing placed yet (both
+ * bbox sources return `null` for zero nodes, the same case `zoomToFit`
+ * itself no-ops on).
+ */
+function fitToFreeArea(fg: FreeAreaFittable, nodes: readonly DrawableNode[], insetRight: number, width: number, height: number): void {
+  const bbox =
+    nodes.length >= ROBUST_BBOX_MIN_POINTS
+      ? robustBbox(nodes.map((n) => ({ x: n.x ?? 0, y: n.y ?? 0, radius: n.radius })))
+      : fg.getGraphBbox();
+  if (!bbox) return;
+
+  const padding = FIT_BASE_PADDING_PX + insetRight / 2;
+  const bboxWidth = bbox.x[1] - bbox.x[0];
+  const bboxHeight = bbox.y[1] - bbox.y[0];
+  const scale = Math.max(FIT_MIN_ZOOM, Math.min(FIT_MAX_ZOOM, (width - padding * 2) / bboxWidth, (height - padding * 2) / bboxHeight));
+
+  const centerX = (bbox.x[0] + bbox.x[1]) / 2 + insetRight / (2 * scale);
+  const centerY = (bbox.y[0] + bbox.y[1]) / 2;
+  fg.centerAt(centerX, centerY, FIT_DURATION_MS);
+  fg.zoom(scale, FIT_DURATION_MS);
+}
+
 export interface GraphCanvasProps {
   data: GraphCanvasData;
   /**
@@ -398,13 +614,67 @@ export interface GraphCanvasProps {
    * applied per-frame without touching `data`.
    */
   focusedNodeType?: string | null;
+  /**
+   * App.tsx's store-wide type-colour rank map (bd-4ye, palette.ts's
+   * `assignTypeColors`) — the SAME map TypePanel and SearchBar receive,
+   * so a node's fill/halo colour here never disagrees with its swatch
+   * elsewhere. Required (not optional with a fallback) — every caller
+   * already holds this from the same state `focusedNodeType`/`data`
+   * derive from, so a silently-empty default would only mask a caller
+   * that forgot to thread it through.
+   */
+  typeColors: ReadonlyMap<string, string>;
+  /**
+   * The currently selected node's id (bd-cfc) — drives both label
+   * eligibility (design.md decision 1) and halo relevance (decision 4)
+   * for the selection and its direct neighbours. `null`/`undefined`
+   * means nothing selected, so only seed/type-focus relevance applies.
+   */
+  selectedNodeId?: string | null;
+  /**
+   * px currently occupied on the right by the open right-column panels
+   * (bd-e9n, design.md decision 5) — 0 when none are open. App.tsx owns
+   * exactly which panels are open (the same state that already decides
+   * that column's rendered width), so this stays a plain prop rather
+   * than a `ResizeObserver`/DOM measurement here — see this file's
+   * "Free-area fit" section header. Never changes the canvas's own size
+   * or `data`; it only shifts where a settled fit centres itself.
+   */
+  insetRight: number;
+  /**
+   * Bumped by App.tsx specifically when a search result lands — never by
+   * any other graph-mutating write (an expansion settling, annotate,
+   * connect, retract, reweight, a saved edit), and never by opening or
+   * closing a panel alone. design.md decision 5 / Risks: "only a search
+   * result landing triggers a fit." Every one of those OTHER writes also
+   * reheats the simulation (they all go through graph/expansion.ts's
+   * pin-then-merge, which gives `data` a fresh top-level reference every
+   * time — see that file's header), so `onEngineStop` alone can't
+   * distinguish "a search just landed" from "an edge got reweighted" or
+   * "a node was expanded." Comparing this id against the id last fitted
+   * for (inside `onEngineStop`, below) can. Review follow-up: an earlier
+   * version also bumped this when an expansion settled — see this file's
+   * own header for why that regressed ("the first click on any node
+   * re-fits the whole view").
+   */
+  fitRequestId: number;
 }
 
 const NO_EXPANDABLE_NODES: ReadonlySet<string> = new Set();
+const NO_NEIGHBORS: ReadonlySet<string> = new Set();
 
-export function GraphCanvas({ data, onNodeExpand, expandableNodeIds = NO_EXPANDABLE_NODES, focusedNodeType = null }: GraphCanvasProps) {
+export function GraphCanvas({ data, onNodeExpand, expandableNodeIds = NO_EXPANDABLE_NODES, focusedNodeType = null, typeColors, selectedNodeId = null, insetRight, fitRequestId }: GraphCanvasProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
+  const fgRef = useRef<ForceGraphMethods<GraphNode, GraphLink> | undefined>(undefined);
+  // The `fitRequestId` this canvas last actually fit for — seeded to the
+  // CURRENT prop so mounting never fits an empty/unsearched graph on its
+  // own; only a later change (a new search landing) makes the comparison
+  // in `onEngineStop` below fail and trigger a fit. See `fitRequestId`'s
+  // own doc comment for why this, not the generic engine-stop signal
+  // `releasePins` already uses, is what "only a search triggers a fit"
+  // actually requires.
+  const lastFittedRequestIdRef = useRef(fitRequestId);
 
   // A ref, not React state: it feeds the per-frame canvas draw, not the
   // component tree, so updating it must never trigger a React re-render
@@ -440,6 +710,30 @@ export function GraphCanvas({ data, onNodeExpand, expandableNodeIds = NO_EXPANDA
     }
     return map;
   }, [data.links]);
+
+  /**
+   * One-hop neighbours of the selected node (bd-cfc, design.md decisions
+   * 1 and 4) — computed once per `(data, selectedNodeId)` change via
+   * `useMemo`, NEVER per frame or per node: reuses graph/nodeEdges.ts's
+   * already-tested `edgesTouchingNode` (the same helper DetailPanel.tsx's
+   * edge list is built from) rather than re-deriving the source/target
+   * normalization it already handles. Both `drawNode` (halo relevance)
+   * and `computeLabelPlacements` (label eligibility) read this same set
+   * every frame as an O(1) `.has()` lookup — no per-frame recomputation.
+   */
+  const neighborIdsOfSelected = useMemo(() => {
+    if (!selectedNodeId) return NO_NEIGHBORS;
+    const ids = new Set<string>();
+    for (const view of edgesTouchingNode(data.links, selectedNodeId)) {
+      ids.add(view.otherNodeId);
+    }
+    return ids;
+  }, [data.links, selectedNodeId]);
+
+  // Built once per React render (not per frame — see DrawContext's own
+  // comment), so `drawNode`'s per-frame closure below only ever reads an
+  // already-computed object, never allocates one.
+  const drawContext: DrawContext = { typeColors, focusedNodeType, selectedNodeId, neighborIdsOfSelected };
 
   useEffect(() => {
     const el = containerRef.current;
@@ -483,9 +777,29 @@ export function GraphCanvas({ data, onNodeExpand, expandableNodeIds = NO_EXPANDA
         itself (bd-8ub review, immersive brief item 11) — see that
         constant's own comment.
       */}
-      <div ref={containerRef} role="img" aria-label={graphAriaSummary(data)} className="min-h-0 flex-1">
+      {/*
+        `id="graph-canvas-container"` + `tabIndex={-1}` (bd-e9n review):
+        DetailPanel.tsx's `handleClose` falls back to focusing this
+        container when neither the previously-focused element nor the
+        search input is a valid restoration target — a plain `<div>`
+        (even with `role="img"`) isn't focusable by default, so
+        `tabIndex={-1}` makes `.focus()` actually land here rather than
+        silently no-op to `<body>`. `-1` keeps it out of the normal Tab
+        order — this is a programmatic fallback target, not a new stop
+        in the page's own tab sequence.
+      */}
+      <div
+        ref={containerRef}
+        id="graph-canvas-container"
+        tabIndex={-1}
+        role="img"
+        aria-label={graphAriaSummary(data)}
+        className="min-h-0 flex-1 focus:outline-none"
+      >
+
         {size.width > 0 && size.height > 0 && (
           <ForceGraph2D<GraphNode, GraphLink>
+            ref={fgRef}
             graphData={data}
             width={size.width}
             height={size.height}
@@ -498,9 +812,9 @@ export function GraphCanvas({ data, onNodeExpand, expandableNodeIds = NO_EXPANDA
             // in `data.nodes`, so reading them here reflects this frame's
             // actual layout. See computeLabelPlacements' own doc comment.
             onRenderFramePre={(ctx, globalScale) => {
-              labelPlacementsRef.current = computeLabelPlacements(data.nodes as DrawableNode[], globalScale);
+              labelPlacementsRef.current = computeLabelPlacements(data.nodes as DrawableNode[], globalScale, selectedNodeId, neighborIdsOfSelected);
             }}
-            nodeCanvasObject={(node, ctx, globalScale) => drawNode(node, ctx, globalScale, labelPlacementsRef.current, expandableNodeIds, focusedNodeType)}
+            nodeCanvasObject={(node, ctx, globalScale) => drawNode(node, ctx, globalScale, labelPlacementsRef.current, expandableNodeIds, drawContext)}
             nodePointerAreaPaint={paintNodePointerArea}
             nodeLabel={nodeTooltip}
             onNodeClick={(node) => onNodeExpand?.(node as GraphNode)}
@@ -514,7 +828,24 @@ export function GraphCanvas({ data, onNodeExpand, expandableNodeIds = NO_EXPANDA
             // it a new function reference does not itself provoke another
             // reheat. See graph/expansion.ts's header for why this must be
             // `releasePins`'s in-place mutation and not a `setGraph` call.
-            onEngineStop={() => releasePins(data.nodes as PositionedNode[])}
+            //
+            // The free-area fit (bd-e9n) piggybacks on this SAME settle
+            // signal — it is exactly "the simulation actually stopped
+            // ticking" for a fit too, not a second detector — but is
+            // gated by the `fitRequestId` comparison below (see that
+            // prop's own doc comment) so a settle caused by anything
+            // other than a search landing (an expansion, annotate,
+            // connect, retract, reweight, a saved edit — all of which
+            // also reach this callback, per graph/expansion.ts's header)
+            // leaves the already-fitted view untouched.
+            onEngineStop={() => {
+              releasePins(data.nodes as PositionedNode[]);
+              if (fitRequestId !== lastFittedRequestIdRef.current) {
+                lastFittedRequestIdRef.current = fitRequestId;
+                const fg = fgRef.current;
+                if (fg) fitToFreeArea(fg, data.nodes as DrawableNode[], insetRight, size.width, size.height);
+              }
+            }}
             linkColor={(link) => {
               const tinted = tintedLinkColorById.get(link.id) ?? link.color;
               return hexToRgba(tinted, isLinkDimmed(link, focusedNodeType, nodeTypesById) ? DIMMED_ALPHA : LINK_ALPHA);

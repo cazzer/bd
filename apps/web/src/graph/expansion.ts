@@ -47,7 +47,7 @@
 
 import type { GraphCanvasData, GraphLink, GraphNode } from "./encoding.js";
 import { degreeToRadius, mergeGraphData, weightToEdgeWidth } from "./encoding.js";
-import { colorForNodeType, colorForSourceSystem } from "./palette.js";
+import { colorForSourceSystem } from "./palette.js";
 import type { trpc } from "../trpc.js";
 
 // --- Client-side mirrors of packages/core/src/human-writes.ts's write
@@ -57,9 +57,9 @@ import type { trpc } from "../trpc.js";
 // into the Vite client bundle (human-writes.ts sits behind the same
 // barrel as everything else `@breakdown/core` exports, and the barrel's
 // re-exports are unconditional). palette.ts already established this
-// exact convention (SOURCE_SYSTEM_COLORS/NODE_TYPE_COLORS keyed by these
-// same literal strings, same reasoning) for the same reason — one more
-// place, not a new pattern.
+// exact convention (SOURCE_SYSTEM_COLORS keyed by these same literal
+// strings, same reasoning) for the same reason — one more place, not a
+// new pattern.
 export const HUMAN_SOURCE_SYSTEM = "human";
 export const NOTE_NODE_TYPE = "note";
 export const ANNOTATES_EDGE_TYPE = "annotates";
@@ -176,7 +176,10 @@ export function mergeExpansion(previous: GraphCanvasData, params: ExpansionParam
       // degree" test, so this is idempotent, not just harmless).
       degree: neighbor.degree,
       radius: degreeToRadius(neighbor.degree),
-      color: colorForNodeType(neighbor.nodeType),
+      // No `color` here — see encoding.ts's GraphNode.color comment:
+      // node-type colour is a render-time lookup against App.tsx's
+      // store-wide rank map (bd-4ye), done in GraphCanvas, not baked in
+      // by this builder.
       isEditable: neighbor.isEditable,
       // Never "seed" — graph-explorer/spec.md's "An expanded node
       // carries no relevance" scenario, verbatim. `edgePath` records
@@ -287,7 +290,8 @@ export function buildStandaloneNoteNode(result: { id: string }, title: string | 
     sourceSystem: HUMAN_SOURCE_SYSTEM,
     degree: 0,
     radius: degreeToRadius(0),
-    color: colorForNodeType(NOTE_NODE_TYPE),
+    // No `color` here — see buildAnnotationNeighbor-adjacent comment
+    // above/GraphNode.color's own comment in encoding.ts.
     isEditable: true,
     provenance: { kind: "path", edgePath: [] },
   };
@@ -311,7 +315,7 @@ export function graphNodeFromUnlinkedNote(note: UnlinkedNote): GraphNode {
     sourceSystem: note.sourceSystem,
     degree: 0,
     radius: degreeToRadius(0),
-    color: colorForNodeType(note.nodeType),
+    // No `color` here — same reasoning as buildStandaloneNoteNode above.
     isEditable: note.isEditable,
     provenance: { kind: "path", edgePath: [] },
   };

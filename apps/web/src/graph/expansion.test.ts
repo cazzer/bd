@@ -16,7 +16,7 @@
 // own header for why that's structurally out of reach for a test.
 
 import { describe, expect, it } from "vitest";
-import { colorForNodeType, colorForSourceSystem } from "./palette.js";
+import { colorForSourceSystem } from "./palette.js";
 import { degreeToRadius, searchResultToGraphData, weightToEdgeWidth, type GraphCanvasData, type GraphNode, type SearchResult, type SearchResultNode } from "./encoding.js";
 import {
   ANNOTATES_EDGE_TYPE,
@@ -56,7 +56,6 @@ function makeNode(overrides: Partial<GraphNode> & { id: string }): PositionedNod
     sourceSystem: "repo",
     degree: 2,
     radius: 8,
-    color: "#2a78d6",
     isEditable: false,
     provenance: { kind: "path", edgePath: [] },
     ...overrides,
@@ -511,7 +510,12 @@ describe("graphNodeFromUnlinkedNote", () => {
     const node = graphNodeFromUnlinkedNote({ id: "n1", title: "Found note", nodeType: NOTE_NODE_TYPE, sourceSystem: HUMAN_SOURCE_SYSTEM, isEditable: true });
     expect(node.degree).toBe(0);
     expect(node.isEditable).toBe(true);
-    expect(node.color).toBe(colorForNodeType(NOTE_NODE_TYPE));
+    // No colour assertion here (bd-4ye) — node-type colour is no longer
+    // baked in by this builder; it's a render-time lookup in
+    // GraphCanvas.tsx against App.tsx's store-wide rank map. nodeType
+    // itself is still threaded through correctly, which is what a
+    // colour lookup would key off of anyway.
+    expect(node.nodeType).toBe(NOTE_NODE_TYPE);
   });
 });
 

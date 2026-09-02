@@ -14,17 +14,28 @@
 // positions, then each node's own draw callback just looks up its
 // precomputed placement.
 //
-// The algorithm: sort candidates so seed/hovered nodes ("alwaysShow")
-// go first, then the rest by priority (GraphCanvas passes each node's
-// degree); for each, in that order, try a fixed set of label positions
-// around the node and take the first one that doesn't overlap any
-// node-circle or label already placed this frame. A non-alwaysShow
-// candidate that finds no free slot is dropped (visible: false) —
-// its identity is still one hover away via GraphCanvas's tooltip
-// (graph/tooltip.ts), never gone entirely. An alwaysShow candidate that
-// finds no free slot is placed anyway, at its default offset: per the
-// review, losing the label on the node the person just searched for (or
-// is pointing at right now) is worse than an overlap.
+// The algorithm: sort candidates so seed/selected/neighbour/hovered
+// nodes ("alwaysShow") go first, then the rest — each group ordered by
+// `priority` (GraphCanvas passes a relevance tier: selected > seed >
+// neighbour-of-selected > everything else, see computeLabelPlacements'
+// own comment); for each, in that order, try a fixed set of label
+// positions around the node and take the first one that doesn't overlap
+// any node-circle or label already placed this frame. ANY candidate that
+// finds no free slot is dropped (visible: false) — including an
+// alwaysShow one — its identity is still one hover away via GraphCanvas's
+// tooltip (graph/tooltip.ts), never gone entirely.
+//
+// explorer-legibility review (bd-cfc/bd-e9n): an earlier version placed
+// an alwaysShow candidate anyway, on top of whatever already occupied
+// its last-resort slot, on the reasoning that losing the label on the
+// node the person just searched for (or is pointing at right now) was
+// worse than an overlap. Measured against a live hub-density screenshot
+// (several seeds converging on one hub), that produced exactly the
+// overlapping labels this module exists to prevent. Dropping the
+// lower-priority contender instead keeps every VISIBLE label
+// non-overlapping — priority ordering, not force-placement, is what
+// keeps the node someone is actually looking at from losing a slot to a
+// lower-relevance one.
 //
 // Coupled with palette.ts: that module's six-node-type categorical
 // palette exceeds the CVD-safe "all pairs simultaneously visible" gate
@@ -44,11 +55,20 @@ export interface LabelCandidate {
   radius: number;
   text: string;
   /**
-   * Seed nodes and the currently-hovered node. Always placed, even if
-   * every candidate slot collides with something — see module header.
+   * Seed / selected / neighbour-of-selected / hovered nodes — this group
+   * is sorted (and contests slots) ahead of every other candidate, but is
+   * no longer force-placed on a collision (explorer-legibility review —
+   * see module header): a slot within this group is still awarded by
+   * `priority`, and a candidate that loses every contest is dropped like
+   * any other.
    */
   alwaysShow: boolean;
-  /** Tie-break among competing non-alwaysShow candidates when slots run out — higher is placed first. GraphCanvas passes degree. */
+  /**
+   * Decides who wins a contested slot, and who is tried first, within
+   * the same `alwaysShow` group — higher goes first. GraphCanvas passes
+   * a relevance tier (selected > seed > neighbour-of-selected > ambient),
+   * not raw degree (explorer-legibility review).
+   */
   priority: number;
 }
 
@@ -188,7 +208,13 @@ export function placeLabels(candidates: readonly LabelCandidate[], fontSize: num
         break;
       }
     }
-    const placedOffset = chosen ?? (candidate.alwaysShow ? offsets[0]! : undefined);
+    // explorer-legibility review: no force-placement fallback here for
+    // `alwaysShow` — a candidate that finds no free slot is dropped, full
+    // stop, regardless of relevance. See module header for why (an
+    // earlier version placed an alwaysShow candidate on top of whatever
+    // was already there, which is exactly the overlap this function
+    // exists to prevent).
+    const placedOffset = chosen;
     if (placedOffset) {
       placements.set(candidate.id, { id: candidate.id, visible: true, dx: placedOffset.dx, dy: placedOffset.dy });
       placedBoxes.push(labelBox(candidate.x + placedOffset.dx, candidate.y + placedOffset.dy, candidate.text, fontSize, lineHeight));

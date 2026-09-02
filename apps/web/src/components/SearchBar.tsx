@@ -41,6 +41,8 @@ export interface SearchBarProps {
   onChooseSuggestion: (nodeType: string) => void;
   /** A chip's own remove button was activated. */
   onRemoveChip: (nodeType: string) => void;
+  /** App.tsx's store-wide type-colour rank map (bd-4ye, palette.ts's `assignTypeColors`) — the SAME map GraphCanvas and TypePanel read, so a chip/suggestion swatch never disagrees with the canvas. */
+  typeColors: ReadonlyMap<string, string>;
 }
 
 function statusLine(status: SearchBarStatus): { text: string; tone: "muted" | "error" } {
@@ -65,10 +67,10 @@ function statusLine(status: SearchBarStatus): { text: string; tone: "muted" | "e
 }
 
 /** A removable type-filter pill (bd-73t) — a coloured swatch (same lookup TypePanel uses, so a type reads identically wherever it appears) plus an accessible remove control. */
-function TypeChip({ nodeType, onRemove }: { nodeType: string; onRemove: () => void }) {
+function TypeChip({ nodeType, onRemove, typeColors }: { nodeType: string; onRemove: () => void; typeColors: ReadonlyMap<string, string> }) {
   return (
     <span className="flex shrink-0 items-center gap-1 rounded-full border border-hairline bg-surface-strong py-0.5 pr-1 pl-2 text-[11px] text-fg">
-      <span aria-hidden className="inline-block h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: colorForNodeType(nodeType) }} />
+      <span aria-hidden className="inline-block h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: colorForNodeType(nodeType, typeColors) }} />
       {nodeType}
       <button
         type="button"
@@ -82,7 +84,7 @@ function TypeChip({ nodeType, onRemove }: { nodeType: string; onRemove: () => vo
   );
 }
 
-export function SearchBar({ query, onQueryChange, onSubmit, status, trailing, suggestions, chips, onChooseSuggestion, onRemoveChip }: SearchBarProps) {
+export function SearchBar({ query, onQueryChange, onSubmit, status, trailing, suggestions, chips, onChooseSuggestion, onRemoveChip, typeColors }: SearchBarProps) {
   const { text, tone } = statusLine(status);
 
   // Listbox UI state (bd-73t) — see this file's header on why this is
@@ -172,10 +174,11 @@ export function SearchBar({ query, onQueryChange, onSubmit, status, trailing, su
           }}
         >
           {chips.map((nodeType) => (
-            <TypeChip key={nodeType} nodeType={nodeType} onRemove={() => onRemoveChip(nodeType)} />
+            <TypeChip key={nodeType} nodeType={nodeType} onRemove={() => onRemoveChip(nodeType)} typeColors={typeColors} />
           ))}
           <div className="relative min-w-40 flex-1">
             <input
+              id="search-input"
               type="text"
               value={query}
               onChange={(e) => handleInputChange(e.target.value)}
@@ -216,7 +219,7 @@ export function SearchBar({ query, onQueryChange, onSubmit, status, trailing, su
                       index === activeIndex ? "bg-surface-strong text-fg" : "text-fg-muted hover:bg-surface-strong hover:text-fg"
                     }`}
                   >
-                    <span aria-hidden className="inline-block h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: colorForNodeType(suggestion.nodeType) }} />
+                    <span aria-hidden className="inline-block h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: colorForNodeType(suggestion.nodeType, typeColors) }} />
                     <span className="flex-1 truncate">{suggestion.nodeType}</span>
                     <span className="shrink-0">{suggestion.count}</span>
                   </li>

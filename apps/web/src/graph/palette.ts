@@ -1,74 +1,75 @@
 // Categorical colour assignment for the graph canvas (bd-hmd.4, tasks.md
 // 4.3/4.4 — "colour nodes by node_type", "colour edges by
-// source_system"). Hex values and slot ORDER are the validated default
-// categorical palette from Claude's dataviz skill
-// (references/palette.md): that fixed order is the colour-vision-
-// deficiency safety mechanism (adjacent-pair ΔE ≥ 8 CVD / ≥ 15
-// normal-vision, validated by scripts/validate_palette.js), not
-// cosmetic — slots are assigned in the documented order and never
+// source_system"; rank-based node_type assignment: bd-4ye,
+// openspec/changes/explorer-legibility/design.md decision 2). Hex
+// values and slot ORDER are the validated default categorical palette
+// from Claude's dataviz skill (references/palette.md): that fixed order
+// is the colour-vision-deficiency safety mechanism (adjacent-pair ΔE ≥ 8
+// CVD / ≥ 15 normal-vision, validated by scripts/validate_palette.js),
+// not cosmetic — slots are assigned in the documented order and never
 // reshuffled or generated on the fly.
 //
-// `node_type` and `source_system` are both open text by design (design.md:
-// "note requires no migration — node_type is open text by existing
-// design"; packages/core/src/editability.ts's comment makes the same
-// point for source_system: "everything else is presumed file/loader-
-// backed"). Below are two *fixed* lookup tables, keyed by the values
-// this repo's own loader is known to produce today
-// (packages/core/src/corpus.ts's deriveNodeType for node types;
-// packages/core/src/seed.ts's SOURCE_SYSTEM plus
-// packages/core/src/editability.ts's EDITABLE_SOURCE_SYSTEMS for source
-// systems), each with one shared fallback colour for anything else.
+// `node_type` is open text by design (packages/core/src/corpus.ts's
+// deriveNodeType, plus the GitHub ingestor landed after this app's first
+// palette — gh-issue/repo — is proof new node_types keep arriving from
+// new ingestors). A FIXED lookup table therefore goes stale the moment a
+// new ingestor ships a node_type nobody added a row for — exactly what
+// happened to gh-issue/repo before bd-4ye (both fell through to
+// FALLBACK_COLOR, indistinguishable from "uncategorized"). Node type
+// colour is assigned instead by RANK: `assignTypeColors` takes an
+// already store-wide-count-ranked list of type names (App.tsx derives
+// this from `getStoreSummary().nodeTypes`, most prevalent first — see
+// graph/typePrevalence.ts's `topStoreTypes`) and maps rank index i onto
+// `CATEGORICAL_PALETTE[i]` in order, so the most common type in the
+// store always gets slot 0, the second-most-common gets slot 1, and so
+// on — no code change needed when a new ingestor's node_type shows up,
+// because this function reads whatever the store currently holds rather
+// than a table someone has to remember to update.
 //
-// Deliberately a fixed map, not a "next free slot" assignment: a type's
-// colour must not depend on what else happens to appear in one search
-// result, the same stability graph-explorer/spec.md asks of node SIZE
-// ("a node is drawn at the same size wherever it appears") — here
-// extended to colour, or a node would appear to change category between
-// queries with nothing about it having changed.
+// Stability is explicitly SESSION-scoped, not permanent identity: two
+// different sessions (or the same session before/after a large ingest
+// that reorders store-wide counts) can assign a given type a different
+// colour. Accepted per design.md's own Risk section — re-ranking to
+// reflect what's actually in the store beats a stale colour built for a
+// store that no longer looks like that, and is preferable to the
+// alternative (a fixed table) this replaces, which is the exact "silently
+// stops covering new ingestors" problem being removed. Within one
+// session, the map is only ever recomputed when `getStoreSummary` is
+// re-fetched (App.tsx: on load, and after a write that could add a new
+// node_type) — the same cadence `nodeTypeCounts` state already follows.
 //
-// `node_type` has six known values — more than the three slots
-// scripts/validate_palette.js's `--pairs all` gate can clear together
-// (a graph canvas shows every category simultaneously, like a scatter
-// plot, not merely adjacent-in-a-stack). Run against all six
-// (2026-09-01, dark-ground re-tune — bd-ktj): adjacent-pair checks (the
-// gate for stacks/bars/lines) pass against this module's own
-// --color-ground surface (`#070b14`, index.css); the `--pairs all` gate
-// fails as documented (worst CVD pair #d55181<->#199e70 ΔE 1.6 deutan,
-// worst normal-vision pair #c98500<->#d95926 ΔE 10.6) — the palette
-// doc's own escape valve is "legal ONLY with secondary encoding: direct
-// labels ... or texture", which this app already has (every node
-// carries a text label — GraphCanvas.tsx/labelPlacement.ts). Hex values
-// are the dataviz skill's own dark-mode categorical steps
-// (references/palette.md's "Dark" column — same eight hues as the
-// light-mode set this replaced, stepped for a dark surface, not a
-// separate palette), re-validated here against `#070b14` specifically
-// rather than the skill's own default dark surface (`#1a1a19`) since
-// this app's ground is darker navy, not neutral gray.
-// `source_system` has three known values, inside the three-slot cap,
-// and passes `--pairs all` outright — no secondary encoding needed
-// there.
+// `source_system` stays a small, genuinely fixed set (packages/core/src/
+// seed.ts's SOURCE_SYSTEM, editability.ts's EDITABLE_SOURCE_SYSTEMS) —
+// no ingestor has ever added a fourth one, so SOURCE_SYSTEM_COLORS below
+// is left as the fixed table it always was; only node_type's assignment
+// moved to rank.
 //
-// COUPLING (bd-hmd.4 follow-up review — read this before touching
-// either module): the node_type mitigation above is NOT "every node is
-// always labelled." graph/labelPlacement.ts hides a label when its node
-// is crowded and not a seed/hovered — the fix for labels overlapping in
-// the corpus's densest cluster, which unconditional per-node labels
-// caused. A hidden-label node's type is still one hover away
-// (graph/tooltip.ts's tooltip always states node_type/source_system as
-// text), but hover-only identity is weaker than an always-visible
-// label — it requires the person to act, not just look, so the
-// mitigation is now conditional rather than universal. Two things keep
-// it honest rather than quietly regressing: (1) `labelPlacement.ts`
-// marks every seed node's label `alwaysShow` — the CVD-hardest pairs
-// above are exactly the pairs a person is most likely staring at right
-// after a search, and those never lose their label; (2) if hidden
-// labels turn out to strand real confusion at higher density (more
-// likely once bd-hmd.5 adds expansion), the next lever is biasing
-// `labelPlacement.ts`'s `priority` by colour-confusability instead of
-// raw degree — not implemented now; degree already tracks "the node
-// most worth a persistent label" well enough for this corpus, and
-// doing more than that without evidence of an actual problem would be
-// solving a problem this ticket hasn't observed.
+// CATEGORICAL_PALETTE has 8 slots; validated (2026-09-01, dark-ground
+// re-tune — bd-ktj) against this module's own --color-ground surface
+// (`#070b14`, index.css): adjacent-pair checks (the gate for
+// stacks/bars/lines) pass; the stricter `--pairs all` gate (every
+// category visible simultaneously, as a graph canvas does) fails once
+// more than ~3 types are assigned at once (worst CVD pair #d55181<->
+// #199e70 ΔE 1.6 deutan, worst normal-vision pair #c98500<->#d95926 ΔE
+// 10.6) — legal only with the palette doc's own escape valve, a
+// secondary encoding, which this app already has: every node carries a
+// text label (GraphCanvas.tsx/labelPlacement.ts) whenever bd-cfc's label
+// policy (graph/labelPolicy.ts) draws one, and a screen-reader user gets
+// type as text unconditionally via the sr-only node list
+// (accessibility.ts's nodeAccessibleDescription) regardless of what's
+// drawn on canvas.
+//
+// COUPLING (bd-hmd.4 follow-up review, still true after bd-4ye's rank
+// change — read this before touching either module): the mitigation
+// above is NOT "every node is always labelled." graph/labelPolicy.ts
+// (bd-cfc) withholds a label from a node that isn't a seed, the
+// selection, a neighbour of the selection, or hovered, unless the view
+// is zoomed in past a threshold — a hidden-label node's type is still
+// one hover away (graph/tooltip.ts's tooltip always states
+// node_type/source_system as text), but hover-only identity is weaker
+// than an always-visible label, so the mitigation stays conditional, not
+// universal — see labelPolicy.ts's own header for the current, honest
+// version of that claim.
 export const CATEGORICAL_PALETTE = [
   "#3987e5", // 1 blue
   "#d95926", // 2 orange
@@ -76,43 +77,63 @@ export const CATEGORICAL_PALETTE = [
   "#c98500", // 4 yellow
   "#d55181", // 5 magenta
   "#008300", // 6 green
-  "#9085e9", // 7 violet — reserved, unused by either table below today
-  "#e66767", // 8 red — reserved, unused by either table below today
+  "#9085e9", // 7 violet
+  "#e66767", // 8 red
 ] as const;
 
 /**
- * Colour for anything not in a table below. Deliberately OUTSIDE the
- * categorical set above — `scripts/validate_palette.js` confirms it
- * fails that palette's own chroma floor ("reads gray"), which is exactly
- * the point: an unrecognised type must read as "uncategorized," never
- * coincidentally collide with a real category's hue. Slate-500 rather
- * than the light-mode fallback's warm gray (`#8a8886`, too dark to read
- * against the dark ground) — still clears the surface's 3:1 contrast
- * floor.
+ * Colour for a type ranked past `CATEGORICAL_PALETTE`'s length.
+ * Deliberately OUTSIDE the categorical set above — `scripts/
+ * validate_palette.js` confirms it fails that palette's own chroma floor
+ * ("reads gray"), which is exactly the point: a type past the palette's
+ * length must read as "uncategorized," never coincidentally collide with
+ * a real category's hue. Slate-500 rather than the light-mode fallback's
+ * warm gray (`#8a8886`, too dark to read against the dark ground) —
+ * still clears the surface's 3:1 contrast floor.
  */
 export const FALLBACK_COLOR = "#64748b";
 
-/** packages/core/src/corpus.ts's deriveNodeType — the six node_type values this repo's loader produces. */
-const NODE_TYPE_COLORS: Readonly<Record<string, string>> = {
-  doc: CATEGORICAL_PALETTE[0],
-  "openspec-spec": CATEGORICAL_PALETTE[1],
-  "openspec-proposal": CATEGORICAL_PALETTE[2],
-  "openspec-design": CATEGORICAL_PALETTE[3],
-  "openspec-tasks": CATEGORICAL_PALETTE[4],
-  "openspec-readme": CATEGORICAL_PALETTE[5],
-};
+/**
+ * Assigns each of `rankedTypes` a colour by its position in the array —
+ * index 0 (the most prevalent type store-wide) gets
+ * `CATEGORICAL_PALETTE[0]`, and so on; an index past the palette's
+ * length gets `FALLBACK_COLOR`. Pure and order-only: the CALLER is what
+ * turns `getStoreSummary().nodeTypes` into a ranked, deduplicated list of
+ * type NAMES (count desc, name-asc tie-break — graph/typePrevalence.ts's
+ * `topStoreTypes`/`sortByCountThenName`) before calling this, so this
+ * function's whole contract is "index i gets palette slot i" — it never
+ * itself reads a count or breaks a tie.
+ *
+ * Computed once in App.tsx alongside the existing `nodeTypeCounts` state
+ * (design.md decision 2) and passed down to every surface that shows a
+ * type colour — GraphCanvas, TypePanel, SearchBar's chip/suggestion
+ * swatches — so none of them can disagree about what colour a type is.
+ */
+export function assignTypeColors(rankedTypes: readonly string[]): Map<string, string> {
+  const colors = new Map<string, string>();
+  rankedTypes.forEach((nodeType, rank) => {
+    colors.set(nodeType, CATEGORICAL_PALETTE[rank] ?? FALLBACK_COLOR);
+  });
+  return colors;
+}
 
-/** packages/core/src/seed.ts's SOURCE_SYSTEM ("repo") plus editability.ts's EDITABLE_SOURCE_SYSTEMS ("human", "agent"). */
+/**
+ * Fill colour for a node, keyed by `node_type`, looked up in `colors` —
+ * the SAME map every caller got from `assignTypeColors`, per this
+ * module's header. A type absent from `colors` (never ranked — e.g. the
+ * store summary hasn't loaded yet) gets `FALLBACK_COLOR`, never a crash,
+ * never an arbitrary per-render assignment.
+ */
+export function colorForNodeType(nodeType: string, colors: ReadonlyMap<string, string>): string {
+  return colors.get(nodeType) ?? FALLBACK_COLOR;
+}
+
+/** packages/core/src/seed.ts's SOURCE_SYSTEM ("repo") plus editability.ts's EDITABLE_SOURCE_SYSTEMS ("human", "agent"). Fixed, unlike node_type's rank-based assignment above — see module header for why this table stays a table. */
 const SOURCE_SYSTEM_COLORS: Readonly<Record<string, string>> = {
   repo: CATEGORICAL_PALETTE[0],
   human: CATEGORICAL_PALETTE[1],
   agent: CATEGORICAL_PALETTE[2],
 };
-
-/** Fill colour for a node, keyed by `node_type`. Unknown types get `FALLBACK_COLOR` — never a crash, never an arbitrary per-render assignment. */
-export function colorForNodeType(nodeType: string): string {
-  return NODE_TYPE_COLORS[nodeType] ?? FALLBACK_COLOR;
-}
 
 /** Colour for an edge, keyed by `source_system`. Same fallback rule as `colorForNodeType`. */
 export function colorForSourceSystem(sourceSystem: string): string {

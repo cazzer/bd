@@ -5,13 +5,15 @@
 // each describe block's comment for which scenario it is.
 
 import { describe, expect, it } from "vitest";
-import { colorForNodeType, colorForSourceSystem, FALLBACK_COLOR } from "./palette.js";
+import { assignTypeColors, CATEGORICAL_PALETTE, colorForNodeType, colorForSourceSystem, FALLBACK_COLOR } from "./palette.js";
 import {
   degreeToRadius,
   EDGE_WIDTH_MAX,
   EDGE_WIDTH_MIN,
   mergeGraphData,
+  NODE_RADIUS_MAX,
   NODE_RADIUS_MIN,
+  NODE_RADIUS_SCALE,
   searchResultToGraphData,
   setNodeDegree,
   weightToEdgeWidth,
@@ -74,18 +76,17 @@ function makeResult(nodes: SearchResultNode[], edges: SearchResultEdge[]): Searc
 // --- degree -> radius: "Node size encodes connectedness" ------------------
 
 describe("degreeToRadius", () => {
-  it("a hub with ten times the degree draws at about three times (sqrt(10)) the radius, not ten", () => {
-    const normal = degreeToRadius(3);
-    const hub = degreeToRadius(30);
+  it("a hub with four times the degree draws at about twice (sqrt(4)) the radius, not four — both comfortably under NODE_RADIUS_MAX (see the cap-specific tests below for degrees large enough to actually hit it; the original 3-vs-30/10x demonstration no longer fits under the cap bd-4ye added, since NODE_RADIUS_MAX = NODE_RADIUS_MIN * 3 = 9 is well below radius(30))", () => {
+    const normal = degreeToRadius(1);
+    const hub = degreeToRadius(4);
 
-    // Actual numbers (NODE_RADIUS_SCALE = 4): radius(3) = 4*sqrt(3) =
-    // 6.928..., radius(30) = 4*sqrt(30) = 21.908... — ratio 3.162,
-    // matching sqrt(10) exactly (both are well clear of NODE_RADIUS_MIN,
-    // so the floor does not distort the ratio).
-    expect(normal).toBeCloseTo(6.9282, 3);
-    expect(hub).toBeCloseTo(21.9089, 3);
-    expect(hub / normal).toBeCloseTo(Math.sqrt(10), 5);
-    expect(hub / normal).toBeCloseTo(3.1623, 3);
+    // NODE_RADIUS_SCALE = 4: radius(1) = 4*sqrt(1) = 4, radius(4) =
+    // 4*sqrt(4) = 8 — ratio 2, matching sqrt(4) exactly (both stay
+    // under NODE_RADIUS_MAX, so the cap does not distort the ratio).
+    expect(normal).toBeCloseTo(4, 5);
+    expect(hub).toBeCloseTo(8, 5);
+    expect(hub / normal).toBeCloseTo(2, 5);
+    expect(hub / normal).toBeCloseTo(Math.sqrt(4), 5);
   });
 
   it("scales with sqrt(degree), not degree itself", () => {
@@ -96,7 +97,30 @@ describe("degreeToRadius", () => {
     expect(degreeToRadius(0)).toBe(NODE_RADIUS_MIN);
   });
 
-  it("never returns a smaller radius for a strictly larger degree", () => {
+  it("NODE_RADIUS_MAX is roughly 3x NODE_RADIUS_MIN, per design.md decision 3", () => {
+    expect(NODE_RADIUS_MAX).toBe(NODE_RADIUS_MIN * 3);
+  });
+
+  it("a degree just under the one where sqrt scaling reaches the cap still draws at its own sqrt-scaled radius — the cap does not engage early", () => {
+    const degreeJustUnderCap = (NODE_RADIUS_MAX / NODE_RADIUS_SCALE) ** 2 - 0.5;
+    const radius = degreeToRadius(degreeJustUnderCap);
+    expect(radius).toBeLessThan(NODE_RADIUS_MAX);
+    expect(radius).toBeCloseTo(NODE_RADIUS_SCALE * Math.sqrt(degreeJustUnderCap), 5);
+  });
+
+  it("draws at exactly NODE_RADIUS_MAX for the degree where sqrt scaling exactly reaches the cap", () => {
+    const degreeAtCap = (NODE_RADIUS_MAX / NODE_RADIUS_SCALE) ** 2;
+    expect(degreeToRadius(degreeAtCap)).toBeCloseTo(NODE_RADIUS_MAX, 5);
+  });
+
+  it("a hub far past the cap draws at the SAME radius as one just past it — graph-explorer/spec.md's 'A hub above the cap is drawn at the maximum radius'", () => {
+    const justPastCap = (NODE_RADIUS_MAX / NODE_RADIUS_SCALE) ** 2 + 1;
+    expect(degreeToRadius(justPastCap)).toBe(NODE_RADIUS_MAX);
+    expect(degreeToRadius(1000)).toBe(NODE_RADIUS_MAX);
+    expect(degreeToRadius(justPastCap)).toBe(degreeToRadius(1000));
+  });
+
+  it("never returns a smaller radius for a strictly larger degree, including across the cap boundary", () => {
     const degrees = [0, 1, 2, 5, 10, 50, 500];
     for (let i = 1; i < degrees.length; i++) {
       expect(degreeToRadius(degrees[i]!)).toBeGreaterThanOrEqual(degreeToRadius(degrees[i - 1]!));
@@ -106,29 +130,66 @@ describe("degreeToRadius", () => {
 
 // --- node_type / source_system -> colour -----------------------------------
 
+// bd-4ye, design.md decision 2: node_type colour moved from a fixed
+// lookup table to rank-based assignment. assignTypeColors takes an
+// already-ranked list of type names (App.tsx derives this from
+// getStoreSummary().nodeTypes via typePrevalence.ts's topStoreTypes);
+// colorForNodeType is now a lookup into whatever map assignTypeColors
+// produced, not a static table — see palette.ts's own header.
+describe("assignTypeColors", () => {
+  it("returns an empty map for an empty store", () => {
+    expect(assignTypeColors([]).size).toBe(0);
+  });
+
+  it("gives each of the first N ranks (fewer types than palette slots) a distinct colour, in rank order", () => {
+    const map = assignTypeColors(["doc", "openspec-spec", "openspec-proposal"]);
+    expect(map.get("doc")).toBe(CATEGORICAL_PALETTE[0]);
+    expect(map.get("openspec-spec")).toBe(CATEGORICAL_PALETTE[1]);
+    expect(map.get("openspec-proposal")).toBe(CATEGORICAL_PALETTE[2]);
+    expect(new Set(map.values()).size).toBe(3);
+  });
+
+  it("falls back to FALLBACK_COLOR for a type ranked past the palette's length", () => {
+    const rankedTypes = Array.from({ length: CATEGORICAL_PALETTE.length + 2 }, (_, i) => `type-${i}`);
+    const map = assignTypeColors(rankedTypes);
+    for (let i = 0; i < CATEGORICAL_PALETTE.length; i++) {
+      expect(map.get(`type-${i}`)).toBe(CATEGORICAL_PALETTE[i]);
+    }
+    expect(map.get(`type-${CATEGORICAL_PALETTE.length}`)).toBe(FALLBACK_COLOR);
+    expect(map.get(`type-${CATEGORICAL_PALETTE.length + 1}`)).toBe(FALLBACK_COLOR);
+  });
+
+  it("is a stable, deterministic assignment — the same ranked input always produces the same map", () => {
+    const ranked = ["gh-issue", "repo", "doc"];
+    expect(assignTypeColors(ranked)).toEqual(assignTypeColors(ranked));
+  });
+});
+
 describe("colorForNodeType", () => {
-  it("gives each of the six known node types a distinct colour", () => {
-    const types = ["doc", "openspec-spec", "openspec-proposal", "openspec-design", "openspec-tasks", "openspec-readme"];
-    const colors = types.map(colorForNodeType);
-    expect(new Set(colors).size).toBe(types.length);
+  const colors = assignTypeColors(["doc", "gh-issue", "repo"]);
+
+  it("looks up a ranked type's assigned colour", () => {
+    expect(colorForNodeType("doc", colors)).toBe(CATEGORICAL_PALETTE[0]);
+    expect(colorForNodeType("gh-issue", colors)).toBe(CATEGORICAL_PALETTE[1]);
+    expect(colorForNodeType("repo", colors)).toBe(CATEGORICAL_PALETTE[2]);
   });
 
-  it("falls back to the stable fallback colour for an unrecognised type, without throwing", () => {
-    expect(() => colorForNodeType("some-future-type")).not.toThrow();
-    expect(colorForNodeType("some-future-type")).toBe(FALLBACK_COLOR);
+  it("falls back to the stable fallback colour for a type absent from the map, without throwing", () => {
+    expect(() => colorForNodeType("some-future-type", colors)).not.toThrow();
+    expect(colorForNodeType("some-future-type", colors)).toBe(FALLBACK_COLOR);
   });
 
-  it("gives two different unknown types the SAME fallback colour rather than colliding arbitrarily", () => {
-    expect(colorForNodeType("unknown-a")).toBe(colorForNodeType("unknown-b"));
+  it("gives two different unmapped types the SAME fallback colour rather than colliding arbitrarily", () => {
+    expect(colorForNodeType("unknown-a", colors)).toBe(colorForNodeType("unknown-b", colors));
   });
 
   it("is a stable, deterministic lookup — repeated calls agree", () => {
-    expect(colorForNodeType("doc")).toBe(colorForNodeType("doc"));
+    expect(colorForNodeType("doc", colors)).toBe(colorForNodeType("doc", colors));
   });
 
-  it("the fallback colour is not equal to any known node type's colour", () => {
-    const known = ["doc", "openspec-spec", "openspec-proposal", "openspec-design", "openspec-tasks", "openspec-readme"].map(colorForNodeType);
-    expect(known).not.toContain(FALLBACK_COLOR);
+  it("the fallback colour is not equal to any ranked type's colour", () => {
+    const ranked = ["doc", "gh-issue", "repo"].map((t) => colorForNodeType(t, colors));
+    expect(ranked).not.toContain(FALLBACK_COLOR);
   });
 });
 
@@ -197,13 +258,12 @@ describe("searchResultToGraphData", () => {
     expect(graph.nodes[0]!.provenance).toEqual({ kind: "path", edgePath: ["part-of-change"] });
   });
 
-  it("a node's radius and colour do not depend on whether it is a seed — provenance never touches geometry", () => {
+  it("a node's radius does not depend on whether it is a seed — provenance never touches geometry (colour isn't computed here at all, bd-4ye — see GraphNode.color's own comment: node-type colour is a render-time lookup against the store-wide rank map, resolved in GraphCanvas, never baked in by this function)", () => {
     const seedResult = makeResult([makeNode({ id: "x", isSeed: true, relevance: 0.9, degree: 8, nodeType: "doc" })], []);
     const pathResult = makeResult([makeNode({ id: "x", isSeed: false, degree: 8, nodeType: "doc" })], []);
     const seedNode = searchResultToGraphData(seedResult).nodes[0]!;
     const pathNode = searchResultToGraphData(pathResult).nodes[0]!;
     expect(seedNode.radius).toBe(pathNode.radius);
-    expect(seedNode.color).toBe(pathNode.color);
   });
 
   it("a new query clears the old highlight: the same node id is a seed in one result and a path node in the next", () => {
@@ -354,7 +414,7 @@ function EMPTY_GRAPH_FOR_TEST(): GraphCanvasData {
 
 describe("setNodeDegree", () => {
   function graphNode(overrides: Partial<GraphNode> & { id: string }): GraphNode {
-    return { title: "n", nodeType: "note", sourceSystem: "human", degree: 0, radius: degreeToRadius(0), color: "#000", isEditable: true, provenance: { kind: "path", edgePath: [] }, ...overrides };
+    return { title: "n", nodeType: "note", sourceSystem: "human", degree: 0, radius: degreeToRadius(0), isEditable: true, provenance: { kind: "path", edgePath: [] }, ...overrides };
   }
 
   it("sets degree and recomputes radius for the matching node, returning true", () => {
