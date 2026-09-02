@@ -565,6 +565,12 @@ describe("node_revisions (history trigger)", () => {
       expect(revs.map((r) => r.revisionNo)).toEqual([1, 2, 3]);
       expect(revs.map((r) => r.content)).toEqual(["initial", "a", "b"]);
     } finally {
+      // On a failure path a client can still be idle-in-transaction,
+      // holding the row lock the delete below needs — and it would go
+      // back to the pool that way. A ROLLBACK after a successful COMMIT
+      // is a harmless no-op, so it is unconditional.
+      await clientA.query("ROLLBACK").catch(() => {});
+      await clientB.query("ROLLBACK").catch(() => {});
       clientA.release();
       clientB.release();
       await db.delete(nodes).where(eq(nodes.id, node.id));

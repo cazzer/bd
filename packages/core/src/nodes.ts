@@ -143,8 +143,9 @@ export interface PreparedNode {
 // (see the "genuine database failure in a later chunk" test in
 // nodes.test.ts for the one Postgres quirk this does not cover: an
 // escaped NUL sequence inside a jsonb string, which jsonb itself
-// rejects).
-const CONTROL_CHAR_CODE_POINTS = new Set<number>([
+// rejects). Exported for ingest-runs.ts, which strips the same set from a
+// client-supplied actor — the same raw-text-into-a-text-column hazard.
+export const CONTROL_CHAR_CODE_POINTS = new Set<number>([
   0, 1, 2, 3, 4, 5, 6, 7, 8, 11, 12, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 127,
 ]);
 

@@ -44,6 +44,7 @@ export {
   openIngestRun,
   closeIngestRun,
   getIngestRunContents,
+  MAX_ACTOR_LENGTH,
   type IngestRunHandle,
   type OpenIngestRunOptions,
   type ClosedIngestRun,
