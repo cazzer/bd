@@ -18,9 +18,9 @@
 
 ## 3. brain_history and client attribution in the MCP server
 
-- [ ] 3.1 Add an actor resolver to `ToolContext`, populated from the server's client info at call time, and have `withAgentIngestRun` pass it as the run's actor
-- [ ] 3.2 Wrap `brain_merge` in `withAgentIngestRun`, pass the run to `mergeNodes`, and include `ingestRunId` in its response
-- [ ] 3.3 Add the `brain_history` tool in `apps/mcp/src/tools/read.ts`: id, optional `limit`, `before`, and `includeContent`; `isWrite: false`; wrapped in `boundResponse` with a truncation note that says how to fetch older revisions
-- [ ] 3.4 Register the tool, and update the server instructions string and the entrypoint comment from seven tools to eight
-- [ ] 3.5 Write server tests: the tool is advertised and callable in read-only mode; a write from a client that introduced itself as `claude-code 2.1.0` records that actor on its run; write, re-write, and merge produce a history whose newest revision reports the right changed fields and actor; an oversized history is truncated with the note
-- [ ] 3.6 Add the history invariant and the merge-needs-a-run rule to the Conventions section of `CLAUDE.md` (AGENTS.md carries no Conventions section), add the missing `InvalidLookupOptionError` branch to the MCP error mapper, and confirm `pnpm check` is green
+- [x] 3.1 Add an actor resolver to `ToolContext`, populated from the server's client info at call time, and have `withAgentIngestRun` pass it as the run's actor
+- [x] 3.2 Wrap `brain_merge` in `withAgentIngestRun`, pass the run to `mergeNodes`, and include `ingestRunId` in its response
+- [x] 3.3 Add the `brain_history` tool in `apps/mcp/src/tools/read.ts`: id, optional `limit`, `before`, and `includeContent`; `isWrite: false`; wrapped in `boundResponse` with a truncation note that says how to fetch older revisions
+- [x] 3.4 Register the tool, and update the server instructions string and the entrypoint comment from seven tools to eight
+- [x] 3.5 Write server tests: the tool is advertised and callable in read-only mode; a write from a client that introduced itself as `claude-code 2.1.0` records that actor on its run; write, re-write, and merge produce a history whose newest revision reports the right changed fields and actor; an oversized history is truncated with the note
+- [x] 3.6 Add the history invariant and the merge-needs-a-run rule to the Conventions section of `CLAUDE.md` (AGENTS.md carries no Conventions section), add the missing `InvalidLookupOptionError` branch to the MCP error mapper, and confirm `pnpm check` is green

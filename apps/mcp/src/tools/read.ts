@@ -1,9 +1,9 @@
-// The four read tools: brain_search, brain_get, brain_neighbors,
-// brain_map. Thin handlers — argument parsing is already done by the time
-// these run (server.ts validates against `schema` first); each handler
-// calls one `@breakdown/core` function and shapes its result, applying
-// the shared response-size bound (../budget.ts) to whatever list it
-// returns.
+// The five read tools: brain_search, brain_get, brain_neighbors,
+// brain_map, brain_history. Thin handlers — argument parsing is already
+// done by the time these run (server.ts validates against `schema`
+// first); each handler calls one `@breakdown/core` function and shapes
+// its result, applying the shared response-size bound (../budget.ts) to
+// whatever list it returns.
 
 import {
   DEFAULT_DECAY,
@@ -14,9 +14,11 @@ import {
   DEFAULT_RECENT_NODES_LIMIT,
   DEFAULT_SEED_LIMIT,
   getNeighbors,
+  getNodeHistory,
   getNodes,
   getStoreSummary,
   MAX_ALLOWED_DEPTH,
+  MAX_HISTORY_LIMIT,
   retrieve,
   type RetrieveOptions,
 } from "@breakdown/core";
@@ -242,4 +244,68 @@ export const mapTool: ToolDef<typeof mapSchema> = {
   },
 };
 
-export const readTools: ToolDef[] = [searchTool, getTool, neighborsTool, mapTool];
+// --- brain_history ---------------------------------------------------------
+
+const historySchema = z.object({
+  id: z.string().min(1, "must not be empty"),
+  limit: z.number().int().positive().max(MAX_HISTORY_LIMIT).optional(),
+  /** A revisionNo; only revisions strictly older than it are returned. Take it from a previous response's nextBefore. */
+  before: z.number().int().positive().optional(),
+  includeContent: z.boolean().optional(),
+});
+
+export const historyTool: ToolDef<typeof historySchema> = {
+  name: "brain_history",
+  description:
+    "Return a node's revision history, newest first. Each revision carries its revisionNo, recordedAt, the ingest run that made it (id, sourceSystem, actor), changedFields (which of nodeType/title/content/metadata/mergedInto differ from the previous revision; the first revision lists every present field), and metadataChanges ({ key: { before, after } } for each top-level metadata key that changed). content is omitted unless includeContent is true; contentHash still shows whether it changed. History is per node as stored: a merged-away node's id returns its own revisions, including the one that merged it, not its survivor's. To page older revisions, call again with before set to the nextBefore from the previous response.",
+  schema: historySchema,
+  isWrite: false,
+  async handler(ctx: ToolContext, args) {
+    const result = await getNodeHistory(ctx.db, args.id, {
+      limit: args.limit,
+      before: args.before ?? null,
+      includeContent: args.includeContent ?? false,
+    });
+
+    // boundResponse drops from the tail, which for a newest-first list is
+    // the OLDEST revisions — so hasMore/nextBefore are recomputed from
+    // what is actually kept, not taken from core's result; otherwise the
+    // cursor would skip every revision the budget dropped.
+    return boundResponse(
+      result.revisions,
+      (r) => String(r.revisionNo),
+      (kept, meta) => {
+        const oldest = kept[kept.length - 1];
+        const hasMore = result.hasMore || meta.droppedIds.length > 0;
+        const nextBefore = hasMore && oldest ? oldest.revisionNo : null;
+
+        const notes: string[] = [];
+        if (hasMore) {
+          notes.push(`Older revisions exist beyond this response; call brain_history again with before=${nextBefore} to continue.`);
+        }
+        if (meta.droppedIds.length > 0) {
+          notes.push(
+            `${meta.droppedIds.length} revision(s) were dropped to fit the response-size budget — the before cursor above already accounts for them; use a smaller limit or includeContent=false if content is what overflows.`,
+          );
+        }
+        if (meta.shrunkIds.length > 0) {
+          notes.push(`${meta.shrunkIds.length} revision(s) had oversized fields truncated in place.`);
+        }
+
+        return {
+          id: result.nodeId,
+          revisions: kept,
+          hasMore,
+          nextBefore,
+          truncated: hasMore || meta.truncated,
+          ...(notes.length > 0 ? { truncationNote: notes.join(" ") } : {}),
+          droppedRevisionNos: meta.droppedIds.map(Number),
+          shrunkRevisionNos: meta.shrunkIds.map(Number),
+        };
+      },
+      ctx.responseCharBudget,
+    );
+  },
+};
+
+export const readTools: ToolDef[] = [searchTool, getTool, neighborsTool, mapTool, historyTool];

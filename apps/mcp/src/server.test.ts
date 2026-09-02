@@ -1,4 +1,4 @@
-// End-to-end coverage of the seven brain_* tools, driven through the real
+// End-to-end coverage of the eight brain_* tools, driven through the real
 // MCP protocol (a Client talking to the Server built by createServer())
 // rather than by calling tool handlers directly — this is what actually
 // proves argument validation, tool advertisement, and error mapping work
@@ -11,7 +11,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { EdgeInput, IngestRunHandle, NodeInput } from "@breakdown/core";
-import { mergeNodes, openIngestRun, upsertEdges, upsertNodes } from "@breakdown/core";
+import { closeIngestRun, mergeNodes, openIngestRun, upsertEdges, upsertNodes } from "@breakdown/core";
 import { createDb, createPool, edges, ingestRuns, nodes, resolveDatabaseUrl, type Database } from "@breakdown/db";
 import { createServer, type CreateServerOptions } from "./server.js";
 
@@ -88,9 +88,10 @@ async function makeEdges(run: IngestRunHandle, specs: readonly Omit<EdgeInput, "
 }
 
 
-async function connectClient(opts?: CreateServerOptions): Promise<{ client: Client }> {
+/** `clientInfo` is what the client sends in its initialize handshake — the server derives the actor it records on ingest runs from it. */
+async function connectClient(opts?: CreateServerOptions, clientInfo: { name: string; version: string } = { name: "test-client", version: "0.0.0" }): Promise<{ client: Client }> {
   const server = createServer(db, opts);
-  const client = new Client({ name: "test-client", version: "0.0.0" });
+  const client = new Client(clientInfo);
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
   return { client };
@@ -115,11 +116,11 @@ const BOGUS_ID = "00000000-0000-0000-0000-000000000000";
 // --- Tool listing (spec: "No arbitrary SQL from the model", "Read-only mode") ---
 
 describe("tool listing", () => {
-  it("advertises all seven tools with object-shaped input schemas, and no SQL passthrough tool", async () => {
+  it("advertises all eight tools with object-shaped input schemas, and no SQL passthrough tool", async () => {
     const { client } = await connectClient();
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
-    expect(names).toEqual(["brain_get", "brain_link", "brain_map", "brain_merge", "brain_neighbors", "brain_search", "brain_write"]);
+    expect(names).toEqual(["brain_get", "brain_history", "brain_link", "brain_map", "brain_merge", "brain_neighbors", "brain_search", "brain_write"]);
     for (const tool of tools) {
       expect(tool.inputSchema.type).toBe("object");
     }
@@ -319,6 +320,21 @@ describe("brain_write", () => {
     expect(result.items[0].sourceSystem).toBe("agent");
   });
 
+  it("records the connected client, as it introduced itself, as the actor on its ingest run — with no environment variable or argument involved (spec: writes name the connected client)", async () => {
+    const suffix = uniqueSuffix();
+    const { client } = await connectClient(undefined, { name: "claude-code", version: "2.1.0" });
+    const result = parseText(
+      await client.callTool({
+        name: "brain_write",
+        arguments: { items: { nodeType: "doc", externalId: `actor-${suffix}`, sourceSystem: `mcp-actor-${suffix}`, content: "c" } },
+      }),
+    );
+    toolRunIds.push(result.ingestRunId);
+
+    const [run] = await db.select({ sourceSystem: ingestRuns.sourceSystem, actor: ingestRuns.actor }).from(ingestRuns).where(eq(ingestRuns.id, result.ingestRunId));
+    expect(run).toEqual({ sourceSystem: "agent", actor: "claude-code 2.1.0" });
+  });
+
   it("stores SQL-looking content as literal text and never executes it (spec: no arbitrary SQL from the model)", async () => {
     const suffix = uniqueSuffix();
     const sourceSystem = `mcp-sql-${suffix}`;
@@ -473,6 +489,168 @@ describe("brain_merge", () => {
   });
 });
 
+// --- brain_history (spec: "History tool") --------------------------------------
+
+describe("brain_history", () => {
+  /**
+   * A node written and then re-written by two runs with source system
+   * "human" — the shape the web app produces — under a fixture-unique node
+   * source system so cleanup stays scoped. Each run is closed right after
+   * its write so it never lingers as an empty human run.
+   */
+  async function writeUnderHumanRuns(sourceSystem: string, versions: readonly Omit<NodeInput, "sourceSystem">[]): Promise<{ id: string; runIds: string[] }> {
+    usedSourceSystems.push(sourceSystem);
+    let id = "";
+    const runIds: string[] = [];
+    for (const version of versions) {
+      const run = await openIngestRun(db, "human", { actor: "human" });
+      openRunIds.push(run.id);
+      runIds.push(run.id);
+      const result = await upsertNodes(db, run, [{ ...version, sourceSystem }]);
+      await closeIngestRun(db, run);
+      id = result.rows[0]!.id;
+    }
+    return { id, runIds };
+  }
+
+  it("reports a status flip with its before/after values, attributed to a run with source system human (spec: agent asks how a work item changed)", async () => {
+    const { id, runIds } = await writeUnderHumanRuns(`mcp-history-${uniqueSuffix()}`, [
+      { nodeType: "work_item", externalId: "wi", title: "Fix login", content: "body", metadata: { status: "open" } },
+      { nodeType: "work_item", externalId: "wi", title: "Fix login", content: "body", metadata: { status: "closed" } },
+    ]);
+    const { client } = await connectClient();
+
+    const result = parseText(await client.callTool({ name: "brain_history", arguments: { id } }));
+    expect(result.id).toBe(id);
+    expect(result.revisions).toHaveLength(2);
+    expect(result.revisions[0]).toMatchObject({
+      revisionNo: 2,
+      changedFields: ["metadata"],
+      metadataChanges: { status: { before: "open", after: "closed" } },
+      ingestRun: { id: runIds[1], sourceSystem: "human", actor: "human" },
+    });
+    expect(result.revisions[0].content).toBeUndefined();
+    expect(typeof result.revisions[0].contentHash).toBe("string");
+    expect(typeof result.revisions[0].recordedAt).toBe("string");
+    expect(result.revisions[1]).toMatchObject({ revisionNo: 1, ingestRun: { id: runIds[0] } });
+    expect(result.hasMore).toBe(false);
+    expect(result.nextBefore).toBeNull();
+    expect(result.truncated).toBe(false);
+    expect(result.truncationNote).toBeUndefined();
+
+    const withContent = parseText(await client.callTool({ name: "brain_history", arguments: { id, includeContent: true } }));
+    expect(withContent.revisions[0].content).toBe("body");
+  });
+
+  it("is advertised and succeeds when the server is read-only (spec: history in read-only mode)", async () => {
+    const run = await newRun();
+    const nodeMap = await makeNodes(run, [{ nodeType: "doc", externalId: "ro", title: "RO", content: "c" }]);
+    const { client } = await connectClient({ readOnly: true });
+
+    const { tools } = await client.listTools();
+    expect(tools.map((t) => t.name)).toContain("brain_history");
+
+    const raw = await client.callTool({ name: "brain_history", arguments: { id: nodeMap.get("ro")! } });
+    expect(raw.isError).toBeFalsy();
+    const result = parseText(raw);
+    expect(result.revisions).toHaveLength(1);
+    expect(result.revisions[0].ingestRun.id).toBe(run.id);
+  });
+
+  it("bounds a long history: over the requested limit it reports hasMore, nextBefore, and a note naming before=; over the response budget it drops the oldest revisions with the same note (spec: long history is bounded)", async () => {
+    const run = await newRun();
+    let id = "";
+    for (let i = 1; i <= 4; i += 1) {
+      const nodeMap = await makeNodes(run, [{ nodeType: "doc", externalId: "long", title: "Long", content: `v${i}` }]);
+      id = nodeMap.get("long")!;
+    }
+
+    const { client } = await connectClient();
+    const page1 = parseText(await client.callTool({ name: "brain_history", arguments: { id, limit: 2 } }));
+    expect(page1.revisions.map((r: { revisionNo: number }) => r.revisionNo)).toEqual([4, 3]);
+    expect(page1.hasMore).toBe(true);
+    expect(page1.nextBefore).toBe(3);
+    expect(page1.truncated).toBe(true);
+    expect(page1.truncationNote).toMatch(/before=3/);
+    expect(page1.droppedRevisionNos).toEqual([]);
+
+    const page2 = parseText(await client.callTool({ name: "brain_history", arguments: { id, limit: 2, before: page1.nextBefore } }));
+    expect(page2.revisions.map((r: { revisionNo: number }) => r.revisionNo)).toEqual([2, 1]);
+    expect(page2.hasMore).toBe(false);
+    expect(page2.nextBefore).toBeNull();
+    expect(page2.truncated).toBe(false);
+    expect(page2.truncationNote).toBeUndefined();
+
+    // Response-size budget: three ~2k-char contents cannot fit in 3000
+    // chars, so boundResponse drops from the tail — the OLDEST revisions
+    // — and the cursor must account for that, not for what core returned.
+    const bigRun = await newRun();
+    let bigId = "";
+    for (const fill of ["a", "b", "c"]) {
+      const nodeMap = await makeNodes(bigRun, [{ nodeType: "doc", externalId: "big", title: "Big", content: fill.repeat(2000) }]);
+      bigId = nodeMap.get("big")!;
+    }
+    const { client: smallClient } = await connectClient({ responseCharBudget: 3000 });
+    const bounded = parseText(await smallClient.callTool({ name: "brain_history", arguments: { id: bigId, includeContent: true } }));
+    expect(bounded.truncated).toBe(true);
+    expect(bounded.droppedRevisionNos.length).toBeGreaterThan(0);
+    expect(bounded.revisions.length + bounded.droppedRevisionNos.length).toBe(3);
+    expect(bounded.revisions[0].revisionNo).toBe(3);
+    const oldestKept = bounded.revisions[bounded.revisions.length - 1].revisionNo;
+    expect(bounded.hasMore).toBe(true);
+    expect(bounded.nextBefore).toBe(oldestKept);
+    expect(bounded.truncationNote).toMatch(new RegExp(`before=${oldestKept}`));
+    expect(bounded.truncationNote).toMatch(/dropped/);
+    // Following the cursor reaches exactly the dropped revisions.
+    const rest = parseText(await smallClient.callTool({ name: "brain_history", arguments: { id: bigId, before: bounded.nextBefore } }));
+    expect(rest.revisions.map((r: { revisionNo: number }) => r.revisionNo)).toEqual(bounded.droppedRevisionNos);
+  });
+
+  it("shows a brain_merge in the loser's history, attributed to source system agent and this client's actor (spec: a merge shows up in history)", async () => {
+    const run = await newRun();
+    const nodeMap = await makeNodes(run, [
+      { nodeType: "doc", externalId: "a", title: "A", content: "c" },
+      { nodeType: "doc", externalId: "b", title: "B", content: "c" },
+    ]);
+    const survivorId = nodeMap.get("a")!;
+    const loserId = nodeMap.get("b")!;
+    const { client } = await connectClient(undefined, { name: "claude-code", version: "2.1.0" });
+
+    const merge = parseText(await client.callTool({ name: "brain_merge", arguments: { loserId, survivorId } }));
+    openRunIds.push(merge.ingestRunId);
+
+    const history = parseText(await client.callTool({ name: "brain_history", arguments: { id: loserId } }));
+    expect(history.id).toBe(loserId);
+    expect(history.revisions).toHaveLength(2);
+    expect(history.revisions[0]).toMatchObject({
+      revisionNo: 2,
+      changedFields: ["mergedInto"],
+      mergedInto: survivorId,
+      title: "B",
+      ingestRun: { id: merge.ingestRunId, sourceSystem: "agent", actor: "claude-code 2.1.0" },
+    });
+  });
+
+  it("maps an unknown id, and a before cursor past int4 that only core can catch, to actionable errors", async () => {
+    const { client } = await connectClient();
+
+    const unknown = await client.callTool({ name: "brain_history", arguments: { id: BOGUS_ID } });
+    expect(unknown.isError).toBe(true);
+    expect(firstText(unknown)).toMatch(/does not exist/i);
+
+    const malformed = await client.callTool({ name: "brain_history", arguments: { id: "not-a-uuid" } });
+    expect(malformed.isError).toBe(true);
+    expect(firstText(malformed)).toMatch(/not-a-uuid/);
+
+    const run = await newRun();
+    const nodeMap = await makeNodes(run, [{ nodeType: "doc", externalId: "opt", title: "O", content: "c" }]);
+    const badBefore = await client.callTool({ name: "brain_history", arguments: { id: nodeMap.get("opt")!, before: 2147483648 } });
+    expect(badBefore.isError).toBe(true);
+    expect(firstText(badBefore)).toMatch(/before/);
+    expect(firstText(badBefore)).toMatch(/adjust/i);
+  });
+});
+
 // --- Read-only mode (spec: "Read-only mode") -----------------------------------
 
 describe("read-only mode", () => {
@@ -480,7 +658,7 @@ describe("read-only mode", () => {
     const { client } = await connectClient({ readOnly: true });
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
-    expect(names).toEqual(["brain_get", "brain_map", "brain_neighbors", "brain_search"]);
+    expect(names).toEqual(["brain_get", "brain_history", "brain_map", "brain_neighbors", "brain_search"]);
   });
 
   it("refuses brain_write with an explanatory error and persists nothing", async () => {

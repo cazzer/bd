@@ -15,6 +15,7 @@ import {
   InvalidEdgeWeightError,
   InvalidIngestRunError,
   InvalidLookupIdError,
+  InvalidLookupOptionError,
   InvalidNodeContentError,
   InvalidNodeInputError,
   InvalidRetrievalOptionError,
@@ -162,6 +163,13 @@ describe("mapError", () => {
     const text = textOf(mapError("brain_get", new InvalidLookupIdError("not-a-uuid", "must be a valid uuid")));
     expect(text).toContain("not-a-uuid");
     expect(text).toMatch(/uuid/i);
+  });
+
+  it("maps InvalidLookupOptionError (brain_history's limit/before): names the option and says to adjust it", () => {
+    const text = textOf(mapError("brain_history", new InvalidLookupOptionError("before", 0, "must be a positive integer")));
+    expect(text).toContain("before");
+    expect(text).toMatch(/adjust/i);
+    expect(text).not.toMatch(STACK_LINE);
   });
 
   it("maps LookupFailedError: tells the model to retry", () => {

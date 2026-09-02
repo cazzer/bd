@@ -8,6 +8,15 @@ export interface ToolContext {
   db: Database;
   /** Character budget for a single tool response's JSON payload — see budget.ts. */
   responseCharBudget: number;
+  /**
+   * The connected client's identity — `"<name> <version>"` from its
+   * initialize handshake — resolved at call time, not at construction:
+   * the handshake has not happened when createServer runs, so a value
+   * captured then would always be undefined. Recorded as the actor on
+   * every ingest run a write tool opens (attribution.ts). `undefined` if
+   * the SDK has none.
+   */
+  actor: () => string | undefined;
 }
 
 /**

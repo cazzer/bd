@@ -16,6 +16,7 @@ import {
   InvalidEdgeWeightError,
   InvalidIngestRunError,
   InvalidLookupIdError,
+  InvalidLookupOptionError,
   InvalidNodeContentError,
   InvalidNodeInputError,
   InvalidRetrievalOptionError,
@@ -135,9 +136,15 @@ export function mapError(toolName: string, err: unknown): CallToolResult {
     return actionable(err, RETRY_HINT);
   }
 
-  // --- Get / neighbors (brain_get, brain_neighbors) ---
+  // --- Get / neighbors / history (brain_get, brain_neighbors, brain_history) ---
   if (err instanceof InvalidLookupIdError) {
     return actionable(err, "Ids must be uuids returned by brain_search, brain_map, brain_write, or brain_link — verify the id and retry.");
+  }
+  // Reachable from brain_history (a `before` past int4 slips through the
+  // Zod schema, which bounds only `limit`); brain_neighbors' own schema
+  // takes no paging options yet, so core's check is the only one for it.
+  if (err instanceof InvalidLookupOptionError) {
+    return actionable(err, "Adjust that option to a value in range and retry.");
   }
   if (err instanceof LookupFailedError) {
     return actionable(err, RETRY_HINT);
