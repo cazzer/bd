@@ -39,8 +39,8 @@ export class MarkdownRenderBoundary extends Component<Props, State> {
     if (this.state.failed) {
       return (
         <div>
-          <p className="mb-2 text-xs text-amber-700">This content could not be rendered as rich text — showing it as plain text instead.</p>
-          <pre className="whitespace-pre-wrap break-words font-sans text-sm text-slate-800">{this.props.rawContent}</pre>
+          <p className="mb-2 text-xs text-amber-300">This content could not be rendered as rich text — showing it as plain text instead.</p>
+          <pre className="whitespace-pre-wrap break-words font-sans text-sm text-fg">{this.props.rawContent}</pre>
         </div>
       );
     }

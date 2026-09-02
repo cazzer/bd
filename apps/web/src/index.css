@@ -1,1 +1,117 @@
 @import "tailwindcss";
+
+/*
+ * Dark-first design tokens (bd-ktj, immersive-explorer-shell design.md
+ * "Dark-first, dark-only for now"). Deep near-black navy ground, with a
+ * translucent `surface`/`surface-strong` pair every floating `.glass`
+ * panel shares (backdrop-blur, hairline border, rounded corners, soft
+ * shadow) — see the `.glass` utility below, and GraphCanvas.tsx's
+ * CANVAS_BACKGROUND (must stay in sync with --color-ground: the canvas's
+ * own background is a hardcoded hex, not a CSS var, because it's read by
+ * a <canvas> draw call, not applied as a CSS rule).
+ *
+ * No light variant is built (design.md's own call — "the token layer
+ * exists so one could be added later without restructuring every
+ * component, not because a toggle is planned now"): every token is
+ * defined once here, unconditionally, rather than under a
+ * prefers-color-scheme/[data-theme] guard.
+ */
+@theme {
+  --color-ground: #070b14;
+  --color-surface: rgba(15, 23, 42, 0.62);
+  --color-surface-strong: rgba(15, 23, 42, 0.86);
+  --color-hairline: rgba(226, 232, 240, 0.1);
+  --color-fg: #e2e8f0;
+  --color-fg-muted: #94a3b8;
+  --color-accent: #818cf8;
+}
+
+/*
+ * Shared frosted-panel recipe (bd-8ub) — every floating layer (search
+ * bar, type control, detail panel, note popover, unlinked-notes
+ * disclosure, expansion-error toast) applies this ONE class rather than
+ * repeating background/blur/border/shadow per component.
+ */
+@utility glass {
+  /* Lightning CSS (Tailwind v4's build pipeline) adds the -webkit-
+     prefix itself based on its default browser targets — writing it by
+     hand here caused it to drop the unprefixed property in the minified
+     build (verified: `pnpm --filter @breakdown/web build` then grepping
+     dist/assets/*.css for `.glass{...}` showed only
+     -webkit-backdrop-filter, no plain backdrop-filter — a regression for
+     current Chrome/Firefox, which need the unprefixed property). */
+  background: var(--color-surface);
+  backdrop-filter: blur(16px);
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--radius-2xl);
+  box-shadow: 0 12px 40px -12px rgba(0, 0, 0, 0.65);
+}
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  overflow: hidden;
+  background-color: var(--color-ground);
+  color: var(--color-fg);
+}
+
+/*
+ * Empty-state ambience (bd-8ub review, immersive brief item 11) — App.tsx's
+ * `-z-10 fixed inset-0` layer, always behind the canvas and every panel.
+ * The vignette moved here verbatim from `body` (design.md: "a cheap CSS
+ * gradient on the page, not a canvas effect") now that GraphCanvas's own
+ * `backgroundColor` is transparent and this layer is what actually shows
+ * through it, not just what's visible before the canvas mounts. The
+ * starfield is a handful of 1px-dot radial-gradients tiled at different,
+ * mutually-prime-ish `background-size`s so their repeats don't visibly
+ * align into a grid — sparse, static, no animation (so
+ * `prefers-reduced-motion` is satisfied by having nothing to reduce), and
+ * each dot capped well under 40% white (most far dimmer, per this
+ * review's own instruction).
+ */
+.ambience {
+  background-color: var(--color-ground);
+  background-image:
+    radial-gradient(ellipse 80% 60% at 50% -10%, rgba(99, 102, 241, 0.14), transparent 60%),
+    radial-gradient(ellipse 60% 55% at 100% 100%, rgba(56, 130, 246, 0.1), transparent 60%),
+    radial-gradient(1px 1px at 20% 30%, rgba(255, 255, 255, 0.35), transparent 100%),
+    radial-gradient(1px 1px at 75% 65%, rgba(255, 255, 255, 0.18), transparent 100%),
+    radial-gradient(1px 1px at 40% 82%, rgba(255, 255, 255, 0.26), transparent 100%),
+    radial-gradient(1px 1px at 88% 18%, rgba(255, 255, 255, 0.14), transparent 100%),
+    radial-gradient(1px 1px at 12% 92%, rgba(255, 255, 255, 0.22), transparent 100%),
+    radial-gradient(1px 1px at 58% 12%, rgba(255, 255, 255, 0.12), transparent 100%);
+  background-repeat: repeat;
+  background-size:
+    100% 100%,
+    100% 100%,
+    340px 360px,
+    410px 320px,
+    380px 440px,
+    460px 300px,
+    320px 400px,
+    390px 350px;
+  background-attachment: fixed;
+}
+
+/*
+ * GraphCanvas.tsx's sr-only node list (bd-8ub review, must-fix 4): its own
+ * `max-h-64 overflow-y-auto` is defeated the moment the list becomes
+ * visible, because Tailwind's `focus-within:not-sr-only` resets
+ * `overflow: visible` at the same `:focus-within` specificity — both
+ * declarations live inside Tailwind's generated `utilities` `@layer`, so
+ * within-layer ordering decides the winner there, not source order in the
+ * class list. This rule is written with NO `@layer` wrapper, so per the
+ * CSS Cascade Layers spec it lands in the implicit final layer, which
+ * outranks every named layer (Tailwind's `utilities` included) regardless
+ * of specificity or declaration order — verified by building
+ * (`pnpm --filter @breakdown/web build`) and grepping the emitted
+ * `dist/assets/*.css`: `.sr-only-node-list:focus-within{overflow-y:auto}`
+ * appears OUTSIDE any `@layer` block, after the closing brace of
+ * Tailwind's own layered utilities.
+ */
+.sr-only-node-list:focus-within {
+  overflow-y: auto;
+}

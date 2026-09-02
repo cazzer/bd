@@ -1,0 +1,6 @@
+schema: spec-driven
+created: 2026-09-01
+goal: Turn the graph explorer from a bordered pane with a header into a
+  full-viewport dark canvas with floating frosted-glass controls, so exploring
+  the store feels like navigating a map rather than reading a search results
+  page

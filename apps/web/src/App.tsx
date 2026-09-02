@@ -1,7 +1,8 @@
 // Search box, submitted query, results as a force-directed graph canvas
-// (bd-hmd.4), click-to-expand (bd-hmd.5, see graph/expansion.ts for the
-// merge/pin/pagination logic this component only orchestrates), and node
-// detail/editing/annotation/hand edges (bd-hmd.6).
+// (bd-hmd.4, see graph/encoding.ts for the merge/pin/pagination logic
+// this component only orchestrates), click-to-expand (bd-hmd.5), node
+// detail/editing/annotation/hand edges (bd-hmd.6), and — bd-8ub — the
+// immersive shell those all now float inside of.
 //
 // --- The gesture conflict (bd-hmd.6's own decision, not up for
 // redesign here) --------------------------------------------------------
@@ -16,12 +17,47 @@
 // sr-only node list, now real `<button>`s — see that file's header)
 // calls this exact same handler, so "reachable by keyboard" is the same
 // gesture too, not a second one.
+//
+// --- The shell (bd-8ub, openspec/changes/immersive-explorer-shell) -----
+//
+// "The map is the page" (design.md): GraphCanvas is the layout root,
+// sized to the viewport by its own `fixed inset-0` wrapper below, never
+// by flex space shared with a sibling. Every other control — search bar,
+// type control (TypePanel), detail panel, note popover, unlinked-notes
+// disclosure — is a separate `fixed`-positioned overlay layer with
+// `pointer-events-none` on the layer itself and `pointer-events-auto`
+// restored only on the actual panel inside it, so empty chrome passes
+// clicks/drags straight through to the canvas. Because every layer is
+// `fixed` (not `absolute` inside a positioned ancestor), none of this
+// depends on an ancestor's height chain — each positions directly
+// against the viewport regardless of nesting.
+//
+// --- Type control + search chips (bd-14q/bd-73t) ------------------------
+//
+// `nodeTypeCounts` (getStoreSummary().nodeTypes) is the one piece of
+// this feature that's an actual fetch — see `refreshStoreSummary` below.
+// Everything else is derived or plain UI state:
+//   - `focusedType`: which type TypePanel's row click last focused on
+//     the canvas (GraphCanvas's `focusedNodeType` prop) — cleared when a
+//     fresh search result replaces the graph (design.md's Open Question,
+//     resolved: "clearing with a new search", matching how
+//     `selectedNodeId` already resets in that same branch of
+//     `runSearch`).
+//   - `chips`: active node_type filters, sent as `search`'s `nodeTypes`
+//     input. TypePanel's focus-click and SearchBar's suggestion-choose
+//     are two entry points into this ONE list (design.md: "one mechanism
+//     for 'filter by this type'").
+//   - the selected node's neighbour-type ranking and the search bar's
+//     type suggestions are both derived plain values computed in the
+//     render body below, never a `useEffect` — see graph/typePrevalence.ts
+//     and lib/typeMatch.ts, both pure functions over state already held.
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { CreateNoteForm } from "./components/CreateNoteForm.js";
 import { DetailPanel } from "./components/DetailPanel.js";
 import { GraphCanvas } from "./components/GraphCanvas.js";
-import { GraphLegend } from "./components/GraphLegend.js";
+import { SearchBar, type SearchBarStatus } from "./components/SearchBar.js";
+import { TypePanel } from "./components/TypePanel.js";
 import { UnlinkedNotes } from "./components/UnlinkedNotes.js";
 import { EMPTY_GRAPH, mergeGraphData, searchResultToGraphData, setNodeDegree, type GraphCanvasData, type GraphNode, type SearchResult } from "./graph/encoding.js";
 import {
@@ -44,13 +80,19 @@ import {
   type ExpansionEntries,
   type UnlinkedNote,
 } from "./graph/expansion.js";
+import { rankNeighborTypes, type TypeCount } from "./graph/typePrevalence.js";
+import { matchNodeTypes } from "./lib/typeMatch.js";
 import { trpc } from "./trpc.js";
 
-type Status = { kind: "idle" } | { kind: "loading" } | { kind: "error"; message: string } | { kind: "done"; result: SearchResult };
+/** Re-exported by SearchBar.tsx as `SearchBarStatus` — this file's own alias keeps the rest of the diff below readable. */
+type Status = SearchBarStatus;
 
 type AnnotateResult = Awaited<ReturnType<typeof trpc.annotateNode.mutate>>;
 type AssertResult = Awaited<ReturnType<typeof trpc.assertEdge.mutate>>;
 type CreateNoteResult = Awaited<ReturnType<typeof trpc.createNote.mutate>>;
+
+/** bd-8ub review, should-fix 7: pairs the trigger's `aria-controls` with the popover's own `id` — an honest non-modal disclosure relationship, not `role="dialog"`/`aria-haspopup="dialog"` (there is no modal here: no focus trap, and outside-pointerdown closes it, wired below). */
+const NOTE_POPOVER_ID = "new-note-popover";
 
 export function App() {
   const [query, setQuery] = useState("");
@@ -73,6 +115,72 @@ export function App() {
   // the first's "in flight" mark immediately — no re-render required.
   const inFlightExpansions = useRef<Set<string>>(new Set());
 
+  // The "New note" popover (bd-8ub, task 2.4) — CreateNoteForm itself is
+  // unchanged (same onCreated contract); only its trigger and container
+  // moved from an inline header row into this popover, opened from the
+  // search bar's trailing slot.
+  const [noteFormOpen, setNoteFormOpen] = useState(false);
+  const newNoteButtonRef = useRef<HTMLButtonElement | null>(null);
+  const noteFormRef = useRef<HTMLDivElement | null>(null);
+
+  function closeNoteForm() {
+    setNoteFormOpen(false);
+    newNoteButtonRef.current?.focus();
+  }
+
+  // bd-8ub review, should-fix 7: an honest non-modal popover closes when a
+  // pointer lands outside both the popover and its own trigger — the
+  // trigger is excluded so its own click (which already toggles
+  // `noteFormOpen`) isn't immediately undone by this same listener.
+  useEffect(() => {
+    if (!noteFormOpen) return;
+    function handlePointerDown(e: PointerEvent) {
+      const target = e.target as Node;
+      if (noteFormRef.current?.contains(target)) return;
+      if (newNoteButtonRef.current?.contains(target)) return;
+      closeNoteForm();
+    }
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => document.removeEventListener("pointerdown", handlePointerDown);
+  }, [noteFormOpen]);
+
+  // Type control + search chips (bd-14q/bd-73t) — see this file's header.
+  const [nodeTypeCounts, setNodeTypeCounts] = useState<TypeCount[]>([]);
+  const [focusedType, setFocusedType] = useState<string | null>(null);
+  const [chips, setChips] = useState<string[]>([]);
+  // bd-8ub review, should-fix 5: which type's chip (if any) was added BY a
+  // focus click, so un-focusing removes only a chip this same mechanism
+  // added — a chip already present (added earlier via a search suggestion)
+  // must survive un-focusing untouched. Only ever holds the CURRENTLY
+  // focused type's own add, or null; see `handleToggleTypeFocus` below.
+  const [focusAddedChip, setFocusAddedChip] = useState<string | null>(null);
+
+  /**
+   * getStoreSummary().nodeTypes — TypePanel's default-view data and the
+   * search bar's suggestion source. Best-effort: a failed fetch just
+   * leaves `nodeTypeCounts` as it was (or empty, before the first
+   * success), which TypePanel's own "no types yet" empty state already
+   * covers. This control is a convenience ranking, not something search
+   * or expansion depend on, so a failure here never surfaces as an app-
+   * level error.
+   */
+  async function refreshStoreSummary() {
+    try {
+      const summary = await trpc.getStoreSummary.query();
+      setNodeTypeCounts(summary.nodeTypes);
+    } catch {
+      // best-effort — see doc comment above
+    }
+  }
+
+  // Fetched once on mount; `handleNoteCreated`/`handleAnnotated` below
+  // call `refreshStoreSummary` again directly after a write that can
+  // introduce a brand-new node_type (an edit, edge assert/retract/
+  // reweight, or expansion never does — those never create a node).
+  useEffect(() => {
+    void refreshStoreSummary();
+  }, []);
+
   async function runSearch(submittedQuery: string) {
     const trimmed = submittedQuery.trim();
     if (trimmed.length === 0) {
@@ -80,7 +188,11 @@ export function App() {
     }
     setStatus({ kind: "loading" });
     try {
-      const result = await trpc.search.query({ query: trimmed });
+      // `chips.length ? chips : undefined`, never `[]`: the server's
+      // filterArraySchema() requires nodeTypes to be either absent or a
+      // non-empty array (read.ts) — sending `[]` would be a validation
+      // error instead of "no filter."
+      const result = await trpc.search.query({ query: trimmed, nodeTypes: chips.length > 0 ? chips : undefined });
       setStatus({ kind: "done", result });
       // graph-explorer/spec.md's "Query matches nothing" scenario: the
       // canvas stays as it was rather than clearing. Skipping the
@@ -110,6 +222,11 @@ export function App() {
         // stale detail for a node the person can no longer see on
         // screen. Re-select by clicking it again if it's still present.
         setSelectedNodeId(null);
+        // design.md's Open Question, resolved: type focus is a canvas-
+        // reading aid for the CURRENT graph, so it clears the same way
+        // selectedNodeId does the moment that graph is replaced — never
+        // half-applied to a neighbourhood it was never focused against.
+        setFocusedType(null);
       }
     } catch (err) {
       // TRPCClientError#message is already the safe, hand-mapped message
@@ -209,6 +326,11 @@ export function App() {
       setNodeDegree(merged.nodes, target.id, newTargetDegree);
       return merged;
     });
+    // Outside the updater, deliberately — see this function's own doc
+    // comment on why the updater above runs twice under StrictMode; a
+    // network call triggered from inside it would double-fire the same
+    // way the degree bug did before setNodeDegree took an absolute value.
+    void refreshStoreSummary(); // a fresh note can carry a brand-new node_type (bd-14q/bd-73t)
   }
 
   /** A hand edge was asserted between two nodes already on screen (DetailPanel's ConnectForm, task 6.5). */
@@ -231,6 +353,8 @@ export function App() {
     const node = buildStandaloneNoteNode(result, title);
     setGraph((previous) => mergeStandaloneNode(previous, node));
     setSelectedNodeId(result.id);
+    closeNoteForm();
+    void refreshStoreSummary(); // a fresh note can carry a brand-new node_type (bd-14q/bd-73t)
   }
 
   /** A previously-unlinked note was chosen from the list (UnlinkedNotes, task 6.4) — draws it and opens its detail, same as a freshly created one. */
@@ -240,90 +364,169 @@ export function App() {
     setSelectedNodeId(note.id);
   }
 
+  /**
+   * TypePanel row click (bd-14q). Reads `focusedType` from this render's
+   * own closure rather than from inside a `setFocusedType` updater —
+   * this is a plain event handler, not one nested inside another state
+   * updater, so the closure is safe (see `handleAnnotated`'s comment for
+   * the pattern this deliberately avoids). Turning focus ON also adds the
+   * chip; turning it OFF (clicking the already-focused row) removes it —
+   * design.md: "one mechanism for 'filter by this type'", reachable from
+   * either this control or the search bar's own suggestions (task 4.5).
+   *
+   * bd-8ub review, should-fix 5: turning focus OFF must remove the chip
+   * ONLY if turning it ON is what added it — `focusAddedChip` (read from
+   * this render's own closure, same reasoning as `turningOn` above) is
+   * how that's known. A chip already present when focus turned on (added
+   * earlier via a search suggestion) is never this handler's to remove.
+   */
+  function handleToggleTypeFocus(nodeType: string) {
+    const turningOn = focusedType !== nodeType;
+    setFocusedType(turningOn ? nodeType : null);
+    if (turningOn) {
+      // Switching straight from one focused type to another must not strand
+      // the previous type's focus-added chip.
+      const stranded = focusAddedChip !== null && focusAddedChip !== nodeType ? focusAddedChip : null;
+      const alreadyChipped = chips.includes(nodeType);
+      setFocusAddedChip(alreadyChipped ? null : nodeType);
+      setChips((previous) => {
+        const kept = stranded === null ? previous : previous.filter((c) => c !== stranded);
+        return alreadyChipped ? kept : [...kept, nodeType];
+      });
+    } else {
+      if (focusAddedChip === nodeType) {
+        setChips((previous) => previous.filter((c) => c !== nodeType));
+      }
+      setFocusAddedChip(null);
+    }
+  }
+
+  /** A type suggestion was chosen from the search bar's dropdown (bd-73t) — adds the chip and clears the typed substring (design.md). */
+  function handleChooseSuggestion(nodeType: string) {
+    setChips((previous) => (previous.includes(nodeType) ? previous : [...previous, nodeType]));
+    setQuery("");
+  }
+
+  /** A chip's own remove button was activated (bd-73t). */
+  function handleRemoveChip(nodeType: string) {
+    setChips((previous) => previous.filter((c) => c !== nodeType));
+  }
+
+  // The selected node's on-screen neighbour-type ranking (bd-14q) — a
+  // plain derived value computed every render, never a `useEffect`:
+  // `rankNeighborTypes` is a pure O(nodes + links) function over state
+  // already held (`graph`), bounded by the same nodeBudget the graph
+  // itself is, so recomputing it on every render is cheap enough not to
+  // warrant memoizing.
+  const selectedNode = selectedNodeId ? graph.nodes.find((n) => n.id === selectedNodeId) : undefined;
+  const typePanelSelection = selectedNode ? { title: selectedNode.title || "(untitled)", ranked: rankNeighborTypes(selectedNode.id, graph.nodes, graph.links) } : null;
+
+  // Search-bar type suggestions (bd-73t) — matchNodeTypes's own 2-arg
+  // contract excludes nothing; already-chosen chips are filtered out
+  // HERE, at the call site, per that function's own header.
+  const typeSuggestions = matchNodeTypes(query, nodeTypeCounts).filter((t) => !chips.includes(t.nodeType));
+
   return (
-    <div className="flex h-screen flex-col px-6 py-6">
-      <div className="mx-auto w-full max-w-3xl shrink-0">
-        <h1 className="text-2xl font-semibold text-slate-900">breakdown</h1>
-        <p className="mt-1 text-sm text-slate-500">Search the local knowledge store.</p>
+    <div className="h-dvh w-screen overflow-hidden">
+      {/*
+        Empty-state ambience (bd-8ub review, immersive brief item 11): a
+        static vignette + sparse starfield, `-z-10` so it always sits
+        behind the canvas (whose own `backgroundColor` is now transparent
+        — see GraphCanvas.tsx's CANVAS_BACKGROUND_COLOR) and every panel.
+        `.ambience` (index.css) is plain CSS `background-image` —
+        `prefers-reduced-motion` is satisfied trivially by there being
+        nothing to reduce, not by a media-query branch.
+      */}
+      <div aria-hidden="true" className="ambience pointer-events-none fixed inset-0 -z-10" />
 
-        <form
-          className="mt-6 flex gap-2"
-          onSubmit={(e) => {
-            e.preventDefault();
-            void runSearch(query);
-          }}
-        >
-          <input
-            type="text"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search…"
-            aria-label="Search the knowledge store"
-            className="flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-            autoFocus
+      {/* The map is the page (design.md) — the canvas's own fixed, full-viewport layer, sized independently of every panel below. */}
+      <div className="fixed inset-0">
+        <GraphCanvas data={graph} onNodeExpand={handleNodeClick} expandableNodeIds={expandableNodeIds(expansions)} focusedNodeType={focusedType} />
+      </div>
+
+      {/* Top-center: search bar + "New note" popover. */}
+      <div className="pointer-events-none fixed inset-x-0 top-4 z-20 flex justify-center px-4">
+        <div className="pointer-events-auto">
+          <SearchBar
+            query={query}
+            onQueryChange={setQuery}
+            onSubmit={(q) => void runSearch(q)}
+            status={status}
+            suggestions={typeSuggestions}
+            chips={chips}
+            onChooseSuggestion={handleChooseSuggestion}
+            onRemoveChip={handleRemoveChip}
+            trailing={
+              <div className="relative shrink-0">
+                <button
+                  ref={newNoteButtonRef}
+                  type="button"
+                  onClick={() => setNoteFormOpen((open) => !open)}
+                  aria-expanded={noteFormOpen}
+                  aria-controls={NOTE_POPOVER_ID}
+                  className="rounded-xl border border-hairline px-3 py-2 text-sm font-medium text-fg hover:bg-surface-strong focus:outline-none focus:ring-2 focus:ring-accent"
+                >
+                  + New note
+                </button>
+                {noteFormOpen && (
+                  <div
+                    id={NOTE_POPOVER_ID}
+                    ref={noteFormRef}
+                    onKeyDown={(e) => {
+                      if (e.key === "Escape") {
+                        e.stopPropagation();
+                        closeNoteForm();
+                      }
+                    }}
+                    className="glass absolute top-full right-0 z-30 mt-2 w-80 p-3"
+                  >
+                    <CreateNoteForm autoOpen onCreated={handleNoteCreated} onCancel={closeNoteForm} />
+                  </div>
+                )}
+              </div>
+            }
           />
-          <button
-            type="submit"
-            disabled={status.kind === "loading"}
-            className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-50"
-          >
-            {status.kind === "loading" ? "Searching…" : "Search"}
-          </button>
-        </form>
-
-        <div className="mt-4 min-h-[1.5rem]">
-          {status.kind === "idle" && <p className="text-sm text-slate-400">Search to see the graph.</p>}
-          {status.kind === "loading" && <p className="text-sm text-slate-400">Searching…</p>}
-          {status.kind === "error" && <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{status.message}</p>}
-          {status.kind === "done" && status.result.mode === "empty" && (
-            <p className="text-sm text-slate-400">No matches. Tried both search modes: {status.result.triedModes.join(" and ")}.</p>
-          )}
-          {status.kind === "done" && status.result.mode !== "empty" && (
-            <p className="text-xs text-slate-500">
-              {status.result.mode} match — {status.result.seedCount} seed{status.result.seedCount === 1 ? "" : "s"}, {status.result.nodeCount} node
-              {status.result.nodeCount === 1 ? "" : "s"}
-              {status.result.truncated ? " (truncated by nodeBudget)" : ""}
-            </p>
-          )}
         </div>
+      </div>
 
-        {/* Node creation/discovery (bd-hmd.6, task 6.4) — deliberately not
-            gated on a search result: a standalone note can be created, and
-            an unlinked one found, with nothing on screen at all. */}
-        <div className="mt-3 flex flex-wrap items-start gap-2">
-          <CreateNoteForm onCreated={handleNoteCreated} />
+      {/* Top-right column: type control (TypePanel) with the detail panel below it. */}
+      <div className="pointer-events-none fixed top-4 right-4 bottom-4 z-10 flex w-96 flex-col items-stretch gap-3">
+        <div className="glass pointer-events-auto shrink-0 p-3">
+          <TypePanel storeTypes={nodeTypeCounts} selected={typePanelSelection} focusedType={focusedType} onToggleFocus={handleToggleTypeFocus} />
+        </div>
+        {selectedNodeId && (
+          <div className="pointer-events-auto min-h-0 flex-1">
+            <DetailPanel
+              key={selectedNodeId}
+              nodeId={selectedNodeId}
+              allNodes={graph.nodes}
+              allLinks={graph.links}
+              onClose={() => setSelectedNodeId(null)}
+              onContentSaved={handleContentSaved}
+              onAnnotated={handleAnnotated}
+              onEdgeAsserted={handleEdgeAsserted}
+              onEdgeRetracted={handleEdgeRetracted}
+              onEdgeReweighted={handleEdgeReweighted}
+            />
+          </div>
+        )}
+      </div>
+
+      {/* Bottom-left: unlinked-notes disclosure. Deliberately not gated on a search result: a standalone note can be created, and an unlinked one found, with nothing on screen at all. */}
+      <div className="pointer-events-none fixed bottom-4 left-4 z-20">
+        <div className="pointer-events-auto">
           <UnlinkedNotes onShow={handleShowUnlinkedNote} />
         </div>
       </div>
 
+      {/* Bottom-center: expansion-error toast (used to be an inline banner under the header). */}
       {expansionError && (
-        <div className="mx-auto mt-2 w-full max-w-3xl shrink-0">
-          <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700">{expansionError}</p>
+        <div className="pointer-events-none fixed inset-x-0 bottom-4 z-30 flex justify-center px-4">
+          <div role="alert" className="glass pointer-events-auto max-w-md px-4 py-2 text-sm text-red-300">
+            {expansionError}
+          </div>
         </div>
       )}
-
-      <div className="mx-auto mt-4 flex w-full min-h-0 flex-1 overflow-hidden rounded-lg border border-slate-200">
-        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-          <div className="min-h-0 flex-1">
-            <GraphCanvas data={graph} onNodeExpand={handleNodeClick} expandableNodeIds={expandableNodeIds(expansions)} />
-          </div>
-          <GraphLegend />
-        </div>
-        {selectedNodeId && (
-          <DetailPanel
-            key={selectedNodeId}
-            nodeId={selectedNodeId}
-            allNodes={graph.nodes}
-            allLinks={graph.links}
-            onClose={() => setSelectedNodeId(null)}
-            onContentSaved={handleContentSaved}
-            onAnnotated={handleAnnotated}
-            onEdgeAsserted={handleEdgeAsserted}
-            onEdgeRetracted={handleEdgeRetracted}
-            onEdgeReweighted={handleEdgeReweighted}
-          />
-        )}
-      </div>
     </div>
   );
 }

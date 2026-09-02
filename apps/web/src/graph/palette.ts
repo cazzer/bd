@@ -30,11 +30,20 @@
 // scripts/validate_palette.js's `--pairs all` gate can clear together
 // (a graph canvas shows every category simultaneously, like a scatter
 // plot, not merely adjacent-in-a-stack). Run against all six
-// (2026-09-01): adjacent-pair checks (the gate for stacks/bars/lines)
-// pass; the `--pairs all` gate fails as documented (worst CVD pair
-// #008300<->#eb6834 ΔE 3.2 protan, worst normal-vision pair
-// #e87ba4<->#eb6834 ΔE 12.9) — the palette doc's own escape valve is
-// "legal ONLY with secondary encoding: direct labels ... or texture".
+// (2026-09-01, dark-ground re-tune — bd-ktj): adjacent-pair checks (the
+// gate for stacks/bars/lines) pass against this module's own
+// --color-ground surface (`#070b14`, index.css); the `--pairs all` gate
+// fails as documented (worst CVD pair #d55181<->#199e70 ΔE 1.6 deutan,
+// worst normal-vision pair #c98500<->#d95926 ΔE 10.6) — the palette
+// doc's own escape valve is "legal ONLY with secondary encoding: direct
+// labels ... or texture", which this app already has (every node
+// carries a text label — GraphCanvas.tsx/labelPlacement.ts). Hex values
+// are the dataviz skill's own dark-mode categorical steps
+// (references/palette.md's "Dark" column — same eight hues as the
+// light-mode set this replaced, stepped for a dark surface, not a
+// separate palette), re-validated here against `#070b14` specifically
+// rather than the skill's own default dark surface (`#1a1a19`) since
+// this app's ground is darker navy, not neutral gray.
 // `source_system` has three known values, inside the three-slot cap,
 // and passes `--pairs all` outright — no secondary encoding needed
 // there.
@@ -61,14 +70,14 @@
 // doing more than that without evidence of an actual problem would be
 // solving a problem this ticket hasn't observed.
 export const CATEGORICAL_PALETTE = [
-  "#2a78d6", // 1 blue
-  "#eb6834", // 2 orange
-  "#1baf7a", // 3 aqua
-  "#eda100", // 4 yellow
-  "#e87ba4", // 5 magenta
+  "#3987e5", // 1 blue
+  "#d95926", // 2 orange
+  "#199e70", // 3 aqua
+  "#c98500", // 4 yellow
+  "#d55181", // 5 magenta
   "#008300", // 6 green
-  "#4a3aa7", // 7 violet — reserved, unused by either table below today
-  "#e34948", // 8 red — reserved, unused by either table below today
+  "#9085e9", // 7 violet — reserved, unused by either table below today
+  "#e66767", // 8 red — reserved, unused by either table below today
 ] as const;
 
 /**
@@ -76,9 +85,12 @@ export const CATEGORICAL_PALETTE = [
  * categorical set above — `scripts/validate_palette.js` confirms it
  * fails that palette's own chroma floor ("reads gray"), which is exactly
  * the point: an unrecognised type must read as "uncategorized," never
- * coincidentally collide with a real category's hue.
+ * coincidentally collide with a real category's hue. Slate-500 rather
+ * than the light-mode fallback's warm gray (`#8a8886`, too dark to read
+ * against the dark ground) — still clears the surface's 3:1 contrast
+ * floor.
  */
-export const FALLBACK_COLOR = "#8a8886";
+export const FALLBACK_COLOR = "#64748b";
 
 /** packages/core/src/corpus.ts's deriveNodeType — the six node_type values this repo's loader produces. */
 const NODE_TYPE_COLORS: Readonly<Record<string, string>> = {
@@ -105,11 +117,6 @@ export function colorForNodeType(nodeType: string): string {
 /** Colour for an edge, keyed by `source_system`. Same fallback rule as `colorForNodeType`. */
 export function colorForSourceSystem(sourceSystem: string): string {
   return SOURCE_SYSTEM_COLORS[sourceSystem] ?? FALLBACK_COLOR;
-}
-
-/** Every (node_type -> colour) pair this module knows, for the legend — insertion order is the palette's fixed order. */
-export function knownNodeTypeColors(): ReadonlyArray<readonly [string, string]> {
-  return Object.entries(NODE_TYPE_COLORS);
 }
 
 /** Every (source_system -> colour) pair this module knows, for the legend. */
