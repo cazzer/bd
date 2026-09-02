@@ -265,3 +265,19 @@ export {
   type WorkItemReadinessResult,
   type BuildWorkItemReadinessQueryParams,
 } from "./work-items.js";
+
+// Pure helpers for the beads importer (work-items change, task group 4):
+// how `bd list --json` rows become work items and how beads dependencies
+// become blocks / child_of edges. See beads.ts.
+export {
+  mapBeadsIssueToNode,
+  deriveBeadsEdges,
+  resolveBeadsEdges,
+  BEADS_SOURCE_SYSTEM,
+  BEADS_EDGE_WEIGHT,
+  BEADS_DEPENDENCY_TYPES,
+  type BeadsIssue,
+  type BeadsDependency,
+  type BeadsEdgeCandidate,
+  type DeriveBeadsEdgesResult,
+} from "./beads.js";

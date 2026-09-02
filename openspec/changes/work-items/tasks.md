@@ -26,6 +26,6 @@
 
 ## 4. Beads importer and dogfood
 
-- [ ] 4.1 Add `packages/core/src/beads.ts` (pure mapping: issue → `NodeInput`, dependency → `EdgeInput`, status/priority/owner/close fields, `parent-child` → `child_of`) and `packages/core/src/ingest-beads.ts` (shells out to `bd list --status=all --json`, one ingest run with actor `ingest:beads`, batch upsert, summary log), wired as `pnpm ingest:beads`
-- [ ] 4.2 Unit tests for the mapping, including a row with an unknown status rejected by the contract and a dependency naming an issue outside the export skipped with a count
-- [ ] 4.3 Run the importer against this project's tracker, then compare `brain_ready` with `bd ready` and record the result in the bead; `pnpm check` green
+- [x] 4.1 Add `packages/core/src/beads.ts` (pure mapping: issue → `NodeInput`, dependency → `EdgeInput`, status/priority/owner/close fields, `parent-child` → `child_of`) and `packages/core/src/ingest-beads.ts` (shells out to `bd list --status=all --json`, one ingest run with actor `ingest:beads`, batch upsert, summary log), wired as `pnpm ingest:beads`
+- [x] 4.2 Unit tests for the mapping, including a row with an unknown status rejected by the contract and a dependency naming an issue outside the export skipped with a count
+- [x] 4.3 Run the importer against this project's tracker, then compare `brain_ready` with `bd ready` and record the result in the bead; `pnpm check` green

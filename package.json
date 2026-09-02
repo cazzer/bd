@@ -13,6 +13,7 @@
     "db:migrate": "pnpm --filter @breakdown/db db:migrate",
     "db:seed": "pnpm --filter @breakdown/core db:seed",
     "ingest:github": "pnpm --filter @breakdown/core ingest:github",
+    "ingest:beads": "pnpm --filter @breakdown/core ingest:beads",
     "typecheck": "pnpm -r run typecheck",
     "test": "vitest run",
     "check": "pnpm typecheck && pnpm test"
