@@ -393,7 +393,7 @@ export class InvalidLookupIdError extends KnowledgeStoreError {
 export class LookupFailedError extends KnowledgeStoreError {
   constructor(
     message: string,
-    readonly operation: "getNodes" | "getNeighbors" | "getNodeHistory",
+    readonly operation: "getNodes" | "getNeighbors" | "getNodeHistory" | "listNodes" | "getWorkItemReadiness",
     options?: ErrorOptions,
   ) {
     super(message, options);
@@ -435,5 +435,60 @@ export class NodeNotEditableError extends KnowledgeStoreError {
       `node ${nodeId} is not editable: its source_system is ${JSON.stringify(sourceSystem)}, which is file-backed ` +
         `(only nodes whose source_system is "human" or "agent" can be edited — see isEditableSourceSystem)`,
     );
+  }
+}
+
+// --- Structured listing (work-items change) --------------------------------
+
+/**
+ * `listNodes()` received an out-of-range `limit`, a malformed `cursor`, an
+ * unparseable `updatedSince`, or a metadata predicate outside the accepted
+ * shape (unknown op, non-scalar value, too many predicates or values, a
+ * key repeated across `equals` predicates). Rejected before any SQL runs,
+ * naming the offending option. Predicates are validated data, never an
+ * expression; this error is the boundary that keeps it so.
+ */
+export class InvalidListOptionError extends KnowledgeStoreError {
+  constructor(
+    readonly option: string,
+    readonly value: unknown,
+    reason: string,
+  ) {
+    super(`invalid list option ${option} (got ${JSON.stringify(value)}): ${reason}`);
+  }
+}
+
+// --- Work items (work-items change) ----------------------------------------
+
+/**
+ * A work item's metadata violates the lifecycle contract (work-items spec,
+ * "Work items carry a validated lifecycle contract"): a status outside the
+ * enum, a priority outside 0..4, an oversized or non-string assignee /
+ * spec_id / closed_reason, or an unparseable closed_at. Names the field
+ * and the offending value; `index` is the item's position when the check
+ * ran over a batch, so a writer knows which item to fix.
+ */
+export class InvalidWorkItemError extends KnowledgeStoreError {
+  constructor(
+    readonly field: string,
+    readonly value: unknown,
+    reason: string,
+    readonly index?: number,
+  ) {
+    super(`invalid work item${index === undefined ? "" : ` at batch index ${index}`}: ${field} (got ${JSON.stringify(value)}) ${reason}`);
+  }
+}
+
+/**
+ * `patchWorkItem()` was aimed at a node whose `node_type` is not
+ * `"work_item"`. Names the node and its actual type so a caller knows this
+ * is the wrong tool for that node, not a transient failure.
+ */
+export class NotAWorkItemError extends KnowledgeStoreError {
+  constructor(
+    readonly nodeId: string,
+    readonly nodeType: string,
+  ) {
+    super(`node ${nodeId} is not a work item: its node_type is ${JSON.stringify(nodeType)}, not "work_item"`);
   }
 }

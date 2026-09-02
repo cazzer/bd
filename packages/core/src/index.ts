@@ -29,6 +29,9 @@ export {
   InvalidLookupOptionError,
   NodeNotEditableError,
   EdgeNotFoundError,
+  InvalidListOptionError,
+  InvalidWorkItemError,
+  NotAWorkItemError,
 } from "./errors.js";
 
 // `asPgError`/`PgErrorLike` are re-exported (not just used internally) so
@@ -207,3 +210,58 @@ export {
   type IssueRefSource,
   type MentionEdgeCandidate,
 } from "./github.js";
+
+// Structured listing (work-items change): canonical nodes by type, source,
+// recency, and validated metadata predicates. See list.ts's module header.
+export {
+  listNodes,
+  buildListNodesQuery,
+  resolveListNodesOptions,
+  DEFAULT_LIST_LIMIT,
+  MAX_LIST_LIMIT,
+  MAX_LIST_PREDICATES,
+  MAX_ONE_OF_VALUES,
+  MAX_PREDICATE_KEY_LENGTH,
+  MAX_PREDICATE_STRING_LENGTH,
+  type MetadataScalar,
+  type MetadataPredicate,
+  type ListNodesCursor,
+  type ListNodesOptions,
+  type ListedNode,
+  type ListNodesResult,
+  type BuildListNodesQueryParams,
+} from "./list.js";
+
+// Work items (work-items change): the lifecycle contract, the patch
+// primitive, dependency edge conventions, and readiness. See
+// work-items.ts's module header.
+export {
+  WORK_ITEM_NODE_TYPE,
+  WORK_ITEM_STATUSES,
+  DEFAULT_WORK_ITEM_STATUS,
+  MIN_WORK_ITEM_PRIORITY,
+  MAX_WORK_ITEM_PRIORITY,
+  DEFAULT_WORK_ITEM_PRIORITY,
+  MAX_ASSIGNEE_LENGTH,
+  MAX_SPEC_ID_LENGTH,
+  MAX_CLOSED_REASON_LENGTH,
+  BLOCKS_EDGE_TYPE,
+  CHILD_OF_EDGE_TYPE,
+  DEFAULT_READINESS_LIMIT,
+  MAX_READINESS_LIMIT,
+  normalizeWorkItemMetadata,
+  readWorkItemFields,
+  patchWorkItem,
+  getWorkItemReadiness,
+  buildWorkItemReadinessQuery,
+  type WorkItemStatus,
+  type WorkItemFields,
+  type NormalizeWorkItemOptions,
+  type WorkItemPatch,
+  type PatchWorkItemResult,
+  type WorkItemReadinessOptions,
+  type ReadyWorkItem,
+  type BlockedWorkItem,
+  type WorkItemReadinessResult,
+  type BuildWorkItemReadinessQueryParams,
+} from "./work-items.js";
