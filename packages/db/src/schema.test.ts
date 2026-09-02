@@ -607,3 +607,160 @@ describe("node_revisions (history trigger)", () => {
     }
   });
 });
+
+// Unwraps drizzle's DrizzleQueryError to the underlying pg error fields.
+function pgErrorOf(err: unknown): { code?: string; detail?: string; message?: string } | undefined {
+  if (!(err instanceof Error)) return undefined;
+  const cause = (err as { cause?: unknown }).cause;
+  const candidate = cause && typeof cause === "object" ? cause : err;
+  const { code, detail, message } = candidate as { code?: string; detail?: string; message?: string };
+  return { code, detail, message };
+}
+
+describe("edges.blocks (acyclic invariant trigger)", () => {
+  const POSTGRES_CHECK_VIOLATION = "23514";
+
+  async function insertNodes(count: number): Promise<string[]> {
+    const rows = await db
+      .insert(nodes)
+      .values(Array.from({ length: count }, () => nodeRow()))
+      .returning({ id: nodes.id });
+    if (rows.length !== count) throw new Error("setup failed to insert nodes");
+    return rows.map((r) => r.id);
+  }
+
+  function blocks(srcId: string, dstId: string, edgeType = "blocks") {
+    return db.insert(edges).values({ srcId, dstId, edgeType, sourceSystem: "schema-test", ingestRunId: testRunId });
+  }
+
+  async function expectCycleRejection(attempt: Promise<unknown>): Promise<{ detail: string }> {
+    let thrown: unknown;
+    try {
+      await attempt;
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeDefined();
+    const pg = pgErrorOf(thrown);
+    expect(pg?.code).toBe(POSTGRES_CHECK_VIOLATION);
+    expect(pg?.message).toContain("would form a cycle");
+    expect(pg?.detail).toContain("path:");
+    return { detail: pg?.detail ?? "" };
+  }
+
+  it("rejects a direct cycle, naming the path back to the source", async () => {
+    const [a, b] = await insertNodes(2);
+    if (!a || !b) throw new Error("setup");
+    try {
+      await blocks(a, b);
+      const { detail } = await expectCycleRejection(blocks(b, a));
+      // The path runs from the rejected edge's source back around to itself.
+      expect(detail).toBe(`path: ${b} -> ${a} -> ${b}`);
+      const stored = await db.select({ id: edges.id }).from(edges).where(and(eq(edges.srcId, b), eq(edges.dstId, a)));
+      expect(stored).toHaveLength(0);
+    } finally {
+      await db.delete(nodes).where(inArray(nodes.id, [a, b]));
+    }
+  });
+
+  it("rejects a node blocking itself", async () => {
+    const [a] = await insertNodes(1);
+    if (!a) throw new Error("setup");
+    try {
+      const { detail } = await expectCycleRejection(blocks(a, a));
+      expect(detail).toBe(`path: ${a} -> ${a}`);
+    } finally {
+      await db.delete(nodes).where(eq(nodes.id, a));
+    }
+  });
+
+  it("rejects an indirect cycle and leaves the existing edges intact", async () => {
+    const [a, b, c] = await insertNodes(3);
+    if (!a || !b || !c) throw new Error("setup");
+    try {
+      await blocks(a, b);
+      await blocks(b, c);
+      const { detail } = await expectCycleRejection(blocks(c, a));
+      expect(detail).toBe(`path: ${c} -> ${a} -> ${b} -> ${c}`);
+      const remaining = await db.select({ src: edges.srcId, dst: edges.dstId }).from(edges).where(inArray(edges.srcId, [a, b, c]));
+      expect(remaining).toHaveLength(2);
+    } finally {
+      await db.delete(nodes).where(inArray(nodes.id, [a, b, c]));
+    }
+  });
+
+  it("folds merged-away endpoints: an edge into a duplicate counts as an edge into its survivor", async () => {
+    const [a, b, dup] = await insertNodes(3);
+    if (!a || !b || !dup) throw new Error("setup");
+    try {
+      await blocks(a, dup);
+      await db.update(nodes).set({ mergedInto: b }).where(eq(nodes.id, dup));
+      // a -> dup is now a -> b once folded, so b -> a closes a cycle.
+      const { detail } = await expectCycleRejection(blocks(b, a));
+      expect(detail).toBe(`path: ${b} -> ${a} -> ${b}`);
+    } finally {
+      await db.delete(nodes).where(inArray(nodes.id, [a, dup]));
+      await db.delete(nodes).where(eq(nodes.id, b));
+    }
+  });
+
+  it("accepts a non-cyclic chain, including a shortcut edge", async () => {
+    const [a, b, c] = await insertNodes(3);
+    if (!a || !b || !c) throw new Error("setup");
+    try {
+      await blocks(a, b);
+      await blocks(b, c);
+      await blocks(a, c);
+      const stored = await db.select({ id: edges.id }).from(edges).where(inArray(edges.srcId, [a, b, c]));
+      expect(stored).toHaveLength(3);
+    } finally {
+      await db.delete(nodes).where(inArray(nodes.id, [a, b, c]));
+    }
+  });
+
+  it("rejects both halves of a cycle arriving in one statement", async () => {
+    const [a, b] = await insertNodes(2);
+    if (!a || !b) throw new Error("setup");
+    try {
+      await expectCycleRejection(
+        db.insert(edges).values([
+          { srcId: a, dstId: b, edgeType: "blocks", sourceSystem: "schema-test", ingestRunId: testRunId },
+          { srcId: b, dstId: a, edgeType: "blocks", sourceSystem: "schema-test", ingestRunId: testRunId },
+        ]),
+      );
+      const stored = await db.select({ id: edges.id }).from(edges).where(inArray(edges.srcId, [a, b]));
+      expect(stored).toHaveLength(0);
+    } finally {
+      await db.delete(nodes).where(inArray(nodes.id, [a, b]));
+    }
+  });
+
+  it("leaves other edge types alone: mutual mentions are fine", async () => {
+    const [a, b] = await insertNodes(2);
+    if (!a || !b) throw new Error("setup");
+    try {
+      await blocks(a, b, "mentions");
+      await blocks(b, a, "mentions");
+      const stored = await db.select({ id: edges.id }).from(edges).where(inArray(edges.srcId, [a, b]));
+      expect(stored).toHaveLength(2);
+    } finally {
+      await db.delete(nodes).where(inArray(nodes.id, [a, b]));
+    }
+  });
+});
+
+describe("nodes.metadata GIN index", () => {
+  it("serves a containment predicate through nodes_metadata_gin_idx", async () => {
+    // The dev store is small enough that the planner may prefer a
+    // sequential scan; disabling it for this transaction proves the
+    // index is *usable* for `@>`, which is the property that matters.
+    const plan = await db.transaction(async (tx) => {
+      await tx.execute(sql`SET LOCAL enable_seqscan = off`);
+      const result = await tx.execute<{ "QUERY PLAN": unknown }>(
+        sql`EXPLAIN (FORMAT JSON) SELECT id FROM nodes WHERE metadata @> '{"status":"open"}'::jsonb`,
+      );
+      return JSON.stringify(result.rows);
+    });
+    expect(plan).toContain("nodes_metadata_gin_idx");
+  });
+});

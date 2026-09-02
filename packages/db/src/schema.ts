@@ -18,7 +18,7 @@ import {
  * Application schema for the knowledge store (bd-vt2.2): `ingest_runs`,
  * `nodes`, `node_revisions`, `edges`, and the `resolved_nodes` view.
  *
- * Five constructs below cannot be expressed through drizzle-orm's
+ * Six constructs below cannot be expressed through drizzle-orm's
  * pg-core column/index builders and are instead hand-written directly
  * into the generated migration SQL (see migrations/0000_*.sql and
  * migrations/0002_*.sql):
@@ -50,9 +50,19 @@ import {
  *      of any caller — four write paths touch `nodes` today and more
  *      loaders are planned, and one that forgot to record a revision
  *      would fail silently.
+ *   6. A BEFORE trigger on `edges` refusing any `blocks` edge that would
+ *      make a node transitively block itself (migrations/0003_*.sql,
+ *      work-items spec, "Blocking and parent relationships"). Endpoints
+ *      are folded through `merged_into`, the walk is serialized by an
+ *      advisory transaction lock so two concurrent inserts cannot each
+ *      see no cycle and together form one, and the rejection carries the
+ *      path in DETAIL. Same justification as #4 and #5: a cross-row rule
+ *      no CHECK can express, with a silent failure mode (an item that
+ *      can never become ready) if any write path forgot it.
  *
- * Everything else (tables, columns, PK/FK/UNIQUE/CHECK constraints, and
- * the two plain B-tree lookup indexes on `edges`) round-trips through
+ * Everything else (tables, columns, PK/FK/UNIQUE/CHECK constraints, the
+ * two plain B-tree lookup indexes on `edges`, and the GIN
+ * `jsonb_path_ops` index on `nodes.metadata`) round-trips through
  * `drizzle-kit generate` unmodified.
  */
 
@@ -161,6 +171,16 @@ export const nodes = pgTable(
     index("nodes_merged_into_idx")
       .on(table.mergedInto)
       .where(sql`${table.mergedInto} IS NOT NULL`),
+    // GIN index serving the structured listing's metadata predicates
+    // (knowledge-store spec, "Nodes can be listed by structure without
+    // query text"; packages/core/src/list.ts). Every predicate the
+    // listing accepts compiles to a jsonb containment test
+    // (`metadata @> '{...}'`), and that is the only operator ever issued
+    // against this column — so `jsonb_path_ops`, which indexes only
+    // containment and is smaller and faster for it than the default
+    // opclass. Unlike the trigram indexes (hand-written: they need
+    // pg_trgm) this round-trips through `drizzle-kit generate`.
+    index("nodes_metadata_gin_idx").using("gin", table.metadata.op("jsonb_path_ops")),
   ],
 );
 
