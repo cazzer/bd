@@ -16,11 +16,12 @@ import {
 
 /**
  * Application schema for the knowledge store (bd-vt2.2): `ingest_runs`,
- * `nodes`, `edges`, and the `resolved_nodes` view.
+ * `nodes`, `node_revisions`, `edges`, and the `resolved_nodes` view.
  *
- * Four constructs below cannot be expressed through drizzle-orm's
+ * Five constructs below cannot be expressed through drizzle-orm's
  * pg-core column/index builders and are instead hand-written directly
- * into the generated migration SQL (see migrations/0000_*.sql):
+ * into the generated migration SQL (see migrations/0000_*.sql and
+ * migrations/0002_*.sql):
  *
  *   1. `nodes.search` — a `GENERATED ALWAYS AS (...) STORED` tsvector
  *      column. pg-core has no `tsvector` column type and no builder for
@@ -38,6 +39,17 @@ import {
  *      `nodes.merged_into` (see the comment on that column). pg-core has
  *      no trigger builder at all, and this is a cross-row rule a CHECK
  *      constraint cannot express.
+ *   5. Two AFTER ROW triggers on `nodes` recording append-only history
+ *      into `node_revisions` (migrations/0002_*.sql): AFTER INSERT
+ *      unconditionally, and AFTER UPDATE only `WHEN` a history-relevant
+ *      column (node_type, title, content, metadata, merged_into)
+ *      actually changed, both sharing `nodes_record_revision()`. The
+ *      same migration carries the one-time backfill that gives every
+ *      pre-existing node its revision one. Same justification as #4:
+ *      "every change leaves a record" is a property of the table, not
+ *      of any caller — four write paths touch `nodes` today and more
+ *      loaders are planned, and one that forgot to record a revision
+ *      would fail silently.
  *
  * Everything else (tables, columns, PK/FK/UNIQUE/CHECK constraints, and
  * the two plain B-tree lookup indexes on `edges`) round-trips through
@@ -47,6 +59,15 @@ import {
 export const ingestRuns = pgTable("ingest_runs", {
   id: uuid("id").primaryKey().defaultRandom(),
   sourceSystem: text("source_system").notNull(),
+  // Who or what drove the run — the MCP client's `name version` from its
+  // initialize handshake, `human` from the web app, a loader's script
+  // name. Attribution, not authentication: it records what the caller
+  // said it was. `source_system` remains the provenance of the content
+  // itself; the two are separate columns because one source system can
+  // be written by many actors (knowledge-store spec, "Two agents writing
+  // under one source system"). Nullable: a run opened naming only a
+  // source system records no actor.
+  actor: text("actor"),
   startedAt: timestamp("started_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
@@ -109,6 +130,11 @@ export const nodes = pgTable(
       .defaultNow(),
     // `search` (generated tsvector, GIN-indexed) is hand-written into
     // the migration SQL — see the file header comment.
+    //
+    // Revision history deliberately adds NO column here: it lives in
+    // `node_revisions` below, so `resolved_nodes` (whose `SELECT *` froze
+    // this column list at CREATE VIEW time — see its comment) stays
+    // untouched.
   },
   (table) => [
     // The deterministic dedup key the idempotent-write story rests on.
@@ -135,6 +161,66 @@ export const nodes = pgTable(
     index("nodes_merged_into_idx")
       .on(table.mergedInto)
       .where(sql`${table.mergedInto} IS NOT NULL`),
+  ],
+);
+
+/**
+ * `node_revisions` — append-only history of `nodes` (knowledge-store
+ * spec, "Every change to a node is recorded as a revision"). One row per
+ * change to a node's type, title, content, metadata, or merge pointer,
+ * holding the node's full state after the change; written only by the
+ * hand-written triggers described in the file header (#5), never by
+ * application code, so no write path can skip it. `nodes` stays
+ * authoritative — nothing reads these rows back into it.
+ *
+ * Rows are full snapshots, not diffs: what changed between two revisions
+ * is computed on read (packages/core/src/history.ts), never stored.
+ * `revision_no` counts from one per node in the order recorded, assigned
+ * by the trigger as one more than the node's current maximum.
+ */
+export const nodeRevisions = pgTable(
+  "node_revisions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    // Cascade, like `edges`: history for a node that no longer exists has
+    // nothing to describe, and every test suite deletes its fixture nodes
+    // in cleanup — a no-action key would fail on the first revision ever
+    // written. No application delete path exists today; when one is
+    // designed, that migration decides between keeping the cascade and
+    // switching to a no-action key with tombstones (design.md, Risks).
+    nodeId: uuid("node_id")
+      .notNull()
+      .references(() => nodes.id, { onDelete: "cascade" }),
+    // No onDelete action, same as nodes.ingestRunId: a run that revisions
+    // still name must not be silently deletable.
+    ingestRunId: uuid("ingest_run_id")
+      .notNull()
+      .references(() => ingestRuns.id),
+    revisionNo: integer("revision_no").notNull(),
+    nodeType: text("node_type").notNull(),
+    title: text("title").notNull(),
+    content: text("content").notNull(),
+    contentHash: text("content_hash").notNull(),
+    metadata: jsonb("metadata").notNull(),
+    // A snapshot of a past value, deliberately with no FK: an FK on
+    // history would block deleting a survivor that a stale revision
+    // still names.
+    mergedInto: uuid("merged_into"),
+    recordedAt: timestamp("recorded_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    // Doubles as the index: its btree serves both "latest N" (backward
+    // scan) and "revision N" (keyed read), and turns any concurrent-
+    // numbering race the trigger's row-lock ordering does not already
+    // prevent into a loud unique violation rather than a duplicate
+    // number. A second `(node_id, revision_no DESC)` index would be pure
+    // write cost.
+    unique("node_revisions_node_id_revision_no_key").on(
+      table.nodeId,
+      table.revisionNo,
+    ),
   ],
 );
 

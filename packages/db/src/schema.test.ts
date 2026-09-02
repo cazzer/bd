@@ -4,13 +4,14 @@ import type { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDb, createPool, type Database } from "./client.js";
 import { resolveDatabaseUrl } from "./env.js";
-import { edges, ingestRuns, nodes, resolvedNodes } from "./schema.js";
+import { edges, ingestRuns, nodeRevisions, nodes, resolvedNodes } from "./schema.js";
 
 /**
  * Integration tests against the real Postgres instance (no mocking) —
- * they exercise the constraints, generated columns, and trigger the
- * migration in ./migrations/0000_*.sql creates, per bd-vt2.2. Every test
- * creates and tears down its own rows so the suite is re-runnable.
+ * they exercise the constraints, generated columns, and triggers the
+ * migrations in ./migrations/0000_*.sql and 0002_*.sql create, per
+ * bd-vt2.2 and the node-history change. Every test creates and tears down
+ * its own rows so the suite is re-runnable.
  *
  * `nodes.ingest_run_id` and `edges.ingest_run_id` are NOT NULL, so every
  * test attributes its rows to one shared ingest run created in
@@ -363,6 +364,238 @@ describe("nodes.node_type", () => {
         .from(nodes)
         .where(eq(nodes.id, node.id));
       expect(reloaded?.nodeType).toBe(novelType);
+    } finally {
+      await db.delete(nodes).where(eq(nodes.id, node.id));
+    }
+  });
+});
+
+describe("node_revisions (history trigger)", () => {
+  /** All revisions of one node, oldest first. */
+  async function revisionsOf(nodeId: string) {
+    return db
+      .select()
+      .from(nodeRevisions)
+      .where(eq(nodeRevisions.nodeId, nodeId))
+      .orderBy(nodeRevisions.revisionNo);
+  }
+
+  /** A second ingest run, for tests that need to tell "which run wrote this revision" apart. */
+  async function secondRun(): Promise<string> {
+    const [run] = await db
+      .insert(ingestRuns)
+      .values({ sourceSystem: "schema-test-suite-second-run" })
+      .returning({ id: ingestRuns.id });
+    if (!run) throw new Error("setup failed to insert second ingest run");
+    return run.id;
+  }
+
+  it("inserting a node records exactly one revision, numbered one, holding the written state and the writing run", async () => {
+    const [node] = await db
+      .insert(nodes)
+      .values(nodeRow({ nodeType: "work_item", title: "First title", content: "first content", metadata: { status: "open" } }))
+      .returning();
+    if (!node) throw new Error("setup failed to insert node");
+
+    try {
+      const revs = await revisionsOf(node.id);
+      expect(revs).toHaveLength(1);
+      expect(revs[0]).toMatchObject({
+        revisionNo: 1,
+        ingestRunId: testRunId,
+        nodeType: "work_item",
+        title: "First title",
+        content: "first content",
+        contentHash: node.contentHash,
+        metadata: { status: "open" },
+        mergedInto: null,
+      });
+      expect(revs[0]?.recordedAt).toBeInstanceOf(Date);
+    } finally {
+      await db.delete(nodes).where(eq(nodes.id, node.id));
+    }
+  });
+
+  it("changing content under a second run records revision two with the new content while revision one still holds the old, each attributed to its own run", async () => {
+    const [node] = await db.insert(nodes).values(nodeRow({ content: "v1" })).returning();
+    if (!node) throw new Error("setup failed to insert node");
+    const runTwo = await secondRun();
+
+    try {
+      await db.update(nodes).set({ content: "v2", ingestRunId: runTwo }).where(eq(nodes.id, node.id));
+
+      const revs = await revisionsOf(node.id);
+      expect(revs.map((r) => r.revisionNo)).toEqual([1, 2]);
+      expect(revs[0]).toMatchObject({ content: "v1", ingestRunId: testRunId });
+      expect(revs[1]).toMatchObject({ content: "v2", ingestRunId: runTwo });
+    } finally {
+      // The node now references runTwo, and its revisions cascade with
+      // it — so node first, then the run.
+      await db.delete(nodes).where(eq(nodes.id, node.id));
+      await db.delete(ingestRuns).where(eq(ingestRuns.id, runTwo));
+    }
+  });
+
+  it("a metadata-only update records a new revision holding the new metadata", async () => {
+    const [node] = await db
+      .insert(nodes)
+      .values(nodeRow({ title: "Same title", content: "same content", metadata: { status: "open" } }))
+      .returning();
+    if (!node) throw new Error("setup failed to insert node");
+
+    try {
+      await db.update(nodes).set({ metadata: { status: "closed" } }).where(eq(nodes.id, node.id));
+
+      const revs = await revisionsOf(node.id);
+      expect(revs).toHaveLength(2);
+      expect(revs[1]).toMatchObject({ revisionNo: 2, title: "Same title", content: "same content", metadata: { status: "closed" } });
+    } finally {
+      await db.delete(nodes).where(eq(nodes.id, node.id));
+    }
+  });
+
+  it("rewriting a node's ingest_run_id (and re-setting identical values) records no revision", async () => {
+    const [node] = await db
+      .insert(nodes)
+      .values(nodeRow({ title: "T", content: "C", metadata: { k: "v" } }))
+      .returning();
+    if (!node) throw new Error("setup failed to insert node");
+    const runTwo = await secondRun();
+
+    try {
+      // Exactly what the batch upsert does on a no-op re-load: every
+      // column rewritten (to the same values), ingest_run_id and
+      // updated_at genuinely changed.
+      await db
+        .update(nodes)
+        .set({ nodeType: node.nodeType, title: "T", content: "C", metadata: { k: "v" }, ingestRunId: runTwo, updatedAt: new Date() })
+        .where(eq(nodes.id, node.id));
+
+      const revs = await revisionsOf(node.id);
+      expect(revs).toHaveLength(1);
+      expect(revs[0]?.ingestRunId).toBe(testRunId);
+    } finally {
+      await db.delete(nodes).where(eq(nodes.id, node.id));
+      await db.delete(ingestRuns).where(eq(ingestRuns.id, runTwo));
+    }
+  });
+
+  it("setting merged_into records a revision carrying the new merge pointer", async () => {
+    const [survivor] = await db.insert(nodes).values(nodeRow()).returning();
+    const [loser] = await db.insert(nodes).values(nodeRow()).returning();
+    if (!survivor || !loser) throw new Error("setup failed to insert nodes");
+
+    try {
+      await db.update(nodes).set({ mergedInto: survivor.id }).where(eq(nodes.id, loser.id));
+
+      const loserRevs = await revisionsOf(loser.id);
+      expect(loserRevs.map((r) => r.revisionNo)).toEqual([1, 2]);
+      expect(loserRevs[0]?.mergedInto).toBeNull();
+      expect(loserRevs[1]?.mergedInto).toBe(survivor.id);
+
+      // The survivor itself was not written — no revision for it.
+      expect(await revisionsOf(survivor.id)).toHaveLength(1);
+    } finally {
+      await db.delete(nodes).where(eq(nodes.id, loser.id));
+      await db.delete(nodes).where(eq(nodes.id, survivor.id));
+    }
+  });
+
+  it("the backfill statement gives a node without history revision one from its current row, attributed to its run, with recorded_at = updated_at", async () => {
+    // updated_at is pinned to a value that cannot be confused with now(),
+    // so recorded_at = updated_at below is a real assertion rather than
+    // two now() calls in the same transaction happening to agree.
+    const updatedAt = new Date("2020-01-02T03:04:05.000Z");
+    const [node] = await db
+      .insert(nodes)
+      .values(nodeRow({ title: "Old", content: "predates history", metadata: { legacy: true }, updatedAt }))
+      .returning();
+    if (!node) throw new Error("setup failed to insert node");
+
+    try {
+      // Simulate a node written before node_revisions existed.
+      await db.delete(nodeRevisions).where(eq(nodeRevisions.nodeId, node.id));
+      expect(await revisionsOf(node.id)).toHaveLength(0);
+
+      // The migration's backfill (migrations/0002_*.sql), scoped to this
+      // one node.
+      await db.execute(sql`
+        INSERT INTO node_revisions (node_id, ingest_run_id, revision_no, node_type, title, content, content_hash, metadata, merged_into, recorded_at)
+        SELECT id, ingest_run_id, 1, node_type, title, content, content_hash, metadata, merged_into, updated_at
+        FROM nodes WHERE id = ${node.id}
+      `);
+
+      const revs = await revisionsOf(node.id);
+      expect(revs).toHaveLength(1);
+      expect(revs[0]).toMatchObject({
+        revisionNo: 1,
+        ingestRunId: testRunId,
+        title: "Old",
+        content: "predates history",
+        contentHash: node.contentHash,
+        metadata: { legacy: true },
+        mergedInto: null,
+      });
+      expect(revs[0]?.recordedAt.getTime()).toBe(updatedAt.getTime());
+    } finally {
+      await db.delete(nodes).where(eq(nodes.id, node.id));
+    }
+  });
+
+  it("two transactions updating the same node get revisions two and three, in commit order, with no duplicate number", async () => {
+    const [node] = await db.insert(nodes).values(nodeRow({ content: "initial" })).returning();
+    if (!node) throw new Error("setup failed to insert node");
+
+    const clientA = await pool.connect();
+    const clientB = await pool.connect();
+    try {
+      await clientA.query("BEGIN");
+      await clientA.query("UPDATE nodes SET content = 'a' WHERE id = $1", [node.id]);
+
+      // B blocks on A's row lock; its promise stays pending until A commits.
+      await clientB.query("BEGIN");
+      const pendingB = clientB.query("UPDATE nodes SET content = 'b' WHERE id = $1", [node.id]);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      await clientA.query("COMMIT");
+      await pendingB;
+      await clientB.query("COMMIT");
+
+      const revs = await revisionsOf(node.id);
+      expect(revs.map((r) => r.revisionNo)).toEqual([1, 2, 3]);
+      expect(revs.map((r) => r.content)).toEqual(["initial", "a", "b"]);
+    } finally {
+      clientA.release();
+      clientB.release();
+      await db.delete(nodes).where(eq(nodes.id, node.id));
+    }
+  });
+
+  it("inserting a second row with an existing (node_id, revision_no) is rejected by node_revisions_node_id_revision_no_key", async () => {
+    const [node] = await db.insert(nodes).values(nodeRow()).returning();
+    if (!node) throw new Error("setup failed to insert node");
+
+    try {
+      let thrown: unknown;
+      try {
+        await db.insert(nodeRevisions).values({
+          nodeId: node.id,
+          ingestRunId: testRunId,
+          revisionNo: 1,
+          nodeType: node.nodeType,
+          title: node.title,
+          content: node.content,
+          contentHash: node.contentHash,
+          metadata: node.metadata,
+        });
+      } catch (err) {
+        thrown = err;
+      }
+
+      expect(thrown).toBeDefined();
+      const cause = (thrown as { cause?: { constraint?: string } }).cause;
+      expect(cause?.constraint).toBe("node_revisions_node_id_revision_no_key");
+      expect(await revisionsOf(node.id)).toHaveLength(1);
     } finally {
       await db.delete(nodes).where(eq(nodes.id, node.id));
     }

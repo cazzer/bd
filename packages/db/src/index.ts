@@ -7,6 +7,7 @@ export { resolveDatabaseUrl, DatabaseUrlNotSetError } from "./env.js";
 export {
   ingestRuns,
   nodes,
+  nodeRevisions,
   edges,
   resolvedNodes,
 } from "./schema.js";
