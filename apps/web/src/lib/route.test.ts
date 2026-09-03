@@ -2,13 +2,21 @@
 // spec.md's "The view is addressable" requirement: the "root path
 // redirects" scenario's parameter carry-over, the "malformed parameters
 // degrade to defaults" scenario, and the equal-routes-format-equally
-// property App.tsx's `navigate` skip depends on.
+// property lib/navigate.ts's skip depends on — plus, node-views, the feed
+// member of the union: node-views/spec.md's "The feed view is
+// addressable" requirement ("Feed with no view" parses rather than
+// redirects; "Unknown path still redirects" carries the graph's
+// parameters and nothing else).
 
 import { describe, expect, it } from "vitest";
-import { formatRoute, GRAPH_VIEW_PATH, graphRouteFromSearch, parseRoute, type GraphRoute } from "./route.js";
+import { FEED_VIEW_PATH, formatRoute, GRAPH_VIEW_PATH, graphRouteFromSearch, parseRoute, type FeedRoute, type GraphRoute, type Route } from "./route.js";
 
 function graph(partial: Partial<Omit<GraphRoute, "view">> = {}): GraphRoute {
   return { view: "graph", q: null, types: [], node: null, ...partial };
+}
+
+function feed(viewId: string | null = null): FeedRoute {
+  return { view: "feed", viewId };
 }
 
 /** `formatRoute` output split back into the two strings `parseRoute` takes — what `location.pathname`/`location.search` would hold after a `pushState` of that URL. */
@@ -17,8 +25,9 @@ function split(url: string): [pathname: string, search: string] {
   return i === -1 ? [url, ""] : [url.slice(0, i), url.slice(i)];
 }
 
-function roundTrip(route: GraphRoute): GraphRoute | null {
-  return parseRoute(...split(formatRoute(route)));
+/** Parse of the format of `route`. The cast only narrows the union back to the member that went in — every use also asserts `toEqual(route)`, which is what actually checks the member came back. */
+function roundTrip<R extends Route>(route: R): R | null {
+  return parseRoute(...split(formatRoute(route))) as R | null;
 }
 
 describe("formatRoute / parseRoute round trip", () => {
@@ -122,5 +131,67 @@ describe("malformed parameters degrade to defaults", () => {
   it("accepts a search string with or without its leading ?", () => {
     expect(graphRouteFromSearch("q=x")).toEqual(graph({ q: "x" }));
     expect(graphRouteFromSearch("")).toEqual(graph());
+  });
+});
+
+describe("feed route (node-views)", () => {
+  const VIEW_ID = "0b8d1e4a-2f5c-4c6e-9a7b-1d2e3f4a5b6c";
+
+  it("round-trips a view id", () => {
+    expect(roundTrip(feed(VIEW_ID))).toEqual(feed(VIEW_ID));
+  });
+
+  it("round-trips no view id", () => {
+    expect(roundTrip(feed())).toEqual(feed());
+  });
+
+  it("formats an empty feed route to exactly the view path", () => {
+    expect(formatRoute(feed())).toBe(FEED_VIEW_PATH);
+  });
+
+  it("formats the view id as the only parameter", () => {
+    expect(formatRoute(feed("v1"))).toBe("/feed?view=v1");
+  });
+
+  it("formats two structurally equal feed routes to the same string", () => {
+    expect(formatRoute(feed(VIEW_ID))).toBe(formatRoute(feed(VIEW_ID)));
+  });
+
+  it("accepts /feed and /feed/ alike", () => {
+    expect(parseRoute("/feed", "?view=v1")).toEqual(feed("v1"));
+    expect(parseRoute("/feed/", "?view=v1")).toEqual(feed("v1"));
+  });
+
+  it("returns null for /feed/x and /Feed (unknown paths, same as the graph's)", () => {
+    expect(parseRoute("/feed/x", "?view=v1")).toBeNull();
+    expect(parseRoute("/Feed", "?view=v1")).toBeNull();
+  });
+
+  it("parses a bare /feed, or an empty or whitespace view, as no view — never a redirect", () => {
+    expect(parseRoute("/feed", "")).toEqual(feed());
+    expect(parseRoute("/feed", "?view=")).toEqual(feed());
+    expect(parseRoute("/feed", "?view=%20")).toEqual(feed());
+  });
+
+  it("trims the view id", () => {
+    expect(parseRoute("/feed", "?view=%20v1%20")).toEqual(feed("v1"));
+  });
+
+  it("keeps a non-UUID view id (validation is the server's, not the parser's)", () => {
+    expect(parseRoute("/feed", "?view=abc")).toEqual(feed("abc"));
+    expect(roundTrip(feed("abc"))).toEqual(feed("abc"));
+  });
+
+  it("ignores graph and unknown parameters on the feed path", () => {
+    expect(parseRoute("/feed", "?q=x&type=a&node=n1&view=v1&zoom=3")).toEqual(feed("v1"));
+  });
+
+  it("keeps a graph address a graph address when it carries a view parameter", () => {
+    expect(parseRoute("/graph", "?q=x&view=v1")).toEqual(graph({ q: "x" }));
+  });
+
+  it("still redirects /list, carrying the graph parameters and dropping view (the 'Unknown path still redirects' scenario)", () => {
+    expect(parseRoute("/list", "?q=x&type=a&view=v1")).toBeNull();
+    expect(formatRoute(graphRouteFromSearch("?q=x&type=a&view=v1"))).toBe("/graph?q=x&type=a");
   });
 });
