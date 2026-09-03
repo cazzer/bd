@@ -26,7 +26,7 @@ The store SHALL answer, for one root node, the set of nodes reachable from it do
 #### Scenario: Root names no node
 
 - **WHEN** a client asks for the subtree of an id that is malformed or names no canonical node
-- **THEN** the request is rejected as a bad request, and nothing is walked
+- **THEN** the request is rejected, and nothing is walked
 
 ### Requirement: The code view is addressable
 

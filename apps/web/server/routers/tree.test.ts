@@ -101,8 +101,8 @@ describe("tree (local-web-api spec, 'Reading a repository's tree')", () => {
     }
   });
 
-  it("maps an unknown root and a malformed root to BAD_REQUEST", async () => {
-    await expect(caller().tree({ rootId: "00000000-0000-4000-8000-000000000000" })).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  it("maps an unknown root to NOT_FOUND and a malformed root to BAD_REQUEST", async () => {
+    await expect(caller().tree({ rootId: "00000000-0000-4000-8000-000000000000" })).rejects.toMatchObject({ code: "NOT_FOUND" });
     await expect(caller().tree({ rootId: "not-a-uuid" })).rejects.toMatchObject({ code: "BAD_REQUEST" });
   });
 

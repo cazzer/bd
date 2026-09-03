@@ -12,36 +12,47 @@
 // subtree); every walk row carries `probe_ids` — the canonical id plus
 // every merged-away alias of it, retrieval.ts's alias pattern — so
 // `e.dst_id = ANY (probe_ids)` finds an edge asserted on a duplicate of a
-// directory in the same indexed probe (`edges_dst_id_edge_type_idx`) that
-// finds the survivor's own; and the far endpoint folds through
+// directory in the same probe (one `edges_dst_id_edge_type_idx` can
+// serve) that finds the survivor's own; and the far endpoint folds through
 // `COALESCE(src.merged_into, src.id)`, so a merged-away child is reported
 // as its survivor and the loser never appears. That is what "both endpoints
 // folded" means here: the design's `COALESCE(dst.merged_into, e.dst_id) =
-// node_id` and this probe select the same edges, but the probe is served
-// by the index and the expression is not.
+// node_id` and this probe select the same edges, but the probe can be
+// served by the index and the expression cannot — "can": the planner
+// picks a materialized seq scan while `edges` is small and the index once
+// it grows.
 //
 // Two bounds, one flag. The recursion is `UNION` (a node reached by two
 // paths at one depth under one parent is one row) with `depth <
 // MAX_SUBTREE_DEPTH` as the terminator: as views.ts's header spells out,
 // `depth` is a column of the walk, so on a `child_of` cycle a node is
 // re-emitted at each greater depth and it is the cap, not set semantics,
-// that ends the walk (at most MAX_SUBTREE_DEPTH + 1 rows per cycle
-// member). A path tree cannot cycle, but `brain_link` writes `child_of`
-// freely, so the guard is not optional. Then `DISTINCT ON (node_id)`
-// places each node once, at its least depth (a node with two parents, or
-// one inside a cycle, is shown where it is nearest the root), the result
-// is ordered `depth, title, node_id`, and `LIMIT max_nodes + 1` over that
-// order answers `truncated` without a count: the bound's worth of
-// shallowest rows is what a cut-short answer keeps, and because every
-// depth < d is emitted before any row at depth d, a kept node's parent is
-// always kept too. Merge-induced self-loops (a loser's `child_of` to its
-// own survivor) are dropped for the reason views.ts and work-items.ts
-// drop them: "a node is a child of itself" is not containment.
+// that ends the walk. That costs more than the cycle's own members: on a
+// downward walk everything below the cycle re-enters at each pass, so the
+// walk emits about (subtree below the cycle) × (MAX_SUBTREE_DEPTH / cycle
+// length) rows — measured on a 356-node tree, 356 rows in 8 ms with no
+// cycle and 5,244 rows in 97 ms with a 2-cycle through the root — and is
+// bounded in the end by the pool's 60 s statement timeout
+// (packages/db/src/client.ts). A path tree cannot cycle, but `brain_link`
+// writes `child_of` freely, so the guard is not optional. Then
+// `DISTINCT ON (node_id)` places each node once, at its least depth (a
+// node with two parents, or one inside a cycle, is shown where it is
+// nearest the root), the result is ordered `depth, title, node_id`, and
+// `LIMIT max_nodes + 1` over that order answers `truncated` without a
+// count: the bound's worth of shallowest rows is what a cut-short answer
+// keeps, and because every depth < d is emitted before any row at depth
+// d, a kept node's parent is always kept too. Merge-induced self-loops (a
+// loser's `child_of` to its own survivor) are dropped for the reason
+// views.ts and work-items.ts drop them: "a node is a child of itself" is
+// not containment.
 //
 // Not budgeted by response size (the router skips `boundResponse`): a row
-// is seven short fields, so MAX_SUBTREE_NODES rows is well under the 2 MB
-// budget the other procedures apply, and dropping rows from the tail of a
-// tree would be a second, silent truncation on top of the honest one.
+// is seven short fields, so MAX_SUBTREE_NODES rows stay within the 2 MB
+// budget the other procedures apply — a 340-row tree serialises to ~88 KB
+// and 5,000 rows to about 1.3 MiB, `path` repeating the tail of
+// `externalId` and so roughly doubling what each row costs — and dropping
+// rows from the tail of a tree would be a second, silent truncation on
+// top of the honest one.
 
 import { sql, type SQL } from "drizzle-orm";
 import type { Database } from "@breakdown/db";

@@ -62,7 +62,6 @@ import {
   type NeighborsCursor,
   type RetrieveOptions,
 } from "@breakdown/core";
-import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { boundResponse } from "../budget.js";
 import { toListedNodeDto, toLookedUpNodeDto, toNeighborDto, toRecentNodeDto, toRetrievedNodeDto } from "../dto.js";
@@ -443,17 +442,18 @@ const resolveDefaultViewsProcedure = publicProcedure.input(resolveDefaultViewsIn
 // Not budgeted — no `boundResponse` — because the read is bounded by
 // count, not by size: core caps the answer at MAX_SUBTREE_NODES rows of
 // seven short fields (titles at most 500 characters, and in practice a
-// file's base name), which is well under the 2 MB character budget the
-// other procedures apply; and the budget drops from the tail, which for
-// a depth-ordered tree would be a second, silent truncation stacked on
-// the honest `truncated` flag core already reports. A root that names no
-// canonical node is BAD_REQUEST, not NOT_FOUND (code-view spec, "Root
-// names no node": "rejected as a bad request"): to the code view the
-// address is wrong the same way a malformed id is — `getNodes` answers
-// both with BAD_REQUEST too, one through Zod-free `InvalidLookupIdError`
-// and one through `notFoundIds` — so the one-id shape gets the same code
-// here rather than `mapCoreError`'s NOT_FOUND for `getNeighbors`, whose
-// caller is an agent that can go and search.
+// file's base name), which stays within the 2 MB character budget the
+// other procedures apply — measured, a 340-row tree is ~88 KB and 5,000
+// rows about 1.3 MiB, `path` repeating the tail of `externalId` and so
+// roughly doubling what each row costs; and the budget drops from the
+// tail, which for a depth-ordered tree would be a second, silent
+// truncation stacked on the honest `truncated` flag core already
+// reports. Errors go through `mapCoreError` like every other procedure:
+// a root that names no canonical node is NOT_FOUND, as it is for
+// `getNeighbors` and `getNodeHistory`, and a malformed id is BAD_REQUEST
+// (`InvalidLookupIdError`). CodeView.tsx branches on neither code — any
+// failed tree read is shown as its message — so the distinction is for
+// the API's own consistency, not the view's.
 
 export const treeInputSchema = z.object({
   rootId: z.string().min(1, "must not be empty"),
@@ -464,10 +464,6 @@ const treeProcedure = publicProcedure.input(treeInputSchema).query(async ({ ctx,
     const result = await getSubtree(ctx.db, input.rootId);
     return { rootId: result.rootId, nodes: result.nodes, truncated: result.truncated };
   } catch (err) {
-    if (err instanceof NodeNotFoundError) {
-      // Built from core's own safe `.message`, never `cause` (../errors.ts's header).
-      throw new TRPCError({ code: "BAD_REQUEST", message: `${err.message} The address names no root — open the view from the graph, or verify the id with getNodes.` });
-    }
     throw mapCoreError("tree", err);
   }
 });
