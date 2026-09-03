@@ -51,6 +51,29 @@
 //     type suggestions are both derived plain values computed in the
 //     render body below, never a `useEffect` — see graph/typePrevalence.ts
 //     and lib/typeMatch.ts, both pure functions over state already held.
+//
+// --- The URL (url-addressable-views) -------------------------------------
+//
+// The explorer lives at the named view path `/graph`, and the URL carries
+// the search as last SUBMITTED (`q`, repeatable `type`) plus the selected
+// node (`node`) — never exploration (expansions, pan, zoom), never a
+// reading aid (`focusedType`, the panel's summary/expanded state), never
+// pending edits (typed text, chips changed since the last submit). The
+// shape lives in lib/route.ts, pure and tested; this component owns
+// when it is read and written, through exactly two kinds of site rather
+// than an effect that mirrors state (design.md decision 2):
+//   - `runSearch`'s landed-result branch is the ONE `pushState` — a
+//     query that matched nothing leaves the URL naming the search whose
+//     result is actually drawn.
+//   - every site that changes the selection (`handleNodeClick`, the
+//     panel's close, `handleNoteCreated`, `handleShowUnlinkedNote`)
+//     does a `replaceState` — a click is the most frequent gesture here
+//     and also expands, which back cannot undo, so a history stop per
+//     click would be half-reversible.
+// `submittedSearch` is what the drawn graph is the result of; `navigate`
+// below is the only caller of the History API. Nothing is put in
+// `history.state`: the URL is the sole source of truth, which is what
+// makes a pasted link and a popstate the same input to `applyRoute`.
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { CreateNoteForm } from "./components/CreateNoteForm.js";
@@ -82,6 +105,7 @@ import {
 } from "./graph/expansion.js";
 import { assignTypeColors } from "./graph/palette.js";
 import { rankNeighborTypes, topStoreTypes, type TypeCount } from "./graph/typePrevalence.js";
+import { formatRoute, graphRouteFromSearch, parseRoute, type GraphRoute } from "./lib/route.js";
 import { matchNodeTypes } from "./lib/typeMatch.js";
 import { trpc } from "./trpc.js";
 
@@ -105,8 +129,26 @@ const RIGHT_COLUMN_OFFSET_PX = 16; // right-4
 const RIGHT_COLUMN_SUMMARY_WIDTH_PX = 320; // w-80
 const RIGHT_COLUMN_EXPANDED_WIDTH_PX = 384; // w-96
 
+/** What the drawn graph is the result of (url-addressable-views, design.md decision 2) — the search as submitted, not as typed. */
+interface SubmittedSearch {
+  q: string;
+  types: string[];
+}
+
+/** Value comparison, never a URL-string one: whether `route` names the search `submitted` already drew (order-sensitive on types, matching the URL's own order). */
+function isSameSearch(submitted: SubmittedSearch | null, route: GraphRoute): boolean {
+  return submitted !== null && submitted.q === route.q && submitted.types.length === route.types.length && submitted.types.every((t, i) => t === route.types[i]);
+}
+
 export function App() {
-  const [query, setQuery] = useState("");
+  // The URL as it was when this component mounted (url-addressable-views,
+  // design.md decision 3) — read once, lazily, so `query` and `chips`
+  // below start out already correct on the first render instead of being
+  // patched in by an effect. `graphRouteFromSearch` as the fallback is
+  // what lets an unknown path's parameters (`/?q=x`) count before the
+  // mount effect's redirect has had a chance to rewrite the address.
+  const [initialRoute] = useState<GraphRoute>(() => parseRoute(location.pathname, location.search) ?? graphRouteFromSearch(location.search));
+  const [query, setQuery] = useState(initialRoute.q ?? "");
   const [status, setStatus] = useState<Status>({ kind: "idle" });
   const [graph, setGraph] = useState<GraphCanvasData>(EMPTY_GRAPH);
   const [expansions, setExpansions] = useState<ExpansionEntries>(new Map());
@@ -153,6 +195,23 @@ export function App() {
   // the first's "in flight" mark immediately — no re-render required.
   const inFlightExpansions = useRef<Set<string>>(new Set());
 
+  // The search whose result is currently drawn (url-addressable-views) —
+  // see this file's header. Set only where a result lands, in `runSearch`;
+  // cleared by `applyRoute` when a navigated-to URL has no query.
+  const [submittedSearch, setSubmittedSearch] = useState<SubmittedSearch | null>(null);
+  // StrictMode guard for the initial-route mount effect below (design.md
+  // decision 3): dev runs every mount effect twice, and the second run
+  // must not be a second search. A ref, like `inFlightExpansions`, and
+  // deliberately never reset in a cleanup — the simulated unmount is the
+  // exact case this exists to ignore.
+  const didApplyInitialRoute = useRef(false);
+  // The current render's `applyRoute`, for the `popstate` listener — which
+  // is registered once and would otherwise hold the FIRST render's closure
+  // (`submittedSearch` null, `graph` empty) forever, turning every back/
+  // forward step into a full re-search. Refreshed by a no-dependency
+  // effect below, on purpose.
+  const applyRouteRef = useRef<((route: GraphRoute) => Promise<void>) | null>(null);
+
   // The "New note" popover (bd-8ub, task 2.4) — CreateNoteForm itself is
   // unchanged (same onCreated contract); only its trigger and container
   // moved from an inline header row into this popover, opened from the
@@ -185,7 +244,7 @@ export function App() {
   // Type control + search chips (bd-14q/bd-73t) — see this file's header.
   const [nodeTypeCounts, setNodeTypeCounts] = useState<TypeCount[]>([]);
   const [focusedType, setFocusedType] = useState<string | null>(null);
-  const [chips, setChips] = useState<string[]>([]);
+  const [chips, setChips] = useState<string[]>(initialRoute.types);
   // bd-8ub review, should-fix 5: which type's chip (if any) was added BY a
   // focus click, so un-focusing removes only a chip this same mechanism
   // added — a chip already present (added earlier via a search suggestion)
@@ -219,18 +278,54 @@ export function App() {
     void refreshStoreSummary();
   }, []);
 
-  async function runSearch(submittedQuery: string) {
+  /**
+   * The only caller of the History API (url-addressable-views, design.md
+   * decision 2). Skips the write when the URL would not change — the
+   * string comparison is encoding-sensitive (`+` vs `%20`), so at worst
+   * it lets through a harmless extra `replaceState`; "did the search
+   * change" is never decided here but by `isSameSearch`'s value
+   * comparison in `applyRoute`. Nothing goes into `history.state`.
+   */
+  function navigate(route: GraphRoute, mode: "push" | "replace") {
+    const url = formatRoute(route);
+    if (url === location.pathname + location.search) {
+      return;
+    }
+    if (mode === "push") {
+      history.pushState(null, "", url);
+    } else {
+      history.replaceState(null, "", url);
+    }
+  }
+
+  /** The current `submittedSearch` with `node` — what every selection-change site replace-writes. */
+  function routeFor(node: string | null): GraphRoute {
+    return { view: "graph", q: submittedSearch?.q ?? null, types: submittedSearch?.types ?? [], node };
+  }
+
+  /**
+   * `types` is an explicit argument rather than `chips` read from the
+   * closure (url-addressable-views): the deep-link and popstate paths
+   * run a search whose chips have not yet been committed to state. The
+   * submit path passes `chips`. `history: "push"` is the one place a
+   * history entry is added; `"none"` is for a search that was NAVIGATED
+   * to, which must not push again. Returns the landed result, or `null`
+   * when nothing landed (empty query, no match, or failure), so
+   * `applyRoute` can tell "graph replaced" from "nothing changed"
+   * without waiting for state to commit.
+   */
+  async function runSearch(submittedQuery: string, types: string[], opts: { history: "push" | "none" }): Promise<SearchResult | null> {
     const trimmed = submittedQuery.trim();
     if (trimmed.length === 0) {
-      return;
+      return null;
     }
     setStatus({ kind: "loading" });
     try {
-      // `chips.length ? chips : undefined`, never `[]`: the server's
+      // `types.length ? types : undefined`, never `[]`: the server's
       // filterArraySchema() requires nodeTypes to be either absent or a
       // non-empty array (read.ts) — sending `[]` would be a validation
       // error instead of "no filter."
-      const result = await trpc.search.query({ query: trimmed, nodeTypes: chips.length > 0 ? chips : undefined });
+      const result = await trpc.search.query({ query: trimmed, nodeTypes: types.length > 0 ? types : undefined });
       setStatus({ kind: "done", result });
       // graph-explorer/spec.md's "Query matches nothing" scenario: the
       // canvas stays as it was rather than clearing. Skipping the
@@ -269,12 +364,23 @@ export function App() {
         // bd-e9n, design.md decision 5: a landed search result fits and
         // centres the view — see GraphCanvas.tsx's `fitRequestId`.
         setFitRequestId((id) => id + 1);
+        // url-addressable-views: the address names the search whose
+        // result is drawn — set here, and pushed here, nowhere else. An
+        // empty result never reaches this branch, so it leaves the URL
+        // (and `submittedSearch`) naming the search still on screen.
+        setSubmittedSearch({ q: trimmed, types });
+        if (opts.history === "push") {
+          navigate({ view: "graph", q: trimmed, types, node: null }, "push");
+        }
+        return result;
       }
+      return null;
     } catch (err) {
       // TRPCClientError#message is already the safe, hand-mapped message
       // server/errors.ts built — never a stack trace or connection string.
       const message = err instanceof Error ? err.message : "Search failed unexpectedly.";
       setStatus({ kind: "error", message });
+      return null;
     }
   }
 
@@ -337,11 +443,24 @@ export function App() {
     // result lands, in `runSearch` below.
   }
 
-  /** "A click both expands and selects" — see this file's header. */
-  function handleNodeClick(node: GraphNode) {
+  /**
+   * Select + expand, and NOTHING about the URL (url-addressable-views,
+   * design.md decision 2). `applyRoute` calls this for a selection it
+   * derived FROM the URL — a replace-write there would be redundant at
+   * best, and wrong right after `await runSearch(...)`, where this
+   * render's `submittedSearch` is still the previous search: it would
+   * emit the old query with the new node.
+   */
+  function selectNode(node: GraphNode) {
     setSelectedNodeId(node.id);
     setDetailExpanded(false); // bd-e9n: a newly selected node always opens as a summary, even if the previously selected one was expanded
     void expandNode(node);
+  }
+
+  /** "A click both expands and selects" — see this file's header — and, url-addressable-views, replace-writes the selection into the address (never a push: see the header). */
+  function handleNodeClick(node: GraphNode) {
+    selectNode(node);
+    navigate(routeFor(node.id), "replace");
   }
 
   /** A content/title edit was saved (DetailPanel's ContentSection) — patch the canvas node's own title so it's reflected without a re-search. */
@@ -403,6 +522,7 @@ export function App() {
     setGraph((previous) => mergeStandaloneNode(previous, node));
     setSelectedNodeId(result.id);
     setDetailExpanded(false); // bd-e9n: opens as a summary, same as any other selection
+    navigate(routeFor(result.id), "replace"); // url-addressable-views: a selection change, so a replace
     closeNoteForm();
     void refreshStoreSummary(); // a fresh note can carry a brand-new node_type (bd-14q/bd-73t)
   }
@@ -413,7 +533,137 @@ export function App() {
     setGraph((previous) => mergeStandaloneNode(previous, node));
     setSelectedNodeId(note.id);
     setDetailExpanded(false); // bd-e9n: opens as a summary, same as any other selection
+    navigate(routeFor(note.id), "replace"); // url-addressable-views: a selection change, so a replace
   }
+
+  /**
+   * The one path that turns a URL into explorer state — a deep link on
+   * mount and a back/forward step both come through here, so they cannot
+   * drift (url-addressable-views, design.md decisions 3 and 4).
+   *
+   *   1. Box and chips always show what the URL says.
+   *   2. No `q`: nothing to search, `submittedSearch` clears, the current
+   *      graph stays. Same search as drawn (a VALUE comparison against
+   *      `submittedSearch`, never a URL string): skip it — this is the
+   *      "only the selection changed" scenario, and why back/forward
+   *      between selections is cheap. Otherwise run it with
+   *      `history: "none"` (it was navigated to; pushing again would
+   *      double the entry), and read the RESULT for the node lookup:
+   *      `setGraph` has not committed when `runSearch` returns — the same
+   *      reason `handleAnnotated` captures `target.degree` before its
+   *      updater runs. An empty result stops here: the spec's "nothing
+   *      matched" behaviour is unchanged and the URL already is what it is.
+   *   3. No `node`: deselect. `node` already selected and the graph not
+   *      replaced: do nothing — `expandNode` with an existing cursor
+   *      fetches the NEXT page, so re-selecting would silently pull extra
+   *      neighbours on a step that changed nothing.
+   *   4. `node` in the result (or the current graph): `selectNode`, so a
+   *      deep link looks exactly like a click — minus the URL write, which
+   *      the URL already is. Not in it: `getNodes`, and draw the node on
+   *      its own through `graphNodeFromUnlinkedNote` + `mergeStandaloneNode`
+   *      (the `handleShowUnlinkedNote` path; the lookup DTO carries
+   *      id/title/type/source/isEditable and is accepted structurally). The
+   *      lookup has no `degree`, so such a node draws at the minimum radius
+   *      and reads degree 0 until a search returns it — accepted, since
+   *      adding `degree` to the lookup is a server change this change
+   *      excludes. A merged-away id resolves to its survivor, whose id then
+   *      replaces the URL's. `notFoundIds`, or a failed call (reported
+   *      through the expansion-error toast): nothing selected, and the URL
+   *      is replaced without `node` so a bad id does not survive a reload.
+   */
+  async function applyRoute(route: GraphRoute): Promise<void> {
+    setQuery(route.q ?? "");
+    setChips(route.types);
+
+    let nodes = graph.nodes;
+    let replaced = false;
+    if (route.q === null) {
+      setSubmittedSearch(null);
+    } else if (!isSameSearch(submittedSearch, route)) {
+      const result = await runSearch(route.q, route.types, { history: "none" });
+      if (!result) {
+        return;
+      }
+      nodes = searchResultToGraphData(result).nodes;
+      replaced = true;
+    }
+
+    if (route.node === null) {
+      setSelectedNodeId(null);
+      setDetailExpanded(false);
+      return;
+    }
+    if (!replaced && route.node === selectedNodeId) {
+      return;
+    }
+
+    const found = nodes.find((n) => n.id === route.node);
+    if (found) {
+      selectNode(found);
+      return;
+    }
+
+    let lookedUp;
+    try {
+      const lookup = await trpc.getNodes.query({ ids: [route.node] });
+      lookedUp = lookup.nodes[0];
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Lookup failed unexpectedly.";
+      setExpansionError(`Couldn't open node ${route.node}: ${message}`);
+    }
+    if (!lookedUp) {
+      setSelectedNodeId(null);
+      setDetailExpanded(false);
+      navigate({ ...route, node: null }, "replace");
+      return;
+    }
+    const node = graphNodeFromUnlinkedNote(lookedUp);
+    setGraph((previous) => mergeStandaloneNode(previous, node));
+    selectNode(node);
+    if (lookedUp.id !== route.node) {
+      navigate({ ...route, node: lookedUp.id }, "replace");
+    }
+  }
+
+  // No dependency array, on purpose: the ref must hold THIS render's
+  // `applyRoute` (see the ref's own comment), and a dependency list that
+  // named everything it closes over would just be a longer way of saying
+  // "every render."
+  useEffect(() => {
+    applyRouteRef.current = applyRoute;
+  });
+
+  // The initial route (design.md decisions 3 and 5): an unknown path
+  // (`/`, a stale bookmark) is replaced — never pushed, so it is never a
+  // back stop — with `/graph` carrying the same query string, then applied
+  // as if that had been the URL. Calls `applyRoute` directly rather than
+  // through the ref: on the first render `graph` is empty and
+  // `submittedSearch` null, which is exactly the state a fresh mount is in.
+  useEffect(() => {
+    if (didApplyInitialRoute.current) {
+      return;
+    }
+    didApplyInitialRoute.current = true;
+    const parsed = parseRoute(location.pathname, location.search);
+    const route = parsed ?? graphRouteFromSearch(location.search);
+    if (parsed === null) {
+      navigate(route, "replace");
+    }
+    void applyRoute(route);
+  }, []);
+
+  // Back/forward (design.md decision 3): the listener body reads no state
+  // of its own — it parses `location` and hands the route to the CURRENT
+  // `applyRoute` through the ref, which is the only reason the listener
+  // can be registered once and left alone.
+  useEffect(() => {
+    function handlePopState() {
+      const route = parseRoute(location.pathname, location.search) ?? graphRouteFromSearch(location.search);
+      void applyRouteRef.current?.(route);
+    }
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
 
   /**
    * TypePanel row click (bd-14q). Reads `focusedType` from this render's
@@ -552,7 +802,7 @@ export function App() {
           <SearchBar
             query={query}
             onQueryChange={setQuery}
-            onSubmit={(q) => void runSearch(q)}
+            onSubmit={(q) => void runSearch(q, chips, { history: "push" })}
             status={status}
             suggestions={typeSuggestions}
             chips={chips}
@@ -613,6 +863,7 @@ export function App() {
               onClose={() => {
                 setSelectedNodeId(null);
                 setDetailExpanded(false);
+                navigate(routeFor(null), "replace"); // url-addressable-views: a selection change, so a replace
               }}
               onExpandedChange={setDetailExpanded}
               onContentSaved={handleContentSaved}
