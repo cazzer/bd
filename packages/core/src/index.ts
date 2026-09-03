@@ -282,3 +282,38 @@ export {
   type BeadsEdgeCandidate,
   type DeriveBeadsEdgesResult,
 } from "./beads.js";
+
+// Git repository loader (git-repo-ingestor change): the pure mapping from
+// `git ls-files` records and file bytes to file/directory nodes and
+// `child_of` candidates, and the one-transaction write of a whole tree.
+// See git-repo.ts.
+export {
+  parseLsFiles,
+  deriveRepoKey,
+  classifyFile,
+  deriveLanguage,
+  countLines,
+  buildRepoTree,
+  gitExternalId,
+  resolveGitRepoEdges,
+  loadGitRepoTree,
+  GIT_SOURCE_SYSTEM,
+  FILE_NODE_TYPE,
+  DIRECTORY_NODE_TYPE,
+  GIT_EDGE_WEIGHT,
+  MAX_FILE_BYTES,
+  NUL_PROBE_BYTES,
+  GENERATED_FILE_NAMES,
+  GENERATED_FILE_SUFFIXES,
+  LANGUAGE_BY_EXTENSION,
+  SYMLINK_MODE,
+  SUBMODULE_MODE,
+  type LsFilesEntry,
+  type SkipReason,
+  type FileClassification,
+  type ClassifyFileInput,
+  type LoadableFile,
+  type GitRepoEdgeCandidate,
+  type GitRepoTree,
+  type LoadGitRepoTreeResult,
+} from "./git-repo.js";
