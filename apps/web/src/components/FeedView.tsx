@@ -6,7 +6,8 @@
 // Two reads, in order. `getNodes` loads the view node itself: the address
 // must name a canonical node of type `view` whose `metadata.filter` is an
 // object — the server validated the contract at write time
-// (packages/core/src/views.ts), so this guard is only against a hand-
+// (packages/core/src/views.ts), so the guard (`viewFilterOf`, lib/
+// viewFilter.ts, shared with the code view) is only against a hand-
 // edited row, and anything else is the "not a view" empty state, never a
 // redirect (node-views/spec.md, "The feed view is addressable"). Then
 // `list` with that filter spread straight in plus a page size: a view's
@@ -43,15 +44,12 @@ import { useEffect, useState, type MouseEvent } from "react";
 import { extractLinks, pickRowFields } from "../lib/feedRow.js";
 import { navigate } from "../lib/navigate.js";
 import { formatRoute, type GraphRoute } from "../lib/route.js";
+import { viewFilterOf, type ViewFilter, type ViewNode } from "../lib/viewFilter.js";
 import { trpc } from "../trpc.js";
 
-type ListInput = Parameters<typeof trpc.list.query>[0];
-/** A view's `filter` as this component sends it: `list`'s input without the reader's own `limit`/`cursor`. */
-type ViewFilter = Omit<ListInput, "limit" | "cursor">;
 type ListResult = Awaited<ReturnType<typeof trpc.list.query>>;
 type FeedRow = ListResult["nodes"][number];
 type ListCursor = NonNullable<ListResult["nextCursor"]>;
-type ViewNode = Awaited<ReturnType<typeof trpc.getNodes.query>>["nodes"][number];
 
 /** Rows per `list` call — design.md decision 6. */
 const PAGE_SIZE = 50;
@@ -74,27 +72,6 @@ type FeedState =
       loadingMore: boolean;
       moreError: string | null;
     };
-
-/**
- * The view's filter, or `null` when the node is not a view or its
- * `metadata.filter` is not an object. `limit`/`cursor` are dropped
- * rather than trusted: the contract refuses them at write time, so a
- * row carrying them was hand-edited, and this component's page size is
- * its own. The cast is the one place the client asserts the server's
- * contract; a hand-edited filter the schema rejects surfaces as `list`'s
- * BAD_REQUEST, shown as an error below.
- */
-function viewFilterOf(node: ViewNode): ViewFilter | null {
-  if (node.nodeType !== "view") {
-    return null;
-  }
-  const filter = (node.metadata as Record<string, unknown>)["filter"];
-  if (typeof filter !== "object" || filter === null || Array.isArray(filter)) {
-    return null;
-  }
-  const { limit: _limit, cursor: _cursor, ...rest } = filter as Record<string, unknown>;
-  return rest as ViewFilter;
-}
 
 function isBadRequest(err: unknown): boolean {
   return err instanceof TRPCClientError && err.data?.code === "BAD_REQUEST";
