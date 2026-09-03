@@ -39,21 +39,31 @@ import {
   getNeighbors,
   getNodes,
   getStoreSummary,
+  listNodes,
   MAX_ALLOWED_DEPTH,
   MAX_FANOUT,
+  MAX_LIST_LIMIT,
+  MAX_LIST_NAMES,
+  MAX_LIST_PREDICATES,
   MAX_NEIGHBOR_LIMIT,
   MAX_NODE_BUDGET,
+  MAX_ONE_OF_VALUES,
+  MAX_PREDICATE_KEY_LENGTH,
+  MAX_PREDICATE_STRING_LENGTH,
   MAX_RECENT_NODES_LIMIT,
+  MAX_RESOLVE_IDS,
   MAX_SEED_LIMIT,
   NodeNotFoundError,
   NOTE_NODE_TYPE,
+  resolveDefaultViews,
   retrieve,
+  type MetadataPredicate,
   type NeighborsCursor,
   type RetrieveOptions,
 } from "@breakdown/core";
 import { z } from "zod";
 import { boundResponse } from "../budget.js";
-import { toLookedUpNodeDto, toNeighborDto, toRecentNodeDto, toRetrievedNodeDto } from "../dto.js";
+import { toListedNodeDto, toLookedUpNodeDto, toNeighborDto, toRecentNodeDto, toRetrievedNodeDto } from "../dto.js";
 import { mapCoreError } from "../errors.js";
 import { publicProcedure, router } from "../trpc.js";
 
@@ -318,10 +328,109 @@ const listUnlinkedNotesProcedure = publicProcedure.input(listUnlinkedNotesInputS
   };
 });
 
+// --- list ------------------------------------------------------------------
+//
+// node-views (design.md decision 7): structured listing for the feed view,
+// mirroring apps/mcp/src/tools/read.ts's brain_list — the same Zod bounds
+// (core's MAX_LIST_* / MAX_PREDICATE_* constants), the same `listNodes`
+// call, the same budget pass. A view's `filter` is exactly this input
+// minus `limit`/`cursor` (packages/core/src/views.ts), which is what lets
+// FeedView.tsx spread a view's metadata straight into a request. Rows
+// carry `metadata` and never `content` (local-web-api spec, "Listing a
+// view's selection"); the per-row `cursor` core attaches is consumed here
+// and stripped from the wire.
+
+const scalarSchema = z.union([z.string().max(MAX_PREDICATE_STRING_LENGTH), z.number().finite(), z.boolean(), z.null()]);
+const predicateKeySchema = z.string().min(1).max(MAX_PREDICATE_KEY_LENGTH);
+const predicateSchema = z.union([
+  z.object({ key: predicateKeySchema, op: z.literal("equals"), value: scalarSchema }),
+  z.object({ key: predicateKeySchema, op: z.literal("oneOf"), values: z.array(scalarSchema).min(1).max(MAX_ONE_OF_VALUES) }),
+]);
+
+export const listInputSchema = z.object({
+  nodeTypes: z.array(z.string().min(1)).min(1).max(MAX_LIST_NAMES).optional(),
+  sourceSystems: z.array(z.string().min(1)).min(1).max(MAX_LIST_NAMES).optional(),
+  /** ISO-8601 instant; only nodes updated at or after this are listed. */
+  updatedSince: z.string().datetime({ offset: true }).optional(),
+  where: z.array(predicateSchema).max(MAX_LIST_PREDICATES).optional(),
+  limit: z.number().int().positive().max(MAX_LIST_LIMIT).optional(),
+  /** Opaque: a previous response's `nextCursor`, passed back unchanged. */
+  cursor: z.object({ updatedAt: z.string().min(1).max(64), id: z.string().min(1).max(64) }).optional(),
+});
+
+const listProcedure = publicProcedure.input(listInputSchema).query(async ({ ctx, input }) => {
+  let result;
+  try {
+    result = await listNodes(ctx.db, {
+      nodeTypes: input.nodeTypes ?? null,
+      sourceSystems: input.sourceSystems ?? null,
+      updatedSince: input.updatedSince ?? null,
+      where: (input.where as MetadataPredicate[] | undefined) ?? null,
+      limit: input.limit,
+      cursor: input.cursor ?? null,
+    });
+  } catch (err) {
+    throw mapCoreError("list", err);
+  }
+
+  const dtoNodes = result.nodes.map(toListedNodeDto);
+
+  return boundResponse(
+    dtoNodes,
+    (n) => n.id,
+    (kept, meta) => {
+      // The budget drops from the tail (the oldest), so the cursor must
+      // come from the last row actually returned, not from core's page —
+      // otherwise the next page would skip every row the budget dropped.
+      const last = kept[kept.length - 1];
+      const hasMore = result.hasMore || meta.droppedIds.length > 0;
+      return {
+        nodes: kept.map(({ cursor: _cursor, ...node }) => node),
+        hasMore,
+        nextCursor: hasMore && last ? last.cursor : null,
+        truncated: meta.truncated,
+        droppedNodeIds: meta.droppedIds,
+        shrunkNodeIds: meta.shrunkIds,
+      };
+    },
+  );
+});
+
+// --- resolveDefaultViews ---------------------------------------------------
+//
+// node-views (design.md decisions 7 and 8): one answer per id, in input
+// order, in one statement (packages/core/src/views.ts). GraphView.tsx asks
+// for the selected node only today; the batch shape is what lets the
+// canvas ask for every drawn node later without an API change (design.md's
+// open question). Not budgeted: the input is capped at MAX_RESOLVE_IDS and
+// each answer is two ids and a title (core caps titles at 500 characters),
+// so the largest possible response is a few hundred kilobytes — and
+// dropping answers would break "one answer per id", which is the contract.
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export const resolveDefaultViewsInputSchema = z.object({
+  ids: z
+    .array(z.string().regex(UUID_RE, "must be a valid uuid"))
+    .min(1, "must contain at least one id")
+    .max(MAX_RESOLVE_IDS, `must contain at most ${MAX_RESOLVE_IDS} ids`),
+});
+
+const resolveDefaultViewsProcedure = publicProcedure.input(resolveDefaultViewsInputSchema).query(async ({ ctx, input }) => {
+  try {
+    const results = await resolveDefaultViews(ctx.db, input.ids);
+    return { results };
+  } catch (err) {
+    throw mapCoreError("resolveDefaultViews", err);
+  }
+});
+
 export const readRouter = router({
   search: searchProcedure,
   getNeighbors: getNeighborsProcedure,
   getNodes: getNodesProcedure,
   getStoreSummary: getStoreSummaryProcedure,
   listUnlinkedNotes: listUnlinkedNotesProcedure,
+  list: listProcedure,
+  resolveDefaultViews: resolveDefaultViewsProcedure,
 });

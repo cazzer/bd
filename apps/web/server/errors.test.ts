@@ -4,11 +4,30 @@
 // (LookupFailedError.cause embeds a full SQL statement via drizzle-orm's
 // DrizzleQueryError).
 
-import { EdgeUpsertFailedError, LookupFailedError } from "@breakdown/core";
+import { EdgeUpsertFailedError, InvalidListOptionError, InvalidViewError, LookupFailedError } from "@breakdown/core";
 import { describe, expect, it } from "vitest";
 import { mapCoreError } from "./errors.js";
 
 describe("mapCoreError", () => {
+  it("maps InvalidViewError to BAD_REQUEST naming the item and field (node-views)", () => {
+    const coreErr = new InvalidViewError("at batch index 1 (agent/timeline-view)", "renderer", "timeline", "must be one of graph, feed, code");
+    const trpcErr = mapCoreError("createView", coreErr);
+
+    expect(trpcErr.code).toBe("BAD_REQUEST");
+    expect(trpcErr.message).toContain("at batch index 1 (agent/timeline-view)");
+    expect(trpcErr.message).toContain('renderer (got "timeline")');
+    expect(trpcErr.cause).toBeUndefined();
+  });
+
+  it("maps InvalidListOptionError to BAD_REQUEST naming the option (list)", () => {
+    const coreErr = new InvalidListOptionError("cursor", { updatedAt: "yesterday", id: "x" }, "must be a nextCursor from a previous listNodes result");
+    const trpcErr = mapCoreError("list", coreErr);
+
+    expect(trpcErr.code).toBe("BAD_REQUEST");
+    expect(trpcErr.message).toContain("cursor");
+    expect(trpcErr.cause).toBeUndefined();
+  });
+
   it("never reads or forwards a KnowledgeStoreError's .cause, even when it embeds a full SQL statement", () => {
     const fakeSql = "select * from nodes n /* secret internal comment */ where n.id = $1";
     const driverErr = new Error(`Failed query: ${fakeSql}\nparams: 42`);

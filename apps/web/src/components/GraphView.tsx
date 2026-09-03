@@ -7,11 +7,16 @@
 // guards, and this view's own `popstate` listener all stayed together on
 // purpose (design.md decision 4: turning `applyRoute` into a prop-driven
 // effect would re-open the four races its review follow-ups closed).
-// Two differences from the original, both marked "node-views" below:
+// Differences from the original, each marked "node-views" below:
 // `navigate` is imported from lib/navigate.ts, which also tells the shell
-// to re-read the address; and the `popstate` listener ignores a route
-// that is another view's, since the shell is about to swap this
-// component out.
+// to re-read the address; the `popstate` listener ignores a route that is
+// another view's, since the shell is about to swap this component out;
+// the unknown-path redirect is the shell's alone (the copy the mount
+// effect used to carry is gone); `leaveView` and the unmount cleanup
+// disarm the view on the way out so nothing still in flight writes
+// history after it is gone; and the selected node's default view is resolved
+// after selection (`defaultViews`) and offered by DetailPanel as "Open as
+// feed", never navigated to on its own (design.md decision 8).
 //
 // Search box, submitted query, results as a force-directed graph canvas
 // (bd-hmd.4, see graph/encoding.ts for the merge/pin/pagination logic
@@ -131,6 +136,8 @@ type Status = SearchBarStatus;
 type AnnotateResult = Awaited<ReturnType<typeof trpc.annotateNode.mutate>>;
 type AssertResult = Awaited<ReturnType<typeof trpc.assertEdge.mutate>>;
 type CreateNoteResult = Awaited<ReturnType<typeof trpc.createNote.mutate>>;
+/** One `resolveDefaultViews` answer (node-views) — what `defaultViews` below stores per node id and DetailPanel receives as `defaultView`. */
+type DefaultViewAnswer = Awaited<ReturnType<typeof trpc.resolveDefaultViews.query>>["results"][number];
 
 /** bd-8ub review, should-fix 7: pairs the trigger's `aria-controls` with the popover's own `id` — an honest non-modal disclosure relationship, not `role="dialog"`/`aria-haspopup="dialog"` (there is no modal here: no focus trap, and outside-pointerdown closes it, wired below). */
 const NOTE_POPOVER_ID = "new-note-popover";
@@ -195,6 +202,16 @@ export function GraphView() {
   // shared right column, and DetailPanel has no reason to know about
   // insetRight at all.
   const [detailExpanded, setDetailExpanded] = useState(false);
+  // node-views (design.md decision 8): the selected node's effective
+  // default view, resolved AFTER selection by the effect below and keyed
+  // by node id — never a single "current answer" slot, for the same reason
+  // `expansions` is a Map: an answer landing after the selection moved on
+  // is stored under the id it was asked for, and DetailPanel reads the
+  // entry for the id it is showing, so a stale answer can never be shown
+  // for the wrong node. A failed resolution stores `null` — shown as
+  // nothing, the graph exactly as it would be without the feature
+  // (node-views/spec.md, "Resolution fails").
+  const [defaultViews, setDefaultViews] = useState<ReadonlyMap<string, DefaultViewAnswer | null>>(() => new Map());
   // Bumped only when a search result lands (design.md decision 5, review
   // follow-up: an earlier version also bumped this on every settled
   // expansion, but the settle path bumps regardless of whether the fetch
@@ -246,6 +263,13 @@ export function GraphView() {
   // re-assert), which `runSearch` cannot know about.
   const searchGeneration = useRef(0);
   const routeGeneration = useRef(0);
+  // Whether this view is still the one on screen (node-views) — armed by
+  // the mount effect below, disarmed by `leaveView` and by that effect's
+  // cleanup on unmount. Read by `stale`, beside the two generations, at
+  // every post-await site in `runSearch`/`applyRoute`; see `leaveView` for
+  // the hazard and for why the unmount cleanup, not the popstate listener,
+  // is what reliably disarms it.
+  const live = useRef(true);
 
   // The "New note" popover (bd-8ub, task 2.4) — CreateNoteForm itself is
   // unchanged (same onCreated contract); only its trigger and container
@@ -342,7 +366,7 @@ export function GraphView() {
       // non-empty array (read.ts) — sending `[]` would be a validation
       // error instead of "no filter."
       const result = await trpc.search.query({ query: trimmed, nodeTypes: types.length > 0 ? types : undefined });
-      if (generation !== searchGeneration.current) {
+      if (stale(generation, searchGeneration)) {
         return null; // a later search was asked for while this one was in flight — see `searchGeneration`; the later call owns `status` now
       }
       setStatus({ kind: "done", result });
@@ -395,7 +419,7 @@ export function GraphView() {
       }
       return null;
     } catch (err) {
-      if (generation !== searchGeneration.current) {
+      if (stale(generation, searchGeneration)) {
         return null; // superseded — same as above; the failure belongs to a search nobody is waiting on any more
       }
       // TRPCClientError#message is already the safe, hand-mapped message
@@ -558,6 +582,75 @@ export function GraphView() {
     navigate(routeFor(note.id), "replace"); // url-addressable-views: a selection change, so a replace
   }
 
+  // node-views (design.md decision 8): resolve the selected node's default
+  // view once it is selected — after the graph is drawn, never before, and
+  // never awaited by anything: the panel opens on `selectedNodeId` alone
+  // and the affordance appears when (and only if) the answer names a feed.
+  // `cancelled` only stops a write after this effect was superseded; the
+  // Map's keying is what keeps a late answer correct — see `defaultViews`.
+  useEffect(() => {
+    if (selectedNodeId === null) {
+      return;
+    }
+    const id = selectedNodeId;
+    let cancelled = false;
+    trpc.resolveDefaultViews
+      .query({ ids: [id] })
+      .then((answer) => {
+        if (cancelled) return;
+        setDefaultViews((previous) => new Map(previous).set(id, answer.results[0] ?? null));
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setDefaultViews((previous) => new Map(previous).set(id, null));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedNodeId]);
+
+  /**
+   * Leaving the graph for another view (node-views; group 2 review's must-
+   * fix): disarm `live` so work still in flight when this component is
+   * unmounted can never write history afterwards. The hazard is concrete
+   * — a feed row activation pushes `/graph?node=X`, `applyRoute` finds no
+   * node in the empty graph and awaits `getNodes`; back to `/feed`
+   * unmounts this view; the lookup lands, its generation check still
+   * passes, and its `navigate(..., "replace")` overwrites the feed's
+   * history entry with a graph address (observed in this change's
+   * dogfood before the fix). Same for a `runSearch` result landing after
+   * back, whose push would add a graph entry on top of the feed. `stale`
+   * below makes every post-await check in `applyRoute` and `runSearch`
+   * fail closed once this is called.
+   *
+   * Called from the "Open as feed" push and from the popstate listener's
+   * non-graph branch, but the call that actually matters is the mount
+   * effect's cleanup: on a cross-view back step the shell's own popstate
+   * listener runs first, React flushes its `setRoute` synchronously (a
+   * popstate is a discrete event), this component unmounts mid-dispatch,
+   * and the DOM skips a listener removed during dispatch — so this view's
+   * listener never runs for that step at all (headless Playwright, React
+   * 19.2). Disarming on unmount covers every way out, present and future.
+   * Why not bump the generations instead? StrictMode's simulated unmount
+   * runs the cleanup too, and a bump there would cancel the initial
+   * `applyRoute` for good (its guard skips the second mount's re-apply);
+   * a flag the effect's setup re-arms survives that by construction.
+   */
+  function leaveView() {
+    live.current = false;
+  }
+
+  /** After an `await` in `runSearch`/`applyRoute`: true when a later call has superseded this one (its generation moved on) or this view has been left — either way, no `set*` and no `navigate`. */
+  function stale(generation: number, latest: { readonly current: number }): boolean {
+    return !live.current || generation !== latest.current;
+  }
+
+  /** DetailPanel's "Open as feed · <title>" (node-views, design.md decision 8): a push, so back returns to this node in the graph. */
+  function handleOpenDefaultView(viewId: string) {
+    leaveView();
+    navigate({ view: "feed", viewId }, "push");
+  }
+
   /**
    * The one path that turns a URL into explorer state — a deep link on
    * mount and a back/forward step both come through here, so they cannot
@@ -631,7 +724,7 @@ export function GraphView() {
       }
     } else if (!isSameSearch(submittedSearch, route)) {
       const result = await runSearch(route.q, route.types, { history: "none" });
-      if (generation !== routeGeneration.current || !result) {
+      if (stale(generation, routeGeneration) || !result) {
         return;
       }
       nodes = searchResultToGraphData(result).nodes;
@@ -667,7 +760,7 @@ export function GraphView() {
     } catch (err) {
       lookupFailure = err instanceof Error ? err.message : "Lookup failed unexpectedly.";
     }
-    if (generation !== routeGeneration.current) {
+    if (stale(generation, routeGeneration)) {
       return;
     }
     if (!lookedUp) {
@@ -693,27 +786,24 @@ export function GraphView() {
     applyRouteRef.current = applyRoute;
   });
 
-  // The initial route (design.md decisions 3 and 5): an unknown path
-  // (`/`, a stale bookmark) is replaced — never pushed, so it is never a
-  // back stop — with `/graph` carrying the same query string, then applied
-  // as if that had been the URL. Calls `applyRoute` directly rather than
-  // through the ref: on the first render `graph` is empty and
-  // `submittedSearch` null, which is exactly the state a fresh mount is in.
-  // (node-views: the shell performs the same replace in its own mount
-  // effect; child effects run first, so by then the address is already
-  // `/graph` and `navigate`'s equal-URL skip makes the shell's a no-op.
-  // Kept here unchanged so this view's mount is complete on its own.)
+  // The initial route (design.md decisions 3 and 5): the address as it is
+  // on mount, applied as if it had been navigated to. Calls `applyRoute`
+  // directly rather than through the ref: on the first render `graph` is
+  // empty and `submittedSearch` null, which is exactly the state a fresh
+  // mount is in. The unknown-path redirect (`/`, a stale bookmark →
+  // `/graph` with the same query) is the shell's (App.tsx, node-views
+  // design.md decision 4), not this view's: a copy here ran first (child
+  // effects before parent effects) and made the shell's dead, and
+  // `applyRoute` reads only `location.search`, which that redirect never
+  // changes — so under an unknown path this view applies the graph's
+  // parameters now and the shell rewrites the path a moment later.
   useEffect(() => {
     if (didApplyInitialRoute.current) {
       return;
     }
     didApplyInitialRoute.current = true;
     const parsed = parseRoute(location.pathname, location.search);
-    const route = parsed?.view === "graph" ? parsed : graphRouteFromSearch(location.search);
-    if (parsed === null) {
-      navigate(route, "replace");
-    }
-    void applyRoute(route);
+    void applyRoute(parsed?.view === "graph" ? parsed : graphRouteFromSearch(location.search));
   }, []);
 
   // Back/forward (design.md decision 3): the listener body reads no state
@@ -723,17 +813,32 @@ export function GraphView() {
   // 4, the one behavioural change in this file): an address that names
   // another view is ignored — the shell's own listener is about to
   // unmount this component, and applying graph parameters the address
-  // does not carry would only start a search nobody will see.
+  // does not carry would only start a search nobody will see. `leaveView`
+  // here is belt and braces: in practice this listener is never reached
+  // for such a step (see `leaveView` on why), and the effect below is
+  // what disarms the in-flight work.
   useEffect(() => {
     function handlePopState() {
       const parsed = parseRoute(location.pathname, location.search);
       if (parsed !== null && parsed.view !== "graph") {
+        leaveView();
         return;
       }
       void applyRouteRef.current?.(parsed ?? graphRouteFromSearch(location.search));
     }
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
+  // Arms `live` on mount, disarms it on unmount — see `leaveView`. No
+  // dependencies, so StrictMode's simulated unmount runs the cleanup and
+  // then this setup again, re-arming the guard for the initial
+  // `applyRoute` still in flight; a real unmount leaves it disarmed.
+  useEffect(() => {
+    live.current = true;
+    return () => {
+      live.current = false;
+    };
   }, []);
 
   /**
@@ -948,6 +1053,8 @@ export function GraphView() {
               onEdgeAsserted={handleEdgeAsserted}
               onEdgeRetracted={handleEdgeRetracted}
               onEdgeReweighted={handleEdgeReweighted}
+              defaultView={defaultViews.get(selectedNodeId) ?? null}
+              onOpenDefaultView={handleOpenDefaultView}
             />
           </div>
         )}

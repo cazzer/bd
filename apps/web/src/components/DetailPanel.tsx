@@ -108,7 +108,20 @@ export interface DetailPanelProps {
   onEdgeAsserted: (input: { srcId: string; dstId: string; edgeType: string; weight?: number }, result: AssertResult) => void;
   onEdgeRetracted: (linkId: string) => void;
   onEdgeReweighted: (linkId: string, weight: number) => void;
+  /**
+   * node-views (design.md decision 8): this node's effective default view,
+   * resolved by GraphView.tsx after selection and handed down — `null` or
+   * absent while unresolved, after a failed resolution, or when nothing
+   * applies; a `view` whose renderer is not `feed` is shown as nothing too
+   * (`graph` is where the person already is; `code` is drawn by nothing
+   * yet). The panel only ever offers, never navigates on its own.
+   */
+  defaultView?: ResolvedDefaultView | null;
+  /** "Open as feed" was chosen — GraphView.tsx pushes `/feed?view=<id>` (it owns the generation guards a push out of the graph must bump first, so the navigation is its call, not this panel's). */
+  onOpenDefaultView?: (viewId: string) => void;
 }
+
+type ResolvedDefaultView = Awaited<ReturnType<typeof trpc.resolveDefaultViews.query>>["results"][number];
 
 /** Closest editable ancestor of `target` (inclusive), if any — an `input`/`textarea`/`select`, or a `[contenteditable="true"]` region (the MarkdownEditor). Escape inside one of these must blur it, not close the whole panel (bd-8ub review, must-fix 2). */
 function closestEditable(target: EventTarget | null): HTMLElement | null {
@@ -480,7 +493,7 @@ function ConnectForm({ selfId, allNodes, onAsserted }: { selfId: string; allNode
   );
 }
 
-export function DetailPanel({ nodeId, allNodes, allLinks, onClose, onExpandedChange, onContentSaved, onAnnotated, onEdgeAsserted, onEdgeRetracted, onEdgeReweighted }: DetailPanelProps) {
+export function DetailPanel({ nodeId, allNodes, allLinks, onClose, onExpandedChange, onContentSaved, onAnnotated, onEdgeAsserted, onEdgeRetracted, onEdgeReweighted, defaultView, onOpenDefaultView }: DetailPanelProps) {
   const [state, setState] = useState<FetchState>({ kind: "loading" });
   // bd-e9n, design.md decision 6 — see this file's header. Defaults to
   // "summary" on every mount (a fresh `nodeId`, per App.tsx's `key`).
@@ -627,6 +640,9 @@ export function DetailPanel({ nodeId, allNodes, allLinks, onClose, onExpandedCha
   const graphNode = allNodes.find((n) => n.id === nodeId);
   const edgeViews = edgesTouchingNode(allLinks, nodeId);
   const nodeTitleById = (id: string) => allNodes.find((n) => n.id === id)?.title || id.slice(0, 8);
+  // node-views/spec.md, "A node's preferred view is offered, never forced":
+  // only a `feed` renderer earns the affordance — see `defaultView`'s doc.
+  const feedView = defaultView?.view && defaultView.view.renderer === "feed" ? defaultView.view : null;
 
   return (
     <aside
@@ -678,6 +694,16 @@ export function DetailPanel({ nodeId, allNodes, allLinks, onClose, onExpandedCha
           <InfoRow label="source" value={graphNode.sourceSystem} />
           <InfoRow label="degree" value={String(graphNode.degree)} />
         </div>
+      )}
+
+      {feedView && onOpenDefaultView && (
+        <button
+          type="button"
+          onClick={() => onOpenDefaultView(feedView.id)}
+          className="mb-3 w-full truncate rounded-lg border border-hairline px-3 py-1.5 text-left text-xs font-medium text-fg hover:bg-surface-strong focus:outline-none focus:ring-2 focus:ring-accent"
+        >
+          Open as feed · {feedView.title || "(untitled view)"}
+        </button>
       )}
 
       {state.kind === "loading" && <p className="text-xs text-fg-muted">Loading…</p>}

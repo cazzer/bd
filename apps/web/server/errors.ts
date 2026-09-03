@@ -34,11 +34,13 @@ import {
   InvalidEdgeInputError,
   InvalidEdgeWeightError,
   InvalidIngestRunError,
+  InvalidListOptionError,
   InvalidLookupIdError,
   InvalidLookupOptionError,
   InvalidNodeContentError,
   InvalidNodeInputError,
   InvalidRetrievalOptionError,
+  InvalidViewError,
   KnowledgeStoreError,
   LookupFailedError,
   MergeFailedError,
@@ -164,6 +166,22 @@ export function mapCoreError(procedureName: string, err: unknown): TRPCError {
   }
   if (err instanceof LookupFailedError) {
     return actionable("INTERNAL_SERVER_ERROR", err, RETRY_HINT);
+  }
+
+  // --- Structured listing (list) — Zod rejects malformed options first, so
+  // this is reached only for what the schema cannot see, e.g. a cursor
+  // that is well-formed text but not a keyset position core issued. ---
+  if (err instanceof InvalidListOptionError) {
+    return actionable("BAD_REQUEST", err, "Fix that option and retry: predicates are { key, op: \"equals\", value } or { key, op: \"oneOf\", values }, values are scalars, cursor is a nextCursor from a previous list response.");
+  }
+
+  // --- Views (node-views). No web procedure writes a view today (MCP
+  // only, design.md's Non-Goals), so this cannot surface yet; mapped now,
+  // beside the listing error the view contract reuses, so the first web
+  // writer inherits a field-naming BAD_REQUEST instead of the unmapped
+  // fallback below. ---
+  if (err instanceof InvalidViewError) {
+    return actionable("BAD_REQUEST", err, "Fix that field on the named item and retry; nothing from this call was persisted. renderer is one of graph, feed, code; filter is an object of list options (nodeTypes, sourceSystems, updatedSince, where) without limit or cursor.");
   }
 
   // --- Attribution plumbing (should not surface in practice — every write

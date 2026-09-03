@@ -29,12 +29,14 @@
 // keeps "one predicate, one place" (the UI still never re-derives
 // `sourceSystem === "repo"` itself) without that bundling hazard.
 
-import { isEditableSourceSystem, type LookedUpNode, type Neighbor, type RecentNode, type RetrievedNode } from "@breakdown/core";
+import { isEditableSourceSystem, type ListedNode, type LookedUpNode, type Neighbor, type RecentNode, type RetrievedNode } from "@breakdown/core";
 
 export type RetrievedNodeDto = Omit<RetrievedNode, "updatedAt"> & { updatedAt: string; isEditable: boolean };
 export type LookedUpNodeDto = Omit<LookedUpNode, "createdAt" | "updatedAt"> & { createdAt: string; updatedAt: string; isEditable: boolean };
 export type RecentNodeDto = Omit<RecentNode, "updatedAt"> & { updatedAt: string; isEditable: boolean };
 export type NeighborDto = Neighbor & { isEditable: boolean };
+/** node-views: a `list` row. Keeps core's per-row `cursor` — routers/read.ts's `list` needs the LAST KEPT row's cursor after the response budget has trimmed the page, and strips it from the wire shape itself. */
+export type ListedNodeDto = Omit<ListedNode, "createdAt" | "updatedAt"> & { createdAt: string; updatedAt: string; isEditable: boolean };
 
 export function toRetrievedNodeDto(node: RetrievedNode): RetrievedNodeDto {
   return { ...node, updatedAt: node.updatedAt.toISOString(), isEditable: isEditableSourceSystem(node.sourceSystem) };
@@ -46,6 +48,10 @@ export function toLookedUpNodeDto(node: LookedUpNode): LookedUpNodeDto {
 
 export function toRecentNodeDto(node: RecentNode): RecentNodeDto {
   return { ...node, updatedAt: node.updatedAt.toISOString(), isEditable: isEditableSourceSystem(node.sourceSystem) };
+}
+
+export function toListedNodeDto(node: ListedNode): ListedNodeDto {
+  return { ...node, createdAt: node.createdAt.toISOString(), updatedAt: node.updatedAt.toISOString(), isEditable: isEditableSourceSystem(node.sourceSystem) };
 }
 
 /**
