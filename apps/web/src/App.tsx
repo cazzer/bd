@@ -1,7 +1,8 @@
 // The app shell (node-views, design.md decision 4): parses `location`
 // into a `Route` and mounts the view it names — GraphView under `/graph`
 // (src/components/GraphView.tsx, where everything this file used to be
-// now lives, verbatim) or FeedView under `/feed`. It re-reads `location`
+// now lives, verbatim), FeedView under `/feed`, or CodeView under `/code`
+// (lazy — see its import below). It re-reads `location`
 // on `popstate` and whenever a view calls the shared `navigate`
 // (lib/navigate.ts), which notifies the subscriber registered below
 // after it has written history. Nothing else: each view keeps its own
@@ -32,12 +33,24 @@
 // GraphView takes no props and keeps its key, so it is never remounted by
 // a search or a selection — only by a change of view.
 
-import { useEffect, useRef, useState } from "react";
-import { CodeView } from "./components/CodeView.js";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { FeedView } from "./components/FeedView.js";
 import { GraphView } from "./components/GraphView.js";
 import { navigate, subscribeToNavigation } from "./lib/navigate.js";
 import { graphRouteFromSearch, parseRoute, type Route } from "./lib/route.js";
+
+// Lazy: CodeView carries CodeMirror's core, Lezer, and One Dark (its
+// grammars are dynamic imports of their own already), none of which the
+// graph or the feed needs, so its chunk is fetched on the first `/code`
+// rather than with every page. Until it lands the shell shows a bare
+// "Loading…"; the address is untouched either way.
+const CodeView = lazy(async () => ({ default: (await import("./components/CodeView.js")).CodeView }));
+
+const LOADING_VIEW = (
+  <main className="flex h-dvh w-screen items-center justify-center">
+    <p className="text-sm text-fg-muted">Loading…</p>
+  </main>
+);
 
 /** The view `location` names right now; an unknown path counts as the graph's, its parameters carried (url-addressable-views, design.md decision 5). */
 function routeFromLocation(): Route {
@@ -79,6 +92,10 @@ export function App() {
     case "feed":
       return <FeedView key="feed" viewId={route.viewId} />;
     case "code":
-      return <CodeView key="code" viewId={route.viewId} node={route.node} />;
+      return (
+        <Suspense fallback={LOADING_VIEW}>
+          <CodeView key="code" viewId={route.viewId} node={route.node} />
+        </Suspense>
+      );
   }
 }

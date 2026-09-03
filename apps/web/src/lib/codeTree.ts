@@ -48,6 +48,18 @@ export function isContainer(nodeType: string): boolean {
   return nodeType === "directory" || nodeType === "repo";
 }
 
+/**
+ * The rows the tree pane gives an expand toggle: a container, or any root
+ * (`parentId === null` — the `list` row a root is drawn from before its
+ * `tree` answer and the answer's own root row both have none). A view's
+ * root can be anything with `child_of` children — an epic over its work
+ * items — so its type does not decide; the `tree` answer does, and a root
+ * with no children opens to nothing.
+ */
+export function isExpandable(row: Pick<TreeRow, "nodeType" | "parentId">): boolean {
+  return isContainer(row.nodeType) || row.parentId === null;
+}
+
 const TITLE_COLLATOR = new Intl.Collator("en", { numeric: true });
 
 /** Containers first, then by title, then by id. Exported so the file pane can order a directory's listing the same way. */

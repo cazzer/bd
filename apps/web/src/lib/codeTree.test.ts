@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ancestorsOf, buildTree, childrenOf, compareTreeRows, isContainer, rootKeyOf, type TreeRow } from "./codeTree.js";
+import { ancestorsOf, buildTree, childrenOf, compareTreeRows, isContainer, isExpandable, rootKeyOf, type TreeRow } from "./codeTree.js";
 
 function row(id: string, parentId: string | null, nodeType: string, title: string, extra: Partial<TreeRow> = {}): TreeRow {
   return { id, parentId, nodeType, title, externalId: `k:${id}`, path: null, language: null, ...extra };
@@ -94,7 +94,7 @@ describe("ancestorsOf", () => {
   });
 });
 
-describe("rootKeyOf and isContainer", () => {
+describe("rootKeyOf, isContainer, and isExpandable", () => {
   it("takes the text before the first colon, or the whole id", () => {
     expect(rootKeyOf("bd:apps/web/src/lib/route.ts")).toBe("bd");
     expect(rootKeyOf("bd:docs/a:b.md")).toBe("bd");
@@ -108,5 +108,13 @@ describe("rootKeyOf and isContainer", () => {
     expect(isContainer("repo")).toBe(true);
     expect(isContainer("file")).toBe(false);
     expect(isContainer("work_item")).toBe(false);
+  });
+
+  it("a root of any type is expandable; below the root only containers are", () => {
+    expect(isExpandable(row("epic", null, "work_item", "bd-hmd"))).toBe(true);
+    expect(isExpandable(ROOT)).toBe(true);
+    expect(isExpandable(APPS)).toBe(true);
+    expect(isExpandable(README)).toBe(false);
+    expect(isExpandable(row("item", "epic", "work_item", "bd-hmd.3"))).toBe(false);
   });
 });

@@ -10,11 +10,16 @@
 // `getNodes` for the view node, `viewFilterOf` (lib/viewFilter.ts, shared)
 // for its filter, then `list` with the filter spread in plus a page size
 // for the roots. The renderer is not checked — `/code` draws any view's
-// selection as a tree, and a root without children is a leaf. One root
-// is expanded to its first level and its `tree` read issued at once;
-// several are collapsed, each read on first expansion. A `tree` answer is
-// cached in state by root id for the life of the view (a view change
-// resets the cache). With `node` set, `getNodes([node])` runs in parallel
+// selection as a tree, and every root is expandable whatever its type
+// (`isExpandable`, lib/codeTree.ts: an epic's `child_of` work items draw
+// the same as a repo's directories); one without children opens to
+// nothing. One root is expanded to its first level and its `tree` read
+// issued at once; several are collapsed, each read on first expansion. A
+// `tree` answer is cached in state by root id for the life of the view (a
+// view change resets the cache; the ready state carries `forViewId`, and
+// the tree-read effect and `ownerOf` bail while it lags `viewId`, so a
+// render still holding the old view never reads under the new one). With
+// `node` set, `getNodes([node])` runs in parallel
 // with the roots: the node's external id up to the first `:` is the
 // loader's key, which is the root's own external id (`rootKeyOf`, lib/
 // codeTree.ts), so the owning root is known without a walk and its tree
@@ -52,7 +57,7 @@ import { EditorView, lineNumbers } from "@codemirror/view";
 import { TRPCClientError } from "@trpc/client";
 import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { loadLanguage } from "../lib/codeLanguage.js";
-import { ancestorsOf, buildTree, childrenOf, isContainer, rootKeyOf, type CodeTree, type TreeRow } from "../lib/codeTree.js";
+import { ancestorsOf, buildTree, childrenOf, isContainer, isExpandable, rootKeyOf, type CodeTree, type TreeRow } from "../lib/codeTree.js";
 import { navigate } from "../lib/navigate.js";
 import { formatRoute, type GraphRoute } from "../lib/route.js";
 import { viewFilterOf } from "../lib/viewFilter.js";
@@ -68,20 +73,21 @@ const ROOT_PAGE_SIZE = 50;
 /** The bare graph — no search, nothing selected — which is where "Open the graph" goes. */
 const GRAPH_HOME: GraphRoute = { view: "graph", q: null, types: [], node: null };
 
+/** `forViewId` is the address the ready state was loaded for: a render can still hold the previous view's state after `viewId` changed, and anything that reads the store from it must wait for the reload. */
 type ViewState =
   | { kind: "no-view" }
   | { kind: "loading" }
   | { kind: "not-a-view" }
   | { kind: "error"; message: string }
-  | { kind: "ready"; view: { id: string; title: string }; roots: RootRow[]; hasMore: boolean };
+  | { kind: "ready"; forViewId: string; view: { id: string; title: string }; roots: RootRow[]; hasMore: boolean };
 
 type TreeState = { kind: "loading" } | { kind: "error"; message: string } | { kind: "ready"; tree: CodeTree; truncated: boolean };
 
 /** The node the address names, as `getNodes` answered: `missing` for BAD_REQUEST or an empty answer (no such node). */
 type NodeState = { kind: "none" } | { kind: "loading" } | { kind: "missing" } | { kind: "error"; message: string } | { kind: "ready"; node: LookedUpNode };
 
-/** Which loaded tree holds the shown node — `pending` while a candidate root's tree is still on its way, `outside` when none holds it. */
-type Owner = { kind: "none" } | { kind: "pending" } | { kind: "outside" } | { kind: "found"; rootId: string; tree: CodeTree };
+/** Which loaded tree holds the shown node — `pending` while a candidate root's tree is still on its way, `error` when a candidate's read failed (the message is the tree's), `outside` when none holds it. */
+type Owner = { kind: "none" } | { kind: "pending" } | { kind: "error"; message: string } | { kind: "outside" } | { kind: "found"; rootId: string; tree: CodeTree };
 
 function isBadRequest(err: unknown): boolean {
   return err instanceof TRPCClientError && err.data?.code === "BAD_REQUEST";
@@ -112,12 +118,12 @@ function rootRowOf(root: RootRow): TreeRow {
   };
 }
 
-/** Which loaded tree holds `nodeId` — see `Owner`. Any ready tree is searched first; only then does a candidate root (same loader key) still loading make the answer `pending`. */
-function ownerOf(view: ViewState, trees: ReadonlyMap<string, TreeState>, shown: NodeState, nodeId: string | null): Owner {
+/** Which loaded tree holds `nodeId` — see `Owner`. Any ready tree is searched first; only then does a candidate root (same loader key) still loading make the answer `pending`, or one whose read failed `error`. A ready view loaded for another address is still `pending`: its trees are the old view's. */
+function ownerOf(view: ViewState, viewId: string | null, trees: ReadonlyMap<string, TreeState>, shown: NodeState, nodeId: string | null): Owner {
   if (nodeId === null) {
     return { kind: "none" };
   }
-  if (view.kind !== "ready") {
+  if (view.kind !== "ready" || view.forViewId !== viewId) {
     return { kind: "pending" };
   }
   for (const root of view.roots) {
@@ -133,6 +139,7 @@ function ownerOf(view: ViewState, trees: ReadonlyMap<string, TreeState>, shown: 
     return { kind: "outside" };
   }
   const key = rootKeyOf(shown.node.externalId);
+  let failed: string | null = null;
   for (const root of view.roots) {
     if (rootKeyOf(root.externalId) !== key) {
       continue;
@@ -141,8 +148,11 @@ function ownerOf(view: ViewState, trees: ReadonlyMap<string, TreeState>, shown: 
     if (state === undefined || state.kind === "loading") {
       return { kind: "pending" };
     }
+    if (state.kind === "error") {
+      failed = state.message;
+    }
   }
-  return { kind: "outside" };
+  return failed === null ? { kind: "outside" } : { kind: "error", message: failed };
 }
 
 export function CodeView({ viewId, node }: { viewId: string | null; node: string | null }) {
@@ -198,7 +208,7 @@ export function CodeView({ viewId, node }: { viewId: string | null; node: string
         if (only !== undefined) {
           setExpanded(new Set([only.id]));
         }
-        setView({ kind: "ready", view: { id: viewNode.id, title: viewNode.title }, roots: page.nodes, hasMore: page.hasMore });
+        setView({ kind: "ready", forViewId: id, view: { id: viewNode.id, title: viewNode.title }, roots: page.nodes, hasMore: page.hasMore });
       } catch (err) {
         if (cancelled) return;
         setView({ kind: "error", message: messageOf(err, "Failed to list this view's roots.") });
@@ -251,6 +261,10 @@ export function CodeView({ viewId, node }: { viewId: string | null; node: string
       setTrees((previous) => new Map(previous).set(rootId, { kind: "ready", tree: buildTree(answer.nodes), truncated: answer.truncated }));
     } catch (err) {
       if (issuedFor !== generation.current) return;
+      // Forgotten here so a retry is possible; the error state below keeps
+      // the tree-read effect from re-issuing it until the person re-expands
+      // the root (`toggle`), which drops the state.
+      requested.current.delete(rootId);
       setTrees((previous) => new Map(previous).set(rootId, { kind: "error", message: messageOf(err, "Failed to read this tree.") }));
     }
   }
@@ -259,9 +273,14 @@ export function CodeView({ viewId, node }: { viewId: string | null; node: string
   // root the person expanded, and — once the shown node is known — every
   // root sharing its loader key, so a deep link's owner is read without
   // waiting for an expansion. Runs after every render; `requested` makes
-  // it idempotent.
+  // it idempotent, and a root whose read failed is left alone until the
+  // person re-expands it. It bails while `view` is the previous address's:
+  // the `viewId` effect above runs first in the same flush, bumping the
+  // generation and emptying `requested`, so without this check the old
+  // view's root would be read anew under the new generation and its
+  // answer cached against the new view.
   useEffect(() => {
-    if (view.kind !== "ready") {
+    if (view.kind !== "ready" || view.forViewId !== viewId) {
       return;
     }
     const wanted = new Set<string>();
@@ -283,13 +302,13 @@ export function CodeView({ viewId, node }: { viewId: string | null; node: string
       }
     }
     for (const rootId of wanted) {
-      if (!requested.current.has(rootId)) {
+      if (!requested.current.has(rootId) && trees.get(rootId)?.kind !== "error") {
         void loadTree(rootId);
       }
     }
   });
 
-  const owner = ownerOf(view, trees, shown, node);
+  const owner = ownerOf(view, viewId, trees, shown, node);
   const ownerTree = owner.kind === "found" ? owner.tree : null;
 
   // Expansion follows the address: the shown node's ancestors, and the
@@ -304,7 +323,7 @@ export function CodeView({ viewId, node }: { viewId: string | null; node: string
       return;
     }
     const row = ownerTree.rows.get(node);
-    const toExpand = row !== undefined && isContainer(row.nodeType) ? [...chain, node] : chain;
+    const toExpand = row !== undefined && isExpandable(row) ? [...chain, node] : chain;
     setExpanded((previous) => {
       let next: Set<string> | null = null;
       for (const id of toExpand) {
@@ -318,6 +337,15 @@ export function CodeView({ viewId, node }: { viewId: string | null; node: string
   }, [node, ownerTree]);
 
   function toggle(id: string) {
+    // Re-expanding a root whose `tree` read failed retries it: the error
+    // state is dropped, and the tree-read effect issues the read again.
+    if (!expanded.has(id) && trees.get(id)?.kind === "error") {
+      setTrees((previous) => {
+        const next = new Map(previous);
+        next.delete(id);
+        return next;
+      });
+    }
     setExpanded((previous) => {
       const next = new Set(previous);
       if (next.has(id)) {
@@ -329,9 +357,9 @@ export function CodeView({ viewId, node }: { viewId: string | null; node: string
     });
   }
 
-  /** Entry activation (code-view/spec.md, "The tree pane"): a push, so the browser's back control returns to the previously opened node; a container is expanded as well. */
+  /** Entry activation (code-view/spec.md, "The tree pane"): a push, so the browser's back control returns to the previously opened node; a container (or a root) is expanded as well. */
   function activate(row: TreeRow) {
-    if (isContainer(row.nodeType)) {
+    if (isExpandable(row)) {
       setExpanded((previous) => (previous.has(row.id) ? previous : new Set(previous).add(row.id)));
     }
     navigate({ view: "code", viewId, node: row.id }, "push");
@@ -384,6 +412,8 @@ export function CodeView({ viewId, node }: { viewId: string | null; node: string
   const shownRow = owner.kind === "found" && node !== null ? owner.tree.rows.get(node) : undefined;
   const path = shown.kind === "ready" ? (shownRow?.path ?? metadataText(shown.node.metadata, "path") ?? shown.node.title) : null;
   const rootsLine = `${view.roots.length} root${view.roots.length === 1 ? "" : "s"} shown${view.hasMore ? " · more match this view" : ""}`;
+  // The pane's alert: the node's own read failing, or the read of the tree that would hold it.
+  const paneError = shown.kind === "error" ? shown.message : owner.kind === "error" ? owner.message : null;
 
   return (
     <main className="flex h-dvh w-screen gap-3 overflow-hidden p-3">
@@ -405,9 +435,9 @@ export function CodeView({ viewId, node }: { viewId: string | null; node: string
           <div className="min-w-0">
             <h1 className="truncate text-base font-semibold text-fg">{view.view.title || "(untitled view)"}</h1>
             {path !== null && (
-              <p className="mt-0.5 truncate font-mono text-xs text-fg-muted" data-path={path}>
+              <h2 className="mt-0.5 truncate font-mono text-xs text-fg-muted" data-path={path}>
                 {path}
-              </p>
+              </h2>
             )}
           </div>
           <a href={formatRoute(graphRoute)} onClick={handleGraphLink(graphRoute)} className="shrink-0 rounded text-sm text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-accent">
@@ -417,12 +447,12 @@ export function CodeView({ viewId, node }: { viewId: string | null; node: string
 
         <div className="min-h-0 flex-1 overflow-hidden">
           {node === null && <p className="p-4 text-sm text-fg-muted">Choose a file from the tree.</p>}
-          {node !== null && shown.kind === "error" && (
+          {node !== null && paneError !== null && (
             <p role="alert" className="m-4 rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
-              {shown.message}
+              {paneError}
             </p>
           )}
-          {node !== null && shown.kind !== "error" && (shown.kind === "loading" || owner.kind === "pending") && <p className="p-4 text-sm text-fg-muted">Loading…</p>}
+          {node !== null && paneError === null && (shown.kind === "loading" || owner.kind === "pending") && <p className="p-4 text-sm text-fg-muted">Loading…</p>}
           {node !== null && (shown.kind === "missing" || (shown.kind === "ready" && owner.kind === "outside")) && (
             <p className="p-4 text-sm text-fg-muted">That node is not in this view.</p>
           )}
@@ -469,7 +499,7 @@ function RootEntry({
 }
 
 /**
- * One entry of the tree pane: a separate expand toggle (containers only)
+ * One entry of the tree pane: a separate expand toggle (containers and roots)
  * beside the activation button, so an activation and an expansion are
  * distinct actions for a screen reader (design.md decision 6). Children
  * render only while expanded, beneath the entry, so expanding moves
@@ -494,15 +524,15 @@ function Entry({
   onActivate: (row: TreeRow) => void;
   children?: ReactNode;
 }) {
-  const container = isContainer(row.nodeType);
-  const isExpanded = container && expanded.has(row.id);
+  const expandable = isExpandable(row);
+  const isExpanded = expandable && expanded.has(row.id);
   const selected = row.id === selectedId;
   const title = row.title || "(untitled)";
   const entries = isExpanded && tree !== null ? childrenOf(tree, row.id) : [];
   return (
     <li data-node-id={row.id} data-node-type={row.nodeType}>
       <div className="flex items-center gap-0.5" style={{ paddingLeft: `${depth * 0.75}rem` }}>
-        {container ? (
+        {expandable ? (
           <button
             type="button"
             aria-label={`${isExpanded ? "Collapse" : "Expand"} ${title}`}
@@ -536,12 +566,12 @@ function Entry({
   );
 }
 
-/** The file pane's body by kind (code-view/spec.md, "The file pane shows a node's content by kind"). */
+/** The file pane's body by kind (code-view/spec.md, "The file pane shows a node's content by kind"). A `repo` root is a container like a directory (`isContainer`), so it lists its entries rather than printing the loader's child-name list. */
 function NodePane({ node, tree, onActivate }: { node: LookedUpNode; tree: CodeTree; onActivate: (row: TreeRow) => void }) {
   if (node.nodeType === "file") {
     return <SourcePane key={node.id} content={node.content} language={metadataText(node.metadata, "language")} />;
   }
-  if (node.nodeType === "directory") {
+  if (isContainer(node.nodeType)) {
     const entries = childrenOf(tree, node.id);
     if (entries.length === 0) {
       return <p className="p-4 text-sm text-fg-muted">This directory has no entries in this view.</p>;
