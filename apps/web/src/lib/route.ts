@@ -1,28 +1,33 @@
 // The explorer's URL, as a pure parse/format pair (url-addressable-views,
-// design.md decision 1). One place knows the URL's shape; App.tsx owns
-// WHEN it is read and written (design.md decisions 2-5), never how it is
+// design.md decision 1). One place knows the URL's shape; the app shell
+// (App.tsx) and each view own WHEN it is read and written (design.md
+// decisions 2-5; node-views design.md decision 4), never how it is
 // spelled.
 //
-// `Route` is a discriminated union on `view` so a second way of looking
-// at the same items (a list, a table) can be added by widening the union
-// and teaching `parseRoute`/`formatRoute` its name — nothing about the
-// graph view has to move. Today the union has one member, which is
-// exactly why the view gets named now, while the rename is free
-// (proposal.md — Why).
+// `Route` is a discriminated union on `view`: the graph view and — node-
+// views, design.md decision 5 — the feed view. A third way of looking at
+// the same items is added by widening the union and teaching
+// `parseRoute`/`formatRoute` its name; nothing about the existing views
+// has to move, which is exactly what adding the feed proved.
 //
-// Not a router: one view with three query parameters needs no matching,
-// layouts, or loaders, and a parse/format pair is a plain function with a
-// plain test in the node environment, the same pattern every other
-// `src/lib` module follows. Accordingly, this module never touches
-// `window`, `location`, or `history` — callers hand it the strings.
+// Not a router: two views with a handful of query parameters need no
+// matching, layouts, or loaders, and a parse/format pair is a plain
+// function with a plain test in the node environment, the same pattern
+// every other `src/lib` module follows. Accordingly, this module never
+// touches `window`, `location`, or `history` — callers hand it the
+// strings (lib/navigate.ts is the one place that does touch them).
 //
-// Parsing never throws and validates nothing beyond shape: a `node` that
-// is not a UUID (or names no node) is the server's to reject —
-// `getNodes`'s `notFoundIds` is how App.tsx discovers a bad id, and a
-// format check here would be a second, weaker copy of that rule.
+// Parsing never throws and validates nothing beyond shape: a `node` (or
+// a feed's `view`) that is not a UUID, or names no node, is the server's
+// to reject — `getNodes`'s `notFoundIds` is how GraphView.tsx discovers
+// a bad id, and a format check here would be a second, weaker copy of
+// that rule.
 
 /** The graph view's path. `parseRoute` also accepts it with one trailing slash. */
 export const GRAPH_VIEW_PATH = "/graph";
+
+/** The feed view's path (node-views). `parseRoute` also accepts it with one trailing slash. */
+export const FEED_VIEW_PATH = "/feed";
 
 /** The force-graph view: the submitted query, the node-type filters it was submitted with, and the selected node. `null`/`[]` mean absent. */
 export interface GraphRoute {
@@ -32,8 +37,14 @@ export interface GraphRoute {
   node: string | null;
 }
 
+/** The feed view (node-views, design.md decision 5): the id of the `view` node whose filter it draws, or `null` when the address names none — FeedView's "no view" empty state, never a redirect. */
+export interface FeedRoute {
+  view: "feed";
+  viewId: string | null;
+}
+
 /** Every addressable view. A future view widens this union. */
-export type Route = GraphRoute;
+export type Route = GraphRoute | FeedRoute;
 
 /** `s` trimmed, or `null` when it is missing or whitespace-only — mirrors `runSearch`'s own trim, so `?q=%20` and no `q` at all mean the same thing. */
 function nonEmpty(s: string | null): string | null {
@@ -68,31 +79,49 @@ export function graphRouteFromSearch(search: string): GraphRoute {
 }
 
 /**
+ * The feed view's parameters from a query string alone (node-views).
+ * `view` is the only one; missing, empty, or whitespace-only degrades to
+ * `null` the way `q`/`node` do above, and anything else is ignored — a
+ * graph parameter on a feed address is not carried anywhere, since the
+ * feed has no search to apply it to.
+ */
+function feedRouteFromSearch(search: string): FeedRoute {
+  const params = new URLSearchParams(search);
+  return { view: "feed", viewId: nonEmpty(params.get("view")) };
+}
+
+/**
  * The route a `pathname` + `search` pair names, or `null` when the path is
  * not a view we have — the caller's cue to redirect to
- * `formatRoute(graphRouteFromSearch(search))`. Exactly `/graph` (one
- * trailing slash tolerated, no case folding) is the graph view; `/`,
- * `/list`, `/graph/x` are all unknown.
+ * `formatRoute(graphRouteFromSearch(search))`. Exactly `/graph` or
+ * `/feed` (one trailing slash tolerated, no case folding) is a view; `/`,
+ * `/list`, `/graph/x`, `/feed/x` are all unknown.
  */
 export function parseRoute(pathname: string, search: string): Route | null {
   const path = pathname.length > 1 && pathname.endsWith("/") ? pathname.slice(0, -1) : pathname;
   if (path === GRAPH_VIEW_PATH) {
     return graphRouteFromSearch(search);
   }
+  if (path === FEED_VIEW_PATH) {
+    return feedRouteFromSearch(search);
+  }
   return null;
 }
 
 /**
  * The URL (path + query string, no origin) for a route. Parameters are
- * emitted in a fixed order — `q`, each `type` in order, `node` — and
- * absent ones are omitted, so two structurally equal routes always
- * format to the same string: App.tsx relies on that to skip a history
- * write when nothing changed. Round-trips through `parseRoute`.
+ * emitted in a fixed order — for the graph `q`, each `type` in order,
+ * `node`; for the feed just `view` — and absent ones are omitted, so two
+ * structurally equal routes always format to the same string:
+ * lib/navigate.ts relies on that to skip a history write when nothing
+ * changed. Round-trips through `parseRoute`.
  */
 export function formatRoute(route: Route): string {
   switch (route.view) {
     case "graph":
       return formatGraphRoute(route);
+    case "feed":
+      return formatFeedRoute(route);
   }
 }
 
@@ -109,4 +138,13 @@ function formatGraphRoute(route: GraphRoute): string {
   }
   const query = params.toString();
   return query.length > 0 ? `${GRAPH_VIEW_PATH}?${query}` : GRAPH_VIEW_PATH;
+}
+
+function formatFeedRoute(route: FeedRoute): string {
+  if (route.viewId === null) {
+    return FEED_VIEW_PATH;
+  }
+  const params = new URLSearchParams();
+  params.set("view", route.viewId);
+  return `${FEED_VIEW_PATH}?${params.toString()}`;
 }
