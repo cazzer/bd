@@ -79,7 +79,7 @@ The result is `Array<{ nodeId, view: { id, title, renderer } | null, declaredBy:
 
 - title, and the node type as a chip;
 - `status`, `priority`, `assignee` when the corresponding metadata value is a string or number (present on work items; simply absent otherwise);
-- every top-level metadata value that is a string beginning with `http://` or `https://`, as a link whose text is the key (`url`, `pr_url`, whatever the writer chose), `rel="noopener"` in a new tab.
+- every top-level metadata value that is a string beginning with `http://` or `https://`, as a link whose text is the key (`url`, `pr_url`, whatever the writer chose), `rel="noopener noreferrer"` in a new tab.
 
 Row activation navigates with a push to `{ view: "graph", q: null, types: [], node: id }`; the graph's existing "deep-linked node outside the result is drawn on its own" path shows it. The feed is read-only and never asks for content.
 

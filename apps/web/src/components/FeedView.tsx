@@ -184,7 +184,9 @@ export function FeedView({ viewId }: { viewId: string | null }) {
       );
     } catch (err) {
       const message = messageOf(err, "Failed to load more.");
-      setState((previous) => (previous.kind === "ready" && previous.view.id === view.id ? { ...previous, loadingMore: false, moreError: message } : previous));
+      setState((previous) =>
+        previous.kind === "ready" && previous.view.id === view.id && previous.nextCursor === cursor ? { ...previous, loadingMore: false, moreError: message } : previous,
+      );
     }
   }
 
@@ -312,7 +314,7 @@ function FeedRowItem({ row, onActivate }: { row: FeedRow; onActivate: (row: Feed
       {links.length > 0 && (
         <span className="flex shrink-0 flex-wrap justify-end gap-2 text-xs">
           {links.map((link) => (
-            <a key={link.key} href={link.href} target="_blank" rel="noopener" className="rounded text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-accent">
+            <a key={link.key} href={link.href} target="_blank" rel="noopener noreferrer" className="rounded text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-accent">
               {link.key}
             </a>
           ))}

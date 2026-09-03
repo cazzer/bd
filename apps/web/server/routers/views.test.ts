@@ -18,7 +18,6 @@ import { closeIngestRun, normalizeViewMetadata, openIngestRun, upsertEdges, upse
 import { createDb, createPool, edges, ingestRuns, nodes, resolveDatabaseUrl, type Database } from "@breakdown/db";
 import { eq, inArray } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { DEFAULT_RESPONSE_CHAR_BUDGET } from "../budget.js";
 import type { Context } from "../context.js";
 import { appRouter } from "../router.js";
 import { createCallerFactory } from "../trpc.js";
@@ -116,33 +115,49 @@ describe("list (local-web-api spec, 'Listing a view's selection')", () => {
   });
 
   it("trims a page that exceeds the response budget, and the cursor resumes at exactly the first dropped row", async () => {
-    // 45 rows of ~48k characters each is ~2.16M — past DEFAULT_RESPONSE_CHAR_BUDGET
-    // (2M) but well under the per-item shrink threshold (2x the budget), so
-    // the budget DROPS tail rows rather than shrinking any: the case where a
-    // cursor taken from core's page (the 45th row) would skip every dropped
-    // row on the next call.
+    // The budget is injected (Context.responseCharBudget) rather than met:
+    // a ~5k budget over ~500-character rows proves the same trim that once
+    // took 45 rows of ~48k characters (~2.16M, past the 2M default) — and
+    // no longer writes megabytes into the shared database to do it. The
+    // rows total more than one budget but less than two, and each is far
+    // under the per-item shrink threshold (2x the budget), so the budget
+    // DROPS tail rows rather than shrinking any: the case where a cursor
+    // taken from core's page (the last row) would skip every dropped row
+    // on the next call.
     const batch = fx();
-    const count = 45;
-    const pad = "x".repeat(47_900);
+    const count = 14;
+    const budget = 5_000;
+    const pad = "x".repeat(100);
     const specs = [];
-    for (let i = 0; i < count; i++) specs.push({ externalId: `${batch}-big-${String(i).padStart(2, "0")}`, nodeType: "blob", metadata: { batch, pad } });
+    for (let i = 0; i < count; i++) specs.push({ externalId: `${batch}-row-${String(i).padStart(2, "0")}`, nodeType: "blob", metadata: { batch, pad } });
     const ids = await writeNodes(specs);
     expect(ids.size).toBe(count);
-    expect(JSON.stringify({ batch, pad }).length * count).toBeGreaterThan(DEFAULT_RESPONSE_CHAR_BUDGET);
 
     const input = { sourceSystems: [SRC], where: [{ key: "batch", op: "equals" as const, value: batch }], limit: count };
 
-    const page1 = await caller().list(input);
+    // The whole listing under the default budget: the order the two
+    // trimmed pages must reproduce between them. Compared against a slice
+    // of this rather than `droppedNodeIds`, which can carry the envelope
+    // back-off's popped id out of order.
+    const full = await caller().list(input);
+    expect(full.truncated).toBe(false);
+    expect(full.hasMore).toBe(false);
+    const order = full.nodes.map((n) => n.id);
+    expect(order).toHaveLength(count);
+    expect(JSON.stringify(full).length).toBeGreaterThan(budget);
+
+    const page1 = await callerWith(db, budget).list(input);
     expect(page1.truncated).toBe(true);
     expect(page1.droppedNodeIds.length).toBeGreaterThan(0);
     expect(page1.shrunkNodeIds).toEqual([]);
     expect(page1.nodes.length + page1.droppedNodeIds.length).toBe(count);
     expect(page1.hasMore).toBe(true);
     expect(page1.nextCursor?.id).toBe(page1.nodes[page1.nodes.length - 1]?.id);
-    expect(JSON.stringify(page1).length).toBeLessThanOrEqual(DEFAULT_RESPONSE_CHAR_BUDGET);
+    expect(JSON.stringify(page1).length).toBeLessThanOrEqual(budget);
+    expect(page1.nodes.map((n) => n.id)).toEqual(order.slice(0, page1.nodes.length));
 
-    const page2 = await caller().list({ ...input, cursor: page1.nextCursor! });
-    expect(page2.nodes.map((n) => n.id)).toEqual(page1.droppedNodeIds);
+    const page2 = await callerWith(db, budget).list({ ...input, cursor: page1.nextCursor! });
+    expect(page2.nodes.map((n) => n.id)).toEqual(order.slice(page1.nodes.length));
     expect(page2.hasMore).toBe(false);
     expect(page2.truncated).toBe(false);
 
@@ -201,7 +216,8 @@ describe("resolveDefaultViews (local-web-api spec, 'Resolving default views for 
   });
 });
 
-function callerWith(dbInstance: Database) {
-  const ctx: Context = { db: dbInstance };
+/** A caller over `dbInstance`, optionally with a response budget other than `DEFAULT_RESPONSE_CHAR_BUDGET` (Context.responseCharBudget). */
+function callerWith(dbInstance: Database, responseCharBudget?: number) {
+  const ctx: Context = { db: dbInstance, responseCharBudget };
   return createCaller(ctx);
 }

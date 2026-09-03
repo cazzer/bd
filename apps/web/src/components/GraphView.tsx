@@ -564,6 +564,12 @@ export function GraphView() {
 
   /** A standalone note was created (CreateNoteForm, task 6.4) — draws it (degree 0, no edges) and opens its detail. */
   function handleNoteCreated(result: CreateNoteResult, title: string | undefined) {
+    // CreateNoteForm awaits the mutation before calling this, so the graph
+    // may already have been left (submit, then Back to `/feed` before the
+    // write lands): the `navigate(..., "replace")` below would overwrite
+    // the feed's history entry with a graph address and remount this view
+    // over the feed. Same fail-closed check as `stale` — see `leaveView`.
+    if (!live.current) return;
     const node = buildStandaloneNoteNode(result, title);
     setGraph((previous) => mergeStandaloneNode(previous, node));
     setSelectedNodeId(result.id);
@@ -625,12 +631,14 @@ export function GraphView() {
    *
    * Called from the "Open as feed" push and from the popstate listener's
    * non-graph branch, but the call that actually matters is the mount
-   * effect's cleanup: on a cross-view back step the shell's own popstate
-   * listener runs first, React flushes its `setRoute` synchronously (a
-   * popstate is a discrete event), this component unmounts mid-dispatch,
-   * and the DOM skips a listener removed during dispatch — so this view's
-   * listener never runs for that step at all (headless Playwright, React
-   * 19.2). Disarming on unmount covers every way out, present and future.
+   * effect's cleanup: on a cross-view back step after a view swap the
+   * shell's own popstate listener runs first, React flushes its
+   * `setRoute` in the microtask checkpoint between listeners, this
+   * component unmounts mid-dispatch, and the DOM skips a listener removed
+   * during dispatch — so this view's listener never runs for that step at
+   * all (headless Playwright, React 19.2; the popstate effect below on
+   * the other registration order, where it does run). Disarming on
+   * unmount covers every way out, present and future.
    * Why not bump the generations instead? StrictMode's simulated unmount
    * runs the cleanup too, and a bump there would cancel the initial
    * `applyRoute` for good (its guard skips the second mount's re-apply);
@@ -812,11 +820,25 @@ export function GraphView() {
   // can be registered once and left alone. node-views (design.md decision
   // 4, the one behavioural change in this file): an address that names
   // another view is ignored — the shell's own listener is about to
-  // unmount this component, and applying graph parameters the address
-  // does not carry would only start a search nobody will see. `leaveView`
-  // here is belt and braces: in practice this listener is never reached
-  // for such a step (see `leaveView` on why), and the effect below is
-  // what disarms the in-flight work.
+  // unmount (or has just unmounted) this component, and applying graph
+  // parameters the address does not carry would only start a search
+  // nobody will see. Whether that branch runs at all depends on which
+  // listener the DOM reaches first, i.e. on registration order:
+  //
+  //   - This instance registered before the shell's listener (the app
+  //     mounted at `/graph`, child effects running before the parent's;
+  //     then Back to an adjacent same-document `/feed` entry): this
+  //     listener runs first, the branch IS reached, and the shell's
+  //     listener unmounts the component right after it.
+  //   - This instance mounted after the shell's listener (a view swap):
+  //     the shell's listener runs first, React flushes its `setRoute` in
+  //     the microtask checkpoint between listeners, this component
+  //     unmounts mid-dispatch, and the DOM skips a listener removed
+  //     during dispatch — the branch is never reached.
+  //
+  // `leaveView` here is correct in both orderings (a no-op in the second,
+  // where the mount effect's cleanup has already disarmed it); that
+  // cleanup, below, is what covers every way out.
   useEffect(() => {
     function handlePopState() {
       const parsed = parseRoute(location.pathname, location.search);

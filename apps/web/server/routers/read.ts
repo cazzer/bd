@@ -150,6 +150,7 @@ const searchProcedure = publicProcedure.input(searchInputSchema).query(async ({ 
         edges: result.edges.filter((e) => keptIds.has(e.srcNodeId) && keptIds.has(e.dstNodeId)),
       };
     },
+    ctx.responseCharBudget,
   );
 });
 
@@ -210,6 +211,7 @@ const getNodesProcedure = publicProcedure.input(getNodesInputSchema).query(async
       droppedNodeIds: meta.droppedIds,
       shrunkNodeIds: meta.shrunkIds,
     }),
+    ctx.responseCharBudget,
   );
 });
 
@@ -247,6 +249,7 @@ const getStoreSummaryProcedure = publicProcedure.input(getStoreSummaryInputSchem
       droppedNodeIds: meta.droppedIds,
       shrunkNodeIds: meta.shrunkIds,
     }),
+    ctx.responseCharBudget,
   );
 });
 
@@ -393,6 +396,7 @@ const listProcedure = publicProcedure.input(listInputSchema).query(async ({ ctx,
         shrunkNodeIds: meta.shrunkIds,
       };
     },
+    ctx.responseCharBudget,
   );
 });
 
