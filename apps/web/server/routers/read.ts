@@ -39,6 +39,7 @@ import {
   getNeighbors,
   getNodes,
   getStoreSummary,
+  getSubtree,
   listNodes,
   MAX_ALLOWED_DEPTH,
   MAX_FANOUT,
@@ -61,6 +62,7 @@ import {
   type NeighborsCursor,
   type RetrieveOptions,
 } from "@breakdown/core";
+import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { boundResponse } from "../budget.js";
 import { toListedNodeDto, toLookedUpNodeDto, toNeighborDto, toRecentNodeDto, toRetrievedNodeDto } from "../dto.js";
@@ -425,6 +427,47 @@ const resolveDefaultViewsProcedure = publicProcedure.input(resolveDefaultViewsIn
   }
 });
 
+// --- tree ------------------------------------------------------------------
+//
+// code-view (design.md decision 1; local-web-api spec, "Reading a
+// repository's tree"): one root id in, the root and its `child_of`
+// descendants out — each with its parent id, type, title, external id,
+// and `path`/`language` metadata, never content — shallowest first
+// (packages/core/src/tree.ts). One request draws a tree; a deep link's
+// ancestors are followed client-side through `parentId`.
+//
+// Not budgeted — no `boundResponse` — because the read is bounded by
+// count, not by size: core caps the answer at MAX_SUBTREE_NODES rows of
+// seven short fields (titles at most 500 characters, and in practice a
+// file's base name), which is well under the 2 MB character budget the
+// other procedures apply; and the budget drops from the tail, which for
+// a depth-ordered tree would be a second, silent truncation stacked on
+// the honest `truncated` flag core already reports. A root that names no
+// canonical node is BAD_REQUEST, not NOT_FOUND (code-view spec, "Root
+// names no node": "rejected as a bad request"): to the code view the
+// address is wrong the same way a malformed id is — `getNodes` answers
+// both with BAD_REQUEST too, one through Zod-free `InvalidLookupIdError`
+// and one through `notFoundIds` — so the one-id shape gets the same code
+// here rather than `mapCoreError`'s NOT_FOUND for `getNeighbors`, whose
+// caller is an agent that can go and search.
+
+export const treeInputSchema = z.object({
+  rootId: z.string().min(1, "must not be empty"),
+});
+
+const treeProcedure = publicProcedure.input(treeInputSchema).query(async ({ ctx, input }) => {
+  try {
+    const result = await getSubtree(ctx.db, input.rootId);
+    return { rootId: result.rootId, nodes: result.nodes, truncated: result.truncated };
+  } catch (err) {
+    if (err instanceof NodeNotFoundError) {
+      // Built from core's own safe `.message`, never `cause` (../errors.ts's header).
+      throw new TRPCError({ code: "BAD_REQUEST", message: `${err.message} The address names no root — open the view from the graph, or verify the id with getNodes.` });
+    }
+    throw mapCoreError("tree", err);
+  }
+});
+
 export const readRouter = router({
   search: searchProcedure,
   getNeighbors: getNeighborsProcedure,
@@ -433,4 +476,5 @@ export const readRouter = router({
   listUnlinkedNotes: listUnlinkedNotesProcedure,
   list: listProcedure,
   resolveDefaultViews: resolveDefaultViewsProcedure,
+  tree: treeProcedure,
 });

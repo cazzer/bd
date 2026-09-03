@@ -109,19 +109,34 @@ export interface DetailPanelProps {
   onEdgeRetracted: (linkId: string) => void;
   onEdgeReweighted: (linkId: string, weight: number) => void;
   /**
-   * node-views (design.md decision 8): this node's effective default view,
-   * resolved by GraphView.tsx after selection and handed down — `null` or
-   * absent while unresolved, after a failed resolution, or when nothing
-   * applies; a `view` whose renderer is not `feed` is shown as nothing too
-   * (`graph` is where the person already is; `code` is drawn by nothing
-   * yet). The panel only ever offers, never navigates on its own.
+   * node-views (design.md decision 8), generalized by code-view (design.md
+   * decision 5): this node's effective default view, resolved by
+   * GraphView.tsx after selection and handed down — `null` or absent while
+   * unresolved, after a failed resolution, or when nothing applies. Only a
+   * `feed` or `code` renderer earns an offer; `graph` is where the person
+   * already is, and a view row written outside the contract (renderer
+   * null) names nothing to open. The panel only ever offers, never
+   * navigates on its own.
    */
   defaultView?: ResolvedDefaultView | null;
-  /** "Open as feed" was chosen — GraphView.tsx pushes `/feed?view=<id>` (it owns the generation guards a push out of the graph must bump first, so the navigation is its call, not this panel's). */
-  onOpenDefaultView?: (viewId: string) => void;
+  /** "Open as feed · …" / "Open as code · …" was chosen — GraphView.tsx pushes `/feed?view=<id>` or `/code?view=<id>&node=<selected>` (it owns the guards a push out of the graph must disarm first, so the navigation is its call, not this panel's). */
+  onOpenDefaultView?: (view: OfferedView) => void;
 }
 
 type ResolvedDefaultView = Awaited<ReturnType<typeof trpc.resolveDefaultViews.query>>["results"][number];
+
+/** The renderers the detail panel can offer to open — the ones another view draws. */
+export type OfferedRenderer = "feed" | "code";
+
+/** What `onOpenDefaultView` receives: the view to open and the renderer that decides which address GraphView.tsx pushes. */
+export interface OfferedView {
+  id: string;
+  renderer: OfferedRenderer;
+}
+
+function isOfferedRenderer(renderer: string | null): renderer is OfferedRenderer {
+  return renderer === "feed" || renderer === "code";
+}
 
 /** Closest editable ancestor of `target` (inclusive), if any — an `input`/`textarea`/`select`, or a `[contenteditable="true"]` region (the MarkdownEditor). Escape inside one of these must blur it, not close the whole panel (bd-8ub review, must-fix 2). */
 function closestEditable(target: EventTarget | null): HTMLElement | null {
@@ -641,8 +656,9 @@ export function DetailPanel({ nodeId, allNodes, allLinks, onClose, onExpandedCha
   const edgeViews = edgesTouchingNode(allLinks, nodeId);
   const nodeTitleById = (id: string) => allNodes.find((n) => n.id === id)?.title || id.slice(0, 8);
   // node-views/spec.md, "A node's preferred view is offered, never forced":
-  // only a `feed` renderer earns the affordance — see `defaultView`'s doc.
-  const feedView = defaultView?.view && defaultView.view.renderer === "feed" ? defaultView.view : null;
+  // a `feed` or `code` renderer earns the affordance, named for the
+  // renderer — see `defaultView`'s doc.
+  const offer = defaultView?.view && isOfferedRenderer(defaultView.view.renderer) ? { id: defaultView.view.id, renderer: defaultView.view.renderer, title: defaultView.view.title } : null;
 
   return (
     <aside
@@ -696,13 +712,13 @@ export function DetailPanel({ nodeId, allNodes, allLinks, onClose, onExpandedCha
         </div>
       )}
 
-      {feedView && onOpenDefaultView && (
+      {offer && onOpenDefaultView && (
         <button
           type="button"
-          onClick={() => onOpenDefaultView(feedView.id)}
+          onClick={() => onOpenDefaultView({ id: offer.id, renderer: offer.renderer })}
           className="mb-3 w-full truncate rounded-lg border border-hairline px-3 py-1.5 text-left text-xs font-medium text-fg hover:bg-surface-strong focus:outline-none focus:ring-2 focus:ring-accent"
         >
-          Open as feed · {feedView.title || "(untitled view)"}
+          Open as {offer.renderer} · {offer.title || "(untitled view)"}
         </button>
       )}
 

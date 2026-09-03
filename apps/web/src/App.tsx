@@ -33,6 +33,7 @@
 // a search or a selection — only by a change of view.
 
 import { useEffect, useRef, useState } from "react";
+import { CodeView } from "./components/CodeView.js";
 import { FeedView } from "./components/FeedView.js";
 import { GraphView } from "./components/GraphView.js";
 import { navigate, subscribeToNavigation } from "./lib/navigate.js";
@@ -77,5 +78,7 @@ export function App() {
       return <GraphView key="graph" />;
     case "feed":
       return <FeedView key="feed" viewId={route.viewId} />;
+    case "code":
+      return <CodeView key="code" viewId={route.viewId} node={route.node} />;
   }
 }

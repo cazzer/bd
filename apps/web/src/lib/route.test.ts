@@ -9,7 +9,7 @@
 // parameters and nothing else).
 
 import { describe, expect, it } from "vitest";
-import { FEED_VIEW_PATH, formatRoute, GRAPH_VIEW_PATH, graphRouteFromSearch, parseRoute, type FeedRoute, type GraphRoute, type Route } from "./route.js";
+import { CODE_VIEW_PATH, FEED_VIEW_PATH, formatRoute, GRAPH_VIEW_PATH, graphRouteFromSearch, parseRoute, type CodeRoute, type FeedRoute, type GraphRoute, type Route } from "./route.js";
 
 function graph(partial: Partial<Omit<GraphRoute, "view">> = {}): GraphRoute {
   return { view: "graph", q: null, types: [], node: null, ...partial };
@@ -17,6 +17,10 @@ function graph(partial: Partial<Omit<GraphRoute, "view">> = {}): GraphRoute {
 
 function feed(viewId: string | null = null): FeedRoute {
   return { view: "feed", viewId };
+}
+
+function code(viewId: string | null = null, node: string | null = null): CodeRoute {
+  return { view: "code", viewId, node };
 }
 
 /** `formatRoute` output split back into the two strings `parseRoute` takes — what `location.pathname`/`location.search` would hold after a `pushState` of that URL. */
@@ -193,5 +197,80 @@ describe("feed route (node-views)", () => {
   it("still redirects /list, carrying the graph parameters and dropping view (the 'Unknown path still redirects' scenario)", () => {
     expect(parseRoute("/list", "?q=x&type=a&view=v1")).toBeNull();
     expect(formatRoute(graphRouteFromSearch("?q=x&type=a&view=v1"))).toBe("/graph?q=x&type=a");
+  });
+});
+
+// code-view/spec.md, "The code view is addressable" (design.md decision 2):
+// the code member of the union — `view` and `node`, each optional.
+describe("code route (code-view)", () => {
+  const VIEW_ID = "0b8d1e4a-2f5c-4c6e-9a7b-1d2e3f4a5b6c";
+  const NODE_ID = "9f1c2b3a-4d5e-4f60-8a71-0b2c3d4e5f60";
+
+  const cases: Array<[string, CodeRoute]> = [
+    ["nothing set", code()],
+    ["view only", code(VIEW_ID)],
+    ["node only", code(null, NODE_ID)],
+    ["view and node", code(VIEW_ID, NODE_ID)],
+  ];
+
+  for (const [name, route] of cases) {
+    it(`round-trips ${name}`, () => {
+      expect(roundTrip(route)).toEqual(route);
+    });
+  }
+
+  it("formats an empty code route to exactly the view path", () => {
+    expect(formatRoute(code())).toBe(CODE_VIEW_PATH);
+  });
+
+  it("emits view then node, omitting an absent one", () => {
+    expect(formatRoute(code("v1", "n1"))).toBe("/code?view=v1&node=n1");
+    expect(formatRoute(code("v1"))).toBe("/code?view=v1");
+    expect(formatRoute(code(null, "n1"))).toBe("/code?node=n1");
+  });
+
+  it("formats two structurally equal code routes to the same string", () => {
+    expect(formatRoute(code(VIEW_ID, NODE_ID))).toBe(formatRoute(code(VIEW_ID, NODE_ID)));
+  });
+
+  it("accepts /code and /code/ alike", () => {
+    expect(parseRoute("/code", "?view=v1&node=n1")).toEqual(code("v1", "n1"));
+    expect(parseRoute("/code/", "?view=v1&node=n1")).toEqual(code("v1", "n1"));
+  });
+
+  it("returns null for /code/x and /Code (unknown paths, same as the graph's and the feed's)", () => {
+    expect(parseRoute("/code/x", "?view=v1")).toBeNull();
+    expect(parseRoute("/Code", "?view=v1")).toBeNull();
+  });
+
+  it("parses a bare /code, or an empty or whitespace view or node, as absent — never a redirect", () => {
+    expect(parseRoute("/code", "")).toEqual(code());
+    expect(parseRoute("/code", "?view=")).toEqual(code());
+    expect(parseRoute("/code", "?view=%20")).toEqual(code());
+    expect(parseRoute("/code", "?view=v1&node=")).toEqual(code("v1"));
+    expect(parseRoute("/code", "?view=v1&node=%20")).toEqual(code("v1"));
+    expect(parseRoute("/code", "?node=n1")).toEqual(code(null, "n1"));
+  });
+
+  it("trims the view and node ids", () => {
+    expect(parseRoute("/code", "?view=%20v1%20&node=%20n1%20")).toEqual(code("v1", "n1"));
+  });
+
+  it("keeps non-UUID view and node ids (validation is the server's, not the parser's)", () => {
+    expect(parseRoute("/code", "?view=abc&node=xyz")).toEqual(code("abc", "xyz"));
+    expect(roundTrip(code("abc", "xyz"))).toEqual(code("abc", "xyz"));
+  });
+
+  it("ignores graph and unknown parameters on the code path", () => {
+    expect(parseRoute("/code", "?q=x&type=a&view=v1&node=n1&zoom=3")).toEqual(code("v1", "n1"));
+  });
+
+  it("keeps a graph address a graph address when it carries a view parameter beside its node", () => {
+    expect(parseRoute("/graph", "?q=x&view=v1&node=n1")).toEqual(graph({ q: "x", node: "n1" }));
+  });
+
+  it("still redirects /list, carrying the graph parameters and dropping view (the 'Unknown path still redirects' scenario)", () => {
+    expect(parseRoute("/list", "?q=x&view=v1&node=n1")).toBeNull();
+    expect(formatRoute(graphRouteFromSearch("?q=x&view=v1&node=n1"))).toBe("/graph?q=x&node=n1");
   });
 });

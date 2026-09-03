@@ -302,6 +302,18 @@ export {
   type NormalizeViewOptions,
   type ResolvedDefaultView,
 } from "./views.js";
+// Bounded subtree read (code-view change): a root's child_of descendants
+// in one statement, merge-folded, cycle-safe, capped by depth and by
+// count, without content. See tree.ts's module header.
+export {
+  MAX_SUBTREE_NODES,
+  MAX_SUBTREE_DEPTH,
+  getSubtree,
+  buildGetSubtreeQuery,
+  type SubtreeNode,
+  type Subtree,
+  type GetSubtreeOptions,
+} from "./tree.js";
 // Git repository loader (git-repo-ingestor change): the pure mapping from
 // `git ls-files` records and file bytes to file/directory nodes and
 // `child_of` candidates, and the one-transaction write of a whole tree.

@@ -16,7 +16,8 @@
 // disarm the view on the way out so nothing still in flight writes
 // history after it is gone; and the selected node's default view is resolved
 // after selection (`defaultViews`) and offered by DetailPanel as "Open as
-// feed", never navigated to on its own (design.md decision 8).
+// feed" or — code-view, design.md decision 5 — "Open as code", never
+// navigated to on its own (design.md decision 8).
 //
 // Search box, submitted query, results as a force-directed graph canvas
 // (bd-hmd.4, see graph/encoding.ts for the merge/pin/pagination logic
@@ -97,7 +98,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { CreateNoteForm } from "./CreateNoteForm.js";
-import { DetailPanel } from "./DetailPanel.js";
+import { DetailPanel, type OfferedView } from "./DetailPanel.js";
 import { GraphCanvas } from "./GraphCanvas.js";
 import { SearchBar, type SearchBarStatus } from "./SearchBar.js";
 import { TypePanel } from "./TypePanel.js";
@@ -645,10 +646,20 @@ export function GraphView() {
     return !live.current || generation !== latest.current;
   }
 
-  /** DetailPanel's "Open as feed · <title>" (node-views, design.md decision 8): a push, so back returns to this node in the graph. */
-  function handleOpenDefaultView(viewId: string) {
+  /**
+   * DetailPanel's "Open as feed · <title>" / "Open as code · <title>"
+   * (node-views, design.md decision 8; code-view, design.md decision 5): a
+   * push, so back returns to this node in the graph. The code address
+   * carries the selected node, so a file reached here is read directly;
+   * the feed's has no node to carry.
+   */
+  function handleOpenDefaultView(view: OfferedView) {
     leaveView();
-    navigate({ view: "feed", viewId }, "push");
+    if (view.renderer === "code") {
+      navigate({ view: "code", viewId: view.id, node: selectedNodeId }, "push");
+      return;
+    }
+    navigate({ view: "feed", viewId: view.id }, "push");
   }
 
   /**

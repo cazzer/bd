@@ -4,11 +4,12 @@
 // decisions 2-5; node-views design.md decision 4), never how it is
 // spelled.
 //
-// `Route` is a discriminated union on `view`: the graph view and — node-
-// views, design.md decision 5 — the feed view. A third way of looking at
-// the same items is added by widening the union and teaching
-// `parseRoute`/`formatRoute` its name; nothing about the existing views
-// has to move, which is exactly what adding the feed proved.
+// `Route` is a discriminated union on `view`: the graph view, — node-
+// views, design.md decision 5 — the feed view, and — code-view, design.md
+// decision 2 — the code view. Another way of looking at the same items is
+// added by widening the union and teaching `parseRoute`/`formatRoute` its
+// name; nothing about the existing views has to move, which is exactly
+// what adding the feed proved and adding the code view repeated.
 //
 // Not a router: two views with a handful of query parameters need no
 // matching, layouts, or loaders, and a parse/format pair is a plain
@@ -18,16 +19,19 @@
 // strings (lib/navigate.ts is the one place that does touch them).
 //
 // Parsing never throws and validates nothing beyond shape: a `node` (or
-// a feed's `view`) that is not a UUID, or names no node, is the server's
-// to reject — `getNodes`'s `notFoundIds` is how GraphView.tsx discovers
-// a bad id, and a format check here would be a second, weaker copy of
-// that rule.
+// a feed's or the code view's `view`) that is not a UUID, or names no
+// node, is the server's to reject — `getNodes`'s `notFoundIds` is how
+// GraphView.tsx discovers a bad id, and a format check here would be a
+// second, weaker copy of that rule.
 
 /** The graph view's path. `parseRoute` also accepts it with one trailing slash. */
 export const GRAPH_VIEW_PATH = "/graph";
 
 /** The feed view's path (node-views). `parseRoute` also accepts it with one trailing slash. */
 export const FEED_VIEW_PATH = "/feed";
+
+/** The code view's path (code-view). `parseRoute` also accepts it with one trailing slash. */
+export const CODE_VIEW_PATH = "/code";
 
 /** The force-graph view: the submitted query, the node-type filters it was submitted with, and the selected node. `null`/`[]` mean absent. */
 export interface GraphRoute {
@@ -43,8 +47,21 @@ export interface FeedRoute {
   viewId: string | null;
 }
 
+/**
+ * The code view (code-view, design.md decision 2): the id of the `view`
+ * node whose roots it draws as a tree, and optionally the id of a node
+ * within that tree to show — the selected file or directory. `null` for
+ * either means absent: no view is CodeView's "no view" empty state, never
+ * a redirect; no node is the tree with nothing chosen.
+ */
+export interface CodeRoute {
+  view: "code";
+  viewId: string | null;
+  node: string | null;
+}
+
 /** Every addressable view. A future view widens this union. */
-export type Route = GraphRoute | FeedRoute;
+export type Route = GraphRoute | FeedRoute | CodeRoute;
 
 /** `s` trimmed, or `null` when it is missing or whitespace-only — mirrors `runSearch`'s own trim, so `?q=%20` and no `q` at all mean the same thing. */
 function nonEmpty(s: string | null): string | null {
@@ -91,11 +108,22 @@ function feedRouteFromSearch(search: string): FeedRoute {
 }
 
 /**
+ * The code view's parameters from a query string alone (code-view). `view`
+ * and `node`, each degraded to `null` through the same trim the feed's
+ * `view` and the graph's `node` get; anything else is ignored — the code
+ * view has no search to carry `q` or `type` to.
+ */
+function codeRouteFromSearch(search: string): CodeRoute {
+  const params = new URLSearchParams(search);
+  return { view: "code", viewId: nonEmpty(params.get("view")), node: nonEmpty(params.get("node")) };
+}
+
+/**
  * The route a `pathname` + `search` pair names, or `null` when the path is
  * not a view we have — the caller's cue to redirect to
- * `formatRoute(graphRouteFromSearch(search))`. Exactly `/graph` or
- * `/feed` (one trailing slash tolerated, no case folding) is a view; `/`,
- * `/list`, `/graph/x`, `/feed/x` are all unknown.
+ * `formatRoute(graphRouteFromSearch(search))`. Exactly `/graph`, `/feed`,
+ * or `/code` (one trailing slash tolerated, no case folding) is a view;
+ * `/`, `/list`, `/graph/x`, `/feed/x`, `/code/x` are all unknown.
  */
 export function parseRoute(pathname: string, search: string): Route | null {
   const path = pathname.length > 1 && pathname.endsWith("/") ? pathname.slice(0, -1) : pathname;
@@ -105,16 +133,19 @@ export function parseRoute(pathname: string, search: string): Route | null {
   if (path === FEED_VIEW_PATH) {
     return feedRouteFromSearch(search);
   }
+  if (path === CODE_VIEW_PATH) {
+    return codeRouteFromSearch(search);
+  }
   return null;
 }
 
 /**
  * The URL (path + query string, no origin) for a route. Parameters are
  * emitted in a fixed order — for the graph `q`, each `type` in order,
- * `node`; for the feed just `view` — and absent ones are omitted, so two
- * structurally equal routes always format to the same string:
- * lib/navigate.ts relies on that to skip a history write when nothing
- * changed. Round-trips through `parseRoute`.
+ * `node`; for the feed just `view`; for the code view `view` then `node`
+ * — and absent ones are omitted, so two structurally equal routes always
+ * format to the same string: lib/navigate.ts relies on that to skip a
+ * history write when nothing changed. Round-trips through `parseRoute`.
  */
 export function formatRoute(route: Route): string {
   switch (route.view) {
@@ -122,6 +153,8 @@ export function formatRoute(route: Route): string {
       return formatGraphRoute(route);
     case "feed":
       return formatFeedRoute(route);
+    case "code":
+      return formatCodeRoute(route);
   }
 }
 
@@ -147,4 +180,16 @@ function formatFeedRoute(route: FeedRoute): string {
   const params = new URLSearchParams();
   params.set("view", route.viewId);
   return `${FEED_VIEW_PATH}?${params.toString()}`;
+}
+
+function formatCodeRoute(route: CodeRoute): string {
+  const params = new URLSearchParams();
+  if (route.viewId !== null) {
+    params.set("view", route.viewId);
+  }
+  if (route.node !== null) {
+    params.set("node", route.node);
+  }
+  const query = params.toString();
+  return query.length > 0 ? `${CODE_VIEW_PATH}?${query}` : CODE_VIEW_PATH;
 }
