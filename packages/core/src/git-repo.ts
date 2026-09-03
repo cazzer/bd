@@ -390,9 +390,11 @@ function validateRelativePath(path: string): string[] {
   }
   // `unsafePrepareNodes` trims every external id, so a path with trailing
   // whitespace would be stored under a different id than the one its
-  // `child_of` candidate names and fail inside the transaction. Refused
-  // here, before any run is opened, naming the path.
-  if (path !== path.trim()) {
+  // `child_of` candidate names and fail inside the transaction. The same
+  // holds per segment: `dir /a.ts` stores the directory as `<key>:dir`
+  // while the file's candidate still names `<key>:dir `. Refused here,
+  // before any run is opened, naming the path.
+  if (path !== path.trim() || segments.some((s) => s !== s.trim())) {
     throw new Error(`buildRepoTree: ${JSON.stringify(path)} has leading or trailing whitespace, which the store trims from external ids`);
   }
   return segments;
@@ -523,7 +525,8 @@ export interface LoadGitRepoTreeResult {
  * `upsertNodes` / `upsertEdges` run, chunked at their default sizes, on
  * one transaction handle rather than two. Node validation runs before the
  * transaction opens, so an oversized or control-character file rejects
- * naming its external id (`<key>:<path>`) without touching the database.
+ * naming its external id (`<key>:<path>`) with nothing written under the
+ * run — the run itself is already open by then, as in `ingest-beads.ts`.
  * Counts are classified by SQL exactly as `upsertNodes` reports them: a
  * re-run over an unchanged checkout reports every node `unchanged`.
  */
