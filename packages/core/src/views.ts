@@ -9,7 +9,9 @@
 // `resolveListNodesOptions` rather than re-validated here, so the two can
 // never disagree about what a valid selection is. `limit` and `cursor` are
 // refused inside a filter: they belong to whoever reads the view, not to
-// the view.
+// the view. So is any key that is not a listing option: `listNodes` ignores
+// what it does not know, so a misspelt key would persist and select every
+// node.
 //
 // `default_view` is a plain edge (design.md decision 2). It goes through
 // `upsertEdges` / `brain_link` / `assertEdge` untouched, carrying its own
@@ -19,7 +21,8 @@
 // rejects a bad target: the candidate join below finds nothing for an edge
 // whose folded target is not a canonical `view` node. Nothing constrains
 // how many `default_view` edges a node carries; ties resolve
-// deterministically instead (heavier edge, then lesser view id).
+// deterministically instead (heavier edge, then lesser view id, then
+// lesser declaring node).
 //
 // Resolution (decision 3) is one statement. The input ids fold through
 // `merged_into`; a recursive walk climbs `child_of` edges with both
@@ -34,7 +37,8 @@
 // distinct row, so on a `child_of` cycle it is the depth cap
 // (`MAX_RESOLVE_DEPTH`) that terminates the walk, never the statement
 // timeout. Only `blocks` has an acyclicity trigger; a `child_of` cycle is
-// legal data and costs at most `MAX_RESOLVE_DEPTH` rows per cycle member.
+// legal data and costs at most `MAX_RESOLVE_DEPTH` rows per cycle member
+// per requested id.
 // A merge-induced self-loop (a `child_of` from a loser to its own survivor)
 // is dropped outright, for the reason work-items.ts drops it for `blocks`:
 // "a node is a child of itself" is not containment.
@@ -63,8 +67,10 @@ export const MAX_RESOLVE_DEPTH = 32;
 export type ViewFilter = Omit<ListNodesOptions, "limit" | "cursor">;
 
 const READER_ONLY_FILTER_KEYS = ["limit", "cursor"] as const;
+/** Every key a filter may carry. `listNodes` ignores a key it does not know, so an unknown one must be refused here or it persists and selects every node. */
+const LISTING_OPTION_KEYS = ["nodeTypes", "sourceSystems", "updatedSince", "where"] as const satisfies readonly (keyof ViewFilter)[];
 
-const FILTER_SHAPE = "an object of listing options (nodeTypes, sourceSystems, updatedSince, where)";
+const FILTER_SHAPE = `an object of listing options (${LISTING_OPTION_KEYS.join(", ")})`;
 
 export function isViewRenderer(value: unknown): value is ViewRenderer {
   return typeof value === "string" && (VIEW_RENDERERS as readonly string[]).includes(value);
@@ -79,9 +85,10 @@ export interface NormalizeViewOptions {
  * Applies the contract to a view's metadata (node-views spec, "A view is a
  * node with a validated contract"): `renderer` must be one of
  * `VIEW_RENDERERS`; `filter` must be an object `resolveListNodesOptions`
- * accepts, carrying neither `limit` nor `cursor`; every other key passes
- * through untouched. Pure. Throws `InvalidViewError` naming the first
- * offending field (`renderer`, `filter`, `filter.limit`, or the offending
+ * accepts, carrying neither `limit` nor `cursor` nor any key that is not a
+ * listing option; every other top-level key passes through untouched. Pure.
+ * Throws `InvalidViewError` naming the first offending field (`renderer`,
+ * `filter`, `filter.limit`, `filter.<unknown key>`, or the offending
  * listing option under `filter.`, e.g. `filter.where[0].op`).
  */
 export function normalizeViewMetadata(
@@ -109,6 +116,11 @@ export function normalizeViewMetadata(
   for (const key of READER_ONLY_FILTER_KEYS) {
     if (Object.hasOwn(filterRecord, key)) {
       throw new InvalidViewError(item, `filter.${key}`, filterRecord[key], "belongs to the reader of a view, not to the view: pass it to listNodes / brain_list when reading");
+    }
+  }
+  for (const key of Object.keys(filterRecord)) {
+    if (!(LISTING_OPTION_KEYS as readonly string[]).includes(key)) {
+      throw new InvalidViewError(item, `filter.${key}`, filterRecord[key], "is not a listing option");
     }
   }
   try {
@@ -220,11 +232,13 @@ candidates AS (
   JOIN resolved_nodes v ON v.id = COALESCE(t.merged_into, t.id) AND v.node_type = ${VIEW_NODE_TYPE}
 ),
 -- Nearest wins; among equally near, the heavier edge; among equal weights,
--- the lesser view id — deterministic on every call.
+-- the lesser view id; among equal views (one view declared by two equally
+-- near ancestors), the lesser declaring node — deterministic on every
+-- call, which the last key is needed for: Postgres's sort is not stable.
 best AS (
   SELECT DISTINCT ON (c.start_id) c.start_id, c.declared_by, c.view_id, c.title, c.renderer
   FROM candidates c
-  ORDER BY c.start_id, c.depth, c.weight DESC, c.view_id
+  ORDER BY c.start_id, c.depth, c.weight DESC, c.view_id, c.declared_by
 )
 SELECT r.req_id, b.view_id, b.title, b.renderer, b.declared_by
 FROM resolved r
