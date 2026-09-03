@@ -14,7 +14,7 @@
     "db:seed": "pnpm --filter @breakdown/core db:seed",
     "ingest:github": "pnpm --filter @breakdown/core ingest:github",
     "ingest:beads": "pnpm --filter @breakdown/core ingest:beads",
-    "ingest:repo": "pnpm --filter @breakdown/core ingest:repo",
+    "ingest:repo": "INGEST_REPO_CWD=\"$INIT_CWD\" pnpm --filter @breakdown/core ingest:repo",
     "typecheck": "pnpm -r run typecheck",
     "test": "vitest run",
     "check": "pnpm typecheck && pnpm test"

@@ -14,12 +14,17 @@
 // <path> is any directory inside the checkout: `git rev-parse
 // --show-toplevel` resolves the checkout root, and that root is what is
 // loaded, so `pnpm ingest:repo .` from the workspace root loads this
-// repository even though pnpm runs the script from packages/core (a
-// relative <path> resolves against INIT_CWD, the directory the command
-// was typed in). The key is `owner/name` from the `origin` remote, else
-// the root directory's name; `--key` overrides it. A checkout with no
-// remote that later gains one would load a second tree under the derived
-// key — pass `--key <old>` to keep loading the first.
+// repository even though pnpm runs the script from packages/core. A
+// relative <path> resolves against the directory the command was typed
+// in. pnpm exposes that as INIT_CWD, but `pnpm run` resets INIT_CWD to
+// its own cwd and the root `ingest:repo` script is a nested
+// `pnpm --filter @breakdown/core ingest:repo`, so this script would only
+// ever see the workspace root; the root script captures its INIT_CWD
+// into INGEST_REPO_CWD before the nested run, and that is read first
+// here. The key is `owner/name` from the `origin` remote, else the root
+// directory's name; `--key` overrides it. A checkout with no remote that
+// later gains one would load a second tree under the derived key — pass
+// `--key <old>` to keep loading the first.
 
 import { execFile } from "node:child_process";
 import { stat } from "node:fs/promises";
@@ -64,13 +69,17 @@ function parseArgs(argv: readonly string[]): CliArgs {
   let keyOverride: string | null = null;
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]!;
+    // A blank value would fall through to the derived key in deriveRepoKey
+    // — the opposite of what --key asks for — so it is a usage error.
     if (arg === "--key") {
       const value = argv[i + 1];
-      if (value === undefined) throw new Error(`--key needs a value\n${USAGE}`);
+      if (value === undefined || value.trim() === "") throw new Error(`--key needs a non-empty value\n${USAGE}`);
       keyOverride = value;
       i += 1;
     } else if (arg.startsWith("--key=")) {
-      keyOverride = arg.slice("--key=".length);
+      const value = arg.slice("--key=".length);
+      if (value.trim() === "") throw new Error(`--key needs a non-empty value\n${USAGE}`);
+      keyOverride = value;
     } else if (arg.startsWith("-")) {
       throw new Error(`unknown option ${JSON.stringify(arg)}\n${USAGE}`);
     } else if (checkoutPath === undefined) {
@@ -101,9 +110,12 @@ function formatSkips(skipped: SkipCounts): string {
 
 async function main(): Promise<void> {
   const { checkoutPath, keyOverride } = parseArgs(process.argv.slice(2));
-  // pnpm runs a package script from the package directory and leaves the
-  // directory the command was typed in as INIT_CWD.
-  const requested = path.resolve(process.env["INIT_CWD"] ?? process.cwd(), checkoutPath);
+  // INGEST_REPO_CWD is the directory the command was typed in, captured by
+  // the root script (see the header); INIT_CWD covers `pnpm ingest:repo`
+  // run from packages/core itself, where no nested `pnpm run` reset it.
+  // `||` rather than `??`: the root script sets the variable to "" when
+  // INIT_CWD is absent, and "" must fall through, not resolve.
+  const requested = path.resolve(process.env["INGEST_REPO_CWD"] || process.env["INIT_CWD"] || process.cwd(), checkoutPath);
   if (!(await stat(requested).catch(() => null))?.isDirectory()) {
     throw new Error(`${requested} is not a directory\n${USAGE}`);
   }

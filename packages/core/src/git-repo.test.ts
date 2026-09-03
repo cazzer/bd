@@ -233,6 +233,7 @@ describe("buildRepoTree", () => {
     expect(() => buildRepoTree("k", "/r", [files[1]!, files[1]!])).toThrow(/listed twice/);
     expect(() => buildRepoTree("k", "/r", [{ path: "notes.md ", blobSha: SHA_A, sizeBytes: 1, text: "x" }])).toThrow(/"notes\.md " has leading or trailing whitespace/);
     expect(() => buildRepoTree("k", "/r", [{ path: " notes.md", blobSha: SHA_A, sizeBytes: 1, text: "x" }])).toThrow(/whitespace/);
+    expect(() => buildRepoTree("k", "/r", [{ path: "dir /a.ts", blobSha: SHA_A, sizeBytes: 1, text: "x" }])).toThrow(/whitespace/);
     expect(() => buildRepoTree("  ", "/r", files)).toThrow(/key/);
   });
 
