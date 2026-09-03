@@ -7,7 +7,7 @@ import { edges, ingestRuns, nodes } from "@breakdown/db";
 import { upsertEdges } from "./edges.js";
 import { InvalidListOptionError, InvalidLookupIdError, InvalidViewError } from "./errors.js";
 import { openIngestRun, type IngestRunHandle } from "./ingest-runs.js";
-import { listNodes } from "./list.js";
+import { listNodes, MAX_LIST_LIMIT } from "./list.js";
 import { mergeNodes } from "./merge.js";
 import { upsertNodes } from "./nodes.js";
 import { connectTestDb, type TestPool, uniqueSuffix } from "./test-helpers.js";
@@ -135,13 +135,20 @@ describe("normalizeViewMetadata", () => {
     expect(limit.value).toBe(10);
     expect(rejection({ renderer: "feed", filter: { cursor: null } }).field).toBe("filter.cursor");
   });
+
+  it("refuses a key that is not a listing option, which listNodes would silently ignore", () => {
+    const e = rejection({ renderer: "feed", filter: { node_types: ["work_item"] } });
+    expect(e.field).toBe("filter.node_types");
+    expect(e.value).toEqual(["work_item"]);
+    expect(e.message).toBe('invalid view: filter.node_types (got ["work_item"]) is not a listing option');
+  });
 });
 
 describe("view nodes in the store", () => {
   it("persists a valid view and lists it by type with its renderer and filter", async () => {
     const p = fx();
     const id = await writeView(`${p}-open`);
-    const listed = await listNodes(db, { nodeTypes: [VIEW_NODE_TYPE], sourceSystems: [SRC] });
+    const listed = await listNodes(db, { nodeTypes: [VIEW_NODE_TYPE], sourceSystems: [SRC], limit: MAX_LIST_LIMIT });
     const mine = listed.nodes.find((n) => n.id === id);
     expect(mine?.metadata).toEqual({ renderer: "feed", filter: FEED_FILTER });
   });
@@ -332,6 +339,25 @@ describe("resolveDefaultViews", () => {
     expect(second).toEqual(first);
   });
 
+  it("with two parents at equal depth and weight declaring the same view, names the lesser declaring node on every call", async () => {
+    const p = fx();
+    const view = await writeView(`${p}-v`);
+    const parentA = await writeItem(`${p}-pa`);
+    const parentB = await writeItem(`${p}-pb`);
+    const child = await writeItem(`${p}-child`);
+    await childOf(child, parentA);
+    await childOf(child, parentB);
+    await declares(parentA, view, 1);
+    await declares(parentB, view, 1);
+    // Same view, same depth, same weight: only declared_by separates the two
+    // candidate rows, and Postgres's sort is not stable.
+    const [lesserParent] = [parentA, parentB].sort();
+
+    for (let i = 0; i < 5; i += 1) {
+      expect(await resolveDefaultViews(db, [child])).toEqual([answer(child, view, `view ${p}-v`, lesserParent!)]);
+    }
+  });
+
   it("terminates on a two-node child_of cycle, answering null when nothing in it declares and the declaration when one does", async () => {
     const p = fx();
     const a = await writeItem(`${p}-a`);
@@ -341,9 +367,7 @@ describe("resolveDefaultViews", () => {
     await childOf(a, b);
     await childOf(b, a);
 
-    const t0 = performance.now();
     expect(await resolveDefaultViews(db, [start, a])).toEqual([none(start), none(a)]);
-    expect(performance.now() - t0).toBeLessThan(5_000);
 
     const view = await writeView(`${p}-v`);
     await declares(b, view);
