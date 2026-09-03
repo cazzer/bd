@@ -1,5 +1,5 @@
 import { and, eq, inArray } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Database } from "@breakdown/db";
 import { edges, ingestRuns, nodes } from "@breakdown/db";
 import { computeContentHash } from "./content-hash.js";
@@ -28,6 +28,19 @@ import { closeIngestRun, getIngestRunContents, openIngestRun, type IngestRunHand
 import { unsafeBuildUpsertEdgesQuery, unsafePrepareEdges, upsertEdges } from "./edges.js";
 import { DEFAULT_MAX_CONTENT_LENGTH, DEFAULT_MAX_METADATA_LENGTH, unsafeBuildUpsertNodesQuery, unsafePrepareNodes, upsertNodes } from "./nodes.js";
 import { connectTestDb, type TestPool, uniqueSuffix } from "./test-helpers.js";
+
+// Wrap (not replace) openIngestRun so the "opens no ingest run" tests can
+// assert on calls instead of on rows. Rows cannot be attributed: a rejected
+// write opens no run, so there is nothing of ours to look for, and other
+// vitest workers (apps/web's router tests, apps/mcp's brain_history
+// fixture) open and close source_system='human' runs in parallel — a
+// before/after set difference on the table saw their in-flight ids and
+// flaked. Tests within one file run sequentially, so a call count taken
+// around the rejected call is exact.
+vi.mock("./ingest-runs.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./ingest-runs.js")>();
+  return { ...actual, openIngestRun: vi.fn(actual.openIngestRun) };
+});
 
 let pool: TestPool;
 let db: Database;
@@ -76,31 +89,9 @@ async function newFixtureRun(label: string): Promise<IngestRunHandle> {
   return run;
 }
 
-/**
- * Ids of `ingest_runs` rows attributed to `HUMAN_SOURCE_SYSTEM` with zero
- * node/edge counts — the exact signature a rejected human write left
- * behind before the review fix (validate/check-existence, then open the
- * run only if the write is actually going to be attempted). Used as a
- * before/after set difference around a call expected to fail, never as a
- * count: this module is NOT the only writer of `source_system='human'`
- * rows in the suite (apps/web's router tests and apps/mcp's brain_history
- * fixture open them too, in parallel vitest workers), and every run is
- * 0/0 for the moment between its open and its close, so a plain count
- * shifts under this test in either direction. "An id present after that
- * was absent before" is sensitive only to a run opened during the call
- * itself.
- */
-async function emptyHumanRunIds(): Promise<Set<string>> {
-  const rows = await db
-    .select({ id: ingestRuns.id })
-    .from(ingestRuns)
-    .where(and(eq(ingestRuns.sourceSystem, HUMAN_SOURCE_SYSTEM), eq(ingestRuns.nodeCount, 0), eq(ingestRuns.edgeCount, 0)));
-  return new Set(rows.map((r) => r.id));
-}
-
-/** Empty human runs that exist now but were not in `before` — expected `[]` after a rejected write. */
-async function newEmptyHumanRunsSince(before: Set<string>): Promise<string[]> {
-  return [...(await emptyHumanRunIds())].filter((id) => !before.has(id));
+/** How many ingest runs have been opened by anything in this file so far — see the vi.mock above. */
+function openIngestRunCalls(): number {
+  return vi.mocked(openIngestRun).mock.calls.length;
 }
 
 /**
@@ -177,12 +168,12 @@ describe("createNote", () => {
 
   it("rejects oversized content the same way upsertNodes does, persists nothing, and opens no ingest run", async () => {
     const oversized = "x".repeat(2_000_000);
-    const before = await emptyHumanRunIds();
+    const runsBefore = openIngestRunCalls();
     await expect(createNote(db, { content: oversized })).rejects.toBeInstanceOf(ContentTooLargeError);
     // Validation (unsafePrepareNodes) is pure and runs before
     // withHumanIngestRun opens anything — a rejected write must not
     // leave a permanent empty run in the audit trail (review fix).
-    expect(await newEmptyHumanRunsSince(before)).toEqual([]);
+    expect(openIngestRunCalls()).toBe(runsBefore);
   });
 
   it("rejects a control character in content the same way upsertNodes does", async () => {
@@ -266,7 +257,7 @@ describe("annotateNode", () => {
     // be attempted"), finds nothing and throws NodeNotFoundError before
     // any run, transaction, or insert happens at all.
     const bogusTarget = "00000000-0000-0000-0000-000000000000";
-    const before = await emptyHumanRunIds();
+    const runsBefore = openIngestRunCalls();
 
     await expect(annotateNode(db, bogusTarget, { content: "orphan?" })).rejects.toBeInstanceOf(NodeNotFoundError);
 
@@ -274,7 +265,7 @@ describe("annotateNode", () => {
     const orphan = await db.select({ id: nodes.id }).from(nodes).where(eq(nodes.content, "orphan?"));
     expect(orphan).toHaveLength(0);
     // And no permanent empty run was left in the audit trail either.
-    expect(await newEmptyHumanRunsSince(before)).toEqual([]);
+    expect(openIngestRunCalls()).toBe(runsBefore);
   });
 
   it("rejects a malformed target id before touching the database", async () => {
@@ -283,11 +274,11 @@ describe("annotateNode", () => {
 
   it("rejects oversized annotation content the same way createNote does, before opening a run", async () => {
     const target = await makeFixtureNode("loader-fixture");
-    const before = await emptyHumanRunIds();
+    const runsBefore = openIngestRunCalls();
 
     await expect(annotateNode(db, target.id, { content: "x".repeat(2_000_000) })).rejects.toBeInstanceOf(ContentTooLargeError);
 
-    expect(await newEmptyHumanRunsSince(before)).toEqual([]);
+    expect(openIngestRunCalls()).toBe(runsBefore);
     // The target itself was never touched.
     const touching = await db.select({ id: edges.id }).from(edges).where(eq(edges.dstId, target.id));
     expect(touching).toHaveLength(0);
@@ -489,9 +480,9 @@ describe("updateNodeContent", () => {
     createdNodeIds.push(note.id);
     createdRunIds.push(note.ingestRunId);
 
-    const before = await emptyHumanRunIds();
+    const runsBefore = openIngestRunCalls();
     await expect(updateNodeContent(db, note.id, { content: "x".repeat(2_000_000) })).rejects.toBeInstanceOf(ContentTooLargeError);
-    expect(await newEmptyHumanRunsSince(before)).toEqual([]);
+    expect(openIngestRunCalls()).toBe(runsBefore);
   });
 
   it("throws NodeNotFoundError for a node that does not exist", async () => {
@@ -527,7 +518,7 @@ describe("assertEdge / retractEdge / reweightEdge", () => {
     const a = await makeFixtureNode("edge-fixture");
     const b = await makeFixtureNode("edge-fixture");
 
-    const before = await emptyHumanRunIds();
+    const runsBefore = openIngestRunCalls();
     let thrown: unknown;
     try {
       await assertEdge(db, { srcId: a.id, dstId: b.id, edgeType: "relates-to", weight: 999.9 });
@@ -540,7 +531,7 @@ describe("assertEdge / retractEdge / reweightEdge", () => {
     expect(err.dstId).toBe(b.id);
     // Validated (unsafePrepareEdges) before withHumanIngestRun opens
     // anything — same review fix as createNote's oversized-content test.
-    expect(await newEmptyHumanRunsSince(before)).toEqual([]);
+    expect(openIngestRunCalls()).toBe(runsBefore);
 
     const rows = await db.select({ id: edges.id }).from(edges).where(and(eq(edges.srcId, a.id), eq(edges.dstId, b.id)));
     expect(rows).toHaveLength(0);
@@ -606,7 +597,7 @@ describe("assertEdge / retractEdge / reweightEdge", () => {
     createdEdgeIds.push(asserted.id);
     createdRunIds.push(asserted.ingestRunId);
 
-    const before = await emptyHumanRunIds();
+    const runsBefore = openIngestRunCalls();
     let thrown: unknown;
     try {
       await reweightEdge(db, { srcId: a.id, dstId: b.id, edgeType: "relates-to", weight: 1.5 });
@@ -619,7 +610,7 @@ describe("assertEdge / retractEdge / reweightEdge", () => {
     expect(err.dstId).toBe(b.id);
     expect(err.edgeType).toBe("relates-to");
     expect(err.message).toContain(a.id);
-    expect(await newEmptyHumanRunsSince(before)).toEqual([]);
+    expect(openIngestRunCalls()).toBe(runsBefore);
 
     const [row] = await db.select({ weight: edges.weight }).from(edges).where(eq(edges.id, asserted.id));
     expect(row?.weight).toBeCloseTo(1.0);
@@ -629,11 +620,11 @@ describe("assertEdge / retractEdge / reweightEdge", () => {
     const a = await makeFixtureNode("edge-fixture");
     const b = await makeFixtureNode("edge-fixture");
 
-    const before = await emptyHumanRunIds();
+    const runsBefore = openIngestRunCalls();
     await expect(reweightEdge(db, { srcId: a.id, dstId: b.id, edgeType: "never-asserted", weight: 0.5 })).rejects.toBeInstanceOf(EdgeNotFoundError);
     // The existence check (review fix) runs before withHumanIngestRun
     // opens anything — a typo'd edge must not leave a permanent empty
     // run in the audit trail on every call.
-    expect(await newEmptyHumanRunsSince(before)).toEqual([]);
+    expect(openIngestRunCalls()).toBe(runsBefore);
   });
 });
