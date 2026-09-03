@@ -358,7 +358,7 @@ export interface WorkItemReadinessResult {
   readyHasMore: boolean;
   blocked: BlockedWorkItem[];
   blockedHasMore: boolean;
-  /** Canonical ids of work items (matching the spec filter) that reach themselves through open blockers. Never ready. */
+  /** Canonical ids of work items (matching the spec filter) that reach themselves through open blockers. Never ready. At most `MAX_READINESS_LIMIT` ids. */
   cycleMemberIds: string[];
 }
 
@@ -395,7 +395,9 @@ export function buildWorkItemReadinessQuery(params: BuildWorkItemReadinessQueryP
 WITH RECURSIVE
 items AS (
   SELECT id, title, source_system, external_id, updated_at,
-         metadata->>'status' AS status,
+         -- A work item written without a status key (possible via raw upsertNodes)
+         -- reads as open, matching readWorkItemFields.
+         COALESCE(metadata->>'status', 'open') AS status,
          CASE WHEN jsonb_typeof(metadata->'priority') = 'number'
               THEN (metadata->>'priority')::int
               ELSE ${DEFAULT_WORK_ITEM_PRIORITY}::int END AS priority,
@@ -422,11 +424,13 @@ open_blocks AS (
   SELECT b.src_id, b.dst_id
   FROM blocks b
   JOIN resolved_nodes n ON n.id = b.src_id
-  WHERE NOT (n.node_type = ${WORK_ITEM_NODE_TYPE} AND n.metadata->>'status' = 'closed')
+  WHERE NOT (n.node_type = ${WORK_ITEM_NODE_TYPE} AND COALESCE(n.metadata->>'status', 'open') = 'closed')
 ),
 -- A node that reaches itself through open blockers is a cycle member.
 -- CYCLE stops expansion when a node repeats on its path; the depth guard
--- is belt and braces.
+-- is belt and braces. This enumerates simple paths, which is exponential
+-- on a dense layered DAG; fine at personal scale, revisit if a store ever
+-- holds thousands of interlinked blockers.
 walk(start_id, node_id, depth) AS (
   SELECT src_id, dst_id, 1 FROM open_blocks
   UNION ALL

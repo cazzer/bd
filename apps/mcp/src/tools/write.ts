@@ -100,7 +100,7 @@ export const writeTool: ToolDef<typeof writeSchema> = {
       // The work-item contract is enforced here, at the tool boundary, not
       // in upsertNodes (work-items spec): a bad item rejects the whole batch
       // before any run is opened, naming the item and field.
-      metadata: item.nodeType === WORK_ITEM_NODE_TYPE ? normalizeWorkItemMetadata(item.metadata, { index }) : item.metadata,
+      metadata: item.nodeType.trim() === WORK_ITEM_NODE_TYPE ? normalizeWorkItemMetadata(item.metadata, { index }) : item.metadata,
     }));
 
     const { ingestRunId, result } = await withAgentIngestRun(ctx.db, ctx.actor(), (run) => upsertNodes(ctx.db, run, input));

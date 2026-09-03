@@ -15,9 +15,10 @@
 // node is not listed), ordered `updated_at DESC, id DESC`, and paged by a
 // keyset cursor under that same order (lookup.ts's convention: one row past
 // the limit answers `hasMore`, a NULL cursor is the first page). The cursor
-// carries `updated_at` as the exact text Postgres returned, not a JS Date:
-// timestamptz has microsecond precision and a millisecond round-trip could
-// repeat or skip a row. Content is never returned — brain_get is for that.
+// carries `updated_at` rendered by Postgres at microsecond precision, not
+// a JS Date: timestamptz has microsecond precision and a millisecond
+// round-trip could repeat or skip a row. Content is never returned —
+// brain_get is for that.
 
 import { sql, type SQL } from "drizzle-orm";
 import type { Database } from "@breakdown/db";
@@ -27,6 +28,8 @@ import { asPgError, formatPgInfo, sqlArray } from "./sql-helpers.js";
 export const DEFAULT_LIST_LIMIT = 50;
 export const MAX_LIST_LIMIT = 500;
 export const MAX_LIST_PREDICATES = 10;
+/** Max entries in `nodeTypes` / `sourceSystems`. */
+export const MAX_LIST_NAMES = 50;
 export const MAX_ONE_OF_VALUES = 20;
 export const MAX_PREDICATE_KEY_LENGTH = 100;
 export const MAX_PREDICATE_STRING_LENGTH = 500;
@@ -39,7 +42,7 @@ export type MetadataPredicate =
 
 /** Opaque to callers: pass a previous result's `nextCursor` back unchanged. */
 export interface ListNodesCursor {
-  /** `updated_at` exactly as Postgres rendered it — see the module header. */
+  /** `updated_at` as microsecond-precision ISO-8601 UTC — see the module header. */
   updatedAt: string;
   id: string;
 }
@@ -95,7 +98,7 @@ type RawListedRow = {
   content_hash: string;
   created_at: string;
   updated_at: string;
-  /** `updated_at::text` — the exact rendering the cursor must carry. */
+  /** `updated_at` rendered as microsecond ISO-8601 UTC — the rendering the cursor must carry. */
   updated_at_text: string;
 };
 
@@ -132,7 +135,10 @@ export function buildListNodesQuery(params: BuildListNodesQueryParams): SQL {
 
   return sql`
 SELECT n.id, n.node_type, n.source_system, n.external_id, n.title, n.metadata, n.content_hash,
-       n.created_at, n.updated_at, n.updated_at::text AS updated_at_text
+       n.created_at, n.updated_at,
+       -- Rendered explicitly at microsecond precision in UTC so the cursor
+       -- round-trips regardless of the session's DateStyle.
+       to_char(n.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS updated_at_text
 FROM resolved_nodes n
 WHERE (${nodeTypesArr} IS NULL OR n.node_type = ANY(${nodeTypesArr}))
   AND (${sourceSystemsArr} IS NULL OR n.source_system = ANY(${sourceSystemsArr}))
@@ -206,6 +212,9 @@ function validateNames(option: string, values: readonly string[] | null | undefi
   if (values === null || values === undefined) return null;
   if (!Array.isArray(values) || values.length === 0 || values.some((v) => typeof v !== "string" || v.length === 0)) {
     throw new InvalidListOptionError(option, values, "must be a non-empty array of non-empty strings, or null");
+  }
+  if (values.length > MAX_LIST_NAMES) {
+    throw new InvalidListOptionError(option, values.length, `must contain at most ${MAX_LIST_NAMES} entries`);
   }
   return [...values];
 }

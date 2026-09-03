@@ -46,7 +46,9 @@ async function bd(args: readonly string[], cwd: string): Promise<string> {
 }
 
 async function fetchIssues(cwd: string): Promise<BeadsIssue[]> {
-  const stdout = await bd(["list", "--status=all", "--json"], cwd);
+  // --limit=0 is "unlimited": bd list defaults to 50 rows, which would
+  // silently truncate the export the moment the tracker outgrows that.
+  const stdout = await bd(["list", "--status=all", "--limit=0", "--json"], cwd);
   const parsed: unknown = JSON.parse(stdout);
   if (!Array.isArray(parsed)) {
     throw new Error("bd list --json did not return an array");

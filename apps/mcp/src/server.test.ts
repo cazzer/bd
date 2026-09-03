@@ -1040,3 +1040,34 @@ describe("work-item contract in brain_write and cycles in brain_link", () => {
     expect(stored).toHaveLength(0);
   });
 });
+
+
+describe("brain_ready under a tight response budget", () => {
+  it("drops blocked items before ready ones and names blockedLimit in the note", async () => {
+    const run = await newRun();
+    const spec = `spec-${uniqueSuffix()}`;
+    // Ready items are small; blocked items carry long titles so the budget
+    // cuts into the blocked list well before it reaches the ready list.
+    const specs = ["r1", "r2", "b1", "b2", "b3", "x"].map((externalId, i) => ({
+      nodeType: "work_item",
+      externalId,
+      title: externalId.startsWith("b") ? `${externalId} ${"t".repeat(200)}` : externalId,
+      content: "c",
+      metadata: { status: "open", priority: i, spec_id: spec },
+    }));
+    const m = await makeNodes(run, specs);
+    await makeEdges(run, ["b1", "b2", "b3"].map((id) => ({ srcId: m.get("x")!, dstId: m.get(id)!, edgeType: "blocks" })));
+    const { client } = await connectClient({ readOnly: true, responseCharBudget: 1500 });
+
+    const report = parseText(await client.callTool({ name: "brain_ready", arguments: { specId: spec } }));
+    expect(report.truncated).toBe(true);
+    expect(report.droppedBlockedIds.length).toBeGreaterThan(0);
+    expect(report.droppedReadyIds).toEqual([]);
+    expect(report.ready.map((i: any) => i.externalId)).toEqual(["r1", "r2", "x"]);
+    expect(report.blockedHasMore).toBe(true);
+    expect(report.readyHasMore).toBe(false);
+    expect(report.truncationNote).toMatch(/blockedLimit/);
+    expect(report.truncationNote).not.toMatch(/readyLimit/);
+    for (const b of report.blocked) expect(b.kind).toBeUndefined();
+  });
+});

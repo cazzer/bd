@@ -764,3 +764,42 @@ describe("nodes.metadata GIN index", () => {
     expect(plan).toContain("nodes_metadata_gin_idx");
   });
 });
+
+
+describe("edges.blocks trigger: cycles that already exist through a merge", () => {
+  it("re-asserting a stored edge succeeds while a genuinely new cycle-closing edge is still refused", async () => {
+    const rows = await db.insert(nodes).values([nodeRow(), nodeRow(), nodeRow()]).returning({ id: nodes.id });
+    const [a, b, c] = rows.map((r) => r.id);
+    if (!a || !b || !c) throw new Error("setup");
+    const edge = (srcId: string, dstId: string, sourceSystem = "schema-test") =>
+      db.insert(edges).values({ srcId, dstId, edgeType: "blocks", sourceSystem, ingestRunId: testRunId }).onConflictDoNothing();
+    try {
+      await edge(a, b);
+      await edge(b, c);
+      // Merging c into a closes a -> b -> (c = a): a cycle the trigger never saw.
+      await db.update(nodes).set({ mergedInto: a }).where(eq(nodes.id, c));
+
+      // The idempotent re-import shape: the same edge, same and different
+      // source system. Neither adds reachability, so neither is refused.
+      await edge(a, b);
+      await edge(a, b, "schema-test-other");
+      await edge(b, c);
+
+      // A new edge that closes the cycle directly is still a cycle.
+      let thrown: unknown;
+      try {
+        await edge(b, a);
+      } catch (err) {
+        thrown = err;
+      }
+      expect(thrown).toBeDefined();
+      expect(pgErrorOf(thrown)?.code).toBe("23514");
+
+      const stored = await db.select({ src: edges.srcId, dst: edges.dstId, source: edges.sourceSystem }).from(edges).where(inArray(edges.srcId, [a, b, c]));
+      expect(stored).toHaveLength(3);
+    } finally {
+      await db.delete(nodes).where(inArray(nodes.id, [b, c]));
+      await db.delete(nodes).where(eq(nodes.id, a));
+    }
+  });
+});

@@ -52,6 +52,7 @@ import {
  *      would fail silently.
  *   6. A BEFORE trigger on `edges` refusing any `blocks` edge that would
  *      make a node transitively block itself (migrations/0003_*.sql,
+ *      function replaced in 0004_*.sql to skip already-stored edges,
  *      work-items spec, "Blocking and parent relationships"). Endpoints
  *      are folded through `merged_into`, the walk is serialized by an
  *      advisory transaction lock so two concurrent inserts cannot each

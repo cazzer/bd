@@ -22,13 +22,16 @@ import {
   MAX_ALLOWED_DEPTH,
   MAX_HISTORY_LIMIT,
   MAX_LIST_LIMIT,
+  MAX_LIST_NAMES,
   MAX_LIST_PREDICATES,
   MAX_ONE_OF_VALUES,
   MAX_PREDICATE_KEY_LENGTH,
   MAX_PREDICATE_STRING_LENGTH,
   MAX_READINESS_LIMIT,
   MAX_SPEC_ID_LENGTH,
+  type BlockedWorkItem,
   type MetadataPredicate,
+  type ReadyWorkItem,
   retrieve,
   type RetrieveOptions,
 } from "@breakdown/core";
@@ -328,8 +331,8 @@ const predicateSchema = z.union([
 ]);
 
 const listSchema = z.object({
-  nodeTypes: z.array(z.string().min(1)).min(1).optional(),
-  sourceSystems: z.array(z.string().min(1)).min(1).optional(),
+  nodeTypes: z.array(z.string().min(1)).min(1).max(MAX_LIST_NAMES).optional(),
+  sourceSystems: z.array(z.string().min(1)).min(1).max(MAX_LIST_NAMES).optional(),
   updatedSince: z.string().datetime({ offset: true }).optional(),
   where: z.array(predicateSchema).max(MAX_LIST_PREDICATES).optional(),
   limit: z.number().int().positive().max(MAX_LIST_LIMIT).optional(),
@@ -396,7 +399,7 @@ export const readyTool: ToolDef<typeof readySchema> = {
   description:
     "The work-item readiness report: `ready` lists open work_item nodes with no open blocker (ordered by priority, then most recently updated); `blocked` lists open, " +
     "in-progress, or blocked items with the ids of their open blockers (a `blocks` edge whose source is not a closed work item; a merged-away duplicate counts as its " +
-    "survivor); `cycleMemberIds` lists items that block themselves through other items and are never ready. Optional specId restricts the items reported, not the " +
+    "survivor); `cycleMemberIds` lists items (at most 500) that block themselves through other items and are never ready. Optional specId restricts the items reported, not the " +
     "blockers considered. Equivalent to `bd ready` plus `bd blocked`.",
   schema: readySchema,
   isWrite: false,
@@ -407,22 +410,42 @@ export const readyTool: ToolDef<typeof readySchema> = {
       blockedLimit: args.blockedLimit,
     });
 
+    // One budget over both lists, ready first: boundResponse drops from the
+    // tail, so blocked items go before ready ones, and the note names
+    // whichever limit was actually cut. Items are flattened (not wrapped)
+    // because the budget's in-place shrinking only knows top-level fields.
+    type Tagged = ({ kind: "ready" } & ReadyWorkItem) | ({ kind: "blocked" } & BlockedWorkItem);
+    const tagged: Tagged[] = [
+      ...report.ready.map((item) => ({ kind: "ready" as const, ...item })),
+      ...report.blocked.map((item) => ({ kind: "blocked" as const, ...item })),
+    ];
+    const untag = (id: string) => id.replace(/^(ready|blocked):/, "");
+
     return boundResponse(
-      report.ready,
-      (i) => i.id,
-      (kept, meta) => ({
-        ready: kept,
-        readyHasMore: report.readyHasMore || meta.droppedIds.length > 0,
-        blocked: report.blocked,
-        blockedHasMore: report.blockedHasMore,
-        cycleMemberIds: report.cycleMemberIds,
-        truncated: meta.truncated,
-        ...(meta.truncated
-          ? { truncationNote: `The response-size budget was reached; ${meta.droppedIds.length} lower-priority ready item(s) were dropped. Call again with a smaller readyLimit, or brain_list them with a status predicate.` }
-          : {}),
-        droppedNodeIds: meta.droppedIds,
-        shrunkNodeIds: meta.shrunkIds,
-      }),
+      tagged,
+      (t) => `${t.kind}:${t.id}`,
+      (kept, meta) => {
+        const ready = kept.filter((t) => t.kind === "ready").map(({ kind: _kind, ...item }) => item);
+        const blocked = kept.filter((t) => t.kind === "blocked").map(({ kind: _kind, ...item }) => item);
+        const droppedReadyIds = meta.droppedIds.filter((id) => id.startsWith("ready:")).map(untag);
+        const droppedBlockedIds = meta.droppedIds.filter((id) => id.startsWith("blocked:")).map(untag);
+        const notes: string[] = [];
+        if (droppedReadyIds.length > 0) notes.push(`${droppedReadyIds.length} lower-priority ready item(s) were dropped to fit the response-size budget; call again with a smaller readyLimit, or brain_list them with a status predicate.`);
+        if (droppedBlockedIds.length > 0) notes.push(`${droppedBlockedIds.length} blocked item(s) were dropped to fit the response-size budget; call again with a smaller blockedLimit.`);
+        if (meta.shrunkIds.length > 0) notes.push(`${meta.shrunkIds.length} item(s) had oversized fields truncated in place.`);
+        return {
+          ready,
+          readyHasMore: report.readyHasMore || droppedReadyIds.length > 0,
+          blocked,
+          blockedHasMore: report.blockedHasMore || droppedBlockedIds.length > 0,
+          cycleMemberIds: report.cycleMemberIds,
+          truncated: meta.truncated,
+          ...(notes.length > 0 ? { truncationNote: notes.join(" ") } : {}),
+          droppedReadyIds,
+          droppedBlockedIds,
+          shrunkNodeIds: meta.shrunkIds.map(untag),
+        };
+      },
       ctx.responseCharBudget,
     );
   },
