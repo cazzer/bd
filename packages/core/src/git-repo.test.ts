@@ -13,7 +13,6 @@ import {
   gitExternalId,
   GIT_SOURCE_SYSTEM,
   MAX_FILE_BYTES,
-  NUL_PROBE_BYTES,
   parseLsFiles,
   resolveGitRepoEdges,
   type LoadableFile,
@@ -76,26 +75,36 @@ describe("deriveRepoKey", () => {
 describe("classifyFile", () => {
   const text = new TextEncoder().encode("export const x = 1;\n");
 
-  it("reports a generated name before size, and size before the NUL probe", () => {
-    expect(classifyFile({ path: "pnpm-lock.yaml", sizeBytes: MAX_FILE_BYTES + 1, head: text })).toBe("generated");
-    expect(classifyFile({ path: "dist/app.min.js", sizeBytes: 10, head: new Uint8Array([0]) })).toBe("generated");
-    expect(classifyFile({ path: "dist/app.css.map", sizeBytes: 10, head: text })).toBe("generated");
-    expect(classifyFile({ path: "package-lock.json", sizeBytes: 10, head: text })).toBe("generated");
-    expect(classifyFile({ path: "big.txt", sizeBytes: MAX_FILE_BYTES + 1, head: new Uint8Array([0]) })).toBe("size");
-    expect(classifyFile({ path: "exact.txt", sizeBytes: MAX_FILE_BYTES, head: text })).toBe("load");
+  it("reports a generated name before size, and size before the control scan", () => {
+    expect(classifyFile({ path: "pnpm-lock.yaml", sizeBytes: MAX_FILE_BYTES + 1, bytes: text })).toBe("generated");
+    expect(classifyFile({ path: "dist/app.min.js", sizeBytes: 10, bytes: new Uint8Array([0]) })).toBe("generated");
+    expect(classifyFile({ path: "dist/app.css.map", sizeBytes: 10, bytes: text })).toBe("generated");
+    expect(classifyFile({ path: "package-lock.json", sizeBytes: 10, bytes: text })).toBe("generated");
+    expect(classifyFile({ path: "big.txt", sizeBytes: MAX_FILE_BYTES + 1, bytes: new Uint8Array([0]) })).toBe("size");
+    expect(classifyFile({ path: "exact.txt", sizeBytes: MAX_FILE_BYTES, bytes: text })).toBe("load");
   });
 
-  it("treats a NUL byte within the first 8 KiB as binary, and one beyond it as text", () => {
-    const early = new Uint8Array(NUL_PROBE_BYTES).fill(0x61);
-    early[NUL_PROBE_BYTES - 1] = 0;
-    expect(classifyFile({ path: "assets/logo.png", sizeBytes: early.length, head: early })).toBe("binary");
+  it("treats a byte from the store's control set anywhere in the file as binary", () => {
+    // A NUL as the very last byte of a file at the size cap: past git's
+    // 8 KiB heuristic window, but `unsafePrepareNodes` would reject it.
+    const lateNul = new Uint8Array(MAX_FILE_BYTES).fill(0x61);
+    lateNul[MAX_FILE_BYTES - 1] = 0;
+    expect(classifyFile({ path: "assets/logo.png", sizeBytes: lateNul.length, bytes: lateNul })).toBe("binary");
 
-    const late = new Uint8Array(NUL_PROBE_BYTES + 1).fill(0x61);
-    late[NUL_PROBE_BYTES] = 0;
-    expect(classifyFile({ path: "odd.txt", sizeBytes: late.length, head: late })).toBe("load");
+    // The cases the 8 KiB NUL probe missed: a form feed in Python, an
+    // ANSI escape in a snapshot, and DEL.
+    const formFeed = new TextEncoder().encode("def a():\n    pass\n\f\ndef b():\n    pass\n");
+    expect(classifyFile({ path: "lib/mod.py", sizeBytes: formFeed.length, bytes: formFeed })).toBe("binary");
+    const ansi = new TextEncoder().encode("exports[`renders`] = `\u001b[31merror\u001b[0m`;\n");
+    expect(classifyFile({ path: "__snapshots__/cli.snap", sizeBytes: ansi.length, bytes: ansi })).toBe("binary");
+    expect(classifyFile({ path: "del.txt", sizeBytes: 3, bytes: new Uint8Array([0x61, 0x7f, 0x62]) })).toBe("binary");
 
-    expect(classifyFile({ path: "src/a.ts", sizeBytes: text.length, head: text })).toBe("load");
-    expect(classifyFile({ path: "empty.ts", sizeBytes: 0, head: new Uint8Array(0) })).toBe("load");
+    // Tab, LF, and CR are allowed; so is every non-ASCII byte, which can
+    // never be a member of the (all-ASCII) control set.
+    const allowed = new TextEncoder().encode("a\tb\r\nc — é 日本\n");
+    expect(classifyFile({ path: "src/a.ts", sizeBytes: allowed.length, bytes: allowed })).toBe("load");
+    expect(classifyFile({ path: "src/b.ts", sizeBytes: text.length, bytes: text })).toBe("load");
+    expect(classifyFile({ path: "empty.ts", sizeBytes: 0, bytes: new Uint8Array(0) })).toBe("load");
   });
 });
 
@@ -181,6 +190,8 @@ describe("buildRepoTree", () => {
     expect(() => buildRepoTree("k", "/r", [{ path: "../etc/passwd", blobSha: SHA_A, sizeBytes: 1, text: "x" }])).toThrow(/not a normalized/);
     expect(() => buildRepoTree("k", "/r", [{ path: "/abs.ts", blobSha: SHA_A, sizeBytes: 1, text: "x" }])).toThrow(/not a normalized/);
     expect(() => buildRepoTree("k", "/r", [files[1]!, files[1]!])).toThrow(/listed twice/);
+    expect(() => buildRepoTree("k", "/r", [{ path: "notes.md ", blobSha: SHA_A, sizeBytes: 1, text: "x" }])).toThrow(/"notes\.md " has leading or trailing whitespace/);
+    expect(() => buildRepoTree("k", "/r", [{ path: " notes.md", blobSha: SHA_A, sizeBytes: 1, text: "x" }])).toThrow(/whitespace/);
     expect(() => buildRepoTree("  ", "/r", files)).toThrow(/key/);
   });
 

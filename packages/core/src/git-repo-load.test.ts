@@ -25,6 +25,7 @@ import { getIngestRunContents, openIngestRun, type IngestRunHandle } from "./ing
 import { listNodes, type ListNodesOptions, type ListedNode } from "./list.js";
 import { getNeighbors, getNodes } from "./lookup.js";
 import { retrieve } from "./retrieval.js";
+import { asPgError } from "./sql-helpers.js";
 import { connectTestDb, type TestPool, uniqueSuffix } from "./test-helpers.js";
 import { CHILD_OF_EDGE_TYPE } from "./work-items.js";
 
@@ -223,7 +224,11 @@ describe("loadGitRepoTree", () => {
       thrown = err;
     }
     expect(thrown).toBeInstanceOf(EdgeUpsertFailedError);
-    expect(vi.mocked(unsafeBuildUpsertEdgesQuery)).toHaveBeenCalled();
+    // The failure was the forced one — Postgres refusing the edge row's
+    // ingest_run_id — not some other rejection along the way. The wrapper
+    // keeps drizzle's query error as `cause`; `asPgError` reaches the pg
+    // error inside it the same way the wrapper's own message does.
+    expect(asPgError((thrown as EdgeUpsertFailedError).cause)).toMatchObject({ code: "23503", constraint: "edges_ingest_run_id_ingest_runs_id_fk" });
 
     expect(await nodeIdsUnder(key)).toEqual([]);
     const contents = await getIngestRunContents(db, run.id);

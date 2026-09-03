@@ -38,11 +38,11 @@ For each loaded file, every ancestor directory is materialized (deduplicated acr
 
 *Rejected:* a separate `contains` edge kind — a second containment vocabulary is exactly what the views design found missing; one relation, one walk.
 
-### Skips are decided before reading, then by a NUL probe, and the size cap is 256 KiB
+### Skips are decided before reading, then by a control-byte scan, and the size cap is 256 KiB
 
-Order: generated-file name list (`pnpm-lock.yaml`, `package-lock.json`, `yarn.lock`, `bun.lockb`, `*.min.js`, `*.min.css`, `*.map`) → size from `stat` against 256 KiB → NUL byte in the first 8 KiB (git's own binary heuristic). Each reason is counted separately and reported. 256 KiB is far below `upsertNodes`'s 1,000,000-character cap on purpose: the generated tsvector over a 1 MB source file can exceed Postgres's 1 MB tsvector limit and fail the whole batch with an error that names no path. 256 KiB of code produces at most a few hundred KB of tsvector. Every source file in this repository is under 60 KiB; the only casualty here is the lockfile, which the name list already drops.
+Order: generated-file name list (`pnpm-lock.yaml`, `package-lock.json`, `yarn.lock`, `bun.lockb`, `*.min.js`, `*.min.css`, `*.map`) → size from `stat` against 256 KiB → any byte from the store's control set (`CONTROL_CHAR_CODE_POINTS` in nodes.ts: NUL, the other C0 controls except tab, LF, and CR, and DEL) anywhere in the content, reported as `binary`. The scan covers the whole file rather than git's 8 KiB NUL window because `unsafePrepareNodes` rejects that set at any position and one rejected node aborts the whole load — a form feed in a Python file or an ANSI escape in a test snapshot would otherwise fail every file in the run. The set is imported, not restated, so the loader cannot drift from what the store refuses; a UTF-8 byte below 0x80 is its own code point, so the byte scan is exact. Each reason is counted separately and reported. 256 KiB is far below `upsertNodes`'s 1,000,000-character cap on purpose: the generated tsvector over a 1 MB source file can exceed Postgres's 1 MB tsvector limit and fail the whole batch with an error that names no path. 256 KiB of code produces at most a few hundred KB of tsvector. Every source file in this repository is under 60 KiB; the only casualty here is the lockfile, which the name list already drops.
 
-*Rejected:* `.gitattributes` `binary` lookups — most repositories do not declare them. *Rejected:* a per-run `--max-size` flag — nobody tunes this per run; change the constant.
+*Rejected:* `.gitattributes` `binary` lookups — most repositories do not declare them. *Rejected:* git's own heuristic, a NUL in the first 8 KiB — it answers "is this a binary" and not "will the store take it"; the loader needs the second answer. *Rejected:* a per-run `--max-size` flag — nobody tunes this per run; change the constant.
 
 ### Metadata is flat scalars; `language` is a small extension map
 

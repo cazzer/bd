@@ -29,6 +29,7 @@ import {
 import { REPO_NODE_TYPE } from "./github.js";
 import type { IngestRunHandle } from "./ingest-runs.js";
 import {
+  CONTROL_CHAR_CODE_POINTS,
   DEFAULT_MAX_CONTENT_LENGTH,
   DEFAULT_MAX_METADATA_LENGTH,
   DEFAULT_MAX_TITLE_LENGTH,
@@ -60,8 +61,17 @@ export const GIT_EDGE_WEIGHT = 1.0;
  */
 export const MAX_FILE_BYTES = 256 * 1024;
 
-/** How many leading bytes the binary probe inspects for a NUL — git's own heuristic. */
-export const NUL_PROBE_BYTES = 8 * 1024;
+/**
+ * Byte-indexed view of `CONTROL_CHAR_CODE_POINTS` (nodes.ts): the set
+ * `unsafePrepareNodes` refuses anywhere in a node's content — NUL, the
+ * other C0 controls except tab, LF, and CR, and DEL. Every member is
+ * below 0x80, and a UTF-8 byte below 0x80 is its own code point, so a
+ * scan over the raw bytes finds exactly the characters the decoded text
+ * would be rejected for. Built from the store's set rather than
+ * restated so the two cannot drift.
+ */
+const CONTROL_BYTES = new Uint8Array(256);
+for (const codePoint of CONTROL_CHAR_CODE_POINTS) CONTROL_BYTES[codePoint] = 1;
 
 /** Exact base names that are generated artifacts, never worth a node. */
 export const GENERATED_FILE_NAMES: readonly string[] = ["pnpm-lock.yaml", "package-lock.json", "yarn.lock", "bun.lockb"];
@@ -192,8 +202,8 @@ export interface ClassifyFileInput {
   path: string;
   /** From `stat`, before anything is read. */
   sizeBytes: number;
-  /** The file's leading bytes — at most `NUL_PROBE_BYTES` are inspected. */
-  head: Uint8Array;
+  /** The file's whole content — at most `MAX_FILE_BYTES` once the size check has passed. Every byte is inspected. */
+  bytes: Uint8Array;
 }
 
 function baseName(path: string): string {
@@ -205,18 +215,32 @@ function isGeneratedFileName(name: string): boolean {
   return GENERATED_FILE_NAMES.includes(name) || GENERATED_FILE_SUFFIXES.some((suffix) => name.endsWith(suffix));
 }
 
+function containsControlByte(bytes: Uint8Array): boolean {
+  for (let i = 0; i < bytes.length; i += 1) {
+    if (CONTROL_BYTES[bytes[i]!] === 1) return true;
+  }
+  return false;
+}
+
 /**
  * Decides whether a tracked file gets a node. Reasons are checked in a
  * fixed order — generated name, then size against `MAX_FILE_BYTES`, then
- * a NUL byte within the first `NUL_PROBE_BYTES` — so a lockfile over the
- * size cap reports `generated`, the reason a person would act on, not
- * `size`. The name and size checks need nothing read from disk; the
- * caller can pass an empty `head` when either of those already decides.
+ * any byte in the store's control set anywhere in the content — so a
+ * lockfile over the size cap reports `generated`, the reason a person
+ * would act on, not `size`. The name and size checks need nothing read
+ * from disk; the caller can pass empty `bytes` when either of those
+ * already decides, and read the file only once they have not.
+ *
+ * The control scan covers the whole file, not git's 8 KiB NUL window,
+ * because `unsafePrepareNodes` rejects the same set at any position and
+ * one rejected node aborts the whole load: a form feed in a Python file
+ * or an ANSI escape in a test snapshot would otherwise fail every file in
+ * the run. Such a file is reported `binary` — not text the store holds.
  */
-export function classifyFile({ path, sizeBytes, head }: ClassifyFileInput): FileClassification {
+export function classifyFile({ path, sizeBytes, bytes }: ClassifyFileInput): FileClassification {
   if (isGeneratedFileName(baseName(path))) return "generated";
   if (sizeBytes > MAX_FILE_BYTES) return "size";
-  if (head.subarray(0, NUL_PROBE_BYTES).includes(0)) return "binary";
+  if (containsControlByte(bytes)) return "binary";
   return "load";
 }
 
@@ -271,6 +295,13 @@ function validateRelativePath(path: string): string[] {
   const segments = path.split("/");
   if (path.length === 0 || segments.some((s) => s.length === 0 || s === "." || s === "..")) {
     throw new Error(`buildRepoTree: ${JSON.stringify(path)} is not a normalized repository-relative path`);
+  }
+  // `unsafePrepareNodes` trims every external id, so a path with trailing
+  // whitespace would be stored under a different id than the one its
+  // `child_of` candidate names and fail inside the transaction. Refused
+  // here, before any run is opened, naming the path.
+  if (path !== path.trim()) {
+    throw new Error(`buildRepoTree: ${JSON.stringify(path)} has leading or trailing whitespace, which the store trims from external ids`);
   }
   return segments;
 }

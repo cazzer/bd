@@ -21,7 +21,7 @@ The loader SHALL take the path of a local git checkout and enumerate exactly the
 #### Scenario: Same checkout loaded twice
 
 - **WHEN** the loader runs twice over an unchanged checkout
-- **THEN** the second run reports every node and edge unchanged and creates nothing
+- **THEN** the second run reports every node unchanged and creates no node or edge (edges report `updated`; `upsertEdges` has no unchanged state, tracked as bd-nr6)
 
 ### Requirement: The tree is expressed with child_of edges
 
@@ -58,7 +58,7 @@ A `file` node's content SHALL be the file's text, its title SHALL be the file's 
 
 ### Requirement: Unloadable files are skipped and counted
 
-The loader SHALL skip a file whose first 8 KiB contains a NUL byte, a file larger than 256 KiB, and a file whose name matches a fixed list of generated artifacts (package-manager lockfiles, minified bundles, source maps). A skipped file SHALL produce no node and no edge, and SHALL be counted by reason in the run's summary. A directory containing only skipped files SHALL still be materialized when it lies on the path of a loaded file, and otherwise SHALL not.
+The loader SHALL skip a file whose content contains, at any position, a character the store refuses in node content (NUL, any other C0 control character except tab, line feed, and carriage return, or DEL), a file larger than 256 KiB, and a file whose name matches a fixed list of generated artifacts (package-manager lockfiles, minified bundles, source maps). A skipped file SHALL produce no node and no edge, and SHALL be counted by reason in the run's summary. A directory containing only skipped files SHALL still be materialized when it lies on the path of a loaded file, and otherwise SHALL not.
 
 #### Scenario: Binary file is skipped
 
