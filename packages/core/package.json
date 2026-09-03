@@ -12,7 +12,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "db:seed": "tsx src/seed.ts",
     "ingest:github": "tsx src/ingest-github.ts",
-    "ingest:beads": "tsx src/ingest-beads.ts"
+    "ingest:beads": "tsx src/ingest-beads.ts",
+    "ingest:repo": "tsx src/ingest-git-repo.ts"
   },
   "dependencies": {
     "@breakdown/db": "workspace:*",

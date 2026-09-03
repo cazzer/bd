@@ -1,10 +1,14 @@
 // Git repository loader (git-repo-ingestor change): the pure mapping from
 // `git ls-files` records and file bytes to `NodeInput`s and `child_of`
-// edge candidates, plus the one write-path composition the loader needs —
-// nodes then edges inside a single transaction. No I/O here beyond that
-// write: the script in ingest-git-repo.ts runs `git`, stats and reads
-// files, opens the ingest run, and prints the summary. Same split as
-// beads.ts / ingest-beads.ts and github.ts / ingest-github.ts.
+// edge candidates, plus the two pieces of I/O the loader needs —
+// `readWorkingTree`, which stats, classifies, and reads each tracked
+// entry (here rather than in the script so the decisions that depend on
+// the filesystem, a missing file or a control byte, are tested against a
+// temp directory without git or a database), and the one write-path
+// composition, nodes then edges inside a single transaction. The script
+// in ingest-git-repo.ts runs `git`, opens the ingest run, and prints the
+// summary. Same split as beads.ts / ingest-beads.ts and github.ts /
+// ingest-github.ts.
 //
 // Shapes (design.md): the root is a `repo` node with external id `<key>`;
 // every directory on the path from a loaded file to the root is a
@@ -16,6 +20,9 @@
 // content is its text and its metadata is flat scalars so `listNodes`'s
 // predicates can select on `language`, `size_bytes`, and the rest.
 
+import type { Stats } from "node:fs";
+import { readFile, stat } from "node:fs/promises";
+import { join } from "node:path";
 import type { Database } from "@breakdown/db";
 import {
   DEFAULT_EDGE_CHUNK_SIZE,
@@ -195,8 +202,24 @@ export function deriveRepoKey(originUrl: string | null, dirName: string, overrid
 
 // --- Classification -----------------------------------------------------
 
-export type SkipReason = "generated" | "size" | "binary";
+/**
+ * Why a tracked entry got no node. `missing` is an index entry with no
+ * file in the working tree — a sparse checkout, or a file removed with
+ * `rm` rather than `git rm`. The loader mirrors the working tree, and a
+ * sparse checkout lists absent files by design, so that is "not in the
+ * checkout", counted and reported, not a failure (design.md).
+ */
+export type SkipReason = "generated" | "size" | "binary" | "missing";
 export type FileClassification = "load" | SkipReason;
+
+/** Every `SkipReason`, in the order the summary reports them. */
+export const SKIP_REASONS: readonly SkipReason[] = ["generated", "size", "binary", "missing"];
+
+export type SkipCounts = Record<SkipReason, number>;
+
+export function emptySkipCounts(): SkipCounts {
+  return { generated: 0, size: 0, binary: 0, missing: 0 };
+}
 
 export interface ClassifyFileInput {
   path: string;
@@ -260,7 +283,7 @@ export function countLines(text: string): number {
   return text.endsWith("\n") ? newlines : newlines + 1;
 }
 
-// --- Tree ----------------------------------------------------------------
+// --- Working tree ------------------------------------------------------
 
 /** A file that passed `classifyFile`, read from the working tree. */
 export interface LoadableFile {
@@ -270,6 +293,75 @@ export interface LoadableFile {
   sizeBytes: number;
   text: string;
 }
+
+export interface WorkingTreeRead {
+  /** Every entry that gets a node, in `entries` order. */
+  files: LoadableFile[];
+  skipped: SkipCounts;
+}
+
+const NO_BYTES = new Uint8Array(0);
+const utf8 = new TextDecoder();
+
+function errnoCode(err: unknown): string | undefined {
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === "string" ? code : undefined;
+}
+
+function describe(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Stats, classifies, and reads each `git ls-files` entry under
+ * `rootPath`. Name and size are decided from `stat` alone; only an entry
+ * that passes both is read, and then its whole content is scanned. An
+ * entry with no file on disk (`ENOENT`) is counted as `missing` and
+ * skipped — see `SkipReason`. Any other failure — a permission error, or
+ * a directory where a regular file is tracked — is not a state of the
+ * checkout this loader mirrors, so it throws naming the path rather than
+ * leaving a hole the summary would not explain.
+ */
+export async function readWorkingTree(rootPath: string, entries: readonly LsFilesEntry[]): Promise<WorkingTreeRead> {
+  const files: LoadableFile[] = [];
+  const skipped = emptySkipCounts();
+  for (const entry of entries) {
+    const absolute = join(rootPath, entry.path);
+    let stats: Stats;
+    try {
+      stats = await stat(absolute);
+    } catch (err) {
+      if (errnoCode(err) === "ENOENT") {
+        skipped.missing += 1;
+        continue;
+      }
+      throw new Error(`readWorkingTree: cannot stat ${entry.path}: ${describe(err)}`, { cause: err });
+    }
+    if (!stats.isFile()) {
+      throw new Error(`readWorkingTree: ${entry.path} is tracked as a regular file but is not one in the working tree`);
+    }
+    const beforeRead = classifyFile({ path: entry.path, sizeBytes: stats.size, bytes: NO_BYTES });
+    if (beforeRead !== "load") {
+      skipped[beforeRead] += 1;
+      continue;
+    }
+    let bytes: Uint8Array;
+    try {
+      bytes = await readFile(absolute);
+    } catch (err) {
+      throw new Error(`readWorkingTree: cannot read ${entry.path}: ${describe(err)}`, { cause: err });
+    }
+    const decision = classifyFile({ path: entry.path, sizeBytes: stats.size, bytes });
+    if (decision !== "load") {
+      skipped[decision] += 1;
+      continue;
+    }
+    files.push({ path: entry.path, blobSha: entry.blobSha, sizeBytes: stats.size, text: utf8.decode(bytes) });
+  }
+  return { files, skipped };
+}
+
+// --- Tree ----------------------------------------------------------------
 
 /** A `child_of` edge by external id: `src` is the child. Resolved to node ids after the node upsert returns. */
 export interface GitRepoEdgeCandidate {

@@ -58,7 +58,7 @@ A `file` node's content SHALL be the file's text, its title SHALL be the file's 
 
 ### Requirement: Unloadable files are skipped and counted
 
-The loader SHALL skip a file whose content contains, at any position, a character the store refuses in node content (NUL, any other C0 control character except tab, line feed, and carriage return, or DEL), a file larger than 256 KiB, and a file whose name matches a fixed list of generated artifacts (package-manager lockfiles, minified bundles, source maps). A skipped file SHALL produce no node and no edge, and SHALL be counted by reason in the run's summary. A directory containing only skipped files SHALL still be materialized when it lies on the path of a loaded file, and otherwise SHALL not.
+The loader SHALL skip a file whose content contains, at any position, a character the store refuses in node content (NUL, any other C0 control character except tab, line feed, and carriage return, or DEL), a file larger than 256 KiB, and a file whose name matches a fixed list of generated artifacts (package-manager lockfiles, minified bundles, source maps). A tracked entry with no file in the working tree SHALL be skipped as missing. A skipped file SHALL produce no node and no edge, and SHALL be counted by reason in the run's summary. A directory containing only skipped files SHALL still be materialized when it lies on the path of a loaded file, and otherwise SHALL not.
 
 #### Scenario: Binary file is skipped
 
@@ -74,6 +74,11 @@ The loader SHALL skip a file whose content contains, at any position, a characte
 
 - **WHEN** `pnpm-lock.yaml` is tracked
 - **THEN** it gets no node and the summary reports one file skipped as generated
+
+#### Scenario: Tracked entry with no working-tree file is skipped
+
+- **WHEN** a tracked path has no file in the working tree (a sparse checkout, or a file removed without `git rm`)
+- **THEN** it gets no node and the summary reports one file skipped as missing
 
 ### Requirement: A load is one attributed, all-or-nothing batch
 

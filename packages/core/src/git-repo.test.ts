@@ -3,7 +3,10 @@
 // function over strings, byte arrays, and already-read files. The write
 // path (`loadGitRepoTree`) is covered in git-repo-load.test.ts.
 
-import { describe, expect, it } from "vitest";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   buildRepoTree,
   classifyFile,
@@ -14,8 +17,10 @@ import {
   GIT_SOURCE_SYSTEM,
   MAX_FILE_BYTES,
   parseLsFiles,
+  readWorkingTree,
   resolveGitRepoEdges,
   type LoadableFile,
+  type LsFilesEntry,
 } from "./git-repo.js";
 
 const SHA_A = "a".repeat(40);
@@ -105,6 +110,42 @@ describe("classifyFile", () => {
     expect(classifyFile({ path: "src/a.ts", sizeBytes: allowed.length, bytes: allowed })).toBe("load");
     expect(classifyFile({ path: "src/b.ts", sizeBytes: text.length, bytes: text })).toBe("load");
     expect(classifyFile({ path: "empty.ts", sizeBytes: 0, bytes: new Uint8Array(0) })).toBe("load");
+  });
+});
+
+describe("readWorkingTree", () => {
+  let root: string;
+  const entry = (path: string): LsFilesEntry => ({ path, blobSha: SHA_A, mode: "100644" });
+
+  beforeAll(async () => {
+    root = await mkdtemp(join(tmpdir(), "gri-working-tree-"));
+    await mkdir(join(root, "src"), { recursive: true });
+    await mkdir(join(root, "was-a-file"));
+    await writeFile(join(root, "src/a.ts"), "export const a = 1;\n");
+    await writeFile(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+    await writeFile(join(root, "big.txt"), new Uint8Array(MAX_FILE_BYTES + 1).fill(0x61));
+    await writeFile(join(root, "logo.png"), new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0, 0]));
+  });
+
+  afterAll(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("reads loadable entries, counts each skip by reason, and treats an index entry with no file as missing", async () => {
+    const read = await readWorkingTree(root, [
+      entry("src/a.ts"),
+      entry("pnpm-lock.yaml"),
+      entry("big.txt"),
+      entry("logo.png"),
+      // Never written: a sparse checkout, or `rm` without `git rm`.
+      entry("sparse/absent.ts"),
+    ]);
+    expect(read.files).toEqual([{ path: "src/a.ts", blobSha: SHA_A, sizeBytes: 20, text: "export const a = 1;\n" }]);
+    expect(read.skipped).toEqual({ generated: 1, size: 1, binary: 1, missing: 1 });
+  });
+
+  it("fails naming the path when a tracked regular file is a directory on disk", async () => {
+    await expect(readWorkingTree(root, [entry("src/a.ts"), entry("was-a-file")])).rejects.toThrow(/was-a-file is tracked as a regular file/);
   });
 });
 
