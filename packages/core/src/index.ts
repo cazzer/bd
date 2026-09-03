@@ -32,6 +32,7 @@ export {
   InvalidListOptionError,
   InvalidWorkItemError,
   NotAWorkItemError,
+  InvalidViewError,
 } from "./errors.js";
 
 // `asPgError`/`PgErrorLike` are re-exported (not just used internally) so
@@ -282,3 +283,22 @@ export {
   type BeadsEdgeCandidate,
   type DeriveBeadsEdgesResult,
 } from "./beads.js";
+
+// Node views (node-views change): the view contract, the default_view edge
+// convention, and batched default-view resolution along child_of. See
+// views.ts's module header.
+export {
+  VIEW_NODE_TYPE,
+  VIEW_RENDERERS,
+  DEFAULT_VIEW_EDGE_TYPE,
+  MAX_RESOLVE_IDS,
+  MAX_RESOLVE_DEPTH,
+  isViewRenderer,
+  normalizeViewMetadata,
+  resolveDefaultViews,
+  buildResolveDefaultViewsQuery,
+  type ViewRenderer,
+  type ViewFilter,
+  type NormalizeViewOptions,
+  type ResolvedDefaultView,
+} from "./views.js";

@@ -11,7 +11,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { EdgeInput, IngestRunHandle, NodeInput } from "@breakdown/core";
-import { closeIngestRun, mergeNodes, openIngestRun, upsertEdges, upsertNodes } from "@breakdown/core";
+import { closeIngestRun, mergeNodes, openIngestRun, resolveDefaultViews, upsertEdges, upsertNodes } from "@breakdown/core";
 import { createDb, createPool, edges, ingestRuns, nodes, resolveDatabaseUrl, type Database } from "@breakdown/db";
 import { createServer, type CreateServerOptions } from "./server.js";
 
@@ -1038,6 +1038,79 @@ describe("work-item contract in brain_write and cycles in brain_link", () => {
     expect(text).toMatch(/Nothing from this call was stored/);
     const stored = await db.select({ id: edges.id }).from(edges).where(and(eq(edges.srcId, a), eq(edges.edgeType, "mentions")));
     expect(stored).toHaveLength(0);
+  });
+});
+
+describe("view contract in brain_write and default_view resolution", () => {
+  it("rejects a batch containing a view with an unknown renderer, naming the item and renderer, persisting nothing (spec: agent writes a view with an unknown renderer)", async () => {
+    const src = `mcp-view-${uniqueSuffix()}`;
+    usedSourceSystems.push(src);
+    const { client } = await connectClient();
+    const raw = await client.callTool({
+      name: "brain_write",
+      arguments: {
+        items: [
+          { nodeType: "doc", sourceSystem: src, externalId: "good", title: "ok" },
+          { nodeType: "view", sourceSystem: src, externalId: "timeline-view", title: "Timeline", metadata: { renderer: "timeline", filter: { nodeTypes: ["work_item"] } } },
+        ],
+      },
+    });
+    expect(raw.isError).toBe(true);
+    const text = firstText(raw);
+    expect(text).toMatch(/renderer \(got "timeline"\)/);
+    expect(text).toMatch(/batch index 1/);
+    expect(text).toContain(`${src}/timeline-view`);
+    expect(text).not.toMatch(/\s+at\s+\S+\s+\(/);
+    const persisted = await db.select({ id: nodes.id }).from(nodes).where(eq(nodes.sourceSystem, src));
+    expect(persisted).toHaveLength(0);
+  });
+
+  it("stores a view and a default_view edge; resolveDefaultViews names the view for the work item and its child_of descendant (spec: agent declares a default view)", async () => {
+    const src = `mcp-view-${uniqueSuffix()}`;
+    usedSourceSystems.push(src);
+    const { client } = await connectClient();
+    const filter = { nodeTypes: ["work_item"], where: [{ key: "status", op: "equals", value: "open" }] };
+
+    const written = parseText(
+      await client.callTool({
+        name: "brain_write",
+        arguments: {
+          items: [
+            { nodeType: "view", sourceSystem: src, externalId: "open-work", title: "Open work", metadata: { renderer: "feed", filter, note: "kept" } },
+            { nodeType: "work_item", sourceSystem: src, externalId: "epic", title: "Epic" },
+            { nodeType: "work_item", sourceSystem: src, externalId: "task", title: "Task" },
+          ],
+        },
+      }),
+    );
+    toolRunIds.push(written.ingestRunId);
+    const idOf = new Map<string, string>(written.items.map((i: { externalId: string; id: string }) => [i.externalId, i.id]));
+    const view = idOf.get("open-work")!;
+    const epic = idOf.get("epic")!;
+    const task = idOf.get("task")!;
+
+    const linked = parseText(
+      await client.callTool({
+        name: "brain_link",
+        arguments: {
+          items: [
+            { srcId: task, dstId: epic, edgeType: "child_of" },
+            { srcId: epic, dstId: view, edgeType: "default_view" },
+          ],
+        },
+      }),
+    );
+    toolRunIds.push(linked.ingestRunId);
+    expect(linked.created).toBe(2);
+
+    const listed = parseText(await client.callTool({ name: "brain_list", arguments: { nodeTypes: ["view"], sourceSystems: [src] } }));
+    expect(listed.nodes).toHaveLength(1);
+    expect(listed.nodes[0]).toMatchObject({ id: view, metadata: { renderer: "feed", filter, note: "kept" } });
+
+    expect(await resolveDefaultViews(db, [epic, task])).toEqual([
+      { nodeId: epic, view: { id: view, title: "Open work", renderer: "feed" }, declaredBy: epic },
+      { nodeId: task, view: { id: view, title: "Open work", renderer: "feed" }, declaredBy: epic },
+    ]);
   });
 });
 

@@ -17,6 +17,7 @@ import {
   InvalidLookupIdError,
   InvalidLookupOptionError,
   NotAWorkItemError,
+  InvalidViewError,
   InvalidWorkItemError,
   InvalidListOptionError,
   InvalidNodeContentError,
@@ -249,6 +250,14 @@ describe("mapError: work-items change", () => {
     const notItem = (mapError("brain_update_work_item", new NotAWorkItemError("00000000-0000-4000-8000-000000000000", "note")).content[0] as { text: string }).text;
     expect(notItem).toMatch(/not a work item/);
     expect(notItem).toMatch(/brain_write/);
+  });
+
+  it("maps InvalidViewError to a message naming the item, the field, and what a valid view carries", () => {
+    const text = (mapError("brain_write", new InvalidViewError("at batch index 2 (agent/open-work)", "renderer", "timeline", "must be one of graph, feed, code")).content[0] as { text: string }).text;
+    expect(text).toMatch(/batch index 2 \(agent\/open-work\)/);
+    expect(text).toMatch(/renderer \(got "timeline"\)/);
+    expect(text).toMatch(/nothing from this call was persisted/i);
+    expect(text).toMatch(/without limit or cursor/);
   });
 });
 

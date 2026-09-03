@@ -20,10 +20,12 @@ import {
   MAX_WORK_ITEM_PRIORITY,
   MIN_WORK_ITEM_PRIORITY,
   mergeNodes,
+  normalizeViewMetadata,
   normalizeWorkItemMetadata,
   patchWorkItem,
   upsertEdges,
   upsertNodes,
+  VIEW_NODE_TYPE,
   WORK_ITEM_NODE_TYPE,
   WORK_ITEM_STATUSES,
   type WorkItemPatch,
@@ -86,22 +88,33 @@ const writeSchema = z.object({
 export const writeTool: ToolDef<typeof writeSchema> = {
   name: "brain_write",
   description:
-    "Create or update one node, or a batch of nodes in one call (pass items as a single object or an array, up to 1000 items). Each item is upserted on (sourceSystem, externalId) — re-writing identical content is a no-op reported as 'unchanged'; changed content is 'updated'; a new key is 'created'. sourceSystem defaults to \"agent\" when omitted. All items in one call share a single ingest run attributed to source_system='agent' and to this client as actor, so this call's writes are identifiable and revertible as a unit. Items with nodeType \"work_item\" are validated against the work-item contract (metadata status/priority/assignee/closed_at/closed_reason/spec_id; missing status defaults to open, priority to 2) and one bad item rejects the whole batch.",
+    "Create or update one node, or a batch of nodes in one call (pass items as a single object or an array, up to 1000 items). Each item is upserted on (sourceSystem, externalId) — re-writing identical content is a no-op reported as 'unchanged'; changed content is 'updated'; a new key is 'created'. sourceSystem defaults to \"agent\" when omitted. All items in one call share a single ingest run attributed to source_system='agent' and to this client as actor, so this call's writes are identifiable and revertible as a unit. Items with nodeType \"work_item\" are validated against the work-item contract (metadata status/priority/assignee/closed_at/closed_reason/spec_id; missing status defaults to open, priority to 2) and one bad item rejects the whole batch. Items with nodeType \"view\" are validated against the view contract (metadata renderer is one of graph, feed, code; filter is the same selection brain_list accepts, without limit or cursor), and a node's default view is declared by linking a default_view edge from it to the view with brain_link — its child_of descendants inherit it.",
   schema: writeSchema,
   isWrite: true,
   async handler(ctx: ToolContext, args) {
     const items = toArray(args.items);
-    const input: NodeInput[] = items.map((item, index) => ({
-      nodeType: item.nodeType,
-      externalId: item.externalId,
-      sourceSystem: item.sourceSystem ?? AGENT_SOURCE_SYSTEM,
-      title: item.title,
-      content: item.content,
-      // The work-item contract is enforced here, at the tool boundary, not
-      // in upsertNodes (work-items spec): a bad item rejects the whole batch
-      // before any run is opened, naming the item and field.
-      metadata: item.nodeType.trim() === WORK_ITEM_NODE_TYPE ? normalizeWorkItemMetadata(item.metadata, { index }) : item.metadata,
-    }));
+    const input: NodeInput[] = items.map((item, index) => {
+      const nodeType = item.nodeType.trim();
+      const sourceSystem = item.sourceSystem ?? AGENT_SOURCE_SYSTEM;
+      // The work-item and view contracts are enforced here, at the tool
+      // boundary, not in upsertNodes (work-items spec, node-views spec): a
+      // bad item rejects the whole batch before any run is opened, naming
+      // the item and field.
+      const metadata =
+        nodeType === WORK_ITEM_NODE_TYPE
+          ? normalizeWorkItemMetadata(item.metadata, { index })
+          : nodeType === VIEW_NODE_TYPE
+            ? normalizeViewMetadata(item.metadata, { itemLabel: `at batch index ${index} (${sourceSystem}/${item.externalId})` })
+            : item.metadata;
+      return {
+        nodeType: item.nodeType,
+        externalId: item.externalId,
+        sourceSystem,
+        title: item.title,
+        content: item.content,
+        metadata,
+      };
+    });
 
     const { ingestRunId, result } = await withAgentIngestRun(ctx.db, ctx.actor(), (run) => upsertNodes(ctx.db, run, input));
 

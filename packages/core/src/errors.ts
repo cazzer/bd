@@ -393,7 +393,7 @@ export class InvalidLookupIdError extends KnowledgeStoreError {
 export class LookupFailedError extends KnowledgeStoreError {
   constructor(
     message: string,
-    readonly operation: "getNodes" | "getNeighbors" | "getNodeHistory" | "listNodes" | "getWorkItemReadiness" | "patchWorkItem",
+    readonly operation: "getNodes" | "getNeighbors" | "getNodeHistory" | "listNodes" | "getWorkItemReadiness" | "patchWorkItem" | "resolveDefaultViews",
     options?: ErrorOptions,
   ) {
     super(message, options);
@@ -452,7 +452,8 @@ export class InvalidListOptionError extends KnowledgeStoreError {
   constructor(
     readonly option: string,
     readonly value: unknown,
-    reason: string,
+    /** Kept as a field so a wrapper (`InvalidViewError`, for a view's `filter`) can re-state it under its own prefix without parsing `message`. */
+    readonly reason: string,
   ) {
     super(`invalid list option ${option} (got ${JSON.stringify(value)}): ${reason}`);
   }
@@ -490,5 +491,29 @@ export class NotAWorkItemError extends KnowledgeStoreError {
     readonly nodeType: string,
   ) {
     super(`node ${nodeId} is not a work item: its node_type is ${JSON.stringify(nodeType)}, not "work_item"`);
+  }
+}
+
+// --- Views (node-views change) ---------------------------------------------
+
+/**
+ * A view's metadata violates the view contract (node-views spec, "A view
+ * is a node with a validated contract"): a `renderer` outside the known
+ * set, a missing or non-object `filter`, a `filter` carrying the reader's
+ * `limit`/`cursor`, or a filter that structured listing itself rejects
+ * (in which case `field` is the offending option under `filter.`, e.g.
+ * `filter.where[0].op`, and the `InvalidListOptionError` is the `cause`).
+ * `item` is however the writer labels the item — the MCP write tool passes
+ * its batch index and key — so a writer knows which item to fix.
+ */
+export class InvalidViewError extends KnowledgeStoreError {
+  constructor(
+    readonly item: string | null,
+    readonly field: string,
+    readonly value: unknown,
+    reason: string,
+    options?: ErrorOptions,
+  ) {
+    super(`invalid view${item === null ? "" : ` ${item}`}: ${field} (got ${JSON.stringify(value)}) ${reason}`, options);
   }
 }

@@ -22,6 +22,7 @@ import {
   InvalidNodeContentError,
   InvalidNodeInputError,
   InvalidRetrievalOptionError,
+  InvalidViewError,
   InvalidWorkItemError,
   KnowledgeStoreError,
   LookupFailedError,
@@ -185,6 +186,11 @@ export function mapError(toolName: string, err: unknown): CallToolResult {
   }
   if (err instanceof NotAWorkItemError) {
     return actionable(err, "brain_update_work_item only patches nodes whose nodeType is work_item. Use brain_write to change other nodes, or write this one as a work_item first.");
+  }
+
+  // --- Views (brain_write of a view) ---
+  if (err instanceof InvalidViewError) {
+    return actionable(err, "Fix that field on the named item and retry; nothing from this call was persisted. renderer is one of graph, feed, code; filter is an object of brain_list options (nodeTypes, sourceSystems, updatedSince, where) without limit or cursor.");
   }
 
   // --- Attribution plumbing (should not surface in practice — the server
