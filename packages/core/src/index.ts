@@ -41,7 +41,7 @@ export {
 // the drizzle/node-postgres error-unwrapping this package already does —
 // that unwrapping is infrastructure, not business logic, and duplicating
 // it at the MCP boundary would be the actual layering violation.
-export { asPgError, type PgErrorLike } from "./sql-helpers.js";
+export { asPgError, isDrizzleQueryError, type PgErrorLike } from "./sql-helpers.js";
 
 export {
   openIngestRun,

@@ -1034,7 +1034,7 @@ describe("work-item contract in brain_write and cycles in brain_link", () => {
     expect(raw.isError).toBe(true);
     const text = firstText(raw);
     expect(text).toMatch(/cycle/);
-    expect(text).toContain(`${b} -> ${a} -> ${b}`);
+    expect(text).toContain(`endpoints: ${b} -> ${a}`);
     expect(text).toMatch(/Nothing from this call was stored/);
     const stored = await db.select({ id: edges.id }).from(edges).where(and(eq(edges.srcId, a), eq(edges.edgeType, "mentions")));
     expect(stored).toHaveLength(0);

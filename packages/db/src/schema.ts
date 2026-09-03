@@ -52,12 +52,14 @@ import {
  *      would fail silently.
  *   6. A BEFORE trigger on `edges` refusing any `blocks` edge that would
  *      make a node transitively block itself (migrations/0003_*.sql,
- *      function replaced in 0004_*.sql to skip already-stored edges,
+ *      function replaced in 0004_*.sql to skip already-stored edges and
+ *      in 0005_*.sql to decide reachability with set semantics, O(V*E),
+ *      rather than enumerating simple paths,
  *      work-items spec, "Blocking and parent relationships"). Endpoints
  *      are folded through `merged_into`, the walk is serialized by an
  *      advisory transaction lock so two concurrent inserts cannot each
- *      see no cycle and together form one, and the rejection carries the
- *      path in DETAIL. Same justification as #4 and #5: a cross-row rule
+ *      see no cycle and together form one, and the rejection names the
+ *      two endpoints in DETAIL. Same justification as #4 and #5: a cross-row rule
  *      no CHECK can express, with a silent failure mode (an item that
  *      can never become ready) if any write path forgot it.
  *

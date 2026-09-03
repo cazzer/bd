@@ -27,7 +27,7 @@ The server SHALL expose a read tool that returns the readiness report and a writ
 
 ### Requirement: Batch write and link tools
 
-The server SHALL expose a tool that creates or updates nodes and a tool that asserts edges, each accepting either a single item or a batch in one call. Writes made through the server SHALL be attributed to an ingest run identifying the writing agent as the source system and the connected MCP client, as it identified itself when the session began, as the actor — so agent-authored content is distinguishable from content loaded by other means, and one client's writes are distinguishable from another's. The server SHALL require no configuration to record the actor. A written node of type `work_item` SHALL be validated and defaulted against the work-item contract before anything is persisted. An asserted `blocks` edge that would form a cycle SHALL be refused with an error naming the cycle, and nothing from that call SHALL be persisted.
+The server SHALL expose a tool that creates or updates nodes and a tool that asserts edges, each accepting either a single item or a batch in one call. Writes made through the server SHALL be attributed to an ingest run identifying the writing agent as the source system and the connected MCP client, as it identified itself when the session began, as the actor — so agent-authored content is distinguishable from content loaded by other means, and one client's writes are distinguishable from another's. The server SHALL require no configuration to record the actor. A written node of type `work_item` SHALL be validated and defaulted against the work-item contract before anything is persisted. An asserted `blocks` edge that would form a cycle SHALL be refused with an error naming the refused edge's endpoints, and nothing from that call SHALL be persisted.
 
 #### Scenario: Agent loads a repository in bulk
 
@@ -57,4 +57,4 @@ The server SHALL expose a tool that creates or updates nodes and a tool that ass
 #### Scenario: Agent links a cycle
 
 - **WHEN** the agent asserts a `blocks` edge that would close a cycle
-- **THEN** the call is refused with an error that names the path and says the edge was not stored
+- **THEN** the call is refused with an error that names the edge's endpoints and says the edge was not stored

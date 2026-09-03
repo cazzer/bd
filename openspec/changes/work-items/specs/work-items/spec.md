@@ -49,12 +49,12 @@ A caller SHALL be able to change specific work-item fields without supplying the
 
 ### Requirement: Blocking and parent relationships
 
-An edge of type `blocks` SHALL mean the source must be closed before the target can be worked. An edge of type `child_of` SHALL mean the source is a child of the target. Endpoints that have been merged SHALL be treated as the surviving node. A `blocks` edge that would make any node transitively block itself SHALL be rejected, naming the cycle, and nothing from that write SHALL be persisted.
+An edge of type `blocks` SHALL mean the source must be closed before the target can be worked. An edge of type `child_of` SHALL mean the source is a child of the target. Endpoints that have been merged SHALL be treated as the surviving node. A `blocks` edge that would make any node transitively block itself SHALL be rejected, naming the two endpoints of the refused edge, and nothing from that write SHALL be persisted. Deciding this SHALL cost time polynomial in the graph's size, never proportional to its number of paths.
 
 #### Scenario: Direct cycle rejected
 
 - **WHEN** A blocks B and a caller asserts that B blocks A
-- **THEN** the assertion is rejected naming the path from A back to A
+- **THEN** the assertion is rejected naming B and A as the refused edge's endpoints
 
 #### Scenario: Self-block rejected
 

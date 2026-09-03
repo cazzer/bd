@@ -12,6 +12,8 @@
 -- The recursive walk enumerates simple paths, which is exponential on a
 -- dense layered DAG; fine at personal scale, and bounded by the path
 -- length guard.
+-- NOTE: replaced again in 0005: the walk below enumerates simple paths, which is
+-- exponential on a dense layered DAG; 0005 uses set-semantics reachability.
 CREATE OR REPLACE FUNCTION edges_blocks_must_be_acyclic() RETURNS trigger
 LANGUAGE plpgsql AS $$
 DECLARE

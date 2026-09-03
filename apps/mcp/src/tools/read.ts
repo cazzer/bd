@@ -336,7 +336,7 @@ const listSchema = z.object({
   updatedSince: z.string().datetime({ offset: true }).optional(),
   where: z.array(predicateSchema).max(MAX_LIST_PREDICATES).optional(),
   limit: z.number().int().positive().max(MAX_LIST_LIMIT).optional(),
-  cursor: z.object({ updatedAt: z.string().min(1), id: z.string().min(1) }).optional(),
+  cursor: z.object({ updatedAt: z.string().min(1).max(64), id: z.string().min(1).max(64) }).optional(),
 });
 
 export const listTool: ToolDef<typeof listSchema> = {

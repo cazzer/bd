@@ -1,3 +1,4 @@
+import { DrizzleQueryError } from "drizzle-orm";
 import { sql, type SQL } from "drizzle-orm";
 
 /** Splits `items` into consecutive slices of at most `size` elements. */
@@ -63,4 +64,13 @@ export function formatPgInfo(pg: PgErrorLike | undefined): string {
   if (!pg) return "";
   const parts = [pg.code, pg.constraint, pg.detail].filter(Boolean);
   return parts.length > 0 ? ` (postgres: ${parts.join(" — ")})` : "";
+}
+
+/**
+ * True when `err` is drizzle's query wrapper, whose `.message` is literally
+ * the SQL text and parameters. Exported so the MCP error mapper can keep
+ * that text off the wire without taking its own drizzle dependency.
+ */
+export function isDrizzleQueryError(err: unknown): err is DrizzleQueryError {
+  return err instanceof DrizzleQueryError;
 }

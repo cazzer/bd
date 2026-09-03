@@ -32,6 +32,7 @@ import {
 } from "@breakdown/core";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
+import { DrizzleQueryError } from "drizzle-orm";
 import { formatZodError, mapError } from "./errors.js";
 
 /** A raw stack trace line looks like "    at functionName (file:line:col)". */
@@ -248,5 +249,18 @@ describe("mapError: work-items change", () => {
     const notItem = (mapError("brain_update_work_item", new NotAWorkItemError("00000000-0000-4000-8000-000000000000", "note")).content[0] as { text: string }).text;
     expect(notItem).toMatch(/not a work item/);
     expect(notItem).toMatch(/brain_write/);
+  });
+});
+
+
+describe("mapError: driver errors that escaped core", () => {
+  it("never echoes drizzle's SQL-and-params message; it emits only the retry hint", () => {
+    const err = new DrizzleQueryError("SELECT secret FROM nodes WHERE id = $1", ["00000000-0000-4000-8000-000000000000"], new Error("connection reset"));
+    const result = mapError("brain_update_work_item", err);
+    expect(result.isError).toBe(true);
+    const text = (result.content[0] as { text: string }).text;
+    expect(text).not.toContain("SELECT secret");
+    expect(text).not.toContain("params");
+    expect(text).toMatch(/you may retry/);
   });
 });

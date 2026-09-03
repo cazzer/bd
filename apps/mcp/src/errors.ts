@@ -7,6 +7,7 @@
 
 import {
   asPgError,
+  isDrizzleQueryError,
   ContentTooLargeError,
   DuplicateEdgeInBatchError,
   DuplicateNodeInBatchError,
@@ -126,7 +127,7 @@ export function mapError(toolName: string, err: unknown): CallToolResult {
     if (isBlocksCycle(err)) {
       return actionable(
         err,
-        "A `blocks` edge in this call would make a node transitively block itself; the path is in the message above. Nothing from this call was stored. Remove or reverse that edge and retry. If the cycle already exists (a merge can create one), brain_ready lists its members.",
+        "A `blocks` edge in this call would make a node transitively block itself; the message above names its endpoints. Nothing from this call was stored. Remove or reverse that edge and retry. If the cycle already exists (a merge can create one), brain_ready lists its members.",
       );
     }
     if (isForeignKeyViolation(err)) {
@@ -199,6 +200,14 @@ export function mapError(toolName: string, err: unknown): CallToolResult {
   // flagged distinctly so it is easy to spot in logs and add above.
   if (err instanceof KnowledgeStoreError) {
     return errorResult(`${err.constructor.name}: ${err.message} Retry, or adjust the input this names.`);
+  }
+
+  // A driver failure that escaped core's wrapping: drizzle's message is the
+  // SQL text and its parameters, which belong in the operator's log, not
+  // in a tool result.
+  if (isDrizzleQueryError(err)) {
+    console.error(`[breakdown-brain] unexpected database error in ${toolName}:`, err);
+    return errorResult(`${toolName} failed at the database. ${RETRY_HINT}`);
   }
 
   // Truly unrecognized. Full detail — including any stack — goes to

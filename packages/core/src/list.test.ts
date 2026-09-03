@@ -125,6 +125,8 @@ describe("listNodes", () => {
       { where: [{ key: "status", op: "equals", value: { nested: 1 } as unknown as string }] },
       { where: [{ key: "status", op: "oneOf", values: [] }] },
       { where: [{ key: "", op: "equals", value: "x" }] },
+      { where: [{ key: "__proto__", op: "equals", value: 1 }] },
+      { where: [{ key: "constructor", op: "oneOf", values: [1] }] },
       { where: [{ key: "a", op: "equals", value: 1 }, { key: "a", op: "equals", value: 2 }] },
       { cursor: { updatedAt: "yesterday", id: "nope" } },
       { updatedSince: "not a date" },

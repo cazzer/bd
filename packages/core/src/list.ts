@@ -117,7 +117,10 @@ export function buildListNodesQuery(params: BuildListNodesQueryParams): SQL {
   // Every `equals` predicate folds into one containment object; an empty
   // object is contained by everything, so "no equals predicates" costs
   // nothing and needs no second code path.
-  const equalsObject: Record<string, MetadataScalar> = {};
+  // A null-prototype object: on a plain object an assignment to "__proto__"
+  // is a no-op and JSON.stringify omits it, which would silently widen the
+  // list. validatePredicates rejects those keys too; this is the backstop.
+  const equalsObject: Record<string, MetadataScalar> = Object.create(null) as Record<string, MetadataScalar>;
   const oneOfClauses: SQL[] = [];
   for (const predicate of params.where) {
     if (predicate.op === "equals") {
@@ -158,6 +161,10 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // Accepts ISO-8601 and Postgres's own timestamptz text ("2026-09-01 01:15:07.238158+00").
 const TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}(:?\d{2})?)$/;
 
+// Keys that would target the prototype chain of the object the predicates
+// are folded into, rather than a metadata key.
+const FORBIDDEN_PREDICATE_KEYS: ReadonlySet<string> = new Set(["__proto__", "constructor", "prototype"]);
+
 function isScalar(value: unknown): value is MetadataScalar {
   return value === null || typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value)) || typeof value === "string";
 }
@@ -189,6 +196,9 @@ function validatePredicates(where: readonly MetadataPredicate[] | null | undefin
     const { key, op } = predicate as { key?: unknown; op?: unknown };
     if (typeof key !== "string" || key.length === 0 || key.length > MAX_PREDICATE_KEY_LENGTH) {
       throw new InvalidListOptionError(`${option}.key`, key, `must be a non-empty string of at most ${MAX_PREDICATE_KEY_LENGTH} characters`);
+    }
+    if (FORBIDDEN_PREDICATE_KEYS.has(key)) {
+      throw new InvalidListOptionError(`${option}.key`, key, "is not an allowed key");
     }
     if (op === "equals") {
       if (equalsKeys.has(key)) {

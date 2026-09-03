@@ -644,7 +644,7 @@ describe("edges.blocks (acyclic invariant trigger)", () => {
     const pg = pgErrorOf(thrown);
     expect(pg?.code).toBe(POSTGRES_CHECK_VIOLATION);
     expect(pg?.message).toContain("would form a cycle");
-    expect(pg?.detail).toContain("path:");
+    expect(pg?.detail).toContain("endpoints:");
     return { detail: pg?.detail ?? "" };
   }
 
@@ -654,8 +654,8 @@ describe("edges.blocks (acyclic invariant trigger)", () => {
     try {
       await blocks(a, b);
       const { detail } = await expectCycleRejection(blocks(b, a));
-      // The path runs from the rejected edge's source back around to itself.
-      expect(detail).toBe(`path: ${b} -> ${a} -> ${b}`);
+      // The rejection names the folded endpoints of the refused edge.
+      expect(detail).toBe(`endpoints: ${b} -> ${a}`);
       const stored = await db.select({ id: edges.id }).from(edges).where(and(eq(edges.srcId, b), eq(edges.dstId, a)));
       expect(stored).toHaveLength(0);
     } finally {
@@ -668,7 +668,7 @@ describe("edges.blocks (acyclic invariant trigger)", () => {
     if (!a) throw new Error("setup");
     try {
       const { detail } = await expectCycleRejection(blocks(a, a));
-      expect(detail).toBe(`path: ${a} -> ${a}`);
+      expect(detail).toBe(`endpoints: ${a} -> ${a}`);
     } finally {
       await db.delete(nodes).where(eq(nodes.id, a));
     }
@@ -681,7 +681,7 @@ describe("edges.blocks (acyclic invariant trigger)", () => {
       await blocks(a, b);
       await blocks(b, c);
       const { detail } = await expectCycleRejection(blocks(c, a));
-      expect(detail).toBe(`path: ${c} -> ${a} -> ${b} -> ${c}`);
+      expect(detail).toBe(`endpoints: ${c} -> ${a}`);
       const remaining = await db.select({ src: edges.srcId, dst: edges.dstId }).from(edges).where(inArray(edges.srcId, [a, b, c]));
       expect(remaining).toHaveLength(2);
     } finally {
@@ -697,7 +697,7 @@ describe("edges.blocks (acyclic invariant trigger)", () => {
       await db.update(nodes).set({ mergedInto: b }).where(eq(nodes.id, dup));
       // a -> dup is now a -> b once folded, so b -> a closes a cycle.
       const { detail } = await expectCycleRejection(blocks(b, a));
-      expect(detail).toBe(`path: ${b} -> ${a} -> ${b}`);
+      expect(detail).toBe(`endpoints: ${b} -> ${a}`);
     } finally {
       await db.delete(nodes).where(inArray(nodes.id, [a, dup]));
       await db.delete(nodes).where(eq(nodes.id, b));

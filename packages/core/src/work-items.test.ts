@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Database } from "@breakdown/db";
 import { ingestRuns, nodes } from "@breakdown/db";
 import { upsertEdges } from "./edges.js";
+import { EdgeUpsertFailedError } from "./errors.js";
 import { InvalidLookupIdError, InvalidLookupOptionError, InvalidWorkItemError, NodeNotFoundError, NotAWorkItemError } from "./errors.js";
 import { getNodeHistory } from "./history.js";
 import { openIngestRun, type IngestRunHandle } from "./ingest-runs.js";
@@ -296,5 +297,61 @@ describe("getWorkItemReadiness", () => {
     const b = dialect.sqlToQuery(buildWorkItemReadinessQuery(params));
     expect(a.sql).toBe(b.sql);
     expect(a.params).toEqual(b.params);
+  });
+});
+
+
+describe("dense layered blocks DAG (polynomial cycle checks)", () => {
+  // 8 layers x 8 nodes, every node blocking every node of the next layer:
+  // 448 edges and about 8^7 (two million) distinct paths. A simple-path
+  // enumeration would take minutes here and days at 10 x 10; the
+  // set-semantics walks in the trigger and the readiness query must stay
+  // in seconds.
+  const LAYERS = 8;
+  const WIDTH = 8;
+  const DAG_SPEC = `dag-${uniqueSuffix()}`;
+
+  it("inserts, reports readiness, and still refuses a cycle-closing edge, each within seconds", async () => {
+    const inputs = [];
+    for (let layer = 0; layer < LAYERS; layer += 1) {
+      for (let i = 0; i < WIDTH; i += 1) {
+        inputs.push({ nodeType: WORK_ITEM_NODE_TYPE, sourceSystem: SRC, externalId: `dag-${layer}-${i}`, title: `dag ${layer} ${i}`, content: "", metadata: { status: "open", priority: 2, spec_id: DAG_SPEC } });
+      }
+    }
+    const written = await upsertNodes(db, run, inputs);
+    const idOf = new Map(written.rows.map((r) => [r.externalId, r.id]));
+    const layerIds = (layer: number) => Array.from({ length: WIDTH }, (_, i) => idOf.get(`dag-${layer}-${i}`)!);
+
+    const edgeInputs = [];
+    for (let layer = 0; layer < LAYERS - 1; layer += 1) {
+      for (const srcId of layerIds(layer)) {
+        for (const dstId of layerIds(layer + 1)) {
+          edgeInputs.push({ srcId, dstId, edgeType: BLOCKS_EDGE_TYPE, sourceSystem: SRC });
+        }
+      }
+    }
+    expect(edgeInputs).toHaveLength((LAYERS - 1) * WIDTH * WIDTH);
+
+    const t0 = performance.now();
+    const edgeResult = await upsertEdges(db, run, edgeInputs);
+    const insertMs = performance.now() - t0;
+    expect(edgeResult.created).toBe(edgeInputs.length);
+
+    const t1 = performance.now();
+    const report = await getWorkItemReadiness(db, { specId: DAG_SPEC, readyLimit: 500, blockedLimit: 500 });
+    const readyMs = performance.now() - t1;
+    expect(report.ready.map((i) => i.externalId).sort()).toEqual(layerIds(0).map((_, i) => `dag-0-${i}`).sort());
+    expect(report.blocked).toHaveLength((LAYERS - 1) * WIDTH);
+    expect(report.blocked.every((b) => b.openBlockerIds.length === WIDTH && !b.inCycle)).toBe(true);
+    expect(report.cycleMemberIds).toEqual([]);
+
+    const t2 = performance.now();
+    await expect(upsertEdges(db, run, [{ srcId: layerIds(LAYERS - 1)[0]!, dstId: layerIds(0)[0]!, edgeType: BLOCKS_EDGE_TYPE, sourceSystem: SRC }])).rejects.toBeInstanceOf(EdgeUpsertFailedError);
+    const refuseMs = performance.now() - t2;
+
+    console.log(`[dag ${LAYERS}x${WIDTH}] insert ${Math.round(insertMs)} ms, readiness ${Math.round(readyMs)} ms, refused cycle edge ${Math.round(refuseMs)} ms`);
+    expect(insertMs).toBeLessThan(10_000);
+    expect(readyMs).toBeLessThan(10_000);
+    expect(refuseMs).toBeLessThan(10_000);
   });
 });

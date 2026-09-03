@@ -19,7 +19,8 @@
 // The readiness query folds `blocks` edge endpoints through `merged_into`
 // (lookup.ts's precedent, for the same reason: an edge attached to a
 // merged-away duplicate must still count against its survivor) and finds
-// cycle members on read with a recursive walk over open blockers. The
+// cycle members on read with a set-semantics transitive closure over open
+// blockers (never a simple-path enumeration, which is exponential). The
 // database trigger (migrations/0003_*.sql) refuses cycles at insert time,
 // but a merge can create one the trigger never sees, so detection here is
 // required, not redundant.
@@ -247,19 +248,29 @@ export async function patchWorkItem(db: Database, run: IngestRunHandle, id: stri
   }
 
   return db.transaction(async (tx) => {
-    const canonical = await tx.execute<{ canonical_id: string }>(sql`
-      SELECT COALESCE(merged_into, id) AS canonical_id FROM nodes WHERE id = ${requestedId}::uuid
-    `);
+    let canonical: { rows: { canonical_id: string }[] };
+    try {
+      canonical = await tx.execute<{ canonical_id: string }>(sql`
+        SELECT COALESCE(merged_into, id) AS canonical_id FROM nodes WHERE id = ${requestedId}::uuid
+      `);
+    } catch (err) {
+      throw new LookupFailedError(`patchWorkItem lookup failed${formatPgInfo(asPgError(err))}`, "patchWorkItem", { cause: err });
+    }
     const canonicalId = canonical.rows[0]?.canonical_id;
     if (!canonicalId) {
       throw new NodeNotFoundError(requestedId);
     }
 
-    const locked = await tx.execute<LockedNodeRow>(sql`
-      SELECT id, node_type, source_system, external_id, title, content, metadata
-      FROM nodes WHERE id = ${canonicalId}::uuid
-      FOR UPDATE
-    `);
+    let locked: { rows: LockedNodeRow[] };
+    try {
+      locked = await tx.execute<LockedNodeRow>(sql`
+        SELECT id, node_type, source_system, external_id, title, content, metadata
+        FROM nodes WHERE id = ${canonicalId}::uuid
+        FOR UPDATE
+      `);
+    } catch (err) {
+      throw new LookupFailedError(`patchWorkItem lock failed${formatPgInfo(asPgError(err))}`, "patchWorkItem", { cause: err });
+    }
     const existing = locked.rows[0];
     if (!existing) {
       throw new NodeNotFoundError(canonicalId);
@@ -426,21 +437,21 @@ open_blocks AS (
   JOIN resolved_nodes n ON n.id = b.src_id
   WHERE NOT (n.node_type = ${WORK_ITEM_NODE_TYPE} AND COALESCE(n.metadata->>'status', 'open') = 'closed')
 ),
--- A node that reaches itself through open blockers is a cycle member.
--- CYCLE stops expansion when a node repeats on its path; the depth guard
--- is belt and braces. This enumerates simple paths, which is exponential
--- on a dense layered DAG; fine at personal scale, revisit if a store ever
--- holds thousands of interlinked blockers.
-walk(start_id, node_id, depth) AS (
-  SELECT src_id, dst_id, 1 FROM open_blocks
-  UNION ALL
-  SELECT w.start_id, ob.dst_id, w.depth + 1
-  FROM walk w
-  JOIN open_blocks ob ON ob.src_id = w.node_id
-  WHERE w.depth < 1000
-) CYCLE node_id SET is_cycle USING path,
+-- Transitive closure over open blockers with set semantics: UNION feeds
+-- only unseen (start, node) pairs forward, so the working set is bounded
+-- by V^2 pairs, each expanded once (O(V*E)), and it terminates on a cycle
+-- without tracking paths. Enumerating simple paths instead (UNION ALL
+-- with a path array, or the CYCLE clause) is exponential on a dense
+-- layered DAG and must not be used here.
+reach(start_id, node_id) AS (
+  SELECT src_id, dst_id FROM open_blocks
+  UNION
+  SELECT r.start_id, ob.dst_id
+  FROM reach r
+  JOIN open_blocks ob ON ob.src_id = r.node_id
+),
 cycle_members AS (
-  SELECT DISTINCT start_id AS id FROM walk WHERE node_id = start_id
+  SELECT DISTINCT start_id AS id FROM reach WHERE node_id = start_id
 ),
 blocked_by AS (
   SELECT ob.dst_id AS id, array_agg(ob.src_id ORDER BY ob.src_id) AS open_blocker_ids

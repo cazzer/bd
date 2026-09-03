@@ -19,6 +19,9 @@ CREATE INDEX "nodes_metadata_gin_idx" ON "nodes" USING gin ("metadata" jsonb_pat
 -- ROW trigger, so a single batch carrying both halves of a cycle is
 -- rejected on its second row. `e.id IS DISTINCT FROM NEW.id` keeps an
 -- UPDATE of an existing edge from walking through its own old row.
+-- NOTE: the function body below was replaced in 0004 (skip an already-stored edge)
+-- and again in 0005 (set-semantics reachability instead of enumerating simple
+-- paths, which was exponential on a dense layered DAG). Kept as applied.
 CREATE FUNCTION edges_blocks_must_be_acyclic() RETURNS trigger
 LANGUAGE plpgsql AS $$
 DECLARE

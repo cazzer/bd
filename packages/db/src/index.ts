@@ -2,7 +2,7 @@
 // env at module scope — `createPool`/`createDb` are plain constructors,
 // and `resolveDatabaseUrl` only reads the environment when a caller
 // invokes it.
-export { createPool, createDb, type Database } from "./client.js";
+export { createPool, createDb, DEFAULT_STATEMENT_TIMEOUT_MS, type Database } from "./client.js";
 export { resolveDatabaseUrl, DatabaseUrlNotSetError } from "./env.js";
 export {
   ingestRuns,
