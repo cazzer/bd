@@ -211,6 +211,19 @@ export function App() {
   // forward step into a full re-search. Refreshed by a no-dependency
   // effect below, on purpose.
   const applyRouteRef = useRef<((route: GraphRoute) => Promise<void>) | null>(null);
+  // Latest-wins guards (url-addressable-views review follow-up), both refs
+  // like `inFlightExpansions` because each is read synchronously right
+  // after an `await`, where a state value would be the snapshot from
+  // before it. `searchGeneration` is bumped by every `runSearch` call; a
+  // result whose call has since been superseded is dropped rather than
+  // drawn, so two searches — two fast back/forward steps, or a submit
+  // during a route-applied search — can never land out of order and leave
+  // the canvas showing the earlier one under the later one's address.
+  // `routeGeneration` does the same for `applyRoute`'s own steps after
+  // each of its awaits (selecting, the out-of-result lookup, the URL
+  // re-assert), which `runSearch` cannot know about.
+  const searchGeneration = useRef(0);
+  const routeGeneration = useRef(0);
 
   // The "New note" popover (bd-8ub, task 2.4) — CreateNoteForm itself is
   // unchanged (same onCreated contract); only its trigger and container
@@ -319,6 +332,7 @@ export function App() {
     if (trimmed.length === 0) {
       return null;
     }
+    const generation = ++searchGeneration.current;
     setStatus({ kind: "loading" });
     try {
       // `types.length ? types : undefined`, never `[]`: the server's
@@ -326,6 +340,9 @@ export function App() {
       // non-empty array (read.ts) — sending `[]` would be a validation
       // error instead of "no filter."
       const result = await trpc.search.query({ query: trimmed, nodeTypes: types.length > 0 ? types : undefined });
+      if (generation !== searchGeneration.current) {
+        return null; // a later search was asked for while this one was in flight — see `searchGeneration`; the later call owns `status` now
+      }
       setStatus({ kind: "done", result });
       // graph-explorer/spec.md's "Query matches nothing" scenario: the
       // canvas stays as it was rather than clearing. Skipping the
@@ -376,6 +393,9 @@ export function App() {
       }
       return null;
     } catch (err) {
+      if (generation !== searchGeneration.current) {
+        return null; // superseded — same as above; the failure belongs to a search nobody is waiting on any more
+      }
       // TRPCClientError#message is already the safe, hand-mapped message
       // server/errors.ts built — never a stack trace or connection string.
       const message = err instanceof Error ? err.message : "Search failed unexpectedly.";
@@ -541,12 +561,20 @@ export function App() {
    * mount and a back/forward step both come through here, so they cannot
    * drift (url-addressable-views, design.md decisions 3 and 4).
    *
-   *   1. Box and chips always show what the URL says.
-   *   2. No `q`: nothing to search, `submittedSearch` clears, the current
-   *      graph stays. Same search as drawn (a VALUE comparison against
-   *      `submittedSearch`, never a URL string): skip it — this is the
-   *      "only the selection changed" scenario, and why back/forward
-   *      between selections is cheap. Otherwise run it with
+   *   1. Box and chips always show what the URL says. Type focus clears
+   *      with them (review follow-up): a focus-added chip may have just
+   *      vanished from the bar, and TypePanel must not keep showing its
+   *      row pressed for a chip that is no longer there.
+   *   2. No `q`: `submittedSearch` clears. With no `node` either, so does
+   *      the canvas (review follow-up) — exactly what a fresh load of this
+   *      URL shows (the spec's "filters alone, with no query" scenario),
+   *      so a back step to the first entry matches a reload of it instead
+   *      of leaving the previous search drawn under an address that no
+   *      longer names it; with a `node`, the current graph is kept for
+   *      step 4 to find it in. Same search as drawn (a VALUE comparison
+   *      against `submittedSearch`, never a URL string): skip it — this
+   *      is the "only the selection changed" scenario, and why back/
+   *      forward between selections is cheap. Otherwise run it with
    *      `history: "none"` (it was navigated to; pushing again would
    *      double the entry), and read the RESULT for the node lookup:
    *      `setGraph` has not committed when `runSearch` returns — the same
@@ -567,21 +595,41 @@ export function App() {
    *      and reads degree 0 until a search returns it — accepted, since
    *      adding `degree` to the lookup is a server change this change
    *      excludes. A merged-away id resolves to its survivor, whose id then
-   *      replaces the URL's. `notFoundIds`, or a failed call (reported
-   *      through the expansion-error toast): nothing selected, and the URL
-   *      is replaced without `node` so a bad id does not survive a reload.
+   *      replaces the URL's. `notFoundIds`, or a failed call: nothing
+   *      selected, the expansion-error toast says so (review follow-up: a
+   *      dead link must not fail silently, and user copy never repeats the
+   *      raw UUID — it is in the address bar), and the URL is replaced
+   *      without `node` so a bad id does not survive a reload.
+   *
+   * Two guards around the awaits (review follow-up). `routeGeneration`:
+   * after each `await`, a route that a later call has superseded returns
+   * without another `set*` or `navigate` — see the ref's own comment. And
+   * once a re-run search has landed, every terminal branch re-asserts the
+   * applied route with a replace-write: normally a no-op through
+   * `navigate`'s equal-URL skip, it repairs the one case a generation
+   * cannot see — a node click landing DURING the in-flight search, which
+   * replace-wrote the previous `submittedSearch` with the new node
+   * (`routeFor` reads its render's closure) and would otherwise leave the
+   * address disagreeing with the canvas until the next click.
    */
   async function applyRoute(route: GraphRoute): Promise<void> {
+    const generation = ++routeGeneration.current;
     setQuery(route.q ?? "");
     setChips(route.types);
+    setFocusedType(null);
+    setFocusAddedChip(null);
 
     let nodes = graph.nodes;
     let replaced = false;
     if (route.q === null) {
       setSubmittedSearch(null);
+      if (route.node === null) {
+        setGraph(EMPTY_GRAPH);
+        setStatus({ kind: "idle" });
+      }
     } else if (!isSameSearch(submittedSearch, route)) {
       const result = await runSearch(route.q, route.types, { history: "none" });
-      if (!result) {
+      if (generation !== routeGeneration.current || !result) {
         return;
       }
       nodes = searchResultToGraphData(result).nodes;
@@ -591,6 +639,9 @@ export function App() {
     if (route.node === null) {
       setSelectedNodeId(null);
       setDetailExpanded(false);
+      if (replaced) {
+        navigate(route, "replace");
+      }
       return;
     }
     if (!replaced && route.node === selectedNodeId) {
@@ -600,18 +651,25 @@ export function App() {
     const found = nodes.find((n) => n.id === route.node);
     if (found) {
       selectNode(found);
+      if (replaced) {
+        navigate(route, "replace");
+      }
       return;
     }
 
     let lookedUp;
+    let lookupFailure: string | null = null;
     try {
       const lookup = await trpc.getNodes.query({ ids: [route.node] });
       lookedUp = lookup.nodes[0];
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Lookup failed unexpectedly.";
-      setExpansionError(`Couldn't open node ${route.node}: ${message}`);
+      lookupFailure = err instanceof Error ? err.message : "Lookup failed unexpectedly.";
+    }
+    if (generation !== routeGeneration.current) {
+      return;
     }
     if (!lookedUp) {
+      setExpansionError(lookupFailure === null ? "That node no longer exists." : `Couldn't open the linked node: ${lookupFailure}`);
       setSelectedNodeId(null);
       setDetailExpanded(false);
       navigate({ ...route, node: null }, "replace");
@@ -620,9 +678,9 @@ export function App() {
     const node = graphNodeFromUnlinkedNote(lookedUp);
     setGraph((previous) => mergeStandaloneNode(previous, node));
     selectNode(node);
-    if (lookedUp.id !== route.node) {
-      navigate({ ...route, node: lookedUp.id }, "replace");
-    }
+    // The survivor's id when a merged-away id resolved; otherwise this IS
+    // `route`, and the re-assert described above.
+    navigate({ ...route, node: lookedUp.id }, "replace");
   }
 
   // No dependency array, on purpose: the ref must hold THIS render's
@@ -809,6 +867,12 @@ export function App() {
             onChooseSuggestion={handleChooseSuggestion}
             onRemoveChip={handleRemoveChip}
             typeColors={typeColors}
+            // url-addressable-views review follow-up: a deep link WITH a
+            // node is asking for the panel, not the box — DetailPanel moves
+            // focus to its own heading on open, and the box's autoFocus
+            // would otherwise take focus first only to have it yanked away
+            // ~1s later when the route-applied selection lands.
+            autoFocus={initialRoute.node === null}
             trailing={
               <div className="relative shrink-0">
                 <button

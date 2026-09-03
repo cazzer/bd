@@ -67,7 +67,7 @@
 // way that boundary's own plain-text fallback does (see that file's
 // header).
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { HUMAN_SOURCE_SYSTEM } from "../graph/expansion.js";
 import type { GraphLink, GraphNode } from "../graph/encoding.js";
 import { edgesTouchingNode, endpointId } from "../graph/nodeEdges.js";
@@ -555,6 +555,38 @@ export function DetailPanel({ nodeId, allNodes, allLinks, onClose, onExpandedCha
     }
     headingRef.current?.focus();
   }, [nodeId]);
+
+  // Focus restore on UNMOUNT (url-addressable-views review follow-up).
+  // `handleClose` below only covers the × button and Escape; every other
+  // way this panel goes away — a back/forward step that `applyRoute`
+  // turns into `setSelectedNodeId(null)`, a fresh search landing, a note
+  // being created while this one is open — removes it through App.tsx's
+  // `{selectedNodeId && …}` guard with focus still on the heading (or a
+  // control inside), and a browser resets `document.activeElement` to
+  // `<body>` the instant a focused element is detached. If focus is
+  // inside the panel as it unmounts, hand it to the same fallbacks
+  // `handleClose` uses (the captured opener is deliberately NOT tried
+  // here: on a popstate it is whatever the person last clicked, which may
+  // itself be gone). `handleClose`'s own explicit restore stays — by the
+  // time this cleanup runs its target already has focus, so this pass
+  // sees focus outside the panel and does nothing.
+  //
+  // `useLayoutEffect`, not `useEffect`, and the `<aside>` captured at
+  // mount rather than read from the ref: React runs LAYOUT cleanups for
+  // a deleted subtree during its deletion traversal, before the host
+  // node is removed from the document, whereas passive (`useEffect`)
+  // cleanups run after — by which point the aside is detached, its ref
+  // is null, and `activeElement` is already `<body>`, so the check below
+  // could never be true.
+  useLayoutEffect(() => {
+    const aside = asideRef.current;
+    return () => {
+      if (!aside || !aside.contains(document.activeElement)) return;
+      const fallback =
+        document.querySelector<HTMLElement>(SEARCH_INPUT_SELECTOR) ?? document.querySelector<HTMLElement>(CANVAS_CONTAINER_SELECTOR);
+      fallback?.focus();
+    };
+  }, []);
 
   /**
    * Routes both close affordances (the × button and Escape below) through

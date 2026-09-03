@@ -43,6 +43,8 @@ export interface SearchBarProps {
   onRemoveChip: (nodeType: string) => void;
   /** App.tsx's store-wide type-colour rank map (bd-4ye, palette.ts's `assignTypeColors`) — the SAME map GraphCanvas and TypePanel read, so a chip/suggestion swatch never disagrees with the canvas. */
   typeColors: ReadonlyMap<string, string>;
+  /** Whether the input takes focus on mount (default true, the behaviour before url-addressable-views). App.tsx passes false for a deep link with a node, whose detail panel takes focus instead. */
+  autoFocus?: boolean;
 }
 
 function statusLine(status: SearchBarStatus): { text: string; tone: "muted" | "error" } {
@@ -84,7 +86,7 @@ function TypeChip({ nodeType, onRemove, typeColors }: { nodeType: string; onRemo
   );
 }
 
-export function SearchBar({ query, onQueryChange, onSubmit, status, trailing, suggestions, chips, onChooseSuggestion, onRemoveChip, typeColors }: SearchBarProps) {
+export function SearchBar({ query, onQueryChange, onSubmit, status, trailing, suggestions, chips, onChooseSuggestion, onRemoveChip, typeColors, autoFocus = true }: SearchBarProps) {
   const { text, tone } = statusLine(status);
 
   // Listbox UI state (bd-73t) — see this file's header on why this is
@@ -92,7 +94,15 @@ export function SearchBar({ query, onQueryChange, onSubmit, status, trailing, su
   // whenever the typed text changes or a choice is made, so a stale
   // highlight never survives onto a fresh suggestion list.
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
-  const [dismissed, setDismissed] = useState(false);
+  // url-addressable-views review follow-up: a query the URL supplied
+  // starts DISMISSED, not open — before that change `query` was always
+  // empty at mount, so `suggestions` was too; now `/graph?q=spec` mounts
+  // with a query that substring-matches `openspec-*` types and would
+  // otherwise open the listbox over the canvas before anyone typed.
+  // Seeding the existing dismissal (rather than gating on focus — the
+  // input has `autoFocus`, so it IS focused at mount) means the first
+  // keystroke re-opens it through `handleInputChange` exactly as before.
+  const [dismissed, setDismissed] = useState(() => query.trim().length > 0);
 
   const showSuggestions = suggestions.length > 0 && !dismissed;
   const activeSuggestion = activeIndex !== null && activeIndex < suggestions.length ? suggestions[activeIndex] : undefined;
@@ -192,7 +202,7 @@ export function SearchBar({ query, onQueryChange, onSubmit, status, trailing, su
               aria-controls="search-type-suggestions"
               aria-activedescendant={activeSuggestion ? `type-suggestion-${activeSuggestion.nodeType}` : undefined}
               className="w-full rounded-xl border border-hairline bg-surface-strong px-3 py-2 text-sm text-fg placeholder:text-fg-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-              autoFocus
+              autoFocus={autoFocus}
             />
             {showSuggestions && (
               <ul
@@ -239,7 +249,8 @@ export function SearchBar({ query, onQueryChange, onSubmit, status, trailing, su
       </div>
       <p
         className={`mt-2 min-h-[1.25rem] text-xs ${!showTextHint && tone === "error" ? "text-red-300" : "text-fg-muted"}`}
-        role={!showTextHint && tone === "error" ? "alert" : undefined}
+        // `status` when not an error (url-addressable-views review follow-up): a route-applied search — a deep link, a back step — changes this line with no keystroke or click to cue a screen reader, so "Searching…" → "exact match — …" is announced politely; `alert` stays assertive for an error.
+        role={!showTextHint && tone === "error" ? "alert" : "status"}
       >
         {showTextHint ? "add search text" : text}
       </p>
