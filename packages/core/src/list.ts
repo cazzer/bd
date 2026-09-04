@@ -218,7 +218,14 @@ function validatePredicates(where: readonly MetadataPredicate[] | null | undefin
   });
 }
 
-function validateNames(option: string, values: readonly string[] | null | undefined): string[] | null {
+/**
+ * The `nodeTypes` / `sourceSystems` rule, shared: `null`/absent means
+ * "all"; otherwise a non-empty array of at most `MAX_LIST_NAMES` non-empty
+ * strings, copied. Throws `InvalidListOptionError` naming `option`.
+ * Exported for `getTimeline` (timeline.ts), whose narrowing is this one —
+ * a second copy would drift from it.
+ */
+export function validateListNames(option: string, values: readonly string[] | null | undefined): string[] | null {
   if (values === null || values === undefined) return null;
   if (!Array.isArray(values) || values.length === 0 || values.some((v) => typeof v !== "string" || v.length === 0)) {
     throw new InvalidListOptionError(option, values, "must be a non-empty array of non-empty strings, or null");
@@ -259,8 +266,8 @@ export function resolveListNodesOptions(options: ListNodesOptions): BuildListNod
   }
 
   return {
-    nodeTypes: validateNames("nodeTypes", options.nodeTypes),
-    sourceSystems: validateNames("sourceSystems", options.sourceSystems),
+    nodeTypes: validateListNames("nodeTypes", options.nodeTypes),
+    sourceSystems: validateListNames("sourceSystems", options.sourceSystems),
     updatedSince,
     where: validatePredicates(options.where),
     limit,

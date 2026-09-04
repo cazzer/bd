@@ -1,8 +1,9 @@
 // The app shell (node-views, design.md decision 4): parses `location`
 // into a `Route` and mounts the view it names — GraphView under `/graph`
 // (src/components/GraphView.tsx, where everything this file used to be
-// now lives, verbatim), FeedView under `/feed`, or CodeView under `/code`
-// (lazy — see its import below). It re-reads `location`
+// now lives, verbatim), FeedView under `/feed`, CodeView under `/code`,
+// or TimelineView under `/timeline` (the last two lazy — see their
+// imports below). It re-reads `location`
 // on `popstate` and whenever a view calls the shared `navigate`
 // (lib/navigate.ts), which notifies the subscriber registered below
 // after it has written history. Nothing else: each view keeps its own
@@ -45,6 +46,11 @@ import { graphRouteFromSearch, parseRoute, type Route } from "./lib/route.js";
 // rather than with every page. Until it lands the shell shows a bare
 // "Loading…"; the address is untouched either way.
 const CodeView = lazy(async () => ({ default: (await import("./components/CodeView.js")).CodeView }));
+
+// Lazy too, not for its size (the timeline has no heavy dependency) but so
+// the pattern for a fourth view is the pattern for the third (timeline-
+// view, design.md decision 6); it shares CodeView's fallback.
+const TimelineView = lazy(async () => ({ default: (await import("./components/TimelineView.js")).TimelineView }));
 
 const LOADING_VIEW = (
   <main className="flex h-dvh w-screen items-center justify-center">
@@ -95,6 +101,12 @@ export function App() {
       return (
         <Suspense fallback={LOADING_VIEW}>
           <CodeView key="code" viewId={route.viewId} node={route.node} />
+        </Suspense>
+      );
+    case "timeline":
+      return (
+        <Suspense fallback={LOADING_VIEW}>
+          <TimelineView key="timeline" viewId={route.viewId} node={route.node} types={route.types} />
         </Suspense>
       );
   }

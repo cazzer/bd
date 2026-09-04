@@ -113,20 +113,20 @@ export interface DetailPanelProps {
    * decision 5): this node's effective default view, resolved by
    * GraphView.tsx after selection and handed down — `null` or absent while
    * unresolved, after a failed resolution, or when nothing applies. Only a
-   * `feed` or `code` renderer earns an offer; `graph` is where the person
-   * already is, and a view row written outside the contract (renderer
-   * null) names nothing to open. The panel only ever offers, never
-   * navigates on its own.
+   * `feed`, `code`, or `timeline` renderer earns an offer; `graph` is where
+   * the person already is, and a view row written outside the contract
+   * (renderer null) names nothing to open. The panel only ever offers,
+   * never navigates on its own.
    */
   defaultView?: ResolvedDefaultView | null;
-  /** "Open as feed · …" / "Open as code · …" was chosen — GraphView.tsx pushes `/feed?view=<id>` or `/code?view=<id>&node=<selected>` (it owns the guards a push out of the graph must disarm first, so the navigation is its call, not this panel's). */
+  /** "Open as feed · …" / "Open as code · …" / "Open as timeline · …" was chosen — GraphView.tsx pushes `/feed?view=<id>`, `/code?view=<id>&node=<selected>`, or `/timeline?view=<id>&node=<selected>` (it owns the guards a push out of the graph must disarm first, so the navigation is its call, not this panel's). */
   onOpenDefaultView?: (view: OfferedView) => void;
 }
 
 type ResolvedDefaultView = Awaited<ReturnType<typeof trpc.resolveDefaultViews.query>>["results"][number];
 
-/** The renderers the detail panel can offer to open — the ones another view draws. */
-export type OfferedRenderer = "feed" | "code";
+/** The renderers the detail panel can offer to open — the ones another view draws (timeline-view, design.md decision 6). */
+export type OfferedRenderer = "feed" | "code" | "timeline";
 
 /** What `onOpenDefaultView` receives: the view to open and the renderer that decides which address GraphView.tsx pushes. */
 export interface OfferedView {
@@ -135,7 +135,7 @@ export interface OfferedView {
 }
 
 function isOfferedRenderer(renderer: string | null): renderer is OfferedRenderer {
-  return renderer === "feed" || renderer === "code";
+  return renderer === "feed" || renderer === "code" || renderer === "timeline";
 }
 
 /** Closest editable ancestor of `target` (inclusive), if any — an `input`/`textarea`/`select`, or a `[contenteditable="true"]` region (the MarkdownEditor). Escape inside one of these must blur it, not close the whole panel (bd-8ub review, must-fix 2). */
@@ -656,8 +656,8 @@ export function DetailPanel({ nodeId, allNodes, allLinks, onClose, onExpandedCha
   const edgeViews = edgesTouchingNode(allLinks, nodeId);
   const nodeTitleById = (id: string) => allNodes.find((n) => n.id === id)?.title || id.slice(0, 8);
   // node-views/spec.md, "A node's preferred view is offered, never forced":
-  // a `feed` or `code` renderer earns the affordance, named for the
-  // renderer — see `defaultView`'s doc.
+  // a `feed`, `code`, or `timeline` renderer earns the affordance, named
+  // for the renderer — see `defaultView`'s doc.
   const offer = defaultView?.view && isOfferedRenderer(defaultView.view.renderer) ? { id: defaultView.view.id, renderer: defaultView.view.renderer, title: defaultView.view.title } : null;
 
   return (

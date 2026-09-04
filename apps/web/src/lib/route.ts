@@ -5,13 +5,14 @@
 // spelled.
 //
 // `Route` is a discriminated union on `view`: the graph view, — node-
-// views, design.md decision 5 — the feed view, and — code-view, design.md
-// decision 2 — the code view. Another way of looking at the same items is
-// added by widening the union and teaching `parseRoute`/`formatRoute` its
-// name; nothing about the existing views has to move, which is exactly
-// what adding the feed proved and adding the code view repeated.
+// views, design.md decision 5 — the feed view, — code-view, design.md
+// decision 2 — the code view, and — timeline-view, design.md decision 4 —
+// the timeline view. Another way of looking at the same items is added by
+// widening the union and teaching `parseRoute`/`formatRoute` its name;
+// nothing about the existing views has to move, which is exactly what
+// adding the feed proved and the code view and the timeline repeated.
 //
-// Not a router: two views with a handful of query parameters need no
+// Not a router: four views with a handful of query parameters need no
 // matching, layouts, or loaders, and a parse/format pair is a plain
 // function with a plain test in the node environment, the same pattern
 // every other `src/lib` module follows. Accordingly, this module never
@@ -19,10 +20,10 @@
 // strings (lib/navigate.ts is the one place that does touch them).
 //
 // Parsing never throws and validates nothing beyond shape: a `node` (or
-// a feed's or the code view's `view`) that is not a UUID, or names no
-// node, is the server's to reject — `getNodes`'s `notFoundIds` is how
-// GraphView.tsx discovers a bad id, and a format check here would be a
-// second, weaker copy of that rule.
+// a feed's, the code view's, or the timeline's `view`) that is not a
+// UUID, or names no node, is the server's to reject — `getNodes`'s
+// `notFoundIds` is how GraphView.tsx discovers a bad id, and a format
+// check here would be a second, weaker copy of that rule.
 
 /** The graph view's path. `parseRoute` also accepts it with one trailing slash. */
 export const GRAPH_VIEW_PATH = "/graph";
@@ -32,6 +33,9 @@ export const FEED_VIEW_PATH = "/feed";
 
 /** The code view's path (code-view). `parseRoute` also accepts it with one trailing slash. */
 export const CODE_VIEW_PATH = "/code";
+
+/** The timeline view's path (timeline-view). `parseRoute` also accepts it with one trailing slash. */
+export const TIMELINE_VIEW_PATH = "/timeline";
 
 /** The force-graph view: the submitted query, the node-type filters it was submitted with, and the selected node. `null`/`[]` mean absent. */
 export interface GraphRoute {
@@ -60,8 +64,24 @@ export interface CodeRoute {
   node: string | null;
 }
 
+/**
+ * The timeline view (timeline-view, design.md decision 4): the id of the
+ * `view` node whose filter names the chips, the id of the anchor whose
+ * timed neighbours are listed, and the chosen node types — repeated `type`
+ * parameters, exactly the graph's, so one parser rule serves both. `null`
+ * for either id means absent: no view is TimelineView's "no view" empty
+ * state and no anchor its "choose a node in the graph" state, never a
+ * redirect; an empty `types` means every chip the view names is chosen.
+ */
+export interface TimelineRoute {
+  view: "timeline";
+  viewId: string | null;
+  node: string | null;
+  types: string[];
+}
+
 /** Every addressable view. A future view widens this union. */
-export type Route = GraphRoute | FeedRoute | CodeRoute;
+export type Route = GraphRoute | FeedRoute | CodeRoute | TimelineRoute;
 
 /** `s` trimmed, or `null` when it is missing or whitespace-only — mirrors `runSearch`'s own trim, so `?q=%20` and no `q` at all mean the same thing. */
 function nonEmpty(s: string | null): string | null {
@@ -85,6 +105,11 @@ function nonEmpty(s: string | null): string | null {
  */
 export function graphRouteFromSearch(search: string): GraphRoute {
   const params = new URLSearchParams(search);
+  return { view: "graph", q: nonEmpty(params.get("q")), types: typesFrom(params), node: nonEmpty(params.get("node")) };
+}
+
+/** Every `type` parameter, trimmed, empties dropped, duplicates collapsed to their first occurrence, order otherwise kept — the graph's rule, which the timeline shares. */
+function typesFrom(params: URLSearchParams): string[] {
   const types: string[] = [];
   for (const raw of params.getAll("type")) {
     const type = raw.trim();
@@ -92,7 +117,7 @@ export function graphRouteFromSearch(search: string): GraphRoute {
       types.push(type);
     }
   }
-  return { view: "graph", q: nonEmpty(params.get("q")), types, node: nonEmpty(params.get("node")) };
+  return types;
 }
 
 /**
@@ -119,11 +144,23 @@ function codeRouteFromSearch(search: string): CodeRoute {
 }
 
 /**
+ * The timeline view's parameters from a query string alone (timeline-view).
+ * `view` and `node` through the same trim as the code view's; `type`
+ * collected as the graph's is (`typesFrom`); anything else is ignored —
+ * the timeline has no search to carry `q` to.
+ */
+function timelineRouteFromSearch(search: string): TimelineRoute {
+  const params = new URLSearchParams(search);
+  return { view: "timeline", viewId: nonEmpty(params.get("view")), node: nonEmpty(params.get("node")), types: typesFrom(params) };
+}
+
+/**
  * The route a `pathname` + `search` pair names, or `null` when the path is
  * not a view we have — the caller's cue to redirect to
  * `formatRoute(graphRouteFromSearch(search))`. Exactly `/graph`, `/feed`,
- * or `/code` (one trailing slash tolerated, no case folding) is a view;
- * `/`, `/list`, `/graph/x`, `/feed/x`, `/code/x` are all unknown.
+ * `/code`, or `/timeline` (one trailing slash tolerated, no case folding)
+ * is a view; `/`, `/list`, `/graph/x`, `/feed/x`, `/code/x`,
+ * `/timeline/x` are all unknown.
  */
 export function parseRoute(pathname: string, search: string): Route | null {
   const path = pathname.length > 1 && pathname.endsWith("/") ? pathname.slice(0, -1) : pathname;
@@ -136,14 +173,18 @@ export function parseRoute(pathname: string, search: string): Route | null {
   if (path === CODE_VIEW_PATH) {
     return codeRouteFromSearch(search);
   }
+  if (path === TIMELINE_VIEW_PATH) {
+    return timelineRouteFromSearch(search);
+  }
   return null;
 }
 
 /**
  * The URL (path + query string, no origin) for a route. Parameters are
  * emitted in a fixed order — for the graph `q`, each `type` in order,
- * `node`; for the feed just `view`; for the code view `view` then `node`
- * — and absent ones are omitted, so two structurally equal routes always
+ * `node`; for the feed just `view`; for the code view `view` then `node`;
+ * for the timeline `view`, `node`, then each `type` in order — and
+ * absent ones are omitted, so two structurally equal routes always
  * format to the same string: lib/navigate.ts relies on that to skip a
  * history write when nothing changed. Round-trips through `parseRoute`.
  */
@@ -155,6 +196,8 @@ export function formatRoute(route: Route): string {
       return formatFeedRoute(route);
     case "code":
       return formatCodeRoute(route);
+    case "timeline":
+      return formatTimelineRoute(route);
   }
 }
 
@@ -192,4 +235,19 @@ function formatCodeRoute(route: CodeRoute): string {
   }
   const query = params.toString();
   return query.length > 0 ? `${CODE_VIEW_PATH}?${query}` : CODE_VIEW_PATH;
+}
+
+function formatTimelineRoute(route: TimelineRoute): string {
+  const params = new URLSearchParams();
+  if (route.viewId !== null) {
+    params.set("view", route.viewId);
+  }
+  if (route.node !== null) {
+    params.set("node", route.node);
+  }
+  for (const type of route.types) {
+    params.append("type", type);
+  }
+  const query = params.toString();
+  return query.length > 0 ? `${TIMELINE_VIEW_PATH}?${query}` : TIMELINE_VIEW_PATH;
 }

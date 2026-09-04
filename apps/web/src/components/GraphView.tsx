@@ -655,16 +655,22 @@ export function GraphView() {
   }
 
   /**
-   * DetailPanel's "Open as feed · <title>" / "Open as code · <title>"
-   * (node-views, design.md decision 8; code-view, design.md decision 5): a
-   * push, so back returns to this node in the graph. The code address
+   * DetailPanel's "Open as feed · <title>" / "Open as code · <title>" /
+   * "Open as timeline · <title>" (node-views, design.md decision 8;
+   * code-view, design.md decision 5; timeline-view, design.md decision 6):
+   * a push, so back returns to this node in the graph. The code address
    * carries the selected node, so a file reached here is read directly;
-   * the feed's has no node to carry.
+   * the timeline's carries it as the anchor, with no types chosen so every
+   * chip starts selected; the feed's has no node to carry.
    */
   function handleOpenDefaultView(view: OfferedView) {
     leaveView();
     if (view.renderer === "code") {
       navigate({ view: "code", viewId: view.id, node: selectedNodeId }, "push");
+      return;
+    }
+    if (view.renderer === "timeline") {
+      navigate({ view: "timeline", viewId: view.id, node: selectedNodeId, types: [] }, "push");
       return;
     }
     navigate({ view: "feed", viewId: view.id }, "push");

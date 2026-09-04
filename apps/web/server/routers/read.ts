@@ -40,6 +40,7 @@ import {
   getNodes,
   getStoreSummary,
   getSubtree,
+  getTimeline,
   listNodes,
   MAX_ALLOWED_DEPTH,
   MAX_FANOUT,
@@ -54,6 +55,7 @@ import {
   MAX_RECENT_NODES_LIMIT,
   MAX_RESOLVE_IDS,
   MAX_SEED_LIMIT,
+  MAX_TIMELINE_LIMIT,
   NodeNotFoundError,
   NOTE_NODE_TYPE,
   resolveDefaultViews,
@@ -468,6 +470,70 @@ const treeProcedure = publicProcedure.input(treeInputSchema).query(async ({ ctx,
   }
 });
 
+// --- timeline --------------------------------------------------------------
+//
+// timeline-view (design.md decision 3; local-web-api spec, "Reading an
+// anchor's timeline"): one anchor id in, its timed neighbours out — newest
+// first, one row per node with its metadata and the heaviest joining
+// edge's type and direction, never content — and the count of untimed
+// neighbours under the same narrowing (packages/core/src/timeline.ts).
+// `nodeTypes`/`sourceSystems` take `list`'s Zod shapes because a timeline
+// view spreads its view's filter in exactly as the feed does; `anchorId`
+// takes `tree`'s, the id's form being core's to reject.
+//
+// Budgeted as `list` is: rows carry `metadata`, which nothing bounds below
+// core's per-row metadata cap, so a page can outgrow the response budget.
+// And as for `list`, the cursor comes from the last row actually returned,
+// not from core's page — the budget drops from the tail (the oldest), so a
+// cursor minted from core's last row would skip every row it dropped.
+// Errors through `mapCoreError`: a malformed id, a bad limit or cursor, and
+// a bad name list are BAD_REQUEST (`InvalidLookupIdError`,
+// `InvalidLookupOptionError`, `InvalidListOptionError`); an anchor naming
+// no canonical node is NOT_FOUND, as it is for `tree`.
+
+export const timelineInputSchema = z.object({
+  anchorId: z.string().min(1, "must not be empty"),
+  nodeTypes: z.array(z.string().min(1)).min(1).max(MAX_LIST_NAMES).optional(),
+  sourceSystems: z.array(z.string().min(1)).min(1).max(MAX_LIST_NAMES).optional(),
+  limit: z.number().int().positive().max(MAX_TIMELINE_LIMIT).optional(),
+  /** Opaque: a previous response's `nextCursor`, passed back unchanged. */
+  cursor: z.object({ occurredAt: z.string().min(1).max(64), id: z.string().min(1).max(64) }).optional(),
+});
+
+const timelineProcedure = publicProcedure.input(timelineInputSchema).query(async ({ ctx, input }) => {
+  let result;
+  try {
+    result = await getTimeline(ctx.db, input.anchorId, {
+      nodeTypes: input.nodeTypes ?? null,
+      sourceSystems: input.sourceSystems ?? null,
+      limit: input.limit,
+      cursor: input.cursor ?? null,
+    });
+  } catch (err) {
+    throw mapCoreError("timeline", err);
+  }
+
+  return boundResponse(
+    result.rows,
+    (row) => row.id,
+    (kept, meta) => {
+      const last = kept[kept.length - 1];
+      const hasMore = result.hasMore || meta.droppedIds.length > 0;
+      return {
+        anchorId: result.anchorId,
+        rows: kept,
+        hasMore,
+        nextCursor: hasMore && last ? { occurredAt: last.occurredAt, id: last.id } : null,
+        untimedCount: result.untimedCount,
+        truncated: meta.truncated,
+        droppedNodeIds: meta.droppedIds,
+        shrunkNodeIds: meta.shrunkIds,
+      };
+    },
+    ctx.responseCharBudget,
+  );
+});
+
 export const readRouter = router({
   search: searchProcedure,
   getNeighbors: getNeighborsProcedure,
@@ -477,4 +543,5 @@ export const readRouter = router({
   list: listProcedure,
   resolveDefaultViews: resolveDefaultViewsProcedure,
   tree: treeProcedure,
+  timeline: timelineProcedure,
 });

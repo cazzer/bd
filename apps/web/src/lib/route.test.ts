@@ -9,7 +9,7 @@
 // parameters and nothing else).
 
 import { describe, expect, it } from "vitest";
-import { CODE_VIEW_PATH, FEED_VIEW_PATH, formatRoute, GRAPH_VIEW_PATH, graphRouteFromSearch, parseRoute, type CodeRoute, type FeedRoute, type GraphRoute, type Route } from "./route.js";
+import { CODE_VIEW_PATH, FEED_VIEW_PATH, formatRoute, GRAPH_VIEW_PATH, graphRouteFromSearch, parseRoute, TIMELINE_VIEW_PATH, type CodeRoute, type FeedRoute, type GraphRoute, type Route, type TimelineRoute } from "./route.js";
 
 function graph(partial: Partial<Omit<GraphRoute, "view">> = {}): GraphRoute {
   return { view: "graph", q: null, types: [], node: null, ...partial };
@@ -21,6 +21,10 @@ function feed(viewId: string | null = null): FeedRoute {
 
 function code(viewId: string | null = null, node: string | null = null): CodeRoute {
   return { view: "code", viewId, node };
+}
+
+function timeline(viewId: string | null = null, node: string | null = null, types: string[] = []): TimelineRoute {
+  return { view: "timeline", viewId, node, types };
 }
 
 /** `formatRoute` output split back into the two strings `parseRoute` takes — what `location.pathname`/`location.search` would hold after a `pushState` of that URL. */
@@ -272,5 +276,99 @@ describe("code route (code-view)", () => {
   it("still redirects /list, carrying the graph parameters and dropping view (the 'Unknown path still redirects' scenario)", () => {
     expect(parseRoute("/list", "?q=x&view=v1&node=n1")).toBeNull();
     expect(formatRoute(graphRouteFromSearch("?q=x&view=v1&node=n1"))).toBe("/graph?q=x&node=n1");
+  });
+});
+
+// timeline-view/spec.md, "The timeline view is addressable" (design.md
+// decision 4): the timeline member of the union — `view`, `node`, and
+// repeated `type`, each optional; `type` parsed by the graph's own rule.
+describe("timeline route (timeline-view)", () => {
+  const VIEW_ID = "0b8d1e4a-2f5c-4c6e-9a7b-1d2e3f4a5b6c";
+  const NODE_ID = "9f1c2b3a-4d5e-4f60-8a71-0b2c3d4e5f60";
+
+  const cases: Array<[string, TimelineRoute]> = [
+    ["nothing set", timeline()],
+    ["view only", timeline(VIEW_ID)],
+    ["node only", timeline(null, NODE_ID)],
+    ["types only", timeline(null, null, ["gh-issue"])],
+    ["view and node", timeline(VIEW_ID, NODE_ID)],
+    ["view and types", timeline(VIEW_ID, null, ["gh-issue", "work_item"])],
+    ["node and types", timeline(null, NODE_ID, ["work_item"])],
+    ["all three", timeline(VIEW_ID, NODE_ID, ["gh-issue", "work_item"])],
+  ];
+
+  for (const [name, route] of cases) {
+    it(`round-trips ${name}`, () => {
+      expect(roundTrip(route)).toEqual(route);
+    });
+  }
+
+  it("preserves type order", () => {
+    expect(roundTrip(timeline(VIEW_ID, NODE_ID, ["zeta", "alpha", "mid"]))?.types).toEqual(["zeta", "alpha", "mid"]);
+  });
+
+  it("formats an empty timeline route to exactly the view path", () => {
+    expect(formatRoute(timeline())).toBe(TIMELINE_VIEW_PATH);
+  });
+
+  it("emits view, node, then each type, omitting absent ones", () => {
+    expect(formatRoute(timeline("v1", "n1", ["a", "b"]))).toBe("/timeline?view=v1&node=n1&type=a&type=b");
+    expect(formatRoute(timeline("v1", "n1"))).toBe("/timeline?view=v1&node=n1");
+    expect(formatRoute(timeline("v1"))).toBe("/timeline?view=v1");
+    expect(formatRoute(timeline(null, "n1"))).toBe("/timeline?node=n1");
+    expect(formatRoute(timeline(null, null, ["a"]))).toBe("/timeline?type=a");
+    expect(formatRoute(timeline("v1", null, ["a"]))).toBe("/timeline?view=v1&type=a");
+  });
+
+  it("formats two structurally equal timeline routes to the same string", () => {
+    expect(formatRoute(timeline(VIEW_ID, NODE_ID, ["a", "b"]))).toBe(formatRoute(timeline(VIEW_ID, NODE_ID, ["a", "b"])));
+  });
+
+  it("accepts /timeline and /timeline/ alike", () => {
+    expect(parseRoute("/timeline", "?view=v1&node=n1&type=a")).toEqual(timeline("v1", "n1", ["a"]));
+    expect(parseRoute("/timeline/", "?view=v1&node=n1&type=a")).toEqual(timeline("v1", "n1", ["a"]));
+  });
+
+  it("returns null for /timeline/x and /Timeline (unknown paths, same as the other views')", () => {
+    expect(parseRoute("/timeline/x", "?view=v1")).toBeNull();
+    expect(parseRoute("/Timeline", "?view=v1")).toBeNull();
+  });
+
+  it("parses a bare /timeline, or an empty or whitespace view or node, as absent — never a redirect", () => {
+    expect(parseRoute("/timeline", "")).toEqual(timeline());
+    expect(parseRoute("/timeline", "?view=")).toEqual(timeline());
+    expect(parseRoute("/timeline", "?view=%20")).toEqual(timeline());
+    expect(parseRoute("/timeline", "?view=v1&node=")).toEqual(timeline("v1"));
+    expect(parseRoute("/timeline", "?view=v1&node=%20")).toEqual(timeline("v1"));
+    expect(parseRoute("/timeline", "?node=n1")).toEqual(timeline(null, "n1"));
+  });
+
+  it("trims the view and node ids", () => {
+    expect(parseRoute("/timeline", "?view=%20v1%20&node=%20n1%20")).toEqual(timeline("v1", "n1"));
+  });
+
+  it("handles type values as the graph does: empties dropped, duplicates collapsed to the first occurrence, values trimmed", () => {
+    expect(parseRoute("/timeline", "?view=v1&type=&type=doc")).toEqual(timeline("v1", null, ["doc"]));
+    expect(parseRoute("/timeline", "?view=v1&type=b&type=a&type=b")).toEqual(timeline("v1", null, ["b", "a"]));
+    expect(parseRoute("/timeline", "?view=v1&type=%20a%20")).toEqual(timeline("v1", null, ["a"]));
+    expect(parseRoute("/timeline", "?view=v1&type=%20")).toEqual(timeline("v1"));
+  });
+
+  it("keeps non-UUID view and node ids (validation is the server's, not the parser's)", () => {
+    expect(parseRoute("/timeline", "?view=abc&node=xyz")).toEqual(timeline("abc", "xyz"));
+    expect(roundTrip(timeline("abc", "xyz"))).toEqual(timeline("abc", "xyz"));
+  });
+
+  it("ignores graph and unknown parameters on the timeline path", () => {
+    expect(parseRoute("/timeline", "?q=x&view=v1&node=n1&type=a&zoom=3&foo=bar")).toEqual(timeline("v1", "n1", ["a"]));
+  });
+
+  it("keeps a graph address a graph address when it carries a view parameter beside its node and types", () => {
+    expect(parseRoute("/graph", "?q=x&view=v1&node=n1&type=a")).toEqual(graph({ q: "x", node: "n1", types: ["a"] }));
+  });
+
+  it("still redirects /list, carrying the graph parameters and dropping view (the 'Unknown path still redirects' scenario)", () => {
+    expect(parseRoute("/list", "?q=x&view=v1&node=n1&type=a")).toBeNull();
+    expect(formatRoute(graphRouteFromSearch("?q=x&view=v1&node=n1&type=a"))).toBe("/graph?q=x&type=a&node=n1");
   });
 });

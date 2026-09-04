@@ -311,6 +311,21 @@ export {
 // Event time (timeline-view change): the `occurred_at` contract every
 // writer applies, whatever the node's type. See event-time.ts's header.
 export { OCCURRED_AT_KEY, normalizeOccurredAt, type NormalizeOccurredAtOptions } from "./event-time.js";
+// Anchored timeline read (timeline-view change): one anchor's timed
+// neighbours newest first, one row per node with the heaviest edge's type
+// and direction, merge-folded, keyset-paged, with the untimed count in the
+// same statement. See timeline.ts's module header.
+export {
+  getTimeline,
+  buildGetTimelineQuery,
+  DEFAULT_TIMELINE_LIMIT,
+  MAX_TIMELINE_LIMIT,
+  type TimelineCursor,
+  type GetTimelineOptions,
+  type TimelineRow,
+  type TimelineResult,
+  type BuildGetTimelineQueryParams,
+} from "./timeline.js";
 // Bounded subtree read (code-view change): a root's child_of descendants
 // in one statement, merge-folded, cycle-safe, capped by depth and by
 // count, without content. See tree.ts's module header.
