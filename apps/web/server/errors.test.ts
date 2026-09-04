@@ -4,18 +4,30 @@
 // (LookupFailedError.cause embeds a full SQL statement via drizzle-orm's
 // DrizzleQueryError).
 
-import { EdgeUpsertFailedError, InvalidListOptionError, InvalidViewError, LookupFailedError } from "@breakdown/core";
+import { EdgeUpsertFailedError, InvalidEventTimeError, InvalidListOptionError, InvalidViewError, LookupFailedError } from "@breakdown/core";
 import { describe, expect, it } from "vitest";
 import { mapCoreError } from "./errors.js";
 
 describe("mapCoreError", () => {
   it("maps InvalidViewError to BAD_REQUEST naming the item and field (node-views)", () => {
-    const coreErr = new InvalidViewError("at batch index 1 (agent/timeline-view)", "renderer", "timeline", "must be one of graph, feed, code");
+    const coreErr = new InvalidViewError("at batch index 1 (agent/kanban-view)", "renderer", "kanban", "must be one of graph, feed, code, timeline");
     const trpcErr = mapCoreError("createView", coreErr);
 
     expect(trpcErr.code).toBe("BAD_REQUEST");
-    expect(trpcErr.message).toContain("at batch index 1 (agent/timeline-view)");
-    expect(trpcErr.message).toContain('renderer (got "timeline")');
+    expect(trpcErr.message).toContain("at batch index 1 (agent/kanban-view)");
+    expect(trpcErr.message).toContain('renderer (got "kanban")');
+    expect(trpcErr.message).toContain("graph, feed, code, timeline");
+    expect(trpcErr.cause).toBeUndefined();
+  });
+
+  it("maps InvalidEventTimeError to BAD_REQUEST naming the item and occurred_at, with the canonical form in the hint (timeline-view)", () => {
+    const coreErr = new InvalidEventTimeError("at batch index 0 (agent/late)", "last Tuesday", "must parse as an instant");
+    const trpcErr = mapCoreError("write", coreErr);
+
+    expect(trpcErr.code).toBe("BAD_REQUEST");
+    expect(trpcErr.message).toContain("at batch index 0 (agent/late)");
+    expect(trpcErr.message).toContain('occurred_at (got "last Tuesday")');
+    expect(trpcErr.message).toContain("2026-03-04T08:00:00.000Z");
     expect(trpcErr.cause).toBeUndefined();
   });
 

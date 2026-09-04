@@ -6,7 +6,9 @@
 // database: `node_type` stays open text and `upsertNodes` stays
 // type-agnostic. Every writer of work items — the MCP write tool, the patch
 // primitive below, the beads importer — calls `normalizeWorkItemMetadata`,
-// so the three cannot disagree about what a valid item is.
+// so the three cannot disagree about what a valid item is. The event-time
+// contract (event-time.ts) is applied beside it wherever a document is
+// written, so `occurred_at` on a work item is canonical too.
 //
 // `patchWorkItem` is a read-modify-write under `SELECT ... FOR UPDATE`,
 // written through the same unsafe upsert kit `annotateNode` uses, inside
@@ -36,6 +38,7 @@ import {
   NodeUpsertFailedError,
   NotAWorkItemError,
 } from "./errors.js";
+import { normalizeOccurredAt } from "./event-time.js";
 import type { IngestRunHandle } from "./ingest-runs.js";
 import {
   DEFAULT_MAX_CONTENT_LENGTH,
@@ -292,7 +295,10 @@ export async function patchWorkItem(db: Database, run: IngestRunHandle, id: stri
     apply(KEY.closedReason, patch.closedReason);
     apply(KEY.specId, patch.specId);
 
-    const normalized = normalizeWorkItemMetadata(merged);
+    // Both contracts run over the merged document: the patch cannot set
+    // occurred_at, but a row written outside the contract may carry one
+    // that is not canonical, and it leaves here canonical or not at all.
+    const normalized = normalizeWorkItemMetadata(normalizeOccurredAt(merged));
 
     const prepared = unsafePrepareNodes(
       [

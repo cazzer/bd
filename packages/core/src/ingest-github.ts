@@ -25,14 +25,16 @@ import {
   deriveMentionEdges,
   getStoreSummary,
   GITHUB_SOURCE_SYSTEM,
-  ISSUE_NODE_TYPE,
+  mapGhIssueToNode,
+  mapGhRepoToNode,
   MENTIONS_EDGE_TYPE,
   MENTIONS_WEIGHT,
   openIngestRun,
-  REPO_NODE_TYPE,
   upsertEdges,
   upsertNodes,
   type EdgeInput,
+  type GhIssue,
+  type GhRepo,
   type IssueRefSource,
   type NodeInput,
 } from "./index.js";
@@ -57,44 +59,6 @@ const ISSUES_PER_REPO_LIMIT = 2000;
 
 const REPO_JSON_FIELDS = "name,nameWithOwner,owner,description,url,visibility,isPrivate,defaultBranchRef,primaryLanguage,createdAt,updatedAt";
 const ISSUE_JSON_FIELDS = "number,title,body,labels,author,createdAt,updatedAt,url,state";
-
-interface GhOwner {
-  login: string;
-}
-
-interface GhRepo {
-  name: string;
-  nameWithOwner: string;
-  owner: GhOwner;
-  description: string | null;
-  url: string;
-  visibility: string;
-  isPrivate: boolean;
-  defaultBranchRef: { name: string } | null;
-  primaryLanguage: { name: string } | null;
-  createdAt: string;
-  updatedAt: string;
-}
-
-interface GhLabel {
-  name: string;
-}
-
-interface GhAuthor {
-  login: string;
-}
-
-interface GhIssue {
-  number: number;
-  title: string;
-  body: string | null;
-  labels: GhLabel[];
-  author: GhAuthor | null;
-  createdAt: string;
-  updatedAt: string;
-  url: string;
-  state: string;
-}
 
 interface GhDiscoveryRepo {
   nameWithOwner: string;
@@ -204,48 +168,12 @@ async function main(): Promise<void> {
     // actor = the pnpm script name a person actually types.
     const run = await openIngestRun(db, GITHUB_SOURCE_SYSTEM, { actor: "ingest:github" });
 
-    const repoNodeInputs: NodeInput[] = repos.map((repo) => ({
-      nodeType: REPO_NODE_TYPE,
-      sourceSystem: GITHUB_SOURCE_SYSTEM,
-      externalId: repo.nameWithOwner,
-      title: repo.name,
-      // A repo can genuinely have no description — `gh` reports that as
-      // `""`, not `null`, but handle both rather than assume the shape.
-      content: repo.description ?? "",
-      metadata: {
-        visibility: repo.visibility,
-        isPrivate: repo.isPrivate,
-        url: repo.url,
-        defaultBranch: repo.defaultBranchRef?.name ?? null,
-        primaryLanguage: repo.primaryLanguage?.name ?? null,
-        owner: repo.owner.login,
-        createdAt: repo.createdAt,
-        updatedAt: repo.updatedAt,
-      },
-    }));
+    const repoNodeInputs: NodeInput[] = repos.map(mapGhRepoToNode);
 
     const issueNodeInputs: NodeInput[] = [];
     for (const slug of repoSlugs) {
       for (const issue of issuesBySlug.get(slug) ?? []) {
-        issueNodeInputs.push({
-          nodeType: ISSUE_NODE_TYPE,
-          sourceSystem: GITHUB_SOURCE_SYSTEM,
-          externalId: `${slug}#${issue.number}`,
-          title: issue.title,
-          // Content is the issue body — this is the point of this loader
-          // (bd-5hd: "this matters, it's what finally gives search real
-          // prose to match against"). A body can be null (no description
-          // given) — handled explicitly, not assumed present.
-          content: issue.body ?? "",
-          metadata: {
-            state: issue.state,
-            labels: issue.labels.map((l) => l.name),
-            author: issue.author?.login ?? null,
-            createdAt: issue.createdAt,
-            updatedAt: issue.updatedAt,
-            url: issue.url,
-          },
-        });
+        issueNodeInputs.push(mapGhIssueToNode(slug, issue));
       }
     }
 

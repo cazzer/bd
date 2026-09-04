@@ -10,9 +10,13 @@
 // naming the issue, rather than stored and silently invisible to
 // readiness. Beads happens to use the same five status names the contract
 // does, so status maps one-to-one; `owner` becomes `assignee` and
-// `close_reason` becomes `closed_reason`.
+// `close_reason` becomes `closed_reason`. The issue's `created_at` is also
+// written as `occurred_at` through `normalizeOccurredAt` (timeline-view
+// design.md decision 2: the moment a person would place the item at on a
+// timeline), with `source_created_at` kept beside it untouched.
 
 import type { EdgeInput } from "./edges.js";
+import { normalizeOccurredAt, OCCURRED_AT_KEY } from "./event-time.js";
 import type { NodeInput } from "./nodes.js";
 import { BLOCKS_EDGE_TYPE, CHILD_OF_EDGE_TYPE, normalizeWorkItemMetadata, WORK_ITEM_NODE_TYPE } from "./work-items.js";
 
@@ -75,15 +79,18 @@ export function mapBeadsIssueToNode(issue: BeadsIssue, index?: number): NodeInpu
     created_by: issue.created_by ?? null,
     source_created_at: issue.created_at ?? null,
     source_updated_at: issue.updated_at ?? null,
+    [OCCURRED_AT_KEY]: issue.created_at ?? null,
     ...(issue.labels && issue.labels.length > 0 ? { labels: issue.labels } : {}),
   };
+  // Event time first, so an unparseable created_at is named as occurred_at
+  // rather than surfacing through the work-item contract.
   return {
     nodeType: WORK_ITEM_NODE_TYPE,
     sourceSystem: BEADS_SOURCE_SYSTEM,
     externalId: issue.id,
     title: issue.title,
     content: `${issue.description?.trim() ?? ""}${section("Acceptance criteria", issue.acceptance_criteria)}${section("Design", issue.design)}${section("Notes", issue.notes)}`,
-    metadata: normalizeWorkItemMetadata(metadata, { index }),
+    metadata: normalizeWorkItemMetadata(normalizeOccurredAt(metadata, { index }), { index }),
   };
 }
 

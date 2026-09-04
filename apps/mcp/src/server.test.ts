@@ -1041,6 +1041,68 @@ describe("work-item contract in brain_write and cycles in brain_link", () => {
   });
 });
 
+describe("event-time contract in brain_write", () => {
+  it("rejects a batch containing a node whose occurred_at does not parse, naming the item and occurred_at, persisting nothing (spec: agent writes a node with a bad event time)", async () => {
+    const src = `mcp-time-${uniqueSuffix()}`;
+    usedSourceSystems.push(src);
+    const { client } = await connectClient();
+    const raw = await client.callTool({
+      name: "brain_write",
+      arguments: {
+        items: [
+          { nodeType: "doc", sourceSystem: src, externalId: "good", title: "ok", metadata: { occurred_at: "2026-03-04T10:00:00+02:00" } },
+          { nodeType: "doc", sourceSystem: src, externalId: "late", title: "late", metadata: { occurred_at: "last Tuesday" } },
+        ],
+      },
+    });
+    expect(raw.isError).toBe(true);
+    const text = firstText(raw);
+    expect(text).toMatch(/invalid event time at batch index 1/);
+    expect(text).toMatch(/occurred_at \(got "last Tuesday"\)/);
+    expect(text).toContain(`${src}/late`);
+    expect(text).not.toMatch(/\s+at\s+\S+\s+\(/);
+
+    // A work item's bad time is named as occurred_at too — the event-time
+    // contract runs before the type's, on every type.
+    const item = await client.callTool({
+      name: "brain_write",
+      arguments: { items: { nodeType: "work_item", sourceSystem: src, externalId: "wi", title: "wi", metadata: { status: "open", occurred_at: 1772611200000 } } },
+    });
+    expect(item.isError).toBe(true);
+    expect(firstText(item)).toMatch(/invalid event time at batch index 0/);
+    expect(firstText(item)).toMatch(/occurred_at \(got 1772611200000\)/);
+
+    const persisted = await db.select({ id: nodes.id }).from(nodes).where(eq(nodes.sourceSystem, src));
+    expect(persisted).toHaveLength(0);
+  });
+
+  it("stores a node of any type with occurred_at canonical, and null removes it (spec: agent writes a node with an event time)", async () => {
+    const src = `mcp-time-${uniqueSuffix()}`;
+    usedSourceSystems.push(src);
+    const { client } = await connectClient();
+    const written = parseText(
+      await client.callTool({
+        name: "brain_write",
+        arguments: {
+          items: [
+            { nodeType: "doc", sourceSystem: src, externalId: "zoned", title: "zoned", metadata: { occurred_at: "2026-03-04T10:00:00+02:00", note: "kept" } },
+            { nodeType: "work_item", sourceSystem: src, externalId: "wi", title: "wi", metadata: { occurred_at: "2026-03-04T08:00:00Z" } },
+            { nodeType: "doc", sourceSystem: src, externalId: "untimed", title: "untimed", metadata: { occurred_at: null, note: "kept" } },
+          ],
+        },
+      }),
+    );
+    toolRunIds.push(written.ingestRunId);
+    expect(written.created).toBe(3);
+    const idOf = new Map<string, string>(written.items.map((i: { externalId: string; id: string }) => [i.externalId, i.id]));
+    const got = parseText(await client.callTool({ name: "brain_get", arguments: { ids: [idOf.get("zoned")!, idOf.get("wi")!, idOf.get("untimed")!] } }));
+    const byId = new Map<string, { metadata: Record<string, unknown> }>(got.nodes.map((n: { id: string; metadata: Record<string, unknown> }) => [n.id, n]));
+    expect(byId.get(idOf.get("zoned")!)?.metadata).toEqual({ occurred_at: "2026-03-04T08:00:00.000Z", note: "kept" });
+    expect(byId.get(idOf.get("wi")!)?.metadata).toEqual({ status: "open", priority: 2, occurred_at: "2026-03-04T08:00:00.000Z" });
+    expect(byId.get(idOf.get("untimed")!)?.metadata).toEqual({ note: "kept" });
+  });
+});
+
 describe("view contract in brain_write and default_view resolution", () => {
   it("rejects a batch containing a view with an unknown renderer, naming the item and renderer, persisting nothing (spec: agent writes a view with an unknown renderer)", async () => {
     const src = `mcp-view-${uniqueSuffix()}`;
@@ -1051,18 +1113,36 @@ describe("view contract in brain_write and default_view resolution", () => {
       arguments: {
         items: [
           { nodeType: "doc", sourceSystem: src, externalId: "good", title: "ok" },
-          { nodeType: "view", sourceSystem: src, externalId: "timeline-view", title: "Timeline", metadata: { renderer: "timeline", filter: { nodeTypes: ["work_item"] } } },
+          { nodeType: "view", sourceSystem: src, externalId: "kanban-view", title: "Kanban", metadata: { renderer: "kanban", filter: { nodeTypes: ["work_item"] } } },
         ],
       },
     });
     expect(raw.isError).toBe(true);
     const text = firstText(raw);
-    expect(text).toMatch(/renderer \(got "timeline"\)/);
+    expect(text).toMatch(/renderer \(got "kanban"\)/);
     expect(text).toMatch(/batch index 1/);
-    expect(text).toContain(`${src}/timeline-view`);
+    expect(text).toContain(`${src}/kanban-view`);
     expect(text).not.toMatch(/\s+at\s+\S+\s+\(/);
     const persisted = await db.select({ id: nodes.id }).from(nodes).where(eq(nodes.sourceSystem, src));
     expect(persisted).toHaveLength(0);
+  });
+
+  it("stores a timeline view whose filter names two node types (spec: agent writes a timeline view)", async () => {
+    const src = `mcp-view-${uniqueSuffix()}`;
+    usedSourceSystems.push(src);
+    const { client } = await connectClient();
+    const filter = { nodeTypes: ["gh-issue", "work_item"] };
+    const written = parseText(
+      await client.callTool({
+        name: "brain_write",
+        arguments: { items: { nodeType: "view", sourceSystem: src, externalId: "history", title: "History", metadata: { renderer: "timeline", filter } } },
+      }),
+    );
+    toolRunIds.push(written.ingestRunId);
+    expect(written.created).toBe(1);
+    const listed = parseText(await client.callTool({ name: "brain_list", arguments: { nodeTypes: ["view"], sourceSystems: [src] } }));
+    expect(listed.nodes).toHaveLength(1);
+    expect(listed.nodes[0]).toMatchObject({ id: written.items[0].id, metadata: { renderer: "timeline", filter } });
   });
 
   it("stores a view and a default_view edge; resolveDefaultViews names the view for the work item and its child_of descendant (spec: agent declares a default view)", async () => {

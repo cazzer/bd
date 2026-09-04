@@ -494,6 +494,28 @@ export class NotAWorkItemError extends KnowledgeStoreError {
   }
 }
 
+// --- Event time (timeline-view change) --------------------------------------
+
+/**
+ * A node's `occurred_at` is neither absent, null, nor a value that parses
+ * as an instant (knowledge-store spec, "Nodes may carry a validated event
+ * time"): a number, an object, an empty or unparseable string, an invalid
+ * `Date`, or an instant outside the years the fixed-width canonical form
+ * covers. The key is the contract's one field, so the message names it
+ * itself (`OCCURRED_AT_KEY` in event-time.ts). `item` is however the
+ * writer labels the item — the MCP write tool passes its batch index and
+ * key — so a writer knows which item to fix.
+ */
+export class InvalidEventTimeError extends KnowledgeStoreError {
+  constructor(
+    readonly item: string | null,
+    readonly value: unknown,
+    reason: string,
+  ) {
+    super(`invalid event time${item === null ? "" : ` ${item}`}: occurred_at (got ${JSON.stringify(value)}) ${reason}`);
+  }
+}
+
 // --- Views (node-views change) ---------------------------------------------
 
 /**

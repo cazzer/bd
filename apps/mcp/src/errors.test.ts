@@ -13,6 +13,7 @@ import {
   EmptyQueryError,
   InvalidEdgeInputError,
   InvalidEdgeWeightError,
+  InvalidEventTimeError,
   InvalidIngestRunError,
   InvalidLookupIdError,
   InvalidLookupOptionError,
@@ -253,11 +254,21 @@ describe("mapError: work-items change", () => {
   });
 
   it("maps InvalidViewError to a message naming the item, the field, and what a valid view carries", () => {
-    const text = (mapError("brain_write", new InvalidViewError("at batch index 2 (agent/open-work)", "renderer", "timeline", "must be one of graph, feed, code")).content[0] as { text: string }).text;
+    const text = (mapError("brain_write", new InvalidViewError("at batch index 2 (agent/open-work)", "renderer", "kanban", "must be one of graph, feed, code, timeline")).content[0] as { text: string }).text;
     expect(text).toMatch(/batch index 2 \(agent\/open-work\)/);
-    expect(text).toMatch(/renderer \(got "timeline"\)/);
+    expect(text).toMatch(/renderer \(got "kanban"\)/);
     expect(text).toMatch(/nothing from this call was persisted/i);
+    expect(text).toMatch(/graph, feed, code, timeline/);
     expect(text).toMatch(/without limit or cursor/);
+  });
+
+  it("maps InvalidEventTimeError to a message naming the item, occurred_at, and the canonical form (timeline-view)", () => {
+    const text = (mapError("brain_write", new InvalidEventTimeError("at batch index 0 (agent/late)", "last Tuesday", "must parse as an instant")).content[0] as { text: string }).text;
+    expect(text).toMatch(/batch index 0 \(agent\/late\)/);
+    expect(text).toMatch(/occurred_at \(got "last Tuesday"\)/);
+    expect(text).toMatch(/nothing from this call was persisted/i);
+    expect(text).toContain("2026-03-04T08:00:00.000Z");
+    expect(text).not.toMatch(STACK_LINE);
   });
 });
 

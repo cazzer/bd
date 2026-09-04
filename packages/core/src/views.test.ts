@@ -96,17 +96,18 @@ describe("normalizeViewMetadata", () => {
     const out = normalizeViewMetadata({ renderer: "feed", filter: FEED_FILTER, note: "kept" });
     expect(out).toEqual({ renderer: "feed", filter: FEED_FILTER, note: "kept" });
     expect(out["filter"]).not.toBe(FEED_FILTER);
-    for (const renderer of ["graph", "feed", "code"]) {
+    for (const renderer of ["graph", "feed", "code", "timeline"]) {
       expect(normalizeViewMetadata({ renderer, filter: {} })["renderer"]).toBe(renderer);
     }
+    expect(normalizeViewMetadata({ renderer: "timeline", filter: { nodeTypes: ["gh-issue", "work_item"] } })).toEqual({ renderer: "timeline", filter: { nodeTypes: ["gh-issue", "work_item"] } });
   });
 
   it("rejects an unknown renderer naming the item and the field", () => {
-    const e = rejection({ renderer: "timeline", filter: {} }, "at batch index 3 (agent/v)");
+    const e = rejection({ renderer: "kanban", filter: {} }, "at batch index 3 (agent/v)");
     expect(e.field).toBe("renderer");
-    expect(e.value).toBe("timeline");
+    expect(e.value).toBe("kanban");
     expect(e.item).toBe("at batch index 3 (agent/v)");
-    expect(e.message).toBe('invalid view at batch index 3 (agent/v): renderer (got "timeline") must be one of graph, feed, code');
+    expect(e.message).toBe('invalid view at batch index 3 (agent/v): renderer (got "kanban") must be one of graph, feed, code, timeline');
     expect(rejection({ filter: {} }).field).toBe("renderer");
     expect(rejection(undefined).field).toBe("renderer");
     expect(rejection(undefined).message).toMatch(/^invalid view: renderer/);
@@ -153,11 +154,18 @@ describe("view nodes in the store", () => {
     expect(mine?.metadata).toEqual({ renderer: "feed", filter: FEED_FILTER });
   });
 
+  it("persists a timeline view through the contract and lists it with its renderer", async () => {
+    const p = fx();
+    const id = await writeView(`${p}-history`, "timeline");
+    const listed = await listNodes(db, { nodeTypes: [VIEW_NODE_TYPE], sourceSystems: [SRC], limit: MAX_LIST_LIMIT });
+    expect(listed.nodes.find((n) => n.id === id)?.metadata).toEqual({ renderer: "timeline", filter: FEED_FILTER });
+  });
+
   it("applies no view validation to a node of another type carrying a renderer key", async () => {
     const p = fx();
-    const id = await writeNode(`${p}-note`, "note", { renderer: "timeline" });
+    const id = await writeNode(`${p}-note`, "note", { renderer: "kanban" });
     const [row] = await db.select({ metadata: nodes.metadata }).from(nodes).where(eq(nodes.id, id));
-    expect(row?.metadata).toEqual({ renderer: "timeline" });
+    expect(row?.metadata).toEqual({ renderer: "kanban" });
   });
 });
 

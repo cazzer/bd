@@ -1,5 +1,85 @@
 import { describe, expect, it } from "vitest";
-import { deriveMentionEdges, extractIssueReferences, type IssueRefSource } from "./github.js";
+import { InvalidEventTimeError } from "./errors.js";
+import { deriveMentionEdges, extractIssueReferences, mapGhIssueToNode, mapGhRepoToNode, type GhIssue, type GhRepo, type IssueRefSource } from "./github.js";
+
+const repo: GhRepo = {
+  name: "toastd",
+  nameWithOwner: "cazzer/toastd",
+  owner: { login: "cazzer" },
+  description: null,
+  url: "https://github.com/cazzer/toastd",
+  visibility: "PUBLIC",
+  isPrivate: false,
+  defaultBranchRef: { name: "main" },
+  primaryLanguage: null,
+  createdAt: "2024-05-06T07:08:09Z",
+  updatedAt: "2026-01-02T03:04:05Z",
+};
+
+const issue: GhIssue = {
+  number: 12,
+  title: "Toast falls butter side down",
+  body: null,
+  labels: [{ name: "bug" }],
+  author: { login: "cazzer" },
+  createdAt: "2026-03-04T10:00:00+02:00",
+  updatedAt: "2026-03-05T10:00:00Z",
+  url: "https://github.com/cazzer/toastd/issues/12",
+  state: "OPEN",
+};
+
+describe("mapGhRepoToNode and mapGhIssueToNode", () => {
+  it("map a repository and an issue with a canonical occurred_at beside the source's createdAt (spec: loaders write the source's time)", () => {
+    expect(mapGhRepoToNode(repo)).toEqual({
+      nodeType: "repo",
+      sourceSystem: "github",
+      externalId: "cazzer/toastd",
+      title: "toastd",
+      content: "",
+      metadata: {
+        visibility: "PUBLIC",
+        isPrivate: false,
+        url: "https://github.com/cazzer/toastd",
+        defaultBranch: "main",
+        primaryLanguage: null,
+        owner: "cazzer",
+        createdAt: "2024-05-06T07:08:09Z",
+        updatedAt: "2026-01-02T03:04:05Z",
+        occurred_at: "2024-05-06T07:08:09.000Z",
+      },
+    });
+    expect(mapGhIssueToNode("cazzer/toastd", issue)).toEqual({
+      nodeType: "gh-issue",
+      sourceSystem: "github",
+      externalId: "cazzer/toastd#12",
+      title: "Toast falls butter side down",
+      content: "",
+      metadata: {
+        state: "OPEN",
+        labels: ["bug"],
+        author: "cazzer",
+        createdAt: "2026-03-04T10:00:00+02:00",
+        updatedAt: "2026-03-05T10:00:00Z",
+        url: "https://github.com/cazzer/toastd/issues/12",
+        occurred_at: "2026-03-04T08:00:00.000Z",
+      },
+    });
+  });
+
+  it("keep the body and description when present, and reject an unparseable createdAt naming occurred_at and the item", () => {
+    expect(mapGhIssueToNode("cazzer/toastd", { ...issue, body: "See #1." }).content).toBe("See #1.");
+    expect(mapGhRepoToNode({ ...repo, description: "Toast, daemonized." }).content).toBe("Toast, daemonized.");
+    let thrown: unknown;
+    try {
+      mapGhIssueToNode("cazzer/toastd", { ...issue, createdAt: "yesterday" });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(InvalidEventTimeError);
+    expect((thrown as InvalidEventTimeError).message).toBe('invalid event time (github/cazzer/toastd#12): occurred_at (got "yesterday") must parse as an instant (an ISO-8601 timestamp such as 2026-03-04T08:00:00.000Z)');
+    expect(() => mapGhRepoToNode({ ...repo, createdAt: "" })).toThrow(/\(github\/cazzer\/toastd\): occurred_at/);
+  });
+});
 
 describe("extractIssueReferences", () => {
   it("finds a same-repo #N reference", () => {

@@ -5,7 +5,7 @@ import type { Database } from "@breakdown/db";
 import { ingestRuns, nodes } from "@breakdown/db";
 import { upsertEdges } from "./edges.js";
 import { EdgeUpsertFailedError } from "./errors.js";
-import { InvalidLookupIdError, InvalidLookupOptionError, InvalidWorkItemError, NodeNotFoundError, NotAWorkItemError } from "./errors.js";
+import { InvalidEventTimeError, InvalidLookupIdError, InvalidLookupOptionError, InvalidWorkItemError, NodeNotFoundError, NotAWorkItemError } from "./errors.js";
 import { getNodeHistory } from "./history.js";
 import { openIngestRun, type IngestRunHandle } from "./ingest-runs.js";
 import { mergeNodes } from "./merge.js";
@@ -184,6 +184,22 @@ describe("patchWorkItem", () => {
     await expect(patchWorkItem(db, run, id, { priority: 7 })).rejects.toBeInstanceOf(InvalidWorkItemError);
     const [row] = await db.select({ metadata: nodes.metadata }).from(nodes).where(eq(nodes.id, id));
     expect((row?.metadata as Record<string, unknown>)["priority"]).toBe(1);
+  });
+
+  it("canonicalizes an occurred_at the row carries and rejects one that does not parse, naming occurred_at and persisting nothing", async () => {
+    // The patch cannot set occurred_at; the merged document inherits the
+    // row's, which the raw upsert here wrote past the contract on purpose.
+    const good = await writeItem("patch-time-good", { status: "open", occurred_at: "2026-03-04T10:00:00+02:00" });
+    const result = await patchWorkItem(db, run, good, { priority: 0 });
+    expect(result.action).toBe("updated");
+    const [goodRow] = await db.select({ metadata: nodes.metadata }).from(nodes).where(eq(nodes.id, good));
+    expect(goodRow?.metadata).toMatchObject({ priority: 0, occurred_at: "2026-03-04T08:00:00.000Z" });
+
+    const bad = await writeItem("patch-time-bad", { status: "open", occurred_at: "last Tuesday" });
+    await expect(patchWorkItem(db, run, bad, { priority: 0 })).rejects.toBeInstanceOf(InvalidEventTimeError);
+    await expect(patchWorkItem(db, run, bad, { priority: 0 })).rejects.toThrow(/occurred_at \(got "last Tuesday"\)/);
+    const [badRow] = await db.select({ metadata: nodes.metadata }).from(nodes).where(eq(nodes.id, bad));
+    expect(badRow?.metadata).toEqual({ spec_id: SPEC, status: "open", occurred_at: "last Tuesday" });
   });
 
   it("applies a patch aimed at a merged-away node to its survivor", async () => {

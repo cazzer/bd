@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { deriveBeadsEdges, mapBeadsIssueToNode, resolveBeadsEdges, type BeadsIssue } from "./beads.js";
-import { InvalidWorkItemError } from "./errors.js";
+import { InvalidEventTimeError, InvalidWorkItemError } from "./errors.js";
 
 const base: BeadsIssue = {
   id: "bd-abc",
@@ -29,7 +29,30 @@ describe("mapBeadsIssueToNode", () => {
       created_by: "Caleb",
       source_created_at: "2026-09-01T10:00:00Z",
       source_updated_at: "2026-09-02T10:00:00Z",
+      occurred_at: "2026-09-01T10:00:00.000Z",
     });
+  });
+
+  it("writes created_at as a canonical occurred_at beside source_created_at, and none when the issue has no created_at", () => {
+    const timed = mapBeadsIssueToNode({ ...base, created_at: "2026-09-01T03:00:00.123456-07:00" });
+    expect(timed.metadata).toMatchObject({ occurred_at: "2026-09-01T10:00:00.123Z", source_created_at: "2026-09-01T03:00:00.123456-07:00" });
+    for (const issue of [{ ...base, created_at: null }, { ...base, created_at: undefined }]) {
+      const node = mapBeadsIssueToNode(issue);
+      expect(node.metadata).not.toHaveProperty("occurred_at");
+      expect(node.metadata).toMatchObject({ source_created_at: null });
+    }
+  });
+
+  it("rejects an unparseable created_at as occurred_at, naming the batch index", () => {
+    let thrown: unknown;
+    try {
+      mapBeadsIssueToNode({ ...base, created_at: "last Tuesday" }, 5);
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(InvalidEventTimeError);
+    expect((thrown as InvalidEventTimeError).item).toBe("at batch index 5");
+    expect((thrown as InvalidEventTimeError).message).toContain("occurred_at");
   });
 
   it("maps a closed issue's closed_at and close_reason, normalizing the timestamp", () => {

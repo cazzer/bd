@@ -6,6 +6,13 @@
 // which is a script, not a library; everything here is a pure function
 // over already-fetched strings, unit-testable without a database or `gh`
 // itself — the same split corpus.ts uses for the markdown seed loader.
+//
+// A repository's and an issue's `createdAt` are also written as
+// `occurred_at` through `normalizeOccurredAt` (timeline-view design.md
+// decision 2), the existing `createdAt`/`updatedAt` keys kept beside it.
+
+import { normalizeOccurredAt, OCCURRED_AT_KEY } from "./event-time.js";
+import type { NodeInput } from "./nodes.js";
 
 /** `source_system` for every node/edge this loader writes — deliberately distinct from the markdown seed's `"repo"`, per bd-5hd: a second source system means edges finally render in more than one colour, and this loader's writes can never collide with the doc corpus on the `(source_system, external_id)` dedup key. */
 export const GITHUB_SOURCE_SYSTEM = "github";
@@ -20,6 +27,85 @@ export const BELONGS_TO_WEIGHT = 1.0;
 /** issue -> issue, parsed from a `#N` / `owner/repo#N` cross-reference. An explicit citation is strong evidence, but not a declaration of equivalence — weight 0.8, not 1.0. */
 export const MENTIONS_EDGE_TYPE = "mentions";
 export const MENTIONS_WEIGHT = 0.8;
+
+// --- gh JSON shapes and node mappings -----------------------------------
+
+/** The subset of `gh repo view --json` this loader reads. */
+export interface GhRepo {
+  name: string;
+  nameWithOwner: string;
+  owner: { login: string };
+  description: string | null;
+  url: string;
+  visibility: string;
+  isPrivate: boolean;
+  defaultBranchRef: { name: string } | null;
+  primaryLanguage: { name: string } | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** The subset of `gh issue list --json` this loader reads. */
+export interface GhIssue {
+  number: number;
+  title: string;
+  body: string | null;
+  labels: { name: string }[];
+  author: { login: string } | null;
+  createdAt: string;
+  updatedAt: string;
+  url: string;
+  state: string;
+}
+
+/** Maps one repository to a `repo` node keyed by its `owner/repo` slug. Throws `InvalidEventTimeError` when `createdAt` does not parse. */
+export function mapGhRepoToNode(repo: GhRepo): NodeInput {
+  return {
+    nodeType: REPO_NODE_TYPE,
+    sourceSystem: GITHUB_SOURCE_SYSTEM,
+    externalId: repo.nameWithOwner,
+    title: repo.name,
+    // A repo can genuinely have no description — `gh` reports that as
+    // `""`, not `null`, but handle both rather than assume the shape.
+    content: repo.description ?? "",
+    metadata: normalizeOccurredAt({
+      visibility: repo.visibility,
+      isPrivate: repo.isPrivate,
+      url: repo.url,
+      defaultBranch: repo.defaultBranchRef?.name ?? null,
+      primaryLanguage: repo.primaryLanguage?.name ?? null,
+      owner: repo.owner.login,
+      createdAt: repo.createdAt,
+      updatedAt: repo.updatedAt,
+      [OCCURRED_AT_KEY]: repo.createdAt,
+    }, { itemLabel: `(${GITHUB_SOURCE_SYSTEM}/${repo.nameWithOwner})` }),
+  };
+}
+
+/** Maps one open issue of repository `slug` to a `gh-issue` node keyed `owner/repo#N`. Throws `InvalidEventTimeError` when `createdAt` does not parse. */
+export function mapGhIssueToNode(slug: string, issue: GhIssue): NodeInput {
+  const externalId = `${slug}#${issue.number}`;
+  return {
+    nodeType: ISSUE_NODE_TYPE,
+    sourceSystem: GITHUB_SOURCE_SYSTEM,
+    externalId,
+    title: issue.title,
+    // Content is the issue body — this is the point of this loader
+    // (bd-5hd: "this matters, it's what finally gives search real
+    // prose to match against"). A body can be null (no description
+    // given) — handled explicitly, not assumed present.
+    content: issue.body ?? "",
+    metadata: normalizeOccurredAt({
+      state: issue.state,
+      labels: issue.labels.map((l) => l.name),
+      author: issue.author?.login ?? null,
+      createdAt: issue.createdAt,
+      updatedAt: issue.updatedAt,
+      url: issue.url,
+      [OCCURRED_AT_KEY]: issue.createdAt,
+    }, { itemLabel: `(${GITHUB_SOURCE_SYSTEM}/${externalId})` }),
+  };
+}
 
 // --- Cross-reference parsing -------------------------------------------
 

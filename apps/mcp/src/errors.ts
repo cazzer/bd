@@ -15,6 +15,7 @@ import {
   EmptyQueryError,
   InvalidEdgeInputError,
   InvalidEdgeWeightError,
+  InvalidEventTimeError,
   InvalidIngestRunError,
   InvalidListOptionError,
   InvalidLookupIdError,
@@ -190,7 +191,12 @@ export function mapError(toolName: string, err: unknown): CallToolResult {
 
   // --- Views (brain_write of a view) ---
   if (err instanceof InvalidViewError) {
-    return actionable(err, "Fix that field on the named item and retry; nothing from this call was persisted. renderer is one of graph, feed, code; filter is an object of brain_list options (nodeTypes, sourceSystems, updatedSince, where) without limit or cursor.");
+    return actionable(err, "Fix that field on the named item and retry; nothing from this call was persisted. renderer is one of graph, feed, code, timeline; filter is an object of brain_list options (nodeTypes, sourceSystems, updatedSince, where) without limit or cursor.");
+  }
+
+  // --- Event time (brain_write of any node) ---
+  if (err instanceof InvalidEventTimeError) {
+    return actionable(err, "Fix occurred_at on the named item and retry; nothing from this call was persisted. It is an ISO-8601 timestamp, stored canonically as UTC with milliseconds (2026-03-04T08:00:00.000Z), or null to remove it.");
   }
 
   // --- Attribution plumbing (should not surface in practice — the server

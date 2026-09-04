@@ -33,6 +33,7 @@ export {
   InvalidWorkItemError,
   NotAWorkItemError,
   InvalidViewError,
+  InvalidEventTimeError,
 } from "./errors.js";
 
 // `asPgError`/`PgErrorLike` are re-exported (not just used internally) so
@@ -194,12 +195,15 @@ export {
 } from "./corpus.js";
 
 // Pure helpers for the GitHub repos/issues loader (bd-5hd) — not
-// write-path or retrieval behavior, just how src/ingest-github.ts names
-// its source system/node/edge types and resolves `#N`/`owner/repo#N`
-// cross-references in issue text into `mentions` edges. See github.ts.
+// write-path or retrieval behavior, just how src/ingest-github.ts maps
+// `gh` JSON to repo/issue nodes, names its source system/node/edge types,
+// and resolves `#N`/`owner/repo#N` cross-references in issue text into
+// `mentions` edges. See github.ts.
 export {
   extractIssueReferences,
   deriveMentionEdges,
+  mapGhRepoToNode,
+  mapGhIssueToNode,
   GITHUB_SOURCE_SYSTEM,
   REPO_NODE_TYPE,
   ISSUE_NODE_TYPE,
@@ -207,6 +211,8 @@ export {
   BELONGS_TO_WEIGHT,
   MENTIONS_EDGE_TYPE,
   MENTIONS_WEIGHT,
+  type GhRepo,
+  type GhIssue,
   type ParsedReference,
   type IssueRefSource,
   type MentionEdgeCandidate,
@@ -302,6 +308,9 @@ export {
   type NormalizeViewOptions,
   type ResolvedDefaultView,
 } from "./views.js";
+// Event time (timeline-view change): the `occurred_at` contract every
+// writer applies, whatever the node's type. See event-time.ts's header.
+export { OCCURRED_AT_KEY, normalizeOccurredAt, type NormalizeOccurredAtOptions } from "./event-time.js";
 // Bounded subtree read (code-view change): a root's child_of descendants
 // in one statement, merge-folded, cycle-safe, capped by depth and by
 // count, without content. See tree.ts's module header.
