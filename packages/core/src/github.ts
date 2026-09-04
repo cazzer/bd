@@ -195,7 +195,7 @@ export interface ClosesEdgeCandidate {
 
 export interface DeriveClosesEdgesResult {
   edges: ClosesEdgeCandidate[];
-  /** References to an issue the loader did not write in this run — a closed issue, almost always, since only open ones are loaded. Skipped and counted, never fatal (github-ingest spec, "A pull request closing an issue that is not loaded"). */
+  /** Distinct (pull request, target) pairs whose target the loader did not write in this run — a closed issue, almost always, since only open ones are loaded. Counted per pair as `edges` is, not per occurrence; skipped, never fatal (github-ingest spec, "A pull request closing an issue that is not loaded"). */
   skipped: number;
 }
 
@@ -206,9 +206,10 @@ export interface DeriveClosesEdgesResult {
  * reference resolves by the repository GitHub names on it, so a cross-
  * repository close lands on the right issue; case-insensitively on the
  * slug, like `deriveMentionEdges`, returning the known node's own casing.
- * A reference that resolves to nothing is counted in `skipped`; a repeated
- * reference to one target collapses to one edge. No self-reference guard:
- * GitHub cannot record a pull request as closing itself.
+ * A repeated reference to one target collapses first, so it is one edge
+ * or one `skipped`, never two of either; a reference that resolves to
+ * nothing is counted in `skipped`. No self-reference guard: GitHub cannot
+ * record a pull request as closing itself.
  */
 export function deriveClosesEdges(
   prs: readonly PrClosesSource[],
@@ -223,16 +224,16 @@ export function deriveClosesEdges(
 
   for (const pr of prs) {
     for (const ref of pr.closingIssuesReferences) {
-      const candidateId = `${ref.repository.owner.login}/${ref.repository.name}#${ref.number}`;
-      const resolved = byLower.get(candidateId.toLowerCase());
+      const candidateId = `${ref.repository.owner.login}/${ref.repository.name}#${ref.number}`.toLowerCase();
+      const pairKey = `${pr.externalId} ${candidateId}`;
+      if (seenPairs.has(pairKey)) continue;
+      seenPairs.add(pairKey);
+
+      const resolved = byLower.get(candidateId);
       if (!resolved) {
         skipped += 1;
         continue;
       }
-
-      const pairKey = `${pr.externalId} ${resolved}`;
-      if (seenPairs.has(pairKey)) continue;
-      seenPairs.add(pairKey);
 
       edges.push({ srcExternalId: pr.externalId, dstExternalId: resolved });
     }

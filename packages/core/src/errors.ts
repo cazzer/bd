@@ -377,8 +377,10 @@ export class InvalidLookupIdError extends KnowledgeStoreError {
   constructor(
     readonly value: unknown,
     reason: string,
+    /** What `value` was meant to be — `node id` for every uuid-taking read; `getNodesByExternalId` names its `external-id pair`. */
+    label = "node id",
   ) {
-    super(`invalid node id ${JSON.stringify(value)}: ${reason}`);
+    super(`invalid ${label} ${JSON.stringify(value)}: ${reason}`);
   }
 }
 

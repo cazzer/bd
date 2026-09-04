@@ -641,7 +641,7 @@ export interface GetNodesByExternalIdResult {
  */
 function validateExternalIdPairs(pairs: readonly ExternalIdPair[]): ExternalIdPair[] {
   if (!Array.isArray(pairs)) {
-    throw new InvalidLookupIdError(pairs, "pairs must be an array of { sourceSystem, externalId }");
+    throw new InvalidLookupIdError(pairs, "must be an array of { sourceSystem, externalId }", "external-id pairs");
   }
   if (pairs.length > MAX_EXTERNAL_ID_LOOKUPS) {
     throw new InvalidLookupOptionError("pairs", pairs.length, `must name no more than ${MAX_EXTERNAL_ID_LOOKUPS} pairs`);
@@ -651,10 +651,10 @@ function validateExternalIdPairs(pairs: readonly ExternalIdPair[]): ExternalIdPa
     const sourceSystem = typeof pair?.sourceSystem === "string" ? pair.sourceSystem.trim() : "";
     const externalId = typeof pair?.externalId === "string" ? pair.externalId.trim() : "";
     if (sourceSystem === "") {
-      throw new InvalidLookupIdError(pair, `pair at index ${index}: sourceSystem must be a non-empty string`);
+      throw new InvalidLookupIdError(pair, `sourceSystem must be a non-empty string (pair at index ${index})`, "external-id pair");
     }
     if (externalId === "") {
-      throw new InvalidLookupIdError(pair, `pair at index ${index}: externalId must be a non-empty string`);
+      throw new InvalidLookupIdError(pair, `externalId must be a non-empty string (pair at index ${index})`, "external-id pair");
     }
     distinct.set(JSON.stringify([sourceSystem, externalId]), { sourceSystem, externalId });
   });
@@ -695,10 +695,16 @@ SELECT jsonb_build_object(
       'node_type', c.node_type
     ) ORDER BY r.source_system, r.external_id)
     FROM resolved r
-    -- The canonical row's own type, through the view: a canonical id never
-    -- carries a pointer (mergeNodes collapses chains), so this is the
-    -- ordinary canonical-row join every other read makes.
-    JOIN resolved_nodes c ON c.id = r.canonical_id
+    -- The canonical row's own type, through the view. A canonical id is
+    -- never itself merged: nodes_merged_into_canonical_trigger (migration
+    -- 0000) refuses any write, whatever the writer, whose merged_into
+    -- names a row that is already merged, and mergeNodes repoints a row's
+    -- dependents when it merges that row away. LEFT, with the NULL fold
+    -- excluded below, so that if either guard were bypassed the pair
+    -- comes back with a NULL id — which getNodesByExternalId turns into
+    -- LookupFailedError — rather than vanishing from both lists.
+    LEFT JOIN resolved_nodes c ON c.id = r.canonical_id
+    WHERE r.canonical_id IS NOT NULL
   ), '[]'::jsonb),
   'not_found', COALESCE((
     SELECT jsonb_agg(jsonb_build_object(
@@ -715,8 +721,9 @@ SELECT jsonb_build_object(
 interface RawResolvedExternalId {
   source_system: string;
   external_id: string;
-  id: string;
-  node_type: string;
+  /** NULL only if the canonical id has no row in `resolved_nodes` — a broken invariant, reported as `LookupFailedError`, never a dropped pair. */
+  id: string | null;
+  node_type: string | null;
 }
 
 interface RawGetNodesByExternalIdResult {
@@ -753,8 +760,19 @@ export async function getNodesByExternalId(db: Database, pairs: readonly Externa
     throw new LookupFailedError("getNodesByExternalId query returned no row", "getNodesByExternalId");
   }
 
+  const found: ResolvedExternalId[] = [];
+  for (const r of row.result.found) {
+    if (r.id === null || r.node_type === null) {
+      throw new LookupFailedError(
+        `getNodesByExternalId: (${r.source_system}, ${r.external_id}) folds to a canonical id that resolved_nodes does not hold — ` +
+          "a merge chain nodes_merged_into_canonical_trigger and mergeNodes should have made impossible",
+        "getNodesByExternalId",
+      );
+    }
+    found.push({ sourceSystem: r.source_system, externalId: r.external_id, id: r.id, nodeType: r.node_type });
+  }
   return {
-    found: row.result.found.map((r) => ({ sourceSystem: r.source_system, externalId: r.external_id, id: r.id, nodeType: r.node_type })),
+    found,
     notFound: row.result.not_found.map((r) => ({ sourceSystem: r.source_system, externalId: r.external_id })),
   };
 }

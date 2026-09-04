@@ -23,6 +23,11 @@
 // the next run re-links (design.md decision 1) — a wrapper would guard
 // against a failure that has not happened at the cost of holding every
 // row lock across two statements.
+//
+// The `gh` fan-out is bounded (`GH_CONCURRENCY`): repositories are fetched
+// eight at a time, one repository's issue and PR fetch in parallel, so the
+// loader never holds more than sixteen `gh` processes — sixteen requests
+// — open, whatever discovery yields.
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -67,8 +72,9 @@ const DISCOVERY_REPO_LIMIT = 1000;
 /**
  * How many open issues `gh issue list` fetches per repo. Generous above
  * any single repo's open-issue count seen so far (under 70); a repo with
- * more open issues than this would silently lose the overflow, which is
- * why this is generous rather than tight.
+ * more open issues than this would lose the overflow — `warnIfAtLimit`
+ * says so when a fetch comes back exactly this long — which is why this is
+ * generous rather than tight.
  */
 const ISSUES_PER_REPO_LIMIT = 2000;
 
@@ -76,10 +82,22 @@ const ISSUES_PER_REPO_LIMIT = 2000;
  * How many pull requests `gh pr list --state all` fetches per repo — every
  * state, so this bounds a repository's whole PR history, not its open
  * set. Above the largest repository seen so far (a few hundred) for the
- * same reason as `ISSUES_PER_REPO_LIMIT`: an overflow would be lost
- * silently. `gh` pages the fetch itself.
+ * same reason as `ISSUES_PER_REPO_LIMIT`: an overflow would be lost, and
+ * only `warnIfAtLimit` would say so. `gh` pages the fetch itself.
  */
 const PRS_PER_REPO_LIMIT = 2000;
+
+/**
+ * How many repositories are in flight against `gh` at once. Each costs one
+ * `gh repo view`, then one `gh issue list` and one `gh pr list` in
+ * parallel, so an unbounded `Promise.all` over N repositories would hold
+ * up to 2N `gh` processes and 2N requests open — fine at 15, but past ~50
+ * it crosses GitHub's secondary limit of 100 concurrent requests, and a
+ * state-blind discovery (bd-0cw) would take N toward this whole account.
+ * Eight keeps the worst case at sixteen. Not a CLI flag: a knob nobody
+ * should need to turn.
+ */
+const GH_CONCURRENCY = 8;
 
 const REPO_JSON_FIELDS = "name,nameWithOwner,owner,description,url,visibility,isPrivate,defaultBranchRef,primaryLanguage,createdAt,updatedAt";
 const ISSUE_JSON_FIELDS = "number,title,body,labels,author,createdAt,updatedAt,url,state";
@@ -89,6 +107,24 @@ interface GhDiscoveryRepo {
   nameWithOwner: string;
   issues: { totalCount: number };
   pullRequests: { totalCount: number };
+}
+
+/** `items.map(fn)` with at most `size` calls in flight: each batch runs under `Promise.all`, batches one after another; results keep `items`' order. */
+async function mapInBatches<T, R>(items: readonly T[], size: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = [];
+  for (let i = 0; i < items.length; i += size) {
+    results.push(...(await Promise.all(items.slice(i, i + size).map(fn))));
+  }
+  return results;
+}
+
+/** A list fetch that comes back exactly as long as its limit may have been cut off, and `gh` says nothing — so this does, naming the repository. */
+function warnIfAtLimit(slug: string, what: string, count: number, limit: number): void {
+  if (count >= limit) {
+    console.warn(
+      `[ingest:github] warning: ${slug} returned ${count} ${what}, exactly the per-repo limit of ${limit} — the fetch may be truncated; raise the limit to be sure`,
+    );
+  }
 }
 
 /** Runs `gh <args>` and returns stdout, or throws with `gh`'s own stderr attached — actionable, not a bare exit-code failure. */
@@ -128,7 +164,9 @@ async function fetchOpenIssues(slug: string): Promise<GhIssue[]> {
     "--json",
     ISSUE_JSON_FIELDS,
   ]);
-  return JSON.parse(stdout) as GhIssue[];
+  const issues = JSON.parse(stdout) as GhIssue[];
+  warnIfAtLimit(slug, "open issue(s)", issues.length, ISSUES_PER_REPO_LIMIT);
+  return issues;
 }
 
 async function fetchPullRequests(slug: string): Promise<GhPullRequest[]> {
@@ -144,7 +182,9 @@ async function fetchPullRequests(slug: string): Promise<GhPullRequest[]> {
     "--json",
     PR_JSON_FIELDS,
   ]);
-  return JSON.parse(stdout) as GhPullRequest[];
+  const prs = JSON.parse(stdout) as GhPullRequest[];
+  warnIfAtLimit(slug, "pull request(s)", prs.length, PRS_PER_REPO_LIMIT);
+  return prs;
 }
 
 const REPO_SLUG_RE = /^[^/\s]+\/[^/\s]+$/;
@@ -192,16 +232,14 @@ async function main(): Promise<void> {
     throw new Error("no repos to ingest — pass repo slugs as arguments, or ensure the authenticated gh user has repos with issues or pull requests");
   }
 
-  const repos = await Promise.all(repoSlugs.map(fetchRepo));
+  const repos = await mapInBatches(repoSlugs, GH_CONCURRENCY, fetchRepo);
   const issuesBySlug = new Map<string, GhIssue[]>();
   const prsBySlug = new Map<string, GhPullRequest[]>();
-  await Promise.all(
-    repoSlugs.map(async (slug) => {
-      const [issues, prs] = await Promise.all([fetchOpenIssues(slug), fetchPullRequests(slug)]);
-      issuesBySlug.set(slug, issues);
-      prsBySlug.set(slug, prs);
-    }),
-  );
+  await mapInBatches(repoSlugs, GH_CONCURRENCY, async (slug) => {
+    const [issues, prs] = await Promise.all([fetchOpenIssues(slug), fetchPullRequests(slug)]);
+    issuesBySlug.set(slug, issues);
+    prsBySlug.set(slug, prs);
+  });
   const totalIssues = [...issuesBySlug.values()].reduce((sum, issues) => sum + issues.length, 0);
   const totalPrs = [...prsBySlug.values()].reduce((sum, prs) => sum + prs.length, 0);
   console.log(`[ingest:github] fetched ${repos.length} repo(s), ${totalIssues} open issue(s), ${totalPrs} pull request(s) total`);

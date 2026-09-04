@@ -938,8 +938,10 @@ describe("getNodesByExternalId", () => {
     const spy = spyDb();
     const ok: ExternalIdPair = { sourceSystem: "github", externalId: "owner/name#12" };
 
-    await expect(getNodesByExternalId(spy.db, [{ sourceSystem: "", externalId: "x" }])).rejects.toThrow(/pair at index 0: sourceSystem must be a non-empty string/);
-    await expect(getNodesByExternalId(spy.db, [ok, { sourceSystem: "github", externalId: "   " }])).rejects.toThrow(/pair at index 1: externalId must be a non-empty string/);
+    await expect(getNodesByExternalId(spy.db, [{ sourceSystem: "", externalId: "x" }])).rejects.toThrow(
+      'invalid external-id pair {"sourceSystem":"","externalId":"x"}: sourceSystem must be a non-empty string (pair at index 0)',
+    );
+    await expect(getNodesByExternalId(spy.db, [ok, { sourceSystem: "github", externalId: "   " }])).rejects.toThrow(/externalId must be a non-empty string \(pair at index 1\)/);
     await expect(getNodesByExternalId(spy.db, [ok, { sourceSystem: "github", externalId: undefined as unknown as string }])).rejects.toBeInstanceOf(InvalidLookupIdError);
     await expect(getNodesByExternalId(spy.db, [ok, null as unknown as ExternalIdPair])).rejects.toBeInstanceOf(InvalidLookupIdError);
     await expect(getNodesByExternalId(spy.db, "github" as unknown as ExternalIdPair[])).rejects.toBeInstanceOf(InvalidLookupIdError);
@@ -962,6 +964,30 @@ describe("getNodesByExternalId", () => {
     expect(spy.executed()).toBe(1);
   });
 
+  it("throws LookupFailedError, rather than dropping the pair, when its canonical id has no canonical row — a chain built past the trigger by raw SQL", async () => {
+    // nodes_merged_into_canonical_trigger refuses a pointer AT a merged row;
+    // it cannot see a survivor being merged away after a loser already
+    // points at it — that repointing is mergeNodes' job. Raw SQL skips it.
+    const run = await newRun();
+    const nodeMap = await makeNodes(run, [
+      { nodeType: "doc", externalId: "a", title: "A", content: "" },
+      { nodeType: "doc", externalId: "b", title: "B", content: "" },
+      { nodeType: "doc", externalId: "c", title: "C", content: "" },
+    ]);
+    await mergeNodes(db, nodeMap.get("a")!, nodeMap.get("b")!, run);
+    await db.execute(sql`UPDATE nodes SET merged_into = ${nodeMap.get("c")!}::uuid WHERE id = ${nodeMap.get("b")!}::uuid`);
+
+    let thrown: unknown;
+    try {
+      await getNodesByExternalId(db, [{ sourceSystem: run.sourceSystem, externalId: "a" }]);
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(LookupFailedError);
+    expect((thrown as LookupFailedError).operation).toBe("getNodesByExternalId");
+    expect((thrown as LookupFailedError).message).toContain(`(${run.sourceSystem}, a)`);
+  });
+
   it("buildGetNodesByExternalIdQuery is pure, one statement, binds both halves of every pair, folds through nodes and reads the canonical row through resolved_nodes", () => {
     const dialect = new PgDialect();
     const pairs: ExternalIdPair[] = [
@@ -975,6 +1001,6 @@ describe("getNodesByExternalId", () => {
     expect(a.sql).not.toContain(";");
     expect(a.params).toEqual(["github", "git", "owner/name#12", "owner/name@abc"]);
     expect(a.sql).toContain("LEFT JOIN nodes n ON n.source_system = req.source_system AND n.external_id = req.external_id");
-    expect(a.sql).toContain("JOIN resolved_nodes c ON c.id = r.canonical_id");
+    expect(a.sql).toContain("LEFT JOIN resolved_nodes c ON c.id = r.canonical_id");
   });
 });

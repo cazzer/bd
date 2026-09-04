@@ -291,11 +291,16 @@ describe("deriveClosesEdges", () => {
     });
   });
 
-  it("collapses a repeated reference to one target into one edge, and produces nothing for no pull requests", () => {
-    const prs: PrClosesSource[] = [{ externalId: "cazzer/toastd#40", closingIssuesReferences: [closing("toastd", 12), closing("toastd", 12)] }];
+  it("collapses a repeated reference to one target into one edge or one skipped, and produces nothing for no pull requests", () => {
+    const prs: PrClosesSource[] = [
+      {
+        externalId: "cazzer/toastd#40",
+        closingIssuesReferences: [closing("toastd", 12), closing("toastd", 12), closing("toastd", 9999), closing("toastd", 9999)],
+      },
+    ];
     expect(deriveClosesEdges(prs, known)).toEqual({
       edges: [{ srcExternalId: "cazzer/toastd#40", dstExternalId: "cazzer/toastd#12" }],
-      skipped: 0,
+      skipped: 1,
     });
     expect(deriveClosesEdges([], known)).toEqual({ edges: [], skipped: 0 });
   });
