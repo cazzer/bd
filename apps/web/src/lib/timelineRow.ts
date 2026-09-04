@@ -131,18 +131,40 @@ export interface RelationLabel {
 }
 
 /**
+ * Edge types whose spelled-out reading is a phrase rather than the generic
+ * "this item —X→ the anchor" sentence (github-prs-and-commits, design.md
+ * decision 5): `closes` — a pull request row on an issue's timeline closes
+ * the anchor, and an issue row on a pull request's timeline is closed by
+ * it — and `touches` — a commit row on a file's timeline touches the
+ * anchor, and a file row on a commit's timeline is touched by it. The
+ * phrase is the hover title and the screen-reader text; the visible pill
+ * keeps the arrow form for every type so rows of mixed types read alike.
+ * A `Map`, not an object, so an edge type named like an inherited key
+ * (`constructor`) falls through to the generic sentence.
+ */
+const RELATION_WORDING: ReadonlyMap<string, Readonly<Record<"incoming" | "outgoing", string>>> = new Map([
+  ["closes", { incoming: "closes", outgoing: "is closed by" }],
+  ["touches", { incoming: "touches", outgoing: "is touched by" }],
+]);
+
+/**
  * The relation a row shows (design.md decision 5: the edge type with an
  * arrow for direction). `direction` is as core reports it — as seen from
  * the anchor — so `incoming` is an edge from this row to the anchor
  * (`belongs-to →`: the issue belongs to the repository) and `outgoing` one
  * from the anchor to this row (`← blocks`: the anchor blocks this item).
  * The arrow always points along the edge, with the anchor's side kept
- * away from the row's text.
+ * away from the row's text. The title spells the direction out — as a
+ * phrase for the types `RELATION_WORDING` names, the edge type between
+ * the two ends otherwise.
  */
 export function relationLabel(edgeType: string, direction: "incoming" | "outgoing"): RelationLabel {
-  return direction === "incoming"
-    ? { text: `${edgeType} →`, title: `this item —${edgeType}→ the anchor` }
-    : { text: `← ${edgeType}`, title: `the anchor —${edgeType}→ this item` };
+  const text = direction === "incoming" ? `${edgeType} →` : `← ${edgeType}`;
+  const wording = RELATION_WORDING.get(edgeType);
+  if (wording !== undefined) {
+    return { text, title: `this item ${wording[direction]} the anchor` };
+  }
+  return { text, title: direction === "incoming" ? `this item —${edgeType}→ the anchor` : `the anchor —${edgeType}→ this item` };
 }
 
 /**

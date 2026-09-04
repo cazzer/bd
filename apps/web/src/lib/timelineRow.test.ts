@@ -3,7 +3,8 @@
 // live in the address" — every chip when the address names none, the
 // intersection otherwise, a type the view does not name ignored, nothing
 // chosen, a view naming no types — plus the toggle, the address a toggle
-// writes, the time label, and the relation label.
+// writes, the time label, and the relation label (github-prs-and-commits
+// 3.1: `closes` and `touches` read as phrases in both directions).
 
 import { describe, expect, it } from "vitest";
 import { addressTypesFor, chosenTypes, formatEventTime, linkHost, NO_TYPE_CHOSEN, relationLabel, toggleType } from "./timelineRow.js";
@@ -137,6 +138,27 @@ describe("relationLabel", () => {
 
   it("points an outgoing edge from the anchor toward the row", () => {
     expect(relationLabel("blocks", "outgoing")).toEqual({ text: "← blocks", title: "the anchor —blocks→ this item" });
+  });
+
+  it("reads closes as a phrase: a pull request row that closes the anchor issue", () => {
+    expect(relationLabel("closes", "incoming")).toEqual({ text: "closes →", title: "this item closes the anchor" });
+  });
+
+  it("reads closes as a phrase: an issue row the anchor pull request closes", () => {
+    expect(relationLabel("closes", "outgoing")).toEqual({ text: "← closes", title: "this item is closed by the anchor" });
+  });
+
+  it("reads touches as a phrase: a commit row that touches the anchor file", () => {
+    expect(relationLabel("touches", "incoming")).toEqual({ text: "touches →", title: "this item touches the anchor" });
+  });
+
+  it("reads touches as a phrase: a file row the anchor commit touches", () => {
+    expect(relationLabel("touches", "outgoing")).toEqual({ text: "← touches", title: "this item is touched by the anchor" });
+  });
+
+  it("keeps the generic sentence for a type with no phrase, including one named like an inherited object key", () => {
+    expect(relationLabel("mentions", "incoming")).toEqual({ text: "mentions →", title: "this item —mentions→ the anchor" });
+    expect(relationLabel("constructor", "outgoing")).toEqual({ text: "← constructor", title: "the anchor —constructor→ this item" });
   });
 });
 
