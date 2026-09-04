@@ -342,7 +342,7 @@ describe("getTimeline", () => {
     expect(cut.rows).toHaveLength(6);
   });
 
-  it("sorts a value written past the contract as text (design.md's first risk, documented): the read never parses, so a zoned string lands where its characters fall", async () => {
+  it("sorts a value written past the contract as text (design.md's first risk, documented): the read never parses, so a zoned string lands where its characters fall, and a JSON null under the key counts as no time", async () => {
     const p = fx();
     const anchor = await writeNode(`${p}/repo`, "repo");
     const nine = await timed(`${p}/nine`, "gh-issue", "2026-03-04T09:00:00Z");
@@ -350,16 +350,23 @@ describe("getTimeline", () => {
     // Raw upsertNodes, no normalizer: the instant is 08:00Z, the oldest of
     // the three, but its text starts "2026-03-04T10" and sorts between the
     // other two. Every real writer runs normalizeOccurredAt; only a test
-    // can do this.
+    // can do this. The null is the other bypass: the contract deletes the
+    // key for null, so only a raw write leaves one under it.
     const bypassed = await upsertNodes(db, run, [
       { nodeType: "gh-issue", sourceSystem: SRC, externalId: `${p}/bypassed`, title: "bypassed", content: "", metadata: { occurred_at: "2026-03-04T10:00:00+02:00" } },
+      { nodeType: "gh-issue", sourceSystem: SRC, externalId: `${p}/null-under-key`, title: "null under key", content: "", metadata: { occurred_at: null } },
     ]);
-    const raw = bypassed.rows[0]!.id;
-    for (const id of [nine, eleven, raw]) await link(id, anchor, "belongs-to");
+    const raw = bypassed.rows.find((r) => r.externalId === `${p}/bypassed`)!.id;
+    const nullUnderKey = bypassed.rows.find((r) => r.externalId === `${p}/null-under-key`)!.id;
+    for (const id of [nine, eleven, raw, nullUnderKey]) await link(id, anchor, "belongs-to");
 
     const result = await getTimeline(db, anchor);
     expect(ids(result.rows)).toEqual([eleven, raw, nine]);
     expect(result.rows[1]!.occurredAt).toBe("2026-03-04T10:00:00+02:00");
+    // The null is neither listed (it would lead the page under DESC with no
+    // time, and mint a cursor the read rejects) nor silent: it is counted.
+    expect(ids(result.rows)).not.toContain(nullUnderKey);
+    expect(result.untimedCount).toBe(1);
 
     // The cursor carries the text as the row held it, so paging across the
     // bypassed row still repeats and skips nothing.
@@ -418,7 +425,7 @@ describe("getTimeline", () => {
     expect(a.params).toContain(DEFAULT_TIMELINE_LIMIT + 1);
     expect(a.params).toContain("occurred_at");
     expect(a.sql).toContain("NULL::text[]");
-    expect(a.sql).toContain("NULL::text");
+    expect(a.sql).toContain("NULL::text IS NULL");
     expect(a.sql).toContain("NULL::uuid");
     expect(a.sql).toContain("rn.other_id <> (SELECT canonical_id FROM self)");
     expect(a.sql).toContain("DISTINCT ON (f.node_id)");

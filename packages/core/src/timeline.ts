@@ -30,8 +30,13 @@
 // joined twice — a `belongs-to` and a `mentions` — is one item on a
 // timeline, and choosing the heaviest edge (then the lesser type name,
 // then the lesser edge id) makes the relation shown the same on every
-// call. `timed` keeps the rows whose metadata has the key and projects
-// `metadata->>'occurred_at'` as text — no cast and no parse, because
+// call. `timed` keeps the rows with a non-null value under the key —
+// `metadata->>'occurred_at' IS NOT NULL`, not `metadata ? 'occurred_at'`:
+// a JSON null under the key (reachable only past the contract, through
+// the exported `upsertNodes`) would pass the key test with a NULL time,
+// lead the page under `DESC`, and mint a cursor the read itself rejects;
+// counting it as untimed is what "carries no time" means — and projects
+// that value as text — no cast and no parse, because
 // event-time.ts guarantees every writer stores the fixed-width canonical
 // form, whose text order is its chronological order in any collation:
 // every canonical value has the same punctuation at the same offsets, so
@@ -66,7 +71,16 @@ export const MAX_TIMELINE_LIMIT = 500;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/** Opaque to callers: the last row's keyset position, `occurredAt` exactly as the row held it. Pass a previous result's `nextCursor` back unchanged. */
+/**
+ * Opaque to callers: the last row's keyset position, `occurredAt` exactly
+ * as the row held it. Pass a previous result's `nextCursor` back
+ * unchanged. Unlike `NeighborsCursor`, it is not bound to the anchor or
+ * the narrowing it was minted under (design.md decision 3): a caller
+ * must not replay a cursor across anchors or narrowings — the read would
+ * silently page the wrong set — and the web view's load-more guard, which
+ * appends only while the view, anchor, and chosen types are unchanged, is
+ * what enforces that.
+ */
 export interface TimelineCursor {
   occurredAt: string;
   id: string;
@@ -141,7 +155,7 @@ export function buildGetTimelineQuery(params: BuildGetTimelineQueryParams): SQL 
   return sql`
 WITH self AS (
   SELECT id, COALESCE(merged_into, id) AS canonical_id
-  FROM nodes WHERE id = ${params.anchorId}::uuid
+  FROM nodes WHERE id = ${params.anchorId}
 ),
 -- Every node merged away into the anchor's canonical id — an edge attached
 -- to one of these must still surface (lookup.ts's alias/probe pattern).
@@ -195,11 +209,13 @@ per_node AS (
   FROM filtered f
   ORDER BY f.node_id, f.weight DESC, f.edge_type, f.edge_id
 ),
--- The rows that carry a time, the time as the text the contract stored.
+-- The rows that carry a time — a non-null value under the key (see the
+-- module header on why not the key test) — the time as the text the
+-- contract stored.
 timed AS (
   SELECT p.*, p.metadata->>${OCCURRED_AT_KEY}::text AS occurred_at
   FROM per_node p
-  WHERE p.metadata ? ${OCCURRED_AT_KEY}::text
+  WHERE p.metadata->>${OCCURRED_AT_KEY}::text IS NOT NULL
 ),
 -- Keyset page: strictly after the cursor under the exact ORDER BY, one row
 -- past the limit so has_more needs no count.
@@ -217,7 +233,7 @@ paged AS (
 untimed AS (
   SELECT count(*) AS untimed_count
   FROM per_node p
-  WHERE NOT (p.metadata ? ${OCCURRED_AT_KEY}::text)
+  WHERE p.metadata->>${OCCURRED_AT_KEY}::text IS NULL
 )
 SELECT jsonb_build_object(
   'found', EXISTS(SELECT 1 FROM self),
