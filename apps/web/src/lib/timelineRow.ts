@@ -23,7 +23,11 @@
 // view has (node types are words like `work_item` and `gh-issue`; a lone
 // dash is a conventional "nothing") and is therefore dropped by the
 // intersection like any foreign type. No special case reads it; a hand-
-// typed `?type=-` and a last-chip deselect land on the same state.
+// typed `?type=-` and a last-chip deselect land on the same state. The
+// one cost: a view whose own `nodeTypes` includes `-` gets a chip that
+// cannot be deselected alone, since the address it would write is the
+// marker — a node type nobody has, accepted here rather than special-
+// cased.
 
 /** The one address type written when every chip is deselected: foreign to every view, so the intersection is empty and the view says no type is chosen. */
 export const NO_TYPE_CHOSEN = "-";
@@ -49,7 +53,7 @@ export function chosenTypes(addressTypes: readonly string[], viewTypes: readonly
   if (viewTypes === null || viewTypes === undefined) {
     return { chips: null, chosen: null, none: false };
   }
-  const chips = [...viewTypes];
+  const chips = [...new Set(viewTypes)];
   if (addressTypes.length === 0) {
     return { chips, chosen: [...chips], none: false };
   }
@@ -76,10 +80,11 @@ export function addressTypesFor(chosen: readonly string[]): string[] {
   return chosen.length === 0 ? [NO_TYPE_CHOSEN] : [...chosen];
 }
 
-/** A row's event time as shown: `text` for the row, `title` for hover — see `formatEventTime`. */
+/** A row's event time as shown: `text` for the row, `title` for hover, `iso` for the `<time>` element's `dateTime` — `null` when the value did not parse, so no machine-readable time is claimed for it. See `formatEventTime`. */
 export interface EventTimeLabel {
   text: string;
   title: string;
+  iso: string | null;
 }
 
 export interface FormatEventTimeOptions {
@@ -113,9 +118,10 @@ function formatterFor(options: FormatEventTimeOptions): Intl.DateTimeFormat {
 export function formatEventTime(iso: string, options: FormatEventTimeOptions = {}): EventTimeLabel {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) {
-    return { text: iso, title: iso };
+    return { text: iso, title: iso, iso: null };
   }
-  return { text: formatterFor(options).format(date), title: date.toISOString() };
+  const canonical = date.toISOString();
+  return { text: formatterFor(options).format(date), title: canonical, iso: canonical };
 }
 
 /** How a row relates to the anchor, as shown: `text` beside the row (the edge type with an arrow), `title` spelling the direction out for hover. */
@@ -137,4 +143,19 @@ export function relationLabel(edgeType: string, direction: "incoming" | "outgoin
   return direction === "incoming"
     ? { text: `${edgeType} →`, title: `this item —${edgeType}→ the anchor` }
     : { text: `← ${edgeType}`, title: `the anchor —${edgeType}→ this item` };
+}
+
+/**
+ * A metadata link's text (design.md decision 5 draws links as the feed
+ * does; the review asked for the host rather than the key): `github.com`
+ * for `https://github.com/x/y/issues/1`, the key-less fallback being the
+ * href itself when it does not parse. The key stays as the link's
+ * `title`, so a writer's name for it (`url`, `pr_url`) is still on hover.
+ */
+export function linkHost(href: string): string {
+  try {
+    return new URL(href).host || href;
+  } catch {
+    return href;
+  }
 }

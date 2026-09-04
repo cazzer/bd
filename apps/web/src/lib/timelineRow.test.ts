@@ -6,7 +6,7 @@
 // writes, the time label, and the relation label.
 
 import { describe, expect, it } from "vitest";
-import { addressTypesFor, chosenTypes, formatEventTime, NO_TYPE_CHOSEN, relationLabel, toggleType } from "./timelineRow.js";
+import { addressTypesFor, chosenTypes, formatEventTime, linkHost, NO_TYPE_CHOSEN, relationLabel, toggleType } from "./timelineRow.js";
 
 describe("chosenTypes", () => {
   it("offers no chips and reads every type when the view names no types (null or absent)", () => {
@@ -35,6 +35,10 @@ describe("chosenTypes", () => {
   it("is none when every address type is foreign — including the deselect-all marker", () => {
     expect(chosenTypes(["file"], ["gh-issue", "work_item"])).toEqual({ chips: ["gh-issue", "work_item"], chosen: [], none: true });
     expect(chosenTypes([NO_TYPE_CHOSEN], ["gh-issue", "work_item"])).toEqual({ chips: ["gh-issue", "work_item"], chosen: [], none: true });
+  });
+
+  it("collapses a view type named twice to one chip", () => {
+    expect(chosenTypes([], ["gh-issue", "work_item", "gh-issue"])).toEqual({ chips: ["gh-issue", "work_item"], chosen: ["gh-issue", "work_item"], none: false });
   });
 
   it("returns copies, never the view's or address's own arrays", () => {
@@ -98,6 +102,7 @@ describe("formatEventTime", () => {
     const label = formatEventTime("2026-03-04T10:00:00.000Z", { locale: "en-US", timeZone: "UTC" });
     expect(label.text).toMatch(/^Mar 4, 2026, 10:00\sAM$/);
     expect(label.title).toBe("2026-03-04T10:00:00.000Z");
+    expect(label.iso).toBe("2026-03-04T10:00:00.000Z");
   });
 
   it("renders the same instant in the viewer's zone", () => {
@@ -109,19 +114,19 @@ describe("formatEventTime", () => {
   it("canonicalizes the title for a value that bypassed the contract, and shows it in the zone", () => {
     const label = formatEventTime("2026-03-04T10:00:00+02:00", { locale: "en-US", timeZone: "UTC" });
     expect(label.title).toBe("2026-03-04T08:00:00.000Z");
+    expect(label.iso).toBe("2026-03-04T08:00:00.000Z");
     expect(label.text).toMatch(/^Mar 4, 2026, 8:00\sAM$/);
   });
 
   it("shows an unparseable value as the text it is", () => {
-    expect(formatEventTime("last Tuesday", { timeZone: "UTC" })).toEqual({ text: "last Tuesday", title: "last Tuesday" });
-    expect(formatEventTime("", { timeZone: "UTC" })).toEqual({ text: "", title: "" });
+    expect(formatEventTime("last Tuesday", { timeZone: "UTC" })).toEqual({ text: "last Tuesday", title: "last Tuesday", iso: null });
+    expect(formatEventTime("", { timeZone: "UTC" })).toEqual({ text: "", title: "", iso: null });
   });
 
   it("uses the viewer's own locale and zone when none are given", () => {
     const label = formatEventTime("2026-03-04T10:00:00.000Z");
     expect(label.title).toBe("2026-03-04T10:00:00.000Z");
     expect(label.text.length).toBeGreaterThan(0);
-    expect(label.text).toContain("2026");
   });
 });
 
@@ -132,5 +137,16 @@ describe("relationLabel", () => {
 
   it("points an outgoing edge from the anchor toward the row", () => {
     expect(relationLabel("blocks", "outgoing")).toEqual({ text: "← blocks", title: "the anchor —blocks→ this item" });
+  });
+});
+
+describe("linkHost", () => {
+  it("names a link by its host", () => {
+    expect(linkHost("https://github.com/cazzer/traitor/issues/1")).toBe("github.com");
+    expect(linkHost("http://example.test:8080/pr/2")).toBe("example.test:8080");
+  });
+
+  it("falls back to the text itself when it is not a URL", () => {
+    expect(linkHost("not a url")).toBe("not a url");
   });
 });

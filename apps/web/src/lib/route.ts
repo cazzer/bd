@@ -71,7 +71,9 @@ export interface CodeRoute {
  * parameters, exactly the graph's, so one parser rule serves both. `null`
  * for either id means absent: no view is TimelineView's "no view" empty
  * state and no anchor its "choose a node in the graph" state, never a
- * redirect; an empty `types` means every chip the view names is chosen.
+ * redirect; an empty `types` means every chip the view names is chosen
+ * (and `NO_TYPE_CHOSEN` in lib/timelineRow.ts is how none chosen is
+ * spelled, since an empty list cannot be).
  */
 export interface TimelineRoute {
   view: "timeline";
