@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { InvalidEventTimeError } from "./errors.js";
+import { DEFAULT_MAX_TITLE_LENGTH } from "./nodes.js";
 import {
   buildCommitNodes,
   buildRepoTree,
@@ -349,6 +350,11 @@ describe("parseGitLog", () => {
     expect(() => parseGitLog(straySeparator)).toThrow(`malformed commit ${SHA_C}: expected 7 NUL-terminated fields, found 6`);
     expect(() => parseGitLog(`${RS}real.\n${NUL}\n\ngone.txt\n`)).toThrow("malformed record 0: expected 7 NUL-terminated fields, found 1");
 
+    // A NUL inside a body — git refuses one in a message, so this is not
+    // git's output — adds an eighth field: named by the sha, never
+    // misattributed to the paths.
+    expect(() => parseGitLog(LITERAL_LOG.replace("for real.", `for${NUL}real.`))).toThrow(`malformed commit ${SHA_C}: expected 7 NUL-terminated fields, found 8`);
+
     // Seven fields whose first is not a sha: plain `git log` output would look like this.
     expect(() => parseGitLog(`${RS}commit abc${NUL}${NUL}${NUL}${NUL}${NUL}${NUL}${NUL}\n`)).toThrow(/malformed record 0: "commit abc" is not a commit sha/);
     expect(() => parseGitLog(`noise${LITERAL_LOG}`)).toThrow(/output before the first record separator "noise"/);
@@ -405,6 +411,29 @@ describe("buildCommitNodes", () => {
     // The author instant is stored as printed and not validated: only the committer instant is the node's moment.
     expect(buildCommitNodes("k", [{ ...EXPECTED_COMMITS[0]!, authoredAt: "whenever" }])[0]?.metadata).toMatchObject({ authored_at: "whenever" });
   });
+
+  it("fits a long subject, control characters, and an empty subject to the store while keeping the whole message", () => {
+    // `git commit -m` with a long one-paragraph message: `%s` is the whole paragraph.
+    const paragraph = "word ".repeat(130).trim();
+    expect(paragraph.length).toBeGreaterThan(DEFAULT_MAX_TITLE_LENGTH);
+    const long = buildCommitNodes("k", [{ ...EXPECTED_COMMITS[1]!, subject: paragraph, body: "" }])[0]!;
+    expect(long.title).toBe(paragraph.slice(0, DEFAULT_MAX_TITLE_LENGTH));
+    expect(long.title).toHaveLength(DEFAULT_MAX_TITLE_LENGTH);
+    expect(long.content).toBe(paragraph);
+
+    // A pasted ANSI escape, a NUL, and DEL become spaces; tab, CR, and LF stay.
+    const escaped = buildCommitNodes("k", [{ ...EXPECTED_COMMITS[0]!, subject: "Fix\u001b[31m red\u001b[0m", body: "tab\there\r\nand \u0000 NUL, \u007f DEL" }])[0]!;
+    expect(escaped.title).toBe("Fix [31m red [0m");
+    expect(escaped.content).toBe("Fix [31m red [0m\n\ntab\there\r\nand   NUL,   DEL");
+
+    // `--allow-empty-message`: the short sha stands in for the title; a blank subject the same.
+    const empty = buildCommitNodes("k", [{ ...EXPECTED_COMMITS[1]!, subject: "", body: "" }])[0]!;
+    expect(empty.title).toBe(SHA_B.slice(0, 7));
+    expect(empty.content).toBe("");
+    expect(buildCommitNodes("k", [{ ...EXPECTED_COMMITS[1]!, subject: " \t " }])[0]?.title).toBe(SHA_B.slice(0, 7));
+    // With no subject the content is the body alone — no leading blank line.
+    expect(buildCommitNodes("k", [{ ...EXPECTED_COMMITS[1]!, subject: "", body: "only a body" }])[0]).toMatchObject({ title: SHA_B.slice(0, 7), content: "only a body" });
+  });
 });
 
 describe("isRepoSlug", () => {
@@ -458,8 +487,10 @@ describe("resolveCommitEdges", () => {
 
   it("writes belongs-to at 1, touches at 0.8 to file rows alone, and mentions at 0.8 to what resolved, counting the rest", () => {
     // `src` was a file in this commit's day and is a directory now: no
-    // `touches` to a directory, counted with the deleted `gone.txt`.
-    const commit: GitCommit = { ...EXPECTED_COMMITS[0]!, paths: ["src/a.ts", "src/b.ts", "gone.txt", "src"] };
+    // `touches` to a directory, counted with the deleted `gone.txt`. The
+    // repeated `src/a.ts` is one edge — git never lists a path twice, and
+    // a duplicate could not be allowed to fail the batch if it did.
+    const commit: GitCommit = { ...EXPECTED_COMMITS[0]!, paths: ["src/a.ts", "src/b.ts", "gone.txt", "src", "src/a.ts"] };
     const { edges, counts } = resolveCommitEdges({ key: "owner/name", commits: [commit], nodeIdByExternalId: ids, fileExternalIds: files, referenceIdByExternalId: references });
     expect(edges).toEqual([
       { srcId: COMMIT_ID, dstId: ROOT_ID, edgeType: "belongs-to", sourceSystem: "git", weight: 1 },

@@ -610,10 +610,31 @@ export function commitExternalId(key: string, sha: string): string {
   return `${key}@${sha}`;
 }
 
-/** The whole message, as git would print it: subject, a blank line, body — the subject alone when there is no body. Content of the node and the text scanned for references. */
-function commitMessage(commit: GitCommit): string {
-  return commit.body.length === 0 ? commit.subject : `${commit.subject}\n\n${commit.body}`;
+/** Subject and body joined by a blank line, whichever of the two are non-empty — the whole message as git would print it. */
+function joinMessage(subject: string, body: string): string {
+  return [subject, body].filter((part) => part.length > 0).join("\n\n");
 }
+
+/** The whole message, as git stores it: the text scanned for references. */
+function commitMessage(commit: GitCommit): string {
+  return joinMessage(commit.subject, commit.body);
+}
+
+// The store refuses a node whose title or content holds a code point in
+// `CONTROL_CHAR_CODE_POINTS` (tab, LF, and CR are not in the set). A
+// commit message can hold one — a pasted ANSI escape — and history cannot
+// be rewritten, so each is replaced by a space rather than rejecting the
+// load. Built from the store's set, like `CONTROL_BYTES`, so the two
+// cannot drift.
+const CONTROL_CHAR_RE = new RegExp(`[${[...CONTROL_CHAR_CODE_POINTS].map((cp) => `\\x${cp.toString(16).padStart(2, "0")}`).join("")}]`, "g");
+
+/** Message text as the store can hold it: every control code point the store refuses replaced by a space; tab, LF, and CR kept. */
+function scrubControlChars(text: string): string {
+  return text.replace(CONTROL_CHAR_RE, " ");
+}
+
+/** Git's default abbreviation: the title of a commit whose subject is empty (`--allow-empty-message`). */
+const SHORT_SHA_LENGTH = 7;
 
 /**
  * One `commit` node per commit: subject as title, the whole message as
@@ -623,18 +644,30 @@ function commitMessage(commit: GitCommit): string {
  * zone, so it canonicalizes; an instant that does not parse rejects
  * naming `(git/<key>@<sha>)`). Pure; the key is trimmed as
  * `buildRepoTree` trims it, so the two agree on every external id.
+ *
+ * Fit-and-keep, because history cannot be rewritten and a dropped commit
+ * would be a hole in the timeline: a subject over the store's title cap
+ * (`git commit -m` with a long one-paragraph message makes `%s` the whole
+ * paragraph) is cut to `DEFAULT_MAX_TITLE_LENGTH` for the title while the
+ * content keeps every character; a control code point the store refuses
+ * is replaced by a space in subject and body (`scrubControlChars`); an
+ * empty or blank subject (`--allow-empty-message`) titles the node with
+ * the short sha. Nothing a message can contain makes `unsafePrepareNodes`
+ * reject the load.
  */
 export function buildCommitNodes(key: string, commits: readonly GitCommit[]): NodeInput[] {
   const trimmedKey = key.trim();
   if (!trimmedKey) throw new Error("buildCommitNodes: key must be a non-empty string");
   return commits.map((commit) => {
     const externalId = commitExternalId(trimmedKey, commit.sha);
+    const subject = scrubControlChars(commit.subject);
+    const body = scrubControlChars(commit.body);
     return {
       nodeType: COMMIT_NODE_TYPE,
       sourceSystem: GIT_SOURCE_SYSTEM,
       externalId,
-      title: commit.subject,
-      content: commitMessage(commit),
+      title: subject.trim().length === 0 ? commit.sha.slice(0, SHORT_SHA_LENGTH) : subject.slice(0, DEFAULT_MAX_TITLE_LENGTH),
+      content: joinMessage(subject, body),
       metadata: normalizeOccurredAt(
         {
           sha: commit.sha,
@@ -671,7 +704,16 @@ export function isRepoSlug(key: string): boolean {
   return REPO_SLUG_RE.test(key);
 }
 
-/** The `github` external id a reference names: `owner/repo#N` as written, or `<key>#N` for a same-repo `#N`. */
+/**
+ * The `github` external id a reference names: `owner/repo#N` as written,
+ * or `<key>#N` for a same-repo `#N`. Matched exact-case by
+ * `getNodesByExternalId`, where the GitHub loader's `deriveMentionEdges`
+ * matches its slug case-insensitively: a key or a reference whose casing
+ * differs from the loaded slug (`Cazzer/Breakdown#12` against
+ * `cazzer/breakdown`) resolves to nothing and is counted unresolved. A
+ * case-insensitive option on `getNodesByExternalId` is tracked by the
+ * case-insensitive external-id lookup bead.
+ */
 function referenceExternalId(key: string, ref: ParsedReference): string {
   return `${ref.ownerRepo ?? key}#${ref.number}`;
 }
@@ -760,7 +802,10 @@ export function resolveCommitEdges(input: ResolveCommitEdgesInput): ResolveCommi
     counts.loaded += 1;
     edges.push({ srcId: commitId, dstId: rootId, edgeType: BELONGS_TO_EDGE_TYPE, sourceSystem: GIT_SOURCE_SYSTEM, weight: BELONGS_TO_WEIGHT });
 
-    for (const path of commit.paths) {
+    // `--name-only` lists a path once per commit; the Set keeps that true
+    // of the edges whatever the input, so a repeated path can never raise
+    // `DuplicateEdgeInBatchError` and fail the load.
+    for (const path of new Set(commit.paths)) {
       const externalId = gitExternalId(key, path);
       if (!fileExternalIds.has(externalId)) {
         counts.skippedPaths += 1;

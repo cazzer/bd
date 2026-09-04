@@ -131,6 +131,22 @@ async function git(args: readonly string[], cwd: string): Promise<string> {
   }
 }
 
+/**
+ * Whether HEAD names a commit. A checkout with staged files and no commit
+ * yet (an unborn HEAD) has a tree to load and no history, and `git log`
+ * exits 128 on it; `rev-parse --verify -q` exits non-zero quietly instead.
+ * `rev-parse --show-toplevel` and `ls-files` have already succeeded on the
+ * same checkout, so a failure here means no commit, not a broken repository.
+ */
+async function hasCommits(rootPath: string): Promise<boolean> {
+  try {
+    await git(["rev-parse", "--verify", "-q", "HEAD"], rootPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function formatSkips(skipped: SkipCounts): string {
   return SKIP_REASONS.map((reason) => `${reason}=${skipped[reason]}`).join(", ");
 }
@@ -179,17 +195,27 @@ async function main(): Promise<void> {
   const fileCount = tree.nodes.filter((n) => n.nodeType === FILE_NODE_TYPE).length;
 
   let commits: GitCommit[] = [];
-  if (commitLimit > 0) {
+  if (commitLimit === 0) {
+    console.log("[ingest:repo] commits disabled (--commits 0)");
+  } else if (!(await hasCommits(rootPath))) {
+    // Staged files and no commit yet: a tree to load and no history.
+    console.log("[ingest:repo] HEAD is unborn (no commits yet); loading the tree alone");
+  } else {
     const started = performance.now();
     // `core.quotePath=false` so a path holding a byte above 0x7f prints as
     // UTF-8 rather than C-quoted (`"caf\303\251.md"`), which would match
     // no file node and be counted skipped. Paths with a control byte or a
     // quote are still quoted by git and still miss; none is known.
-    const log = await git(["-c", "core.quotePath=false", "log", "-n", String(commitLimit), "--name-only", `--format=${GIT_LOG_FORMAT}`], rootPath);
+    // `--no-show-signature`: under `log.showSignature=true` in a user's
+    // config, git prints `gpg:` lines before each signed record whatever
+    // the `--format`; they would read as paths, or as text before the
+    // first record separator.
+    const log = await git(
+      ["-c", "core.quotePath=false", "log", "--no-show-signature", "-n", String(commitLimit), "--name-only", `--format=${GIT_LOG_FORMAT}`],
+      rootPath,
+    );
     commits = parseGitLog(log);
     console.log(`[ingest:repo] ${commits.length} commit(s) via \`git log -n ${commitLimit} --name-only\` in ${elapsedMs(started)} (${log.length} chars)`);
-  } else {
-    console.log("[ingest:repo] commits disabled (--commits 0)");
   }
 
   const pool = createPool(resolveDatabaseUrl());

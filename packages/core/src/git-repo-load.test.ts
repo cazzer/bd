@@ -270,18 +270,35 @@ describe("loadGitRepoTree", () => {
 
 const execFileAsync = promisify(execFile);
 
+/** The variables a suite run from a git hook inherits that would point git at the hook's repository instead of the fixture. */
+const GIT_REDIRECT_VARIABLES = ["GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE"];
+
 /**
  * Runs `git <args>` in `cwd` with the user's global and system config
  * masked, so a signing key, a hooks path, or a commit template on the
- * machine cannot reach the fixture; identity is set locally below.
+ * machine cannot reach the fixture, and with `GIT_REDIRECT_VARIABLES`
+ * removed, so a suite run from a hook cannot be pointed away from it;
+ * identity is set locally below. `env` adds to that — the pinned dates a
+ * commit is made under.
  */
-async function gitIn(cwd: string, ...args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync("git", args, {
+async function gitIn(cwd: string, args: readonly string[], env: Record<string, string> = {}): Promise<string> {
+  const inherited: Record<string, string | undefined> = { ...process.env };
+  for (const name of GIT_REDIRECT_VARIABLES) delete inherited[name];
+  const { stdout } = await execFileAsync("git", [...args], {
     cwd,
     maxBuffer: 16 * 1024 * 1024,
-    env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" },
+    env: { ...inherited, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", ...env },
   });
   return stdout;
+}
+
+/** Author and committer dates the fixture's two commits are made under, so a commit's `occurred_at` is asserted exactly rather than derived from what git printed. */
+const FIXTURE_COMMIT_DATES = { first: "2026-09-01T10:00:00+02:00", second: "2026-09-02T12:30:00-04:00" } as const;
+/** `FIXTURE_COMMIT_DATES.second` in the canonical form. */
+const FIXTURE_SECOND_OCCURRED_AT = "2026-09-02T16:30:00.000Z";
+
+function pinnedDates(instant: string): Record<string, string> {
+  return { GIT_AUTHOR_DATE: instant, GIT_COMMITTER_DATE: instant };
 }
 
 /**
@@ -290,25 +307,26 @@ async function gitIn(cwd: string, ...args: string[]): Promise<string> {
  * TypeScript files, deletes `gone.txt`, and carries a message naming
  * `#12` (loaded as a `github` fixture issue under the same slug), `#999`
  * (loaded nowhere), and a `#12` inside a code span (not a reference).
+ * Each is made under its `FIXTURE_COMMIT_DATES` instant.
  */
 async function createFixtureRepo(ident: string): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "gri-commits-"));
-  await gitIn(root, "init", "-q", "-b", "main");
-  await gitIn(root, "config", "user.name", "Fixture Author");
-  await gitIn(root, "config", "user.email", "fixture@example.invalid");
-  await gitIn(root, "config", "commit.gpgsign", "false");
+  await gitIn(root, ["init", "-q", "-b", "main"]);
+  await gitIn(root, ["config", "user.name", "Fixture Author"]);
+  await gitIn(root, ["config", "user.email", "fixture@example.invalid"]);
+  await gitIn(root, ["config", "commit.gpgsign", "false"]);
   await mkdir(join(root, "src"), { recursive: true });
   await writeFile(join(root, "src/a.ts"), `export const a = "${ident}";\n`);
   await writeFile(join(root, "src/b.ts"), "export const b = 2;\n");
   await writeFile(join(root, "README.md"), "# Fixture\n");
   await writeFile(join(root, "gone.txt"), "soon deleted\n");
-  await gitIn(root, "add", "-A");
-  await gitIn(root, "commit", "-q", "-m", "Initial import");
+  await gitIn(root, ["add", "-A"]);
+  await gitIn(root, ["commit", "-q", "-m", "Initial import"], pinnedDates(FIXTURE_COMMIT_DATES.first));
   await writeFile(join(root, "src/a.ts"), `export const a = "${ident}";\nexport const more = true;\n`);
   await writeFile(join(root, "src/b.ts"), "export const b = 3;\n");
   await rm(join(root, "gone.txt"));
-  await gitIn(root, "add", "-A");
-  await gitIn(root, "commit", "-q", "-m", "Touch a and b, drop gone.txt", "-m", "Closes #12; see also #999 and `#12` in code.");
+  await gitIn(root, ["add", "-A"]);
+  await gitIn(root, ["commit", "-q", "-m", "Touch a and b, drop gone.txt", "-m", "Closes #12; see also #999 and `#12` in code."], pinnedDates(FIXTURE_COMMIT_DATES.second));
   return root;
 }
 
@@ -320,9 +338,11 @@ interface FixtureLoad {
 
 /** The script's pipeline over the fixture: `git ls-files`, the working-tree read, the tree, `git log` as ingest-git-repo.ts runs it, one load. */
 async function loadFixture(key: string, root: string, run: IngestRunHandle, commitLimit = 500): Promise<FixtureLoad> {
-  const { files } = await readWorkingTree(root, parseLsFiles(await gitIn(root, "ls-files", "-s", "-z")));
+  const { files } = await readWorkingTree(root, parseLsFiles(await gitIn(root, ["ls-files", "-s", "-z"])));
   const tree = buildRepoTree(key, root, files);
-  const commits = parseGitLog(await gitIn(root, "-c", "core.quotePath=false", "log", "-n", String(commitLimit), "--name-only", `--format=${GIT_LOG_FORMAT}`));
+  const commits = parseGitLog(
+    await gitIn(root, ["-c", "core.quotePath=false", "log", "--no-show-signature", "-n", String(commitLimit), "--name-only", `--format=${GIT_LOG_FORMAT}`]),
+  );
   const result = await loadGitRepoTree(db, run, tree, { commits });
   return { tree, commits, result };
 }
@@ -384,14 +404,17 @@ describe("loadGitRepoTree with commits", () => {
       title: "Touch a and b, drop gone.txt",
       content: "Touch a and b, drop gone.txt\n\nCloses #12; see also #999 and `#12` in code.",
     });
+    // Made under a pinned `-04:00` instant: git prints `%cI` with that
+    // zone, and the node sits at the same instant in the canonical form.
+    expect(newest.committedAt).toBe(FIXTURE_COMMIT_DATES.second);
     expect(looked[0]?.metadata).toEqual({
       sha: newest.sha,
       parents: [oldest.sha],
       author: "Fixture Author",
-      authored_at: newest.authoredAt,
-      committed_at: newest.committedAt,
+      authored_at: FIXTURE_COMMIT_DATES.second,
+      committed_at: FIXTURE_COMMIT_DATES.second,
       files_changed: 3,
-      occurred_at: new Date(newest.committedAt).toISOString(),
+      occurred_at: FIXTURE_SECOND_OCCURRED_AT,
     });
     expect(looked[0]?.metadata["occurred_at"]).toMatch(CANONICAL_INSTANT_RE);
 
