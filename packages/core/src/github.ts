@@ -1,15 +1,21 @@
-// Pure helpers for the GitHub repos/issues loader (bd-5hd) — turning `gh`
-// JSON output into knowledge-store node/edge shapes, and parsing issue
-// cross-references (`#N`, `owner/repo#N`) out of issue text. Orchestration
+// Pure helpers for the GitHub repos/issues/pull-requests loader (bd-5hd;
+// pull requests in github-prs-and-commits) — turning `gh` JSON output into
+// knowledge-store node/edge shapes, resolving the issues GitHub records a
+// pull request as closing, and parsing cross-references (`#N`,
+// `owner/repo#N`) out of issue and pull-request text. Orchestration
 // (invoking `gh`, opening an ingest run, calling
 // upsertNodes/upsertEdges/closeIngestRun) stays in src/ingest-github.ts,
 // which is a script, not a library; everything here is a pure function
 // over already-fetched strings, unit-testable without a database or `gh`
 // itself — the same split corpus.ts uses for the markdown seed loader.
 //
-// A repository's and an issue's `createdAt` are also written as
-// `occurred_at` through `normalizeOccurredAt` (timeline-view design.md
-// decision 2), the existing `createdAt`/`updatedAt` keys kept beside it.
+// A repository's, an issue's, and a pull request's `createdAt` are also
+// written as `occurred_at` through `normalizeOccurredAt` (timeline-view
+// design.md decision 2), the existing `createdAt`/`updatedAt` keys kept
+// beside it. A pull request sits at its creation, not its merge — a merged
+// PR at its merge instant would move on merge and sort a still-open one by
+// a different rule (github-prs-and-commits design.md decision 1); its
+// `mergedAt`/`closedAt` are in metadata for a later per-node fan-out.
 
 import { normalizeOccurredAt, OCCURRED_AT_KEY } from "./event-time.js";
 import type { NodeInput } from "./nodes.js";
@@ -19,14 +25,20 @@ export const GITHUB_SOURCE_SYSTEM = "github";
 
 export const REPO_NODE_TYPE = "repo";
 export const ISSUE_NODE_TYPE = "gh-issue";
+/** A pull request in any state, keyed exactly as an issue is (`owner/repo#N`): GitHub numbers issues and pull requests from one sequence, so the id is already unique and a `#N` in prose resolves to whichever exists. */
+export const PR_NODE_TYPE = "gh-pr";
 
 /** issue -> its repo. Structural, so weight 1.0. */
 export const BELONGS_TO_EDGE_TYPE = "belongs-to";
 export const BELONGS_TO_WEIGHT = 1.0;
 
-/** issue -> issue, parsed from a `#N` / `owner/repo#N` cross-reference. An explicit citation is strong evidence, but not a declaration of equivalence — weight 0.8, not 1.0. */
+/** issue or PR -> issue or PR, parsed from a `#N` / `owner/repo#N` cross-reference. An explicit citation is strong evidence, but not a declaration of equivalence — weight 0.8, not 1.0. */
 export const MENTIONS_EDGE_TYPE = "mentions";
 export const MENTIONS_WEIGHT = 0.8;
+
+/** PR -> the issue GitHub itself records it as closing (`closingIssuesReferences`, GitHub's parse of a `closes #N` keyword). The source's own assertion, so full weight like `belongs-to` — and heavier than `mentions`, so a PR that both closes and mentions an issue reads `closes` on the issue's timeline (github-prs-and-commits design.md decision 5). */
+export const CLOSES_EDGE_TYPE = "closes";
+export const CLOSES_WEIGHT = 1.0;
 
 // --- gh JSON shapes and node mappings -----------------------------------
 
@@ -107,6 +119,128 @@ export function mapGhIssueToNode(slug: string, issue: GhIssue): NodeInput {
   };
 }
 
+/**
+ * One entry of `gh pr list --json closingIssuesReferences`: the issue's
+ * number and its own repository. A pull request can close an issue in
+ * another repository (`closes owner/other#N`), so a reference resolves by
+ * the repository it names, never by the pull request's.
+ */
+export interface GhClosingIssueReference {
+  number: number;
+  repository: { name: string; owner: { login: string } };
+}
+
+/** The subset of `gh pr list --json` this loader reads. `state` is `OPEN`, `CLOSED`, or `MERGED`; `mergedAt`/`closedAt` are `null` until they happen. */
+export interface GhPullRequest {
+  number: number;
+  title: string;
+  body: string | null;
+  state: string;
+  isDraft: boolean;
+  mergedAt: string | null;
+  closedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  author: { login: string } | null;
+  headRefName: string;
+  baseRefName: string;
+  url: string;
+  labels: { name: string }[];
+  closingIssuesReferences: GhClosingIssueReference[];
+}
+
+/** Maps one pull request of repository `slug` to a `gh-pr` node keyed `owner/repo#N`, `occurred_at` at its creation. Throws `InvalidEventTimeError` when `createdAt` does not parse. */
+export function mapGhPrToNode(slug: string, pr: GhPullRequest): NodeInput {
+  const externalId = `${slug}#${pr.number}`;
+  return {
+    nodeType: PR_NODE_TYPE,
+    sourceSystem: GITHUB_SOURCE_SYSTEM,
+    externalId,
+    title: pr.title,
+    // The body is the content, as for an issue — and null when none was
+    // given, handled the same way.
+    content: pr.body ?? "",
+    metadata: normalizeOccurredAt({
+      state: pr.state,
+      isDraft: pr.isDraft,
+      mergedAt: pr.mergedAt,
+      closedAt: pr.closedAt,
+      createdAt: pr.createdAt,
+      updatedAt: pr.updatedAt,
+      author: pr.author?.login ?? null,
+      headRefName: pr.headRefName,
+      baseRefName: pr.baseRefName,
+      url: pr.url,
+      labels: pr.labels.map((l) => l.name),
+      [OCCURRED_AT_KEY]: pr.createdAt,
+    }, { itemLabel: `(${GITHUB_SOURCE_SYSTEM}/${externalId})` }),
+  };
+}
+
+// --- Closing references -----------------------------------------------
+
+/** One ingested pull request's identity and GitHub's closing references for it, as `deriveClosesEdges` needs it. */
+export interface PrClosesSource {
+  /** This pull request's own `owner/repo#N` external id. */
+  externalId: string;
+  /** `closingIssuesReferences` as `gh` returned them, each naming its own repository. */
+  closingIssuesReferences: readonly GhClosingIssueReference[];
+}
+
+/** One resolved `closes` edge candidate, by external id (not yet a node id — the caller maps that). */
+export interface ClosesEdgeCandidate {
+  srcExternalId: string;
+  dstExternalId: string;
+}
+
+export interface DeriveClosesEdgesResult {
+  edges: ClosesEdgeCandidate[];
+  /** References to an issue the loader did not write in this run — a closed issue, almost always, since only open ones are loaded. Skipped and counted, never fatal (github-ingest spec, "A pull request closing an issue that is not loaded"). */
+  skipped: number;
+}
+
+/**
+ * Resolves every pull request's `closingIssuesReferences` against the set
+ * of external ids actually written this run (`knownExternalIds` — issues
+ * and pull requests both), producing `closes` edge candidates. Each
+ * reference resolves by the repository GitHub names on it, so a cross-
+ * repository close lands on the right issue; case-insensitively on the
+ * slug, like `deriveMentionEdges`, returning the known node's own casing.
+ * A reference that resolves to nothing is counted in `skipped`; a repeated
+ * reference to one target collapses to one edge. No self-reference guard:
+ * GitHub cannot record a pull request as closing itself.
+ */
+export function deriveClosesEdges(
+  prs: readonly PrClosesSource[],
+  knownExternalIds: ReadonlySet<string>,
+): DeriveClosesEdgesResult {
+  const byLower = new Map<string, string>();
+  for (const id of knownExternalIds) byLower.set(id.toLowerCase(), id);
+
+  const seenPairs = new Set<string>();
+  const edges: ClosesEdgeCandidate[] = [];
+  let skipped = 0;
+
+  for (const pr of prs) {
+    for (const ref of pr.closingIssuesReferences) {
+      const candidateId = `${ref.repository.owner.login}/${ref.repository.name}#${ref.number}`;
+      const resolved = byLower.get(candidateId.toLowerCase());
+      if (!resolved) {
+        skipped += 1;
+        continue;
+      }
+
+      const pairKey = `${pr.externalId} ${resolved}`;
+      if (seenPairs.has(pairKey)) continue;
+      seenPairs.add(pairKey);
+
+      edges.push({ srcExternalId: pr.externalId, dstExternalId: resolved });
+    }
+  }
+
+  return { edges, skipped };
+}
+
 // --- Cross-reference parsing -------------------------------------------
 
 /** A `#N` or `owner/repo#N` reference found in issue text. `ownerRepo` is `null` for a same-repo `#N` reference — the caller resolves it against whichever issue the text came from. */
@@ -171,11 +305,11 @@ export function extractIssueReferences(text: string): ParsedReference[] {
   return refs;
 }
 
-/** One ingested issue's identity and the text to scan for references, as `deriveMentionEdges` needs it. */
+/** One ingested issue's or pull request's identity and the text to scan for references, as `deriveMentionEdges` needs it — the two share the id scheme, so one shape serves both. */
 export interface IssueRefSource {
-  /** This issue's own `owner/repo#N` external id. */
+  /** This item's own `owner/repo#N` external id. */
   externalId: string;
-  /** This issue's own repo, as `owner/repo` — what a same-repo `#N` reference resolves against. */
+  /** This item's own repo, as `owner/repo` — what a same-repo `#N` reference resolves against. */
   ownerRepo: string;
   /** Text to scan — title and body concatenated is the intended use. */
   text: string;
@@ -188,17 +322,17 @@ export interface MentionEdgeCandidate {
 }
 
 /**
- * Resolves every issue's parsed references against the set of issue
- * external ids actually ingested (`knownIssueExternalIds`), producing
+ * Resolves every item's parsed references against the set of external ids
+ * actually ingested (`knownIssueExternalIds` — issues and pull requests
+ * both, since github-prs-and-commits; the parameter keeps its name), producing
  * `mentions` edge candidates. A reference that doesn't resolve to a known
- * node — most commonly a pull request or a closed issue, neither written
- * by this loader — is silently skipped, per bd-5hd: "skip a reference
- * that doesn't resolve to a node you wrote, rather than erroring or
- * creating a dangling edge." A self-reference (an issue citing its own
- * number) and a repeated reference to the same target within one issue
- * are both collapsed rather than duplicated — `upsertEdges` would reject
- * a literal duplicate `(src, dst, edgeType, sourceSystem)` pair within one
- * batch.
+ * node — most commonly a closed issue, which this loader does not write —
+ * is silently skipped, per bd-5hd: "skip a reference that doesn't resolve
+ * to a node you wrote, rather than erroring or creating a dangling edge."
+ * A self-reference (an item citing its own number) and a repeated
+ * reference to the same target within one item are both collapsed rather
+ * than duplicated — `upsertEdges` would reject a literal duplicate
+ * `(src, dst, edgeType, sourceSystem)` pair within one batch.
  *
  * Resolution is case-insensitive on `owner/repo` (GitHub slugs are), but
  * the returned `dstExternalId` always uses the known node's own casing.

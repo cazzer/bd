@@ -119,8 +119,11 @@ export {
   buildGetNodesQuery,
   getNeighbors,
   buildGetNeighborsQuery,
+  getNodesByExternalId,
+  buildGetNodesByExternalIdQuery,
   DEFAULT_NEIGHBOR_LIMIT,
   MAX_NEIGHBOR_LIMIT,
+  MAX_EXTERNAL_ID_LOOKUPS,
   type LookedUpNode,
   type GetNodesResult,
   type NeighborDirection,
@@ -129,6 +132,9 @@ export {
   type GetNeighborsOptions,
   type GetNeighborsResult,
   type BuildGetNeighborsQueryParams,
+  type ExternalIdPair,
+  type ResolvedExternalId,
+  type GetNodesByExternalIdResult,
 } from "./lookup.js";
 
 // Per-node revision history (node-history change): what the triggers in
@@ -194,28 +200,40 @@ export {
   type EdgeCandidate,
 } from "./corpus.js";
 
-// Pure helpers for the GitHub repos/issues loader (bd-5hd) — not
-// write-path or retrieval behavior, just how src/ingest-github.ts maps
-// `gh` JSON to repo/issue nodes, names its source system/node/edge types,
-// and resolves `#N`/`owner/repo#N` cross-references in issue text into
-// `mentions` edges. See github.ts.
+// Pure helpers for the GitHub repos/issues/pull-requests loader (bd-5hd;
+// pull requests in github-prs-and-commits) — not write-path or retrieval
+// behavior, just how src/ingest-github.ts maps `gh` JSON to repo/issue/PR
+// nodes, names its source system/node/edge types, resolves the issues a
+// PR closes into `closes` edges, and resolves `#N`/`owner/repo#N`
+// cross-references in issue and PR text into `mentions` edges. See
+// github.ts.
 export {
   extractIssueReferences,
   deriveMentionEdges,
+  deriveClosesEdges,
   mapGhRepoToNode,
   mapGhIssueToNode,
+  mapGhPrToNode,
   GITHUB_SOURCE_SYSTEM,
   REPO_NODE_TYPE,
   ISSUE_NODE_TYPE,
+  PR_NODE_TYPE,
   BELONGS_TO_EDGE_TYPE,
   BELONGS_TO_WEIGHT,
   MENTIONS_EDGE_TYPE,
   MENTIONS_WEIGHT,
+  CLOSES_EDGE_TYPE,
+  CLOSES_WEIGHT,
   type GhRepo,
   type GhIssue,
+  type GhPullRequest,
+  type GhClosingIssueReference,
   type ParsedReference,
   type IssueRefSource,
   type MentionEdgeCandidate,
+  type PrClosesSource,
+  type ClosesEdgeCandidate,
+  type DeriveClosesEdgesResult,
 } from "./github.js";
 
 // Structured listing (work-items change): canonical nodes by type, source,

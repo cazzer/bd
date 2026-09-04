@@ -1,6 +1,19 @@
 import { describe, expect, it } from "vitest";
 import { InvalidEventTimeError } from "./errors.js";
-import { deriveMentionEdges, extractIssueReferences, mapGhIssueToNode, mapGhRepoToNode, type GhIssue, type GhRepo, type IssueRefSource } from "./github.js";
+import {
+  deriveClosesEdges,
+  deriveMentionEdges,
+  extractIssueReferences,
+  mapGhIssueToNode,
+  mapGhPrToNode,
+  mapGhRepoToNode,
+  type GhClosingIssueReference,
+  type GhIssue,
+  type GhPullRequest,
+  type GhRepo,
+  type IssueRefSource,
+  type PrClosesSource,
+} from "./github.js";
 
 const repo: GhRepo = {
   name: "toastd",
@@ -179,5 +192,139 @@ describe("deriveMentionEdges", () => {
 
   it("produces no edges when there are no issues", () => {
     expect(deriveMentionEdges([], known)).toEqual([]);
+  });
+});
+
+// --- Pull requests (github-prs-and-commits): one test per github-ingest scenario ---
+
+const pr: GhPullRequest = {
+  number: 40,
+  title: "Butter the other side",
+  body: "Fixes #12.",
+  state: "MERGED",
+  isDraft: false,
+  mergedAt: "2026-03-06T09:00:00Z",
+  closedAt: "2026-03-06T09:00:00Z",
+  createdAt: "2026-03-05T12:30:00+02:00",
+  updatedAt: "2026-03-06T09:00:01Z",
+  author: { login: "cazzer" },
+  headRefName: "fix/butter-side",
+  baseRefName: "main",
+  url: "https://github.com/cazzer/toastd/pull/40",
+  labels: [{ name: "bug" }],
+  closingIssuesReferences: [{ number: 12, repository: { name: "toastd", owner: { login: "cazzer" } } }],
+};
+
+/** A closing reference as `gh` shapes it, into `cazzer/<repo>#<number>`. */
+function closing(repo: string, number: number): GhClosingIssueReference {
+  return { number, repository: { name: repo, owner: { login: "cazzer" } } };
+}
+
+describe("mapGhPrToNode", () => {
+  it("maps a merged pull request under the issue id scheme, its merge instant in metadata and occurred_at at its creation, canonical (spec: A merged pull request that closes an issue)", () => {
+    expect(mapGhPrToNode("cazzer/toastd", pr)).toEqual({
+      nodeType: "gh-pr",
+      sourceSystem: "github",
+      externalId: "cazzer/toastd#40",
+      title: "Butter the other side",
+      content: "Fixes #12.",
+      metadata: {
+        state: "MERGED",
+        isDraft: false,
+        mergedAt: "2026-03-06T09:00:00Z",
+        closedAt: "2026-03-06T09:00:00Z",
+        createdAt: "2026-03-05T12:30:00+02:00",
+        updatedAt: "2026-03-06T09:00:01Z",
+        author: "cazzer",
+        headRefName: "fix/butter-side",
+        baseRefName: "main",
+        url: "https://github.com/cazzer/toastd/pull/40",
+        labels: ["bug"],
+        occurred_at: "2026-03-05T10:30:00.000Z",
+      },
+    });
+  });
+
+  it("keeps an open draft's null merge and close instants and absent body and author, and rejects an unparseable createdAt naming the pull request", () => {
+    const open = mapGhPrToNode("cazzer/toastd", { ...pr, state: "OPEN", isDraft: true, mergedAt: null, closedAt: null, body: null, author: null, labels: [] });
+    expect(open.content).toBe("");
+    expect(open.metadata).toMatchObject({ state: "OPEN", isDraft: true, mergedAt: null, closedAt: null, author: null, labels: [], occurred_at: "2026-03-05T10:30:00.000Z" });
+    expect(() => mapGhPrToNode("cazzer/toastd", { ...pr, createdAt: "yesterday" })).toThrow(InvalidEventTimeError);
+    expect(() => mapGhPrToNode("cazzer/toastd", { ...pr, createdAt: "yesterday" })).toThrow(/\(github\/cazzer\/toastd#40\): occurred_at/);
+  });
+
+  it("gives issue #12 and pull request #40 ids that cannot collide, owner/name#12 and owner/name#40 (spec: Numbers do not collide)", () => {
+    expect(mapGhIssueToNode("cazzer/toastd", issue).externalId).toBe("cazzer/toastd#12");
+    expect(mapGhPrToNode("cazzer/toastd", pr).externalId).toBe("cazzer/toastd#40");
+  });
+});
+
+describe("deriveClosesEdges", () => {
+  const known = new Set(["cazzer/toastd#12", "cazzer/toastd#40", "cazzer/traitor#5"]);
+
+  it("writes one closes edge per reference naming a loaded issue and counts a reference to an unloaded one as skipped (spec: A pull request closing an issue that is not loaded)", () => {
+    const prs: PrClosesSource[] = [
+      { externalId: "cazzer/toastd#40", closingIssuesReferences: [closing("toastd", 12), closing("toastd", 9999)] },
+      { externalId: "cazzer/toastd#41", closingIssuesReferences: [closing("toastd", 9998)] },
+      { externalId: "cazzer/toastd#42", closingIssuesReferences: [] },
+    ];
+    expect(deriveClosesEdges(prs, known)).toEqual({
+      edges: [{ srcExternalId: "cazzer/toastd#40", dstExternalId: "cazzer/toastd#12" }],
+      skipped: 2,
+    });
+  });
+
+  it("resolves a reference by the repository GitHub names on it, case-insensitively, never by the pull request's own repository", () => {
+    const prs: PrClosesSource[] = [
+      {
+        externalId: "cazzer/toastd#40",
+        closingIssuesReferences: [
+          { number: 5, repository: { name: "Traitor", owner: { login: "Cazzer" } } },
+          // Same number in the PR's own repository: not loaded, so skipped.
+          closing("toastd", 5),
+        ],
+      },
+    ];
+    expect(deriveClosesEdges(prs, known)).toEqual({
+      edges: [{ srcExternalId: "cazzer/toastd#40", dstExternalId: "cazzer/traitor#5" }],
+      skipped: 1,
+    });
+  });
+
+  it("collapses a repeated reference to one target into one edge, and produces nothing for no pull requests", () => {
+    const prs: PrClosesSource[] = [{ externalId: "cazzer/toastd#40", closingIssuesReferences: [closing("toastd", 12), closing("toastd", 12)] }];
+    expect(deriveClosesEdges(prs, known)).toEqual({
+      edges: [{ srcExternalId: "cazzer/toastd#40", dstExternalId: "cazzer/toastd#12" }],
+      skipped: 0,
+    });
+    expect(deriveClosesEdges([], known)).toEqual({ edges: [], skipped: 0 });
+  });
+});
+
+describe("deriveMentionEdges over issues and pull requests together", () => {
+  const known = new Set(["cazzer/toastd#12", "cazzer/toastd#40"]);
+
+  it("resolves an issue mentioning a pull request and a pull request mentioning an issue, each to whichever #N names (spec: An issue mentions a pull request; Numbers do not collide)", () => {
+    const sources: IssueRefSource[] = [
+      { externalId: "cazzer/toastd#12", ownerRepo: "cazzer/toastd", text: "Toast falls butter side down\n\nfixed by #40" },
+      { externalId: "cazzer/toastd#40", ownerRepo: "cazzer/toastd", text: "Butter the other side\n\nFixes #12." },
+    ];
+    expect(deriveMentionEdges(sources, known)).toEqual([
+      { srcExternalId: "cazzer/toastd#12", dstExternalId: "cazzer/toastd#40" },
+      { srcExternalId: "cazzer/toastd#40", dstExternalId: "cazzer/toastd#12" },
+    ]);
+  });
+
+  it("skips a pull request's self-reference and repeated references, and a #N inside a code span (spec: A reference in a code span)", () => {
+    const sources: IssueRefSource[] = [
+      { externalId: "cazzer/toastd#40", ownerRepo: "cazzer/toastd", text: "See #12, #12 again, and #40 itself." },
+      { externalId: "cazzer/toastd#12", ownerRepo: "cazzer/toastd", text: "Run `#40` — quoted as code, not cited." },
+    ];
+    expect(deriveMentionEdges(sources, known)).toEqual([{ srcExternalId: "cazzer/toastd#40", dstExternalId: "cazzer/toastd#12" }]);
+  });
+
+  it("skips a reference to a number that is neither an issue nor a pull request the loader wrote (spec: A reference to something not loaded)", () => {
+    const sources: IssueRefSource[] = [{ externalId: "cazzer/toastd#12", ownerRepo: "cazzer/toastd", text: "Blocked on #9999." }];
+    expect(deriveMentionEdges(sources, known)).toEqual([]);
   });
 });

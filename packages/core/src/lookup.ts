@@ -47,6 +47,18 @@
  *     `InvalidLookupOptionError` rather than silently applying the wrong
  *     node's keyset filter and dropping neighbors with no signal
  *     (bd-hmd.1 review).
+ *
+ *   - `getNodesByExternalId` (github-prs-and-commits, closing bd-wq4) is the
+ *     one read keyed by source identity — `(source_system, external_id)`,
+ *     the pair `upsertNodes` dedups on — rather than by node id. It exists
+ *     so a loader can link the nodes it just wrote to nodes another loader
+ *     wrote (a commit to the GitHub issue its message names) through a
+ *     public read instead of raw SQL in a script. Same fold as `getNodes`:
+ *     a pair naming a merged-away row answers with its survivor's id and
+ *     type, and a pair naming nothing is reported in `notFound`, never
+ *     dropped. Unlike `getNodes`, an empty batch is not an error — a
+ *     loader with no references to resolve is ordinary — and answers
+ *     empty without a round trip.
  */
 
 import { sql, type SQL } from "drizzle-orm";
@@ -584,5 +596,165 @@ export async function getNeighbors(db: Database, id: string, options: GetNeighbo
     neighbors,
     hasMore,
     nextCursor: hasMore && last ? { canonicalId: row.result.canonical_id, weight: last.weight, nodeId: last.nodeId, edgeId: last.edgeId } : null,
+  };
+}
+
+// --- getNodesByExternalId ---------------------------------------------------
+
+/**
+ * Hard ceiling on the pairs one `getNodesByExternalId` call may name. A
+ * loader resolves at most the distinct references of one batch through it
+ * (github-prs-and-commits design.md decision 3), and that is hundreds at
+ * most; bounding the statement keeps the two bound arrays — and the SQL a
+ * driver failure would embed in its message — at a size a caller-facing
+ * error can carry, the same reasoning as `MAX_NEIGHBOR_LIMIT`. Rejected
+ * before any SQL runs.
+ */
+export const MAX_EXTERNAL_ID_LOOKUPS = 500;
+
+/** One `(source_system, external_id)` pair — the write path's identity for a node, the unique key `upsertNodes` dedups on. */
+export interface ExternalIdPair {
+  sourceSystem: string;
+  externalId: string;
+}
+
+/** A pair that named a node: the pair as asked (trimmed), the canonical node's id — a merged-away row answers with its survivor — and that canonical row's type. */
+export interface ResolvedExternalId extends ExternalIdPair {
+  id: string;
+  nodeType: string;
+}
+
+export interface GetNodesByExternalIdResult {
+  /** Every distinct pair that named a node, ordered by source system then external id — never by the order asked, so the answer cannot depend on it. */
+  found: ResolvedExternalId[];
+  /** Every distinct pair that named nothing, in the same order — reported, never silently dropped. */
+  notFound: ExternalIdPair[];
+}
+
+/**
+ * Trims every pair, rejects an empty half naming the pair's position, and
+ * collapses duplicates (after trimming) so the statement binds each
+ * identity once — "duplicate pairs answered once" is decided here, not by
+ * a DISTINCT in the query. The bound is checked on what the caller passed,
+ * before deduplication: a predictable rule ("at most 500 pairs"), and the
+ * loader that is this read's consumer already passes distinct references.
+ */
+function validateExternalIdPairs(pairs: readonly ExternalIdPair[]): ExternalIdPair[] {
+  if (!Array.isArray(pairs)) {
+    throw new InvalidLookupIdError(pairs, "pairs must be an array of { sourceSystem, externalId }");
+  }
+  if (pairs.length > MAX_EXTERNAL_ID_LOOKUPS) {
+    throw new InvalidLookupOptionError("pairs", pairs.length, `must name no more than ${MAX_EXTERNAL_ID_LOOKUPS} pairs`);
+  }
+  const distinct = new Map<string, ExternalIdPair>();
+  pairs.forEach((pair, index) => {
+    const sourceSystem = typeof pair?.sourceSystem === "string" ? pair.sourceSystem.trim() : "";
+    const externalId = typeof pair?.externalId === "string" ? pair.externalId.trim() : "";
+    if (sourceSystem === "") {
+      throw new InvalidLookupIdError(pair, `pair at index ${index}: sourceSystem must be a non-empty string`);
+    }
+    if (externalId === "") {
+      throw new InvalidLookupIdError(pair, `pair at index ${index}: externalId must be a non-empty string`);
+    }
+    distinct.set(JSON.stringify([sourceSystem, externalId]), { sourceSystem, externalId });
+  });
+  return [...distinct.values()];
+}
+
+/**
+ * Pure query builder — no database, same convention as `buildGetNodesQuery`.
+ * `pairs` must already be validated and deduplicated (see
+ * `validateExternalIdPairs`) and non-empty: the two arrays are bound
+ * positionally into one `unnest`, so they must be the same length.
+ */
+export function buildGetNodesByExternalIdQuery(pairs: readonly ExternalIdPair[]): SQL {
+  const sourceSystems = pairs.map((p) => p.sourceSystem);
+  const externalIds = pairs.map((p) => p.externalId);
+  return sql`
+WITH requested(source_system, external_id) AS (
+  SELECT * FROM unnest(${sqlArray(sourceSystems, "text")}, ${sqlArray(externalIds, "text")})
+),
+-- Each pair onto the row it names, if any, folded to its canonical id.
+-- This join is on \`nodes\`, not \`resolved_nodes\`, on purpose: a pair
+-- naming a merged-away row must answer with that row's survivor, and the
+-- view hides exactly the row that carries the \`merged_into\` pointer —
+-- the same deliberate exception retrieval.ts's seed search documents. A
+-- pair matching nothing resolves to NULL here (the LEFT JOIN finds no
+-- row), which is what separates "not found" from "merged away" below.
+resolved AS (
+  SELECT req.source_system, req.external_id, COALESCE(n.merged_into, n.id) AS canonical_id
+  FROM requested req
+  LEFT JOIN nodes n ON n.source_system = req.source_system AND n.external_id = req.external_id
+)
+SELECT jsonb_build_object(
+  'found', COALESCE((
+    SELECT jsonb_agg(jsonb_build_object(
+      'source_system', r.source_system,
+      'external_id', r.external_id,
+      'id', c.id,
+      'node_type', c.node_type
+    ) ORDER BY r.source_system, r.external_id)
+    FROM resolved r
+    -- The canonical row's own type, through the view: a canonical id never
+    -- carries a pointer (mergeNodes collapses chains), so this is the
+    -- ordinary canonical-row join every other read makes.
+    JOIN resolved_nodes c ON c.id = r.canonical_id
+  ), '[]'::jsonb),
+  'not_found', COALESCE((
+    SELECT jsonb_agg(jsonb_build_object(
+      'source_system', r.source_system,
+      'external_id', r.external_id
+    ) ORDER BY r.source_system, r.external_id)
+    FROM resolved r
+    WHERE r.canonical_id IS NULL
+  ), '[]'::jsonb)
+) AS result
+`;
+}
+
+interface RawResolvedExternalId {
+  source_system: string;
+  external_id: string;
+  id: string;
+  node_type: string;
+}
+
+interface RawGetNodesByExternalIdResult {
+  found: RawResolvedExternalId[];
+  not_found: { source_system: string; external_id: string }[];
+}
+
+/**
+ * Resolves a batch of `(source system, external id)` pairs to canonical
+ * node ids and types in one round trip (knowledge-store spec, "Nodes can be
+ * resolved by source identity"). A pair naming a merged-away node answers
+ * with its survivor; a pair naming nothing is listed in `notFound`. Pairs
+ * are trimmed, must be non-empty on both halves (`InvalidLookupIdError`
+ * naming the pair's position, before any SQL), and may number at most
+ * `MAX_EXTERNAL_ID_LOOKUPS` (`InvalidLookupOptionError`). Duplicates are
+ * answered once; the answer's order is by pair, never by the order asked.
+ * An empty batch answers empty without touching the database.
+ */
+export async function getNodesByExternalId(db: Database, pairs: readonly ExternalIdPair[]): Promise<GetNodesByExternalIdResult> {
+  const validated = validateExternalIdPairs(pairs);
+  if (validated.length === 0) {
+    return { found: [], notFound: [] };
+  }
+
+  let result: { rows: { result: RawGetNodesByExternalIdResult }[] };
+  try {
+    result = await db.execute<{ result: RawGetNodesByExternalIdResult }>(buildGetNodesByExternalIdQuery(validated));
+  } catch (err) {
+    throw new LookupFailedError(`getNodesByExternalId query failed${formatPgInfo(asPgError(err))}`, "getNodesByExternalId", { cause: err });
+  }
+
+  const row = result.rows[0];
+  if (!row) {
+    throw new LookupFailedError("getNodesByExternalId query returned no row", "getNodesByExternalId");
+  }
+
+  return {
+    found: row.result.found.map((r) => ({ sourceSystem: r.source_system, externalId: r.external_id, id: r.id, nodeType: r.node_type })),
+    notFound: row.result.not_found.map((r) => ({ sourceSystem: r.source_system, externalId: r.external_id })),
   };
 }

@@ -3,7 +3,7 @@ import { inArray, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database } from "@breakdown/db";
 import { edges, ingestRuns, nodes } from "@breakdown/db";
-import { InvalidLookupIdError, InvalidLookupOptionError, NodeNotFoundError } from "./errors.js";
+import { InvalidLookupIdError, InvalidLookupOptionError, LookupFailedError, NodeNotFoundError } from "./errors.js";
 import type { EdgeInput } from "./edges.js";
 import { upsertEdges } from "./edges.js";
 import { openIngestRun, type IngestRunHandle } from "./ingest-runs.js";
@@ -12,12 +12,16 @@ import type { NodeInput } from "./nodes.js";
 import { upsertNodes } from "./nodes.js";
 import {
   buildGetNeighborsQuery,
+  buildGetNodesByExternalIdQuery,
   buildGetNodesQuery,
   DEFAULT_NEIGHBOR_LIMIT,
   getNeighbors,
   getNodes,
+  getNodesByExternalId,
+  MAX_EXTERNAL_ID_LOOKUPS,
   MAX_NEIGHBOR_LIMIT,
   type BuildGetNeighborsQueryParams,
+  type ExternalIdPair,
   type NeighborsCursor,
 } from "./lookup.js";
 import { retrieve } from "./retrieval.js";
@@ -834,5 +838,143 @@ describe("getNeighbors — bounded and ordered", () => {
     const page2 = await getNeighbors(db, hubId, { limit: 2, cursor: staleCursor });
     expect(page2.neighbors.map((n) => n.externalId)).toEqual(["d3", "d4"]);
     expect(page2.hasMore).toBe(false);
+  });
+});
+
+// --- getNodesByExternalId: one test per "Nodes can be resolved by source identity" scenario ---
+
+describe("getNodesByExternalId", () => {
+  /** A database whose only behaviour is counting `execute` calls — for asserting a rejection happened before any SQL. */
+  function spyDb(): { db: Database; executed: () => number } {
+    let executed = 0;
+    const db = {
+      execute: async () => {
+        executed += 1;
+        return { rows: [] };
+      },
+    } as unknown as Database;
+    return { db, executed: () => executed };
+  }
+
+  it("answers found and not-found pairs in one call with the canonical id and type; the pair, not the id alone, is the key (spec: Resolving a loader's cross-references)", async () => {
+    const run = await newRun();
+    const nodeMap = await makeNodes(run, [
+      { nodeType: "gh-issue", externalId: "owner/name#12", title: "Twelve", content: "" },
+      { nodeType: "gh-pr", externalId: "owner/name#40", title: "Forty", content: "" },
+    ]);
+    const otherSource = `${run.sourceSystem}-other`;
+
+    const result = await getNodesByExternalId(db, [
+      { sourceSystem: run.sourceSystem, externalId: "owner/name#12" },
+      { sourceSystem: run.sourceSystem, externalId: "owner/name#9999" },
+      { sourceSystem: otherSource, externalId: "owner/name#12" },
+      { sourceSystem: run.sourceSystem, externalId: "owner/name#40" },
+    ]);
+
+    expect(result.found).toEqual([
+      { sourceSystem: run.sourceSystem, externalId: "owner/name#12", id: nodeMap.get("owner/name#12"), nodeType: "gh-issue" },
+      { sourceSystem: run.sourceSystem, externalId: "owner/name#40", id: nodeMap.get("owner/name#40"), nodeType: "gh-pr" },
+    ]);
+    expect(result.notFound).toHaveLength(2);
+    expect(result.notFound).toEqual(
+      expect.arrayContaining([
+        { sourceSystem: run.sourceSystem, externalId: "owner/name#9999" },
+        { sourceSystem: otherSource, externalId: "owner/name#12" },
+      ]),
+    );
+  });
+
+  it("answers a pair naming a merged-away node with the survivor's id and the survivor's type (spec: A merged-away pair)", async () => {
+    const run = await newRun();
+    const nodeMap = await makeNodes(run, [
+      { nodeType: "doc", externalId: "survivor", title: "Survivor", content: "" },
+      { nodeType: "note", externalId: "loser", title: "Loser", content: "" },
+    ]);
+    await mergeNodes(db, nodeMap.get("loser")!, nodeMap.get("survivor")!, run);
+
+    const result = await getNodesByExternalId(db, [{ sourceSystem: run.sourceSystem, externalId: "loser" }]);
+
+    expect(result).toEqual({
+      found: [{ sourceSystem: run.sourceSystem, externalId: "loser", id: nodeMap.get("survivor"), nodeType: "doc" }],
+      notFound: [],
+    });
+  });
+
+  it("gives the same answer whatever the order of the pairs (spec: nothing depends on the order)", async () => {
+    const run = await newRun();
+    await makeNodes(run, [
+      { nodeType: "doc", externalId: "a", title: "A", content: "" },
+      { nodeType: "doc", externalId: "b", title: "B", content: "" },
+    ]);
+    const pairs: ExternalIdPair[] = ["a", "missing", "b"].map((externalId) => ({ sourceSystem: run.sourceSystem, externalId }));
+
+    const forward = await getNodesByExternalId(db, pairs);
+    const reversed = await getNodesByExternalId(db, [...pairs].reverse());
+
+    expect(reversed).toEqual(forward);
+    expect(forward.found.map((f) => f.externalId)).toEqual(["a", "b"]);
+    expect(forward.notFound.map((f) => f.externalId)).toEqual(["missing"]);
+  });
+
+  it("answers a duplicated pair once, trimmed, and an empty batch without a round trip", async () => {
+    const run = await newRun();
+    const nodeMap = await makeNodes(run, [{ nodeType: "doc", externalId: "a", title: "A", content: "" }]);
+
+    const result = await getNodesByExternalId(db, [
+      { sourceSystem: run.sourceSystem, externalId: "a" },
+      { sourceSystem: ` ${run.sourceSystem} `, externalId: " a " },
+      { sourceSystem: run.sourceSystem, externalId: "zzz" },
+      { sourceSystem: run.sourceSystem, externalId: "zzz" },
+    ]);
+    expect(result.found).toEqual([{ sourceSystem: run.sourceSystem, externalId: "a", id: nodeMap.get("a"), nodeType: "doc" }]);
+    expect(result.notFound).toEqual([{ sourceSystem: run.sourceSystem, externalId: "zzz" }]);
+
+    const spy = spyDb();
+    expect(await getNodesByExternalId(spy.db, [])).toEqual({ found: [], notFound: [] });
+    expect(spy.executed()).toBe(0);
+  });
+
+  it("rejects an empty source system or external id naming the pair's position, and more pairs than the bound, before any SQL runs (spec: Malformed pair)", async () => {
+    const spy = spyDb();
+    const ok: ExternalIdPair = { sourceSystem: "github", externalId: "owner/name#12" };
+
+    await expect(getNodesByExternalId(spy.db, [{ sourceSystem: "", externalId: "x" }])).rejects.toThrow(/pair at index 0: sourceSystem must be a non-empty string/);
+    await expect(getNodesByExternalId(spy.db, [ok, { sourceSystem: "github", externalId: "   " }])).rejects.toThrow(/pair at index 1: externalId must be a non-empty string/);
+    await expect(getNodesByExternalId(spy.db, [ok, { sourceSystem: "github", externalId: undefined as unknown as string }])).rejects.toBeInstanceOf(InvalidLookupIdError);
+    await expect(getNodesByExternalId(spy.db, [ok, null as unknown as ExternalIdPair])).rejects.toBeInstanceOf(InvalidLookupIdError);
+    await expect(getNodesByExternalId(spy.db, "github" as unknown as ExternalIdPair[])).rejects.toBeInstanceOf(InvalidLookupIdError);
+
+    const tooMany: ExternalIdPair[] = Array.from({ length: MAX_EXTERNAL_ID_LOOKUPS + 1 }, (_, i) => ({ sourceSystem: "github", externalId: `x${i}` }));
+    let thrown: unknown;
+    try {
+      await getNodesByExternalId(spy.db, tooMany);
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(InvalidLookupOptionError);
+    expect((thrown as InvalidLookupOptionError).option).toBe("pairs");
+    expect((thrown as InvalidLookupOptionError).value).toBe(MAX_EXTERNAL_ID_LOOKUPS + 1);
+    expect(spy.executed()).toBe(0);
+
+    // Exactly the bound is accepted: it reaches the database (whose empty
+    // answer the read then reports as a failure, which is not the point).
+    await expect(getNodesByExternalId(spy.db, tooMany.slice(0, MAX_EXTERNAL_ID_LOOKUPS))).rejects.toBeInstanceOf(LookupFailedError);
+    expect(spy.executed()).toBe(1);
+  });
+
+  it("buildGetNodesByExternalIdQuery is pure, one statement, binds both halves of every pair, folds through nodes and reads the canonical row through resolved_nodes", () => {
+    const dialect = new PgDialect();
+    const pairs: ExternalIdPair[] = [
+      { sourceSystem: "github", externalId: "owner/name#12" },
+      { sourceSystem: "git", externalId: "owner/name@abc" },
+    ];
+    const a = dialect.sqlToQuery(buildGetNodesByExternalIdQuery(pairs));
+    const b = dialect.sqlToQuery(buildGetNodesByExternalIdQuery(pairs));
+    expect(a.sql).toBe(b.sql);
+    expect(a.params).toEqual(b.params);
+    expect(a.sql).not.toContain(";");
+    expect(a.params).toEqual(["github", "git", "owner/name#12", "owner/name@abc"]);
+    expect(a.sql).toContain("LEFT JOIN nodes n ON n.source_system = req.source_system AND n.external_id = req.external_id");
+    expect(a.sql).toContain("JOIN resolved_nodes c ON c.id = r.canonical_id");
   });
 });

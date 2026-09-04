@@ -383,8 +383,8 @@ export class InvalidLookupIdError extends KnowledgeStoreError {
 }
 
 /**
- * `getNodes()` / `getNeighbors()` / `getNodeHistory()` failed at the
- * database after passing boundary validation — a genuine driver/Postgres
+ * `getNodes()` / `getNeighbors()` / `getNodeHistory()` / `getNodesByExternalId()`
+ * failed at the database after passing boundary validation — a genuine driver/Postgres
  * failure, not a caller mistake `InvalidLookupIdError` /
  * `NodeNotFoundError` would already have caught. Wraps the original error
  * as `cause` so every error any of these functions can throw is a
@@ -393,7 +393,7 @@ export class InvalidLookupIdError extends KnowledgeStoreError {
 export class LookupFailedError extends KnowledgeStoreError {
   constructor(
     message: string,
-    readonly operation: "getNodes" | "getNeighbors" | "getNodeHistory" | "listNodes" | "getWorkItemReadiness" | "patchWorkItem" | "resolveDefaultViews" | "getSubtree" | "getTimeline",
+    readonly operation: "getNodes" | "getNeighbors" | "getNodeHistory" | "listNodes" | "getWorkItemReadiness" | "patchWorkItem" | "resolveDefaultViews" | "getSubtree" | "getTimeline" | "getNodesByExternalId",
     options?: ErrorOptions,
   ) {
     super(message, options);
