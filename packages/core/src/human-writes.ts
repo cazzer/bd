@@ -28,6 +28,12 @@
  * every rejected paste or typo'd edge would otherwise pollute the audit
  * trail forever. `retractEdge` opens no run at all — a `DELETE` leaves no
  * row to attribute one to.
+ *
+ * Metadata a person supplies goes through `normalizeOccurredAt`
+ * (event-time.ts) before it is prepared, as every other writer's does, so
+ * a note carries a canonical `occurred_at` or none — and the normalizer is
+ * pure, so a bad time is rejected before any run opens, like every other
+ * validation here.
  */
 
 import { randomUUID } from "node:crypto";
@@ -35,6 +41,7 @@ import { and, eq } from "drizzle-orm";
 import type { Database } from "@breakdown/db";
 import { edges, nodes } from "@breakdown/db";
 import { isEditableSourceSystem } from "./editability.js";
+import { normalizeOccurredAt } from "./event-time.js";
 import {
   EdgeNotFoundError,
   EdgeUpsertFailedError,
@@ -172,7 +179,7 @@ export async function createNote(db: Database, input: CreateNoteInput = {}): Pro
     externalId,
     title: input.title,
     content: input.content,
-    metadata: input.metadata,
+    metadata: normalizeOccurredAt(input.metadata),
   };
   unsafePrepareNodes([nodeInput], DEFAULT_MAX_CONTENT_LENGTH, DEFAULT_MAX_METADATA_LENGTH, DEFAULT_MAX_TITLE_LENGTH);
 
@@ -251,7 +258,7 @@ export async function annotateNode(db: Database, targetNodeId: string, input: An
         externalId,
         title: input.title,
         content: input.content,
-        metadata: input.metadata,
+        metadata: normalizeOccurredAt(input.metadata),
       },
     ],
     DEFAULT_MAX_CONTENT_LENGTH,
@@ -364,7 +371,10 @@ export async function updateNodeContent(db: Database, nodeId: string, input: Upd
     externalId: existing.externalId,
     title: input.title ?? existing.title,
     content: input.content ?? existing.content,
-    metadata: input.metadata ?? (existing.metadata as Record<string, unknown>),
+    // The merged document is normalized, not only what the caller sent:
+    // a row written past the contract leaves here canonical or not at all,
+    // as patchWorkItem does for a work item.
+    metadata: normalizeOccurredAt(input.metadata ?? (existing.metadata as Record<string, unknown>), { itemLabel: `(node ${trimmedId})` }),
   };
   unsafePrepareNodes([merged], DEFAULT_MAX_CONTENT_LENGTH, DEFAULT_MAX_METADATA_LENGTH, DEFAULT_MAX_TITLE_LENGTH);
 

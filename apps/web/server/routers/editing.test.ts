@@ -94,6 +94,26 @@ async function makeRepoFixtureNode(content = "fixture repo content"): Promise<st
   return row.id;
 }
 
+describe("a person's occurred_at is stored canonical (timeline-view, knowledge-store spec 'A time in another zone is canonicalized')", () => {
+  it("createNote and updateNodeContent both canonicalize a zoned time; updateNodeContent without metadata keeps it", async () => {
+    const created = await caller().createNote({ title: "timed note", metadata: { occurred_at: "2026-03-04T10:00:00+02:00", note: "kept" } });
+    createdNodeIds.push(created.id);
+    createdRunIds.push(created.ingestRunId);
+    const [afterCreate] = await db.select({ metadata: nodes.metadata }).from(nodes).where(inArray(nodes.id, [created.id]));
+    expect(afterCreate?.metadata).toEqual({ occurred_at: "2026-03-04T08:00:00.000Z", note: "kept" });
+
+    const updated = await caller().updateNodeContent({ nodeId: created.id, metadata: { occurred_at: "2026-03-05" } });
+    createdRunIds.push(updated.ingestRunId);
+    const [afterUpdate] = await db.select({ metadata: nodes.metadata }).from(nodes).where(inArray(nodes.id, [created.id]));
+    expect(afterUpdate?.metadata).toEqual({ occurred_at: "2026-03-05T00:00:00.000Z" });
+
+    const contentOnly = await caller().updateNodeContent({ nodeId: created.id, content: "edited" });
+    createdRunIds.push(contentOnly.ingestRunId);
+    const [afterContent] = await db.select({ metadata: nodes.metadata }).from(nodes).where(inArray(nodes.id, [created.id]));
+    expect(afterContent?.metadata).toEqual({ occurred_at: "2026-03-05T00:00:00.000Z" });
+  });
+});
+
 describe("a repo-sourced node offers no editing affordance (graph-explorer/spec.md, 'Opening a repo-sourced node')", () => {
   it("getNodes reports isEditable: false — the flag DetailPanel.tsx gates the edit form on", async () => {
     const id = await makeRepoFixtureNode();

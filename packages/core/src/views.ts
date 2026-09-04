@@ -53,7 +53,7 @@ import { CHILD_OF_EDGE_TYPE } from "./work-items.js";
 // --- Conventions ------------------------------------------------------------
 
 export const VIEW_NODE_TYPE = "view";
-/** Every renderer a view may name. The web app switches on it (apps/web/src/App.tsx); widening this set is the first step of adding a view, so a view naming the newest member is valid before anything draws it. */
+/** Every renderer a view may name. The web app keys its "open as" affordance on it (`OfferedRenderer` / `isOfferedRenderer` in apps/web/src/components/DetailPanel.tsx); widening this set is the first step of adding a view, so a view naming the newest member is valid before anything draws it. */
 export const VIEW_RENDERERS = ["graph", "feed", "code", "timeline"] as const;
 export type ViewRenderer = (typeof VIEW_RENDERERS)[number];
 /** Source node prefers to be shown as the target `view` node. */

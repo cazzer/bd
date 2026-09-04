@@ -196,7 +196,7 @@ export function mapError(toolName: string, err: unknown): CallToolResult {
 
   // --- Event time (brain_write of any node) ---
   if (err instanceof InvalidEventTimeError) {
-    return actionable(err, "Fix occurred_at on the named item and retry; nothing from this call was persisted. It is an ISO-8601 timestamp, stored canonically as UTC with milliseconds (2026-03-04T08:00:00.000Z), or null to remove it.");
+    return actionable(err, "Fix occurred_at on the named item and retry; nothing from this call was persisted. It is an ISO-8601 timestamp carrying a zone (Z or ±HH:MM) or a date alone (YYYY-MM-DD, read as UTC), stored canonically as UTC with milliseconds (2026-03-04T08:00:00.000Z), or null to remove it.");
   }
 
   // --- Attribution plumbing (should not surface in practice — the server

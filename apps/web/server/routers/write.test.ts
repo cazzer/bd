@@ -78,6 +78,20 @@ describe("a rejected write persists nothing (bd-hmd.3 review)", () => {
     await expect(callerWith(poisonedDb()).createNote({ content: "x".repeat(1_000_001) })).rejects.toMatchObject({ code: "BAD_REQUEST" });
   });
 
+  it("createNote and annotateNode with an occurred_at that does not parse, or carries no zone, are rejected by core's normalizeOccurredAt before any ingest run opens — ctx.db is never touched (timeline-view)", async () => {
+    await expect(callerWith(poisonedDb()).createNote({ metadata: { occurred_at: "last Tuesday" } })).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+      message: expect.stringContaining('occurred_at (got "last Tuesday")'),
+    });
+    await expect(callerWith(poisonedDb()).createNote({ metadata: { occurred_at: "2026-03-04T10:00:00" } })).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+      message: expect.stringContaining("must carry a zone"),
+    });
+    await expect(
+      callerWith(poisonedDb()).annotateNode({ targetNodeId: "00000000-0000-4000-8000-0000000000f3", metadata: { occurred_at: 1772611200000 } }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST", message: expect.stringContaining("occurred_at (got 1772611200000)") });
+  });
+
   it("reweightEdge on an edge no human ever asserted is rejected, and no such edge exists before or after", async () => {
     const srcId = "00000000-0000-0000-0000-0000000000f1";
     const dstId = "00000000-0000-0000-0000-0000000000f2";

@@ -18,12 +18,23 @@
 // rather than written in ECMAScript's expanded `±YYYYYY` form: it would
 // sort as text before every four-digit year. `closed_at` in
 // work-items.ts already stores this form, so the two keys order together.
+//
+// A string must say which zone it is in. `new Date("2026-03-04T10:00:00")`
+// is the machine's local time under the ECMAScript grammar, and the legacy
+// parser behind `"March 4, 2026"` or `"1"` is looser still — the same
+// string would canonicalize to two instants on two machines, which is the
+// one thing a canonical form must not do. So a string is accepted only
+// with a trailing `Z` or `±HH:MM`, or as a date alone (`YYYY-MM-DD`, which
+// the grammar reads as UTC midnight). A `Date` already is an instant and
+// needs no rule.
 
 import { InvalidEventTimeError } from "./errors.js";
 
 export const OCCURRED_AT_KEY = "occurred_at";
 
 const CANONICAL_LENGTH = "2026-03-04T08:00:00.000Z".length;
+const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
+const ZONED_RE = /(?:Z|[+-]\d{2}:\d{2})$/;
 
 export interface NormalizeOccurredAtOptions {
   /** Batch position, named as `at batch index N` when `itemLabel` is absent. */
@@ -34,12 +45,13 @@ export interface NormalizeOccurredAtOptions {
 
 /**
  * Applies the event-time contract to any node's metadata. Pure; returns a
- * copy. A string or `Date` that parses as an instant is rewritten to the
- * canonical form; an absent or `null` value leaves the copy without the
- * key; anything else — a number, an object, an empty or unparseable
- * string, an invalid `Date`, an instant outside years 0000–9999 — throws
- * `InvalidEventTimeError` naming the item and `occurred_at`. Every other
- * key passes through untouched.
+ * copy. A `Date`, or a string that parses as an instant and carries a zone
+ * (`Z` or `±HH:MM`) or is a date alone (`YYYY-MM-DD`, UTC midnight), is
+ * rewritten to the canonical form; an absent or `null` value leaves the
+ * copy without the key; anything else — a number, an object, an empty or
+ * unparseable string, a zone-less date-time, an invalid `Date`, an
+ * instant outside years 0000–9999 — throws `InvalidEventTimeError` naming
+ * the item and `occurred_at`. Every other key passes through untouched.
  */
 export function normalizeOccurredAt(
   metadata: Record<string, unknown> | undefined,
@@ -61,6 +73,9 @@ export function normalizeOccurredAt(
   }
   if (Number.isNaN(parsed.getTime())) {
     throw new InvalidEventTimeError(item, value, "must parse as an instant (an ISO-8601 timestamp such as 2026-03-04T08:00:00.000Z)");
+  }
+  if (typeof value === "string" && !DATE_ONLY_RE.test(value) && !ZONED_RE.test(value)) {
+    throw new InvalidEventTimeError(item, value, "must carry a zone (Z or ±HH:MM), or be a date alone (YYYY-MM-DD, read as UTC midnight)");
   }
   const canonical = parsed.toISOString();
   if (canonical.length !== CANONICAL_LENGTH) {

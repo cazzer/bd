@@ -44,6 +44,17 @@ describe("normalizeOccurredAt", () => {
     }
   });
 
+  it("requires a string to carry a zone or be a date alone, so the instant never depends on the machine (review follow-up)", () => {
+    for (const value of ["2026-03-04T10:00:00", "2026-03-04T10:00:00.000", "March 4, 2026", "1", "2026-03-04T10:00:00+0200"]) {
+      const e = rejection({ occurred_at: value });
+      expect(e.value).toBe(value);
+      expect(e.message).toContain("must carry a zone (Z or ±HH:MM)");
+    }
+    expect(normalizeOccurredAt({ occurred_at: "2026-03-04" })).toEqual({ occurred_at: "2026-03-04T00:00:00.000Z" });
+    expect(normalizeOccurredAt({ occurred_at: "2026-03-04T10:00:00-07:00" })).toEqual({ occurred_at: "2026-03-04T17:00:00.000Z" });
+    expect(normalizeOccurredAt({ occurred_at: new Date(Date.UTC(2026, 2, 4, 8)) })).toEqual({ occurred_at: "2026-03-04T08:00:00.000Z" });
+  });
+
   it("rejects an instant the fixed-width form cannot carry", () => {
     const e = rejection({ occurred_at: "+010000-01-01T00:00:00Z" });
     expect(e.message).toContain("years 0000 to 9999");

@@ -185,11 +185,12 @@ export function mapCoreError(procedureName: string, err: unknown): TRPCError {
     return actionable("BAD_REQUEST", err, "Fix that field on the named item and retry; nothing from this call was persisted. renderer is one of graph, feed, code, timeline; filter is an object of list options (nodeTypes, sourceSystems, updatedSince, where) without limit or cursor.");
   }
 
-  // --- Event time (timeline-view). No web procedure writes metadata a
-  // caller supplies today, so this cannot surface yet; mapped now for the
-  // same reason the view error is. ---
+  // --- Event time (timeline-view). createNote, annotateNode, and
+  // updateNodeContent all take metadata a person supplies and run it
+  // through core's normalizeOccurredAt before anything is prepared, so
+  // this is the mapping a bad time typed into the web app reaches. ---
   if (err instanceof InvalidEventTimeError) {
-    return actionable("BAD_REQUEST", err, "Fix occurred_at on the named item and retry; nothing from this call was persisted. It is an ISO-8601 timestamp, stored canonically as UTC with milliseconds (2026-03-04T08:00:00.000Z), or null to remove it.");
+    return actionable("BAD_REQUEST", err, "Fix occurred_at on the named item and retry; nothing from this call was persisted. It is an ISO-8601 timestamp carrying a zone (Z or ±HH:MM) or a date alone (YYYY-MM-DD, read as UTC), stored canonically as UTC with milliseconds (2026-03-04T08:00:00.000Z), or null to remove it.");
   }
 
   // --- Attribution plumbing (should not surface in practice — every write

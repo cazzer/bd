@@ -64,8 +64,9 @@ function section(heading: string, body: string | null | undefined): string {
  * Maps one beads issue to a `work_item` node. Content is the description
  * followed by the acceptance criteria, design, and notes sections when
  * present, so full-text search sees everything a person wrote. Throws
- * `InvalidWorkItemError` (naming `index`) when the row violates the
- * contract.
+ * `InvalidEventTimeError` when `created_at` does not parse and
+ * `InvalidWorkItemError` when the row violates the work-item contract,
+ * each naming `index`.
  */
 export function mapBeadsIssueToNode(issue: BeadsIssue, index?: number): NodeInput {
   const metadata: Record<string, unknown> = {
