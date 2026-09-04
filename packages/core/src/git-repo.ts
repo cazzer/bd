@@ -1,14 +1,15 @@
-// Git repository loader (git-repo-ingestor change): the pure mapping from
-// `git ls-files` records and file bytes to `NodeInput`s and `child_of`
-// edge candidates, plus the two pieces of I/O the loader needs —
-// `readWorkingTree`, which stats, classifies, and reads each tracked
-// entry (here rather than in the script so the decisions that depend on
-// the filesystem, a missing file or a control byte, are tested against a
-// temp directory without git or a database), and the one write-path
-// composition, nodes then edges inside a single transaction. The script
-// in ingest-git-repo.ts runs `git`, opens the ingest run, and prints the
-// summary. Same split as beads.ts / ingest-beads.ts and github.ts /
-// ingest-github.ts.
+// Git repository loader (git-repo-ingestor change; commits in
+// github-prs-and-commits): the pure mapping from `git ls-files` records
+// and file bytes to `NodeInput`s and `child_of` edge candidates, the pure
+// parse of `git log` records into commits and commit nodes, plus the two
+// pieces of I/O the loader needs — `readWorkingTree`, which stats,
+// classifies, and reads each tracked entry (here rather than in the
+// script so the decisions that depend on the filesystem, a missing file
+// or a control byte, are tested against a temp directory without git or a
+// database), and the one write-path composition, nodes then edges inside
+// a single transaction. The script in ingest-git-repo.ts runs `git`,
+// opens the ingest run, and prints the summary. Same split as beads.ts /
+// ingest-beads.ts and github.ts / ingest-github.ts.
 //
 // Shapes (design.md): the root is a `repo` node with external id `<key>`;
 // every directory on the path from a loaded file to the root is a
@@ -19,6 +20,19 @@
 // base names; a directory's content lists its direct children; a file's
 // content is its text and its metadata is flat scalars so `listNodes`'s
 // predicates can select on `language`, `size_bytes`, and the rest.
+//
+// Commits (github-prs-and-commits design.md decision 2) are a second
+// record kind in the same batch: one `commit` node per `git log` record,
+// keyed `<key>@<sha>`, subject as title, the whole message as content,
+// `occurred_at` at the committer instant — the moment the commit entered
+// the history the timeline shows; a rebase rewrites it and leaves the
+// author date, which is kept beside it. Each commit is joined
+// `belongs-to` the root, `touches` each changed path that is a `file` row
+// of the same load, and `mentions` each GitHub issue or pull request its
+// message names, resolved through `getNodesByExternalId`. A path with no
+// row and a reference that resolves to nothing are counted, never fatal:
+// history is allowed to name what the tree no longer holds and what the
+// store has not loaded.
 
 import type { Stats } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
@@ -33,8 +47,19 @@ import {
   type UpsertEdgeRow,
   type UpsertEdgesResult,
 } from "./edges.js";
-import { REPO_NODE_TYPE } from "./github.js";
+import { normalizeOccurredAt, OCCURRED_AT_KEY } from "./event-time.js";
+import {
+  BELONGS_TO_EDGE_TYPE,
+  BELONGS_TO_WEIGHT,
+  extractIssueReferences,
+  GITHUB_SOURCE_SYSTEM,
+  MENTIONS_EDGE_TYPE,
+  MENTIONS_WEIGHT,
+  REPO_NODE_TYPE,
+  type ParsedReference,
+} from "./github.js";
 import type { IngestRunHandle } from "./ingest-runs.js";
+import { getNodesByExternalId, MAX_EXTERNAL_ID_LOOKUPS, type ExternalIdPair } from "./lookup.js";
 import {
   CONTROL_CHAR_CODE_POINTS,
   DEFAULT_MAX_CONTENT_LENGTH,
@@ -484,6 +509,306 @@ export function buildRepoTree(key: string, rootPath: string, files: readonly Loa
   return { key: trimmedKey, rootPath, nodes, edges };
 }
 
+// --- git log ---------------------------------------------------------------
+
+export const COMMIT_NODE_TYPE = "commit";
+
+/**
+ * commit -> a file it changed that this load wrote. Git's own diff names
+ * the path, but a commit is about the repository first and the file second:
+ * 0.8, below `belongs-to`, so a commit reads `belongs-to` on the
+ * repository's timeline and `touches` on a file's (design.md decision 5).
+ */
+export const TOUCHES_EDGE_TYPE = "touches";
+export const TOUCHES_WEIGHT = 0.8;
+
+/** Commits loaded when `--commits` is not given: the newest 500. `0` disables commits entirely. */
+export const COMMITS_DEFAULT = 500;
+
+/**
+ * `--format` for `git log --name-only`: a record separator (0x1e) opens
+ * each commit, then sha, parents, author instant, committer instant,
+ * author name, subject, and body, each terminated by NUL; the paths
+ * `--name-only` appends run until the next separator. Git refuses a NUL
+ * in a commit message, so the seven fields split exactly; `parseGitLog`
+ * counts them and rejects a record that does not, rather than
+ * misattributing a body to the wrong field.
+ */
+export const GIT_LOG_FORMAT = "%x1e%H%x00%P%x00%aI%x00%cI%x00%an%x00%s%x00%b%x00";
+
+const GIT_LOG_RECORD_SEPARATOR = "\x1e";
+const GIT_LOG_FIELD_SEPARATOR = "\x00";
+const GIT_LOG_FIELD_COUNT = 7;
+
+/** A full object name: 40 hex digits (SHA-1) or 64 (SHA-256 repositories). */
+const COMMIT_SHA_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
+/** One commit as `parseGitLog` reads it from `GIT_LOG_FORMAT` output. */
+export interface GitCommit {
+  sha: string;
+  /** Parent shas in `%P` order: none for a root commit, two or more for a merge. */
+  parents: string[];
+  /** `%aI` — the author instant, ISO-8601 with its zone. */
+  authoredAt: string;
+  /** `%cI` — the committer instant, ISO-8601 with its zone; where `occurred_at` comes from. */
+  committedAt: string;
+  /** `%an` — the author's name. No e-mail is read. */
+  author: string;
+  subject: string;
+  /** `%b` without the trailing newline git stores; `""` when the message is its subject alone. Blank lines inside the body are kept. */
+  body: string;
+  /** The paths the commit changed, as `--name-only` lists them: none for a merge commit, which `git log` shows without a diff. */
+  paths: string[];
+}
+
+/**
+ * Parses `git log -n <N> --name-only --format=<GIT_LOG_FORMAT>` output.
+ * Pure. Records split on the record separator (the text before the first
+ * one is empty for real output and rejected otherwise); each record's
+ * first seven NUL-terminated fields are the commit and what follows is
+ * `--name-only`'s listing — git's line break, a blank line, then one path
+ * per line — read as the non-empty lines. A record with the wrong field
+ * count (a message carrying a stray record separator, or output not in
+ * this format at all) throws naming the sha when the first field is one
+ * and the record's index otherwise. Empty output is no commits.
+ */
+export function parseGitLog(stdout: string): GitCommit[] {
+  const records = stdout.split(GIT_LOG_RECORD_SEPARATOR);
+  if (records[0]!.length > 0) {
+    throw new Error(
+      `parseGitLog: output before the first record separator ${JSON.stringify(records[0]!.slice(0, 200))}; is this \`git log --format=<GIT_LOG_FORMAT> --name-only\` output?`,
+    );
+  }
+  const commits: GitCommit[] = [];
+  for (const [index, record] of records.slice(1).entries()) {
+    const parts = record.split(GIT_LOG_FIELD_SEPARATOR);
+    const sha = parts[0]!;
+    const name = COMMIT_SHA_RE.test(sha) ? `commit ${sha}` : `record ${index}`;
+    if (parts.length !== GIT_LOG_FIELD_COUNT + 1) {
+      throw new Error(`parseGitLog: malformed ${name}: expected ${GIT_LOG_FIELD_COUNT} NUL-terminated fields, found ${parts.length - 1}`);
+    }
+    if (!COMMIT_SHA_RE.test(sha)) {
+      throw new Error(`parseGitLog: malformed ${name}: ${JSON.stringify(sha.slice(0, 80))} is not a commit sha`);
+    }
+    const [, parentField, authoredAt, committedAt, author, subject, body, listing] = parts as [string, string, string, string, string, string, string, string];
+    commits.push({
+      sha,
+      parents: parentField.split(" ").filter((p) => p.length > 0),
+      authoredAt,
+      committedAt,
+      author,
+      subject,
+      body: body.replace(/\n+$/, ""),
+      paths: listing.split("\n").filter((line) => line.length > 0),
+    });
+  }
+  return commits;
+}
+
+/** External id for a commit: `<key>@<sha>`. `@` rather than `:` so a commit can never collide with an entry's `<key>:<path>`, and reads as "the repository at this commit". */
+export function commitExternalId(key: string, sha: string): string {
+  return `${key}@${sha}`;
+}
+
+/** The whole message, as git would print it: subject, a blank line, body — the subject alone when there is no body. Content of the node and the text scanned for references. */
+function commitMessage(commit: GitCommit): string {
+  return commit.body.length === 0 ? commit.subject : `${commit.subject}\n\n${commit.body}`;
+}
+
+/**
+ * One `commit` node per commit: subject as title, the whole message as
+ * content, metadata carrying the sha, parents, author name, both instants
+ * as git printed them, and the changed-path count, and `occurred_at` from
+ * the committer instant through `normalizeOccurredAt` (`%cI` carries a
+ * zone, so it canonicalizes; an instant that does not parse rejects
+ * naming `(git/<key>@<sha>)`). Pure; the key is trimmed as
+ * `buildRepoTree` trims it, so the two agree on every external id.
+ */
+export function buildCommitNodes(key: string, commits: readonly GitCommit[]): NodeInput[] {
+  const trimmedKey = key.trim();
+  if (!trimmedKey) throw new Error("buildCommitNodes: key must be a non-empty string");
+  return commits.map((commit) => {
+    const externalId = commitExternalId(trimmedKey, commit.sha);
+    return {
+      nodeType: COMMIT_NODE_TYPE,
+      sourceSystem: GIT_SOURCE_SYSTEM,
+      externalId,
+      title: commit.subject,
+      content: commitMessage(commit),
+      metadata: normalizeOccurredAt(
+        {
+          sha: commit.sha,
+          parents: commit.parents,
+          author: commit.author,
+          authored_at: commit.authoredAt,
+          committed_at: commit.committedAt,
+          files_changed: commit.paths.length,
+          [OCCURRED_AT_KEY]: commit.committedAt,
+        },
+        { itemLabel: `(${GIT_SOURCE_SYSTEM}/${externalId})` },
+      ),
+    };
+  });
+}
+
+// One segment of a GitHub `owner/name` slug — the grammar
+// `extractIssueReferences` accepts for the slug half of a cross-repository
+// reference, restated here because that pattern is private to github.ts
+// and anchored differently (it matches inside prose; this matches a whole
+// key).
+const REPO_SLUG_SEGMENT = "[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?";
+const REPO_SLUG_RE = new RegExp(`^${REPO_SLUG_SEGMENT}/${REPO_SLUG_SEGMENT}$`);
+
+/**
+ * Whether a repository key is an `owner/name` slug — what `deriveRepoKey`
+ * makes of a GitHub remote and what the GitHub loader keys its nodes by —
+ * so a same-repo `#N` in a commit message can be resolved as `<key>#N`
+ * under `github`. A key that is not (`bd`, a directory name) names no
+ * store identity, and the loader counts every reference unresolved
+ * instead of asking.
+ */
+export function isRepoSlug(key: string): boolean {
+  return REPO_SLUG_RE.test(key);
+}
+
+/** The `github` external id a reference names: `owner/repo#N` as written, or `<key>#N` for a same-repo `#N`. */
+function referenceExternalId(key: string, ref: ParsedReference): string {
+  return `${ref.ownerRepo ?? key}#${ref.number}`;
+}
+
+/**
+ * Every distinct GitHub identity the commit messages reference, in first
+ * seen order, as `getNodesByExternalId` pairs under `github` — what
+ * `loadGitRepoTree` resolves before its transaction opens. Meaningful when
+ * `key` is a slug (`isRepoSlug`); the caller decides whether to ask.
+ */
+export function collectCommitReferences(key: string, commits: readonly GitCommit[]): ExternalIdPair[] {
+  const seen = new Set<string>();
+  const pairs: ExternalIdPair[] = [];
+  for (const commit of commits) {
+    for (const ref of extractIssueReferences(commitMessage(commit))) {
+      const externalId = referenceExternalId(key, ref);
+      if (seen.has(externalId)) continue;
+      seen.add(externalId);
+      pairs.push({ sourceSystem: GITHUB_SOURCE_SYSTEM, externalId });
+    }
+  }
+  return pairs;
+}
+
+/** What a load wrote and skipped for its commits — zero across the board when the load carried none. */
+export interface CommitEdgeCounts {
+  /** Commits in the batch; each has one `belongs-to` edge to the root. */
+  loaded: number;
+  /** `touches` edges written. */
+  touches: number;
+  /** Changed paths with no `file` row in this load — deleted since, or skipped as generated, oversized, binary, or missing. Counted, never fatal. */
+  skippedPaths: number;
+  /** `mentions` edges written. */
+  mentions: number;
+  /** Distinct references per commit that resolved to no `github` node: the key is not a slug, or the issue or pull request is not loaded. */
+  unresolvedReferences: number;
+}
+
+export function emptyCommitEdgeCounts(): CommitEdgeCounts {
+  return { loaded: 0, touches: 0, skippedPaths: 0, mentions: 0, unresolvedReferences: 0 };
+}
+
+export interface ResolveCommitEdgesInput {
+  key: string;
+  commits: readonly GitCommit[];
+  /** Every node id the upsert returned, by external id — root, directories, files, and commits of this batch. */
+  nodeIdByExternalId: ReadonlyMap<string, string>;
+  /** External ids of the `file` rows in this load. `touches` is written to these alone — never to a directory that now stands where a commit once changed a file of the same path. */
+  fileExternalIds: ReadonlySet<string>;
+  /** Canonical `github` node id by referenced external id, from `getNodesByExternalId`; a reference absent from the map is counted unresolved. Empty when the key is not a slug. */
+  referenceIdByExternalId: ReadonlyMap<string, string>;
+}
+
+export interface ResolveCommitEdgesResult {
+  edges: EdgeInput[];
+  counts: CommitEdgeCounts;
+}
+
+function requireNodeId(nodeIdByExternalId: ReadonlyMap<string, string>, externalId: string): string {
+  const id = nodeIdByExternalId.get(externalId);
+  if (!id) throw new Error(`resolveCommitEdges: ${externalId} has no node id in this batch`);
+  return id;
+}
+
+/**
+ * Resolves each commit's edges from the node ids the upsert returned:
+ * `belongs-to` the root, `touches` each changed path that is a `file` row
+ * of this load, `mentions` each reference that resolved. Like
+ * `resolveGitRepoEdges`, a commit or root with no id in the batch is a
+ * loader bug and throws; unlike it, a changed path with no file row and a
+ * reference with no node are properties of history rather than of the
+ * load, so each is counted and skipped (spec: "skipped and counted, never
+ * fatal"). References are deduplicated per commit on the identity named
+ * and again on the node resolved, so `#12` twice, or `#12` beside
+ * `owner/name#12`, is one edge and one count.
+ */
+export function resolveCommitEdges(input: ResolveCommitEdgesInput): ResolveCommitEdgesResult {
+  const { key, commits, nodeIdByExternalId, fileExternalIds, referenceIdByExternalId } = input;
+  const edges: EdgeInput[] = [];
+  const counts = emptyCommitEdgeCounts();
+  if (commits.length === 0) return { edges, counts };
+
+  const rootId = requireNodeId(nodeIdByExternalId, gitExternalId(key));
+  for (const commit of commits) {
+    const commitId = requireNodeId(nodeIdByExternalId, commitExternalId(key, commit.sha));
+    counts.loaded += 1;
+    edges.push({ srcId: commitId, dstId: rootId, edgeType: BELONGS_TO_EDGE_TYPE, sourceSystem: GIT_SOURCE_SYSTEM, weight: BELONGS_TO_WEIGHT });
+
+    for (const path of commit.paths) {
+      const externalId = gitExternalId(key, path);
+      if (!fileExternalIds.has(externalId)) {
+        counts.skippedPaths += 1;
+        continue;
+      }
+      edges.push({ srcId: commitId, dstId: requireNodeId(nodeIdByExternalId, externalId), edgeType: TOUCHES_EDGE_TYPE, sourceSystem: GIT_SOURCE_SYSTEM, weight: TOUCHES_WEIGHT });
+      counts.touches += 1;
+    }
+
+    const seenReferences = new Set<string>();
+    const mentionedIds = new Set<string>();
+    for (const ref of extractIssueReferences(commitMessage(commit))) {
+      const externalId = referenceExternalId(key, ref);
+      if (seenReferences.has(externalId)) continue;
+      seenReferences.add(externalId);
+      const targetId = referenceIdByExternalId.get(externalId);
+      if (!targetId) {
+        counts.unresolvedReferences += 1;
+        continue;
+      }
+      if (mentionedIds.has(targetId)) continue;
+      mentionedIds.add(targetId);
+      edges.push({ srcId: commitId, dstId: targetId, edgeType: MENTIONS_EDGE_TYPE, sourceSystem: GIT_SOURCE_SYSTEM, weight: MENTIONS_WEIGHT });
+      counts.mentions += 1;
+    }
+  }
+  return { edges, counts };
+}
+
+/**
+ * Resolves every GitHub identity the commit messages name to a canonical
+ * node id through `getNodesByExternalId`, in chunks of its bound. Runs
+ * before the transaction opens rather than inside it — a deviation from
+ * design.md decision 2 recorded in tasks.md 2.2: the read takes a
+ * `Database`, not a transaction handle, and it reads `github` rows the git
+ * transaction never writes, so the answer is exactly as fresh either way.
+ * A key that is not an `owner/name` slug asks nothing (see `isRepoSlug`).
+ */
+async function resolveCommitReferences(db: Database, key: string, commits: readonly GitCommit[]): Promise<Map<string, string>> {
+  const resolved = new Map<string, string>();
+  if (commits.length === 0 || !isRepoSlug(key)) return resolved;
+  for (const pairs of chunk(collectCommitReferences(key, commits), MAX_EXTERNAL_ID_LOOKUPS)) {
+    const { found } = await getNodesByExternalId(db, pairs);
+    for (const row of found) resolved.set(row.externalId, row.id);
+  }
+  return resolved;
+}
+
 // --- Write path ------------------------------------------------------------
 
 /**
@@ -511,27 +836,50 @@ export function resolveGitRepoEdges(candidates: readonly GitRepoEdgeCandidate[],
   return edges;
 }
 
+export interface LoadGitRepoTreeOptions {
+  /** Commits to write in the tree's batch, newest first as `parseGitLog` returns them. Absent or empty, the tree loads exactly as it did before commits existed. */
+  commits?: readonly GitCommit[];
+}
+
 export interface LoadGitRepoTreeResult {
   nodes: UpsertNodesResult;
   edges: UpsertEdgesResult;
+  /** Commit counts (`loaded`, `touches`, `skippedPaths`, `mentions`, `unresolvedReferences`); all zero without commits. */
+  commits: CommitEdgeCounts;
 }
 
 /**
- * Writes a tree's nodes and then its edges under `run`, inside one
- * transaction, so an edge batch failure leaves no half-loaded tree — a
- * file with no `child_of` edge is invisible to the tree walk (design.md).
- * Composed the way `annotateNode` is: the same `unsafePrepareNodes` /
- * `unsafePrepareEdges` validation and the same query builders
- * `upsertNodes` / `upsertEdges` run, chunked at their default sizes, on
- * one transaction handle rather than two. Node validation runs before the
- * transaction opens, so an oversized or control-character file rejects
- * naming its external id (`<key>:<path>`) with nothing written under the
- * run — the run itself is already open by then, as in `ingest-beads.ts`.
- * Counts are classified by SQL exactly as `upsertNodes` reports them: a
- * re-run over an unchanged checkout reports every node `unchanged`.
+ * Writes a tree's nodes — and its commits' — and then every edge under
+ * `run`, inside one transaction, so an edge batch failure leaves no
+ * half-loaded tree — a file with no `child_of` edge is invisible to the
+ * tree walk (design.md). Composed the way `annotateNode` is: the same
+ * `unsafePrepareNodes` / `unsafePrepareEdges` validation and the same
+ * query builders `upsertNodes` / `upsertEdges` run, chunked at their
+ * default sizes, on one transaction handle rather than two. Node
+ * validation, tree and commit nodes together, runs before the transaction
+ * opens, so an oversized or control-character file rejects naming its
+ * external id (`<key>:<path>`, `<key>@<sha>`) with nothing written under
+ * the run — the run itself is already open by then, as in
+ * `ingest-beads.ts`. So does the reference lookup (`resolveCommitReferences`
+ * says why). Counts are classified by SQL exactly as `upsertNodes` reports
+ * them: a re-run over an unchanged checkout reports every node, commits
+ * included, `unchanged`; the upsert never sets `merged_into`, so a root
+ * merged into another repository node keeps its pointer across re-loads.
  */
-export async function loadGitRepoTree(db: Database, run: IngestRunHandle, tree: GitRepoTree): Promise<LoadGitRepoTreeResult> {
-  const preparedNodes = unsafePrepareNodes(tree.nodes, DEFAULT_MAX_CONTENT_LENGTH, DEFAULT_MAX_METADATA_LENGTH, DEFAULT_MAX_TITLE_LENGTH);
+export async function loadGitRepoTree(
+  db: Database,
+  run: IngestRunHandle,
+  tree: GitRepoTree,
+  options: LoadGitRepoTreeOptions = {},
+): Promise<LoadGitRepoTreeResult> {
+  const commits = options.commits ?? [];
+  const preparedNodes = unsafePrepareNodes(
+    [...tree.nodes, ...buildCommitNodes(tree.key, commits)],
+    DEFAULT_MAX_CONTENT_LENGTH,
+    DEFAULT_MAX_METADATA_LENGTH,
+    DEFAULT_MAX_TITLE_LENGTH,
+  );
+  const referenceIdByExternalId = await resolveCommitReferences(db, tree.key, commits);
 
   return db.transaction(async (tx) => {
     const nodeResult: UpsertNodesResult = { created: 0, updated: 0, unchanged: 0, rows: [] };
@@ -549,7 +897,14 @@ export async function loadGitRepoTree(db: Database, run: IngestRunHandle, tree: 
     }
 
     const nodeIdByExternalId = new Map(nodeResult.rows.map((r) => [r.externalId, r.id]));
-    const preparedEdges = unsafePrepareEdges(resolveGitRepoEdges(tree.edges, nodeIdByExternalId));
+    const commitEdges = resolveCommitEdges({
+      key: tree.key,
+      commits,
+      nodeIdByExternalId,
+      fileExternalIds: new Set(tree.nodes.filter((n) => n.nodeType === FILE_NODE_TYPE).map((n) => n.externalId)),
+      referenceIdByExternalId,
+    });
+    const preparedEdges = unsafePrepareEdges([...resolveGitRepoEdges(tree.edges, nodeIdByExternalId), ...commitEdges.edges]);
 
     const edgeResult: UpsertEdgesResult = { created: 0, updated: 0, rows: [] };
     for (const rows of chunk(preparedEdges, DEFAULT_EDGE_CHUNK_SIZE)) {
@@ -574,6 +929,6 @@ export async function loadGitRepoTree(db: Database, run: IngestRunHandle, tree: 
       }
     }
 
-    return { nodes: nodeResult, edges: edgeResult };
+    return { nodes: nodeResult, edges: edgeResult, commits: commitEdges.counts };
   });
 }

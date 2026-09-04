@@ -1,10 +1,19 @@
 // Database tests for `loadGitRepoTree` (git-repo-ingestor change, task
-// 1.4). Every fixture is scoped by a unique repository key — external ids
-// all start with `<key>:` — so nothing here asserts on a global count or
-// on `ingest_runs` rows (other suites write under other keys, and other
-// source systems, in parallel against the same database).
+// 1.4; commits in github-prs-and-commits task 2.2). Every fixture is scoped
+// by a unique repository key — external ids all start with `<key>:` or
+// `<key>@` — so nothing here asserts on a global count or on `ingest_runs`
+// rows (other suites write under other keys, and other source systems, in
+// parallel against the same database). The commit tests run against a real
+// repository built with `git init` in a temp directory — the first test in
+// this repository that runs git — so `parseGitLog` reads what git actually
+// prints, not a transcription of it.
 
-import { and, eq, like } from "drizzle-orm";
+import { execFile } from "node:child_process";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
+import { and, eq, inArray, like } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Database } from "@breakdown/db";
 import { ingestRuns, nodes } from "@breakdown/db";
@@ -12,18 +21,30 @@ import { unsafeBuildUpsertEdgesQuery } from "./edges.js";
 import { EdgeUpsertFailedError } from "./errors.js";
 import {
   buildRepoTree,
+  COMMIT_NODE_TYPE,
+  commitExternalId,
   DIRECTORY_NODE_TYPE,
+  emptyCommitEdgeCounts,
   FILE_NODE_TYPE,
+  GIT_LOG_FORMAT,
   GIT_SOURCE_SYSTEM,
   gitExternalId,
+  isRepoSlug,
   loadGitRepoTree,
+  parseGitLog,
+  parseLsFiles,
+  readWorkingTree,
+  type GitCommit,
   type GitRepoTree,
   type LoadableFile,
+  type LoadGitRepoTreeResult,
 } from "./git-repo.js";
-import { REPO_NODE_TYPE } from "./github.js";
+import { GITHUB_SOURCE_SYSTEM, ISSUE_NODE_TYPE, REPO_NODE_TYPE } from "./github.js";
 import { getIngestRunContents, openIngestRun, type IngestRunHandle } from "./ingest-runs.js";
 import { listNodes, type ListNodesOptions, type ListedNode } from "./list.js";
-import { getNeighbors, getNodes } from "./lookup.js";
+import { getNeighbors, getNodes, getNodesByExternalId } from "./lookup.js";
+import { mergeNodes } from "./merge.js";
+import { upsertNodes } from "./nodes.js";
 import { retrieve } from "./retrieval.js";
 import { asPgError } from "./sql-helpers.js";
 import { connectTestDb, type TestPool, uniqueSuffix } from "./test-helpers.js";
@@ -47,8 +68,8 @@ let pool: TestPool;
 let db: Database;
 const openRuns: string[] = [];
 
-async function newRun(actor: string): Promise<IngestRunHandle> {
-  const run = await openIngestRun(db, GIT_SOURCE_SYSTEM, { actor });
+async function newRun(actor: string, sourceSystem: string = GIT_SOURCE_SYSTEM): Promise<IngestRunHandle> {
+  const run = await openIngestRun(db, sourceSystem, { actor });
   openRuns.push(run.id);
   return run;
 }
@@ -91,7 +112,10 @@ beforeAll(() => {
 });
 
 afterAll(async () => {
-  await db.delete(nodes).where(and(eq(nodes.sourceSystem, GIT_SOURCE_SYSTEM), like(nodes.externalId, `${PREFIX}%`)));
+  // One statement over both source systems: the commit tests merge a git
+  // root into a `github` fixture node, and a row's `merged_into` must go
+  // with the row it points at.
+  await db.delete(nodes).where(and(inArray(nodes.sourceSystem, [GIT_SOURCE_SYSTEM, GITHUB_SOURCE_SYSTEM]), like(nodes.externalId, `${PREFIX}%`)));
   for (const id of openRuns) await db.delete(ingestRuns).where(eq(ingestRuns.id, id));
   await pool.end();
 });
@@ -239,5 +263,257 @@ describe("loadGitRepoTree", () => {
     const retry = await loadGitRepoTree(db, await newRun("git-repo-load-test"), tree);
     expect(retry.nodes.created).toBe(tree.nodes.length);
     expect(retry.edges.created).toBe(tree.edges.length);
+  });
+});
+
+// --- Commits (github-prs-and-commits task 2.2) ----------------------------
+
+const execFileAsync = promisify(execFile);
+
+/**
+ * Runs `git <args>` in `cwd` with the user's global and system config
+ * masked, so a signing key, a hooks path, or a commit template on the
+ * machine cannot reach the fixture; identity is set locally below.
+ */
+async function gitIn(cwd: string, ...args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync("git", args, {
+    cwd,
+    maxBuffer: 16 * 1024 * 1024,
+    env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" },
+  });
+  return stdout;
+}
+
+/**
+ * A real repository with two commits. The first adds `src/a.ts`,
+ * `src/b.ts`, `README.md`, and `gone.txt`; the second changes both
+ * TypeScript files, deletes `gone.txt`, and carries a message naming
+ * `#12` (loaded as a `github` fixture issue under the same slug), `#999`
+ * (loaded nowhere), and a `#12` inside a code span (not a reference).
+ */
+async function createFixtureRepo(ident: string): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "gri-commits-"));
+  await gitIn(root, "init", "-q", "-b", "main");
+  await gitIn(root, "config", "user.name", "Fixture Author");
+  await gitIn(root, "config", "user.email", "fixture@example.invalid");
+  await gitIn(root, "config", "commit.gpgsign", "false");
+  await mkdir(join(root, "src"), { recursive: true });
+  await writeFile(join(root, "src/a.ts"), `export const a = "${ident}";\n`);
+  await writeFile(join(root, "src/b.ts"), "export const b = 2;\n");
+  await writeFile(join(root, "README.md"), "# Fixture\n");
+  await writeFile(join(root, "gone.txt"), "soon deleted\n");
+  await gitIn(root, "add", "-A");
+  await gitIn(root, "commit", "-q", "-m", "Initial import");
+  await writeFile(join(root, "src/a.ts"), `export const a = "${ident}";\nexport const more = true;\n`);
+  await writeFile(join(root, "src/b.ts"), "export const b = 3;\n");
+  await rm(join(root, "gone.txt"));
+  await gitIn(root, "add", "-A");
+  await gitIn(root, "commit", "-q", "-m", "Touch a and b, drop gone.txt", "-m", "Closes #12; see also #999 and `#12` in code.");
+  return root;
+}
+
+interface FixtureLoad {
+  tree: GitRepoTree;
+  commits: GitCommit[];
+  result: LoadGitRepoTreeResult;
+}
+
+/** The script's pipeline over the fixture: `git ls-files`, the working-tree read, the tree, `git log` as ingest-git-repo.ts runs it, one load. */
+async function loadFixture(key: string, root: string, run: IngestRunHandle, commitLimit = 500): Promise<FixtureLoad> {
+  const { files } = await readWorkingTree(root, parseLsFiles(await gitIn(root, "ls-files", "-s", "-z")));
+  const tree = buildRepoTree(key, root, files);
+  const commits = parseGitLog(await gitIn(root, "-c", "core.quotePath=false", "log", "-n", String(commitLimit), "--name-only", `--format=${GIT_LOG_FORMAT}`));
+  const result = await loadGitRepoTree(db, run, tree, { commits });
+  return { tree, commits, result };
+}
+
+/** Writes the `github` side of a slug: its `repo` node and issue `#12`, as `pnpm ingest:github` would have. Returns their ids by external id. */
+async function writeGithubFixture(slug: string): Promise<Map<string, string>> {
+  const run = await newRun("git-repo-load-test-github", GITHUB_SOURCE_SYSTEM);
+  const written = await upsertNodes(db, run, [
+    { nodeType: REPO_NODE_TYPE, sourceSystem: GITHUB_SOURCE_SYSTEM, externalId: slug, title: slug, content: "A fixture repository." },
+    { nodeType: ISSUE_NODE_TYPE, sourceSystem: GITHUB_SOURCE_SYSTEM, externalId: `${slug}#12`, title: "Fixture issue twelve", content: "" },
+  ]);
+  return new Map(written.rows.map((r) => [r.externalId, r.id]));
+}
+
+const CANONICAL_INSTANT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+describe("loadGitRepoTree with commits", () => {
+  let root: string;
+
+  beforeAll(async () => {
+    root = await createFixtureRepo(`identCommits${uniqueSuffix()}`);
+  });
+
+  afterAll(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it("writes commit nodes at the committer instant with belongs-to, touches to surviving files, mentions to the loaded issue, and counts the rest", async () => {
+    const key = keyFor("commits");
+    expect(isRepoSlug(key)).toBe(true);
+    const github = await writeGithubFixture(key);
+
+    const run = await newRun("git-repo-load-test");
+    const { tree, commits, result } = await loadFixture(key, root, run);
+    expect(commits).toHaveLength(2);
+    const [newest, oldest] = commits as [GitCommit, GitCommit];
+    expect(newest.parents).toEqual([oldest.sha]);
+    expect(oldest.parents).toEqual([]);
+    expect(newest.paths).toEqual(["gone.txt", "src/a.ts", "src/b.ts"]);
+    expect(oldest.paths).toEqual(["README.md", "gone.txt", "src/a.ts", "src/b.ts"]);
+
+    // The first commit touches its three surviving files; the second the
+    // two it changed; `gone.txt` is skipped in both. `#12` resolves,
+    // `#999` does not, the `#12` in code is no reference at all.
+    expect(result.nodes).toMatchObject({ created: tree.nodes.length + 2, updated: 0, unchanged: 0 });
+    expect(result.commits).toEqual({ loaded: 2, touches: 5, skippedPaths: 2, mentions: 1, unresolvedReferences: 1 });
+    expect(result.edges).toMatchObject({ created: tree.edges.length + 2 + 5 + 1, updated: 0 });
+
+    const idOf = (externalId: string): string => {
+      const row = result.nodes.rows.find((r) => r.externalId === externalId);
+      expect(row, externalId).toBeDefined();
+      return row!.id;
+    };
+    const newestId = idOf(commitExternalId(key, newest.sha));
+    const { nodes: looked } = await getNodes(db, [newestId]);
+    expect(looked[0]).toMatchObject({
+      nodeType: COMMIT_NODE_TYPE,
+      sourceSystem: GIT_SOURCE_SYSTEM,
+      title: "Touch a and b, drop gone.txt",
+      content: "Touch a and b, drop gone.txt\n\nCloses #12; see also #999 and `#12` in code.",
+    });
+    expect(looked[0]?.metadata).toEqual({
+      sha: newest.sha,
+      parents: [oldest.sha],
+      author: "Fixture Author",
+      authored_at: newest.authoredAt,
+      committed_at: newest.committedAt,
+      files_changed: 3,
+      occurred_at: new Date(newest.committedAt).toISOString(),
+    });
+    expect(looked[0]?.metadata["occurred_at"]).toMatch(CANONICAL_INSTANT_RE);
+
+    const { neighbors: fromNewest } = await getNeighbors(db, newestId);
+    const outgoing = fromNewest.filter((n) => n.direction === "outgoing");
+    expect(outgoing.map((n) => [n.edgeType, n.externalId, n.edgeSourceSystem]).sort()).toEqual(
+      [
+        ["belongs-to", key, GIT_SOURCE_SYSTEM],
+        ["mentions", `${key}#12`, GIT_SOURCE_SYSTEM],
+        ["touches", gitExternalId(key, "src/a.ts"), GIT_SOURCE_SYSTEM],
+        ["touches", gitExternalId(key, "src/b.ts"), GIT_SOURCE_SYSTEM],
+      ].sort(),
+    );
+    // `edges.weight` is a `real`: 0.8 reads back as the nearest float4.
+    for (const n of outgoing) expect(n.weight, n.edgeType).toBeCloseTo(n.edgeType === "belongs-to" ? 1 : 0.8, 6);
+    expect(outgoing.find((n) => n.edgeType === "mentions")).toMatchObject({ nodeId: github.get(`${key}#12`), nodeType: ISSUE_NODE_TYPE, nodeSourceSystem: GITHUB_SOURCE_SYSTEM });
+    expect(outgoing.find((n) => n.edgeType === "belongs-to")).toMatchObject({ nodeId: idOf(key), nodeType: REPO_NODE_TYPE });
+
+    const { neighbors: fromOldest } = await getNeighbors(db, idOf(commitExternalId(key, oldest.sha)));
+    expect(
+      fromOldest
+        .filter((n) => n.direction === "outgoing")
+        .map((n) => [n.edgeType, n.externalId])
+        .sort(),
+    ).toEqual([
+      ["belongs-to", key],
+      ["touches", gitExternalId(key, "README.md")],
+      ["touches", gitExternalId(key, "src/a.ts")],
+      ["touches", gitExternalId(key, "src/b.ts")],
+    ]);
+
+    // A file's side: its commits, as `touches`, and nothing from `gone.txt`, which has no node.
+    const { neighbors: fromFile } = await getNeighbors(db, idOf(gitExternalId(key, "src/b.ts")));
+    expect(fromFile.filter((n) => n.edgeType === "touches").map((n) => n.nodeType)).toEqual([COMMIT_NODE_TYPE, COMMIT_NODE_TYPE]);
+    expect(result.nodes.rows.some((r) => r.externalId === gitExternalId(key, "gone.txt"))).toBe(false);
+
+    const attributed = await getIngestRunContents(db, run.id);
+    expect(attributed.nodes).toHaveLength(tree.nodes.length + 2);
+    expect(attributed.edges).toHaveLength(tree.edges.length + 8);
+
+    // Second run over the unchanged checkout: every node, commits
+    // included, unchanged; edges re-asserted (`updated`, as upsertEdges
+    // reports a re-assertion); the same counts.
+    const second = await loadFixture(key, root, await newRun("git-repo-load-test"));
+    expect(second.result.nodes).toMatchObject({ created: 0, updated: 0, unchanged: tree.nodes.length + 2 });
+    expect(second.result.commits).toEqual(result.commits);
+    expect(second.result.edges).toMatchObject({ created: 0, updated: tree.edges.length + 8 });
+    expect(new Set(second.result.nodes.rows.map((r) => r.id))).toEqual(new Set(result.nodes.rows.map((r) => r.id)));
+  });
+
+  it("counts every reference unresolved under a key that is not a slug, and still loads", async () => {
+    const key = `${PREFIX}-bd`;
+    expect(isRepoSlug(key)).toBe(false);
+    const run = await newRun("git-repo-load-test");
+    const { tree, result } = await loadFixture(key, root, run);
+    expect(result.nodes).toMatchObject({ created: tree.nodes.length + 2 });
+    expect(result.commits).toEqual({ loaded: 2, touches: 5, skippedPaths: 2, mentions: 0, unresolvedReferences: 2 });
+    const attributed = await getIngestRunContents(db, run.id);
+    expect(attributed.edges.some((e) => e.edgeType === "mentions")).toBe(false);
+    expect(attributed.edges.filter((e) => e.edgeType === "belongs-to")).toHaveLength(2);
+  });
+
+  it("loads the newest N alone, and a later, larger N adds the rest and reports the first unchanged", async () => {
+    const key = keyFor("bound");
+    const first = await loadFixture(key, root, await newRun("git-repo-load-test"), 1);
+    expect(first.commits).toHaveLength(1);
+    expect(first.result.nodes).toMatchObject({ created: first.tree.nodes.length + 1 });
+    expect(first.result.commits).toEqual({ loaded: 1, touches: 2, skippedPaths: 1, mentions: 0, unresolvedReferences: 2 });
+
+    const second = await loadFixture(key, root, await newRun("git-repo-load-test"), 2);
+    expect(second.commits).toHaveLength(2);
+    expect(second.commits[0]).toEqual(first.commits[0]);
+    expect(second.result.nodes).toMatchObject({ created: 1, updated: 0, unchanged: first.tree.nodes.length + 1 });
+    expect(second.result.nodes.rows.find((r) => r.action === "created")?.externalId).toBe(commitExternalId(key, second.commits[1]!.sha));
+    expect(second.result.commits.loaded).toBe(2);
+  });
+
+  it("writes the tree exactly as before with commits: [] or no option at all", async () => {
+    const key = keyFor("no-commits");
+    const tree = buildRepoTree(key, "/checkout/no-commits", fixtureFiles(`identNoCommits${uniqueSuffix()}`));
+
+    const explicit = await loadGitRepoTree(db, await newRun("git-repo-load-test"), tree, { commits: [] });
+    expect(explicit.nodes).toMatchObject({ created: tree.nodes.length, updated: 0, unchanged: 0 });
+    expect(explicit.edges).toMatchObject({ created: tree.edges.length, updated: 0 });
+    expect(explicit.commits).toEqual(emptyCommitEdgeCounts());
+
+    const absent = await loadGitRepoTree(db, await newRun("git-repo-load-test"), tree);
+    expect(absent.nodes).toMatchObject({ created: 0, updated: 0, unchanged: tree.nodes.length });
+    expect(absent.commits).toEqual(emptyCommitEdgeCounts());
+
+    const commitRows = await db
+      .select({ id: nodes.id })
+      .from(nodes)
+      .where(and(eq(nodes.sourceSystem, GIT_SOURCE_SYSTEM), like(nodes.externalId, `${key}@%`)));
+    expect(commitRows).toEqual([]);
+  });
+
+  it("keeps a root's merged_into across a re-load once it has been merged into the GitHub repository node", async () => {
+    const key = keyFor("merged");
+    const github = await writeGithubFixture(key);
+    const survivorId = github.get(key)!;
+
+    const first = await loadFixture(key, root, await newRun("git-repo-load-test"));
+    const rootId = first.result.nodes.rows.find((r) => r.externalId === key)!.id;
+    const merge = await mergeNodes(db, rootId, survivorId, await newRun("git-repo-load-test-merge"));
+    expect(merge).toEqual({ survivorId, mergedNodeIds: [rootId] });
+
+    // The upsert never sets `merged_into`: the loser row is re-upserted
+    // by external id, reports unchanged, and still points at the survivor.
+    const again = await loadFixture(key, root, await newRun("git-repo-load-test"));
+    expect(again.result.nodes.rows.find((r) => r.externalId === key)).toMatchObject({ id: rootId, action: "unchanged" });
+    expect(again.result.commits).toEqual(first.result.commits);
+    const [rootRow] = await db.select({ mergedInto: nodes.mergedInto }).from(nodes).where(eq(nodes.id, rootId));
+    expect(rootRow?.mergedInto).toBe(survivorId);
+
+    // Every read folds: the identity lookup answers the survivor, and a
+    // commit's `belongs-to` — still an edge to the loser's id, since
+    // mergeNodes rewrites pointers, not edges — reads as the survivor.
+    const lookup = await getNodesByExternalId(db, [{ sourceSystem: GIT_SOURCE_SYSTEM, externalId: key }]);
+    expect(lookup.found).toEqual([{ sourceSystem: GIT_SOURCE_SYSTEM, externalId: key, id: survivorId, nodeType: REPO_NODE_TYPE }]);
+    const commitId = again.result.nodes.rows.find((r) => r.externalId === commitExternalId(key, again.commits[0]!.sha))!.id;
+    const { neighbors } = await getNeighbors(db, commitId);
+    expect(neighbors.find((n) => n.edgeType === "belongs-to")).toMatchObject({ nodeId: survivorId, nodeSourceSystem: GITHUB_SOURCE_SYSTEM, externalId: key });
   });
 });

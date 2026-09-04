@@ -1,15 +1,19 @@
-// `pnpm ingest:repo <path> [--key <k>]` (git-repo-ingestor change, task
-// 2.1): mirrors a local git checkout into the knowledge store as a tree
-// of `file` and `directory` nodes joined by `child_of` edges under
-// `source_system = 'git'`, so source code is full-text searchable and a
-// code view has a tree to render.
+// `pnpm ingest:repo <path> [--key <k>] [--commits <N>]` (git-repo-ingestor
+// change, task 2.1; commits in github-prs-and-commits): mirrors a local git
+// checkout into the knowledge store as a tree of `file` and `directory`
+// nodes joined by `child_of` edges under `source_system = 'git'`, so
+// source code is full-text searchable and a code view has a tree to
+// render, and writes the checkout's newest N commits (`--commits`, default
+// `COMMITS_DEFAULT`, `0` disables) as `commit` nodes in the same batch,
+// joined `belongs-to` the root, `touches` the files they changed, and
+// `mentions` the GitHub issues and pull requests their messages name.
 //
-// A script, not a library: the mapping and the working-tree read live in
-// git-repo.ts (tested without git or a database); this file shells out
-// to `git`, derives the key, opens one ingest run, hands the tree to
-// `loadGitRepoTree`, and prints a summary — the same split as
-// ingest-beads.ts and ingest-github.ts. Nothing below runs `git` or
-// connects to the database at module scope.
+// A script, not a library: the mapping, the working-tree read, and the
+// `git log` parse live in git-repo.ts (tested without git or a database);
+// this file shells out to `git`, derives the key, opens one ingest run,
+// hands the tree and commits to `loadGitRepoTree`, and prints a summary —
+// the same split as ingest-beads.ts and ingest-github.ts. Nothing below
+// runs `git` or connects to the database at module scope.
 //
 // <path> is any directory inside the checkout: `git rev-parse
 // --show-toplevel` resolves the checkout root, and that root is what is
@@ -34,16 +38,20 @@ import { createDb, createPool, resolveDatabaseUrl } from "@breakdown/db";
 import {
   buildRepoTree,
   closeIngestRun,
+  COMMITS_DEFAULT,
   deriveRepoKey,
   DIRECTORY_NODE_TYPE,
   FILE_NODE_TYPE,
   getStoreSummary,
+  GIT_LOG_FORMAT,
   GIT_SOURCE_SYSTEM,
   loadGitRepoTree,
   openIngestRun,
+  parseGitLog,
   parseLsFiles,
   readWorkingTree,
   SKIP_REASONS,
+  type GitCommit,
   type SkipCounts,
 } from "./index.js";
 
@@ -53,20 +61,34 @@ const execFileAsync = promisify(execFile);
  * Stdout cap for `git ls-files -s -z`, whose output is one ~60-byte
  * record plus the path per tracked file: execFile's 1 MiB default holds
  * a few thousand files, this holds a few million. A repository larger
- * than that is out of scope until one is measured.
+ * than that is out of scope until one is measured. The same cap serves
+ * `git log`, whose output is a message plus a path list per commit —
+ * this repository's 74 commits are 118 KB; 500 commits of a busy
+ * repository are a few MB.
  */
 const GIT_STDOUT_MAX_BUFFER = 256 * 1024 * 1024;
 
-const USAGE = "usage: pnpm ingest:repo <path> [--key <owner/name>]";
+const USAGE = "usage: pnpm ingest:repo <path> [--key <owner/name>] [--commits <N>]";
 
 interface CliArgs {
   checkoutPath: string;
   keyOverride: string | null;
+  /** Newest commits to load; `0` disables commits. */
+  commitLimit: number;
+}
+
+/** `--commits` takes a non-negative integer and nothing else: a negative, a fraction, or a word is a usage error, not a default. */
+function parseCommitLimit(value: string | undefined): number {
+  if (value === undefined || !/^\d+$/.test(value.trim())) {
+    throw new Error(`--commits needs a non-negative integer (0 disables commits)\n${USAGE}`);
+  }
+  return Number(value.trim());
 }
 
 function parseArgs(argv: readonly string[]): CliArgs {
   let checkoutPath: string | undefined;
   let keyOverride: string | null = null;
+  let commitLimit = COMMITS_DEFAULT;
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]!;
     // A blank value would fall through to the derived key in deriveRepoKey
@@ -80,6 +102,11 @@ function parseArgs(argv: readonly string[]): CliArgs {
       const value = arg.slice("--key=".length);
       if (value.trim() === "") throw new Error(`--key needs a non-empty value\n${USAGE}`);
       keyOverride = value;
+    } else if (arg === "--commits") {
+      commitLimit = parseCommitLimit(argv[i + 1]);
+      i += 1;
+    } else if (arg.startsWith("--commits=")) {
+      commitLimit = parseCommitLimit(arg.slice("--commits=".length));
     } else if (arg.startsWith("-")) {
       throw new Error(`unknown option ${JSON.stringify(arg)}\n${USAGE}`);
     } else if (checkoutPath === undefined) {
@@ -89,7 +116,7 @@ function parseArgs(argv: readonly string[]): CliArgs {
     }
   }
   if (checkoutPath === undefined) throw new Error(`missing <path>\n${USAGE}`);
-  return { checkoutPath, keyOverride };
+  return { checkoutPath, keyOverride, commitLimit };
 }
 
 /** Runs `git <args>` in `cwd` and returns stdout, or throws with git's own stderr attached. */
@@ -108,8 +135,13 @@ function formatSkips(skipped: SkipCounts): string {
   return SKIP_REASONS.map((reason) => `${reason}=${skipped[reason]}`).join(", ");
 }
 
+/** Milliseconds since `started`, for the summary's timings. */
+function elapsedMs(started: number): string {
+  return `${Math.round(performance.now() - started)} ms`;
+}
+
 async function main(): Promise<void> {
-  const { checkoutPath, keyOverride } = parseArgs(process.argv.slice(2));
+  const { checkoutPath, keyOverride, commitLimit } = parseArgs(process.argv.slice(2));
   // INGEST_REPO_CWD is the directory the command was typed in, captured by
   // the root script (see the header); INIT_CWD covers `pnpm ingest:repo`
   // run from packages/core itself, where no nested `pnpm run` reset it.
@@ -146,12 +178,28 @@ async function main(): Promise<void> {
   const directoryCount = tree.nodes.filter((n) => n.nodeType === DIRECTORY_NODE_TYPE).length;
   const fileCount = tree.nodes.filter((n) => n.nodeType === FILE_NODE_TYPE).length;
 
+  let commits: GitCommit[] = [];
+  if (commitLimit > 0) {
+    const started = performance.now();
+    // `core.quotePath=false` so a path holding a byte above 0x7f prints as
+    // UTF-8 rather than C-quoted (`"caf\303\251.md"`), which would match
+    // no file node and be counted skipped. Paths with a control byte or a
+    // quote are still quoted by git and still miss; none is known.
+    const log = await git(["-c", "core.quotePath=false", "log", "-n", String(commitLimit), "--name-only", `--format=${GIT_LOG_FORMAT}`], rootPath);
+    commits = parseGitLog(log);
+    console.log(`[ingest:repo] ${commits.length} commit(s) via \`git log -n ${commitLimit} --name-only\` in ${elapsedMs(started)} (${log.length} chars)`);
+  } else {
+    console.log("[ingest:repo] commits disabled (--commits 0)");
+  }
+
   const pool = createPool(resolveDatabaseUrl());
   const db = createDb(pool);
   try {
     // actor = the pnpm script name a person actually types.
     const run = await openIngestRun(db, GIT_SOURCE_SYSTEM, { actor: "ingest:repo" });
-    const result = await loadGitRepoTree(db, run, tree);
+    const loadStarted = performance.now();
+    const result = await loadGitRepoTree(db, run, tree, { commits });
+    const loadTook = elapsedMs(loadStarted);
     const closed = await closeIngestRun(db, run, {
       key,
       rootPath,
@@ -159,14 +207,22 @@ async function main(): Promise<void> {
       filesTracked: entries.length,
       filesLoaded: files.length,
       skipped,
+      commits: { limit: commitLimit, ...result.commits },
     });
     const summary = await getStoreSummary(db);
 
     console.log(
       `[ingest:repo] nodes: ${result.nodes.created} created, ${result.nodes.updated} updated, ${result.nodes.unchanged} unchanged ` +
-        `(1 repo, ${directoryCount} directories, ${fileCount} files)`,
+        `(1 repo, ${directoryCount} directories, ${fileCount} files, ${result.commits.loaded} commits) in ${loadTook}`,
     );
-    console.log(`[ingest:repo] edges: ${result.edges.created} created, ${result.edges.updated} updated (${tree.edges.length} child_of)`);
+    console.log(
+      `[ingest:repo] edges: ${result.edges.created} created, ${result.edges.updated} updated ` +
+        `(${tree.edges.length} child_of, ${result.commits.loaded} belongs-to, ${result.commits.touches} touches, ${result.commits.mentions} mentions)`,
+    );
+    console.log(
+      `[ingest:repo] commits: ${result.commits.loaded} loaded, ${result.commits.touches} touches written, ${result.commits.skippedPaths} path(s) skipped (no file node), ` +
+        `${result.commits.mentions} mentions written, ${result.commits.unresolvedReferences} reference(s) unresolved`,
+    );
     console.log(
       `[ingest:repo] ingest run ${closed.id} (source_system=${closed.sourceSystem}, actor=${closed.actor}) closed: ${closed.nodeCount} nodes, ${closed.edgeCount} edges attributed`,
     );

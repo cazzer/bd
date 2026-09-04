@@ -1,24 +1,34 @@
 // Pure-function tests for the git repository loader's mapping module
-// (git-repo-ingestor change, task 1.3). No database: everything here is a
-// function over strings, byte arrays, and already-read files. The write
-// path (`loadGitRepoTree`) is covered in git-repo-load.test.ts.
+// (git-repo-ingestor change, task 1.3; commits in github-prs-and-commits
+// task 2.1). No database and no git: everything here is a function over
+// strings, byte arrays, already-read files, and a literal `git log`. The
+// write path (`loadGitRepoTree`), and the one real `git init`, are in
+// git-repo-load.test.ts.
 
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { InvalidEventTimeError } from "./errors.js";
 import {
+  buildCommitNodes,
   buildRepoTree,
   classifyFile,
+  collectCommitReferences,
+  commitExternalId,
   countLines,
   deriveLanguage,
   deriveRepoKey,
   gitExternalId,
   GIT_SOURCE_SYSTEM,
+  isRepoSlug,
   MAX_FILE_BYTES,
+  parseGitLog,
   parseLsFiles,
   readWorkingTree,
+  resolveCommitEdges,
   resolveGitRepoEdges,
+  type GitCommit,
   type LoadableFile,
   type LsFilesEntry,
 } from "./git-repo.js";
@@ -267,5 +277,223 @@ describe("resolveGitRepoEdges", () => {
   it("refuses a candidate whose end has no node id, naming it", () => {
     expect(() => resolveGitRepoEdges([{ srcExternalId: "k:missing.ts", dstExternalId: "k" }], ids)).toThrow(/k:missing\.ts has no node id/);
     expect(() => resolveGitRepoEdges([{ srcExternalId: "k:src", dstExternalId: "other" }], ids)).toThrow(/other has no node id/);
+  });
+});
+
+// --- Commits (github-prs-and-commits task 2.1) ----------------------------
+
+const RS = "\x1e";
+const NUL = "\x00";
+const SHA_C = "c".repeat(40);
+const SHA_D = "d".repeat(40);
+
+// Exactly what `git log -n 3 --name-only --format=<GIT_LOG_FORMAT>` prints
+// for three commits, newest first: a normal commit with three paths and a
+// body holding blank lines, a `#12`, a cross-repository reference, and a
+// `#99` inside a code span; a merge commit with two parents, no body, and
+// no paths (git shows a merge without a diff); and the root commit with no
+// parent. After the seventh NUL git prints its own line break, a blank
+// line, then one path per line — nothing but the line break for the merge.
+const LITERAL_LOG =
+  `${RS}${SHA_C}${NUL}${SHA_B}${NUL}2026-09-04T18:43:52-04:00${NUL}2026-09-04T19:00:00-04:00${NUL}Caleb Brewer${NUL}Drop gone.txt and touch a and b${NUL}` +
+  `Closes #12 for real.\n\nAlso see cazzer/toastd#7 and \`#99\` in code.\n${NUL}\n\ngone.txt\nsrc/a.ts\nsrc/b.ts\n` +
+  `${RS}${SHA_B}${NUL}${SHA_A} ${SHA_D}${NUL}2026-09-03T10:00:00+02:00${NUL}2026-09-03T10:00:00+02:00${NUL}Someone Else${NUL}Merge branch 'feature'${NUL}${NUL}\n` +
+  `${RS}${SHA_A}${NUL}${NUL}2026-09-01T00:00:00Z${NUL}2026-09-01T00:00:00Z${NUL}Caleb Brewer${NUL}Initial import${NUL}${NUL}\n\nREADME.md\nsrc/a.ts\n`;
+
+const EXPECTED_COMMITS: GitCommit[] = [
+  {
+    sha: SHA_C,
+    parents: [SHA_B],
+    authoredAt: "2026-09-04T18:43:52-04:00",
+    committedAt: "2026-09-04T19:00:00-04:00",
+    author: "Caleb Brewer",
+    subject: "Drop gone.txt and touch a and b",
+    body: "Closes #12 for real.\n\nAlso see cazzer/toastd#7 and `#99` in code.",
+    paths: ["gone.txt", "src/a.ts", "src/b.ts"],
+  },
+  {
+    sha: SHA_B,
+    parents: [SHA_A, SHA_D],
+    authoredAt: "2026-09-03T10:00:00+02:00",
+    committedAt: "2026-09-03T10:00:00+02:00",
+    author: "Someone Else",
+    subject: "Merge branch 'feature'",
+    body: "",
+    paths: [],
+  },
+  {
+    sha: SHA_A,
+    parents: [],
+    authoredAt: "2026-09-01T00:00:00Z",
+    committedAt: "2026-09-01T00:00:00Z",
+    author: "Caleb Brewer",
+    subject: "Initial import",
+    body: "",
+    paths: ["README.md", "src/a.ts"],
+  },
+];
+
+describe("parseGitLog", () => {
+  it("reads a normal commit's paths, a merge's absence of them, a body with blank lines, and a root's absence of parents", () => {
+    expect(parseGitLog(LITERAL_LOG)).toEqual(EXPECTED_COMMITS);
+    expect(parseGitLog("")).toEqual([]);
+  });
+
+  it("rejects a record with the wrong field count naming the sha, or the index when the record has none", () => {
+    const missingBody = `${RS}${SHA_C}${NUL}${SHA_B}${NUL}2026-09-04T18:43:52-04:00${NUL}2026-09-04T19:00:00-04:00${NUL}Caleb Brewer${NUL}subject${NUL}\n`;
+    expect(() => parseGitLog(missingBody)).toThrow(`parseGitLog: malformed commit ${SHA_C}: expected 7 NUL-terminated fields, found 6`);
+
+    // A record separator inside a body splits one commit into a short
+    // record (named by its sha) and a fragment that starts with body text.
+    const straySeparator = LITERAL_LOG.replace("for real.", `for${RS}real.`);
+    expect(() => parseGitLog(straySeparator)).toThrow(`malformed commit ${SHA_C}: expected 7 NUL-terminated fields, found 6`);
+    expect(() => parseGitLog(`${RS}real.\n${NUL}\n\ngone.txt\n`)).toThrow("malformed record 0: expected 7 NUL-terminated fields, found 1");
+
+    // Seven fields whose first is not a sha: plain `git log` output would look like this.
+    expect(() => parseGitLog(`${RS}commit abc${NUL}${NUL}${NUL}${NUL}${NUL}${NUL}${NUL}\n`)).toThrow(/malformed record 0: "commit abc" is not a commit sha/);
+    expect(() => parseGitLog(`noise${LITERAL_LOG}`)).toThrow(/output before the first record separator "noise"/);
+  });
+});
+
+describe("buildCommitNodes", () => {
+  const nodes = buildCommitNodes("owner/name", EXPECTED_COMMITS);
+
+  it("keys each commit <key>@<sha> with the subject as title, the whole message as content, and occurred_at canonical at the committer instant", () => {
+    expect(nodes[0]).toEqual({
+      nodeType: "commit",
+      sourceSystem: GIT_SOURCE_SYSTEM,
+      externalId: `owner/name@${SHA_C}`,
+      title: "Drop gone.txt and touch a and b",
+      content: "Drop gone.txt and touch a and b\n\nCloses #12 for real.\n\nAlso see cazzer/toastd#7 and `#99` in code.",
+      metadata: {
+        sha: SHA_C,
+        parents: [SHA_B],
+        author: "Caleb Brewer",
+        authored_at: "2026-09-04T18:43:52-04:00",
+        committed_at: "2026-09-04T19:00:00-04:00",
+        files_changed: 3,
+        occurred_at: "2026-09-04T23:00:00.000Z",
+      },
+    });
+    // A message with no body is its subject alone — no dangling blank line.
+    expect(nodes[1]).toMatchObject({
+      title: "Merge branch 'feature'",
+      content: "Merge branch 'feature'",
+      metadata: { parents: [SHA_A, SHA_D], files_changed: 0, occurred_at: "2026-09-03T08:00:00.000Z" },
+    });
+    expect(nodes[2]?.metadata).toEqual({
+      sha: SHA_A,
+      parents: [],
+      author: "Caleb Brewer",
+      authored_at: "2026-09-01T00:00:00Z",
+      committed_at: "2026-09-01T00:00:00Z",
+      files_changed: 2,
+      occurred_at: "2026-09-01T00:00:00.000Z",
+    });
+    expect(Object.keys(nodes[0]!.metadata!)).not.toContain("email");
+  });
+
+  it("trims the key as buildRepoTree does, and rejects a blank one or a committer instant that does not parse, naming the commit", () => {
+    expect(commitExternalId("k", SHA_C)).toBe(`k@${SHA_C}`);
+    expect(buildCommitNodes(" owner/name ", EXPECTED_COMMITS)[0]?.externalId).toBe(`owner/name@${SHA_C}`);
+    expect(buildCommitNodes("k", [])).toEqual([]);
+    expect(() => buildCommitNodes("  ", EXPECTED_COMMITS)).toThrow(/key must be a non-empty string/);
+
+    const badInstant = [{ ...EXPECTED_COMMITS[0]!, committedAt: "yesterday" }];
+    expect(() => buildCommitNodes("k", badInstant)).toThrow(InvalidEventTimeError);
+    expect(() => buildCommitNodes("k", badInstant)).toThrow(`(git/k@${SHA_C})`);
+    // The author instant is stored as printed and not validated: only the committer instant is the node's moment.
+    expect(buildCommitNodes("k", [{ ...EXPECTED_COMMITS[0]!, authoredAt: "whenever" }])[0]?.metadata).toMatchObject({ authored_at: "whenever" });
+  });
+});
+
+describe("isRepoSlug", () => {
+  it("accepts owner/name in GitHub's grammar and nothing else", () => {
+    expect(isRepoSlug("cazzer/breakdown")).toBe(true);
+    expect(isRepoSlug("gri-test-0123abcd/commits.v2_x")).toBe(true);
+    expect(isRepoSlug("bd")).toBe(false);
+    expect(isRepoSlug("a/b/c")).toBe(false);
+    expect(isRepoSlug("owner/")).toBe(false);
+    expect(isRepoSlug("/name")).toBe(false);
+    expect(isRepoSlug("-owner/name")).toBe(false);
+    expect(isRepoSlug("owner/name-")).toBe(false);
+    expect(isRepoSlug("owner /name")).toBe(false);
+    expect(isRepoSlug("owner/name@sha")).toBe(false);
+  });
+});
+
+describe("collectCommitReferences", () => {
+  it("names each distinct GitHub identity once under github, resolving a same-repo #N against the key and skipping code spans", () => {
+    // `extractIssueReferences` yields a message's cross-repository
+    // references before its same-repo ones; the order is its, not the text's.
+    expect(collectCommitReferences("owner/name", EXPECTED_COMMITS)).toEqual([
+      { sourceSystem: "github", externalId: "cazzer/toastd#7" },
+      { sourceSystem: "github", externalId: "owner/name#12" },
+    ]);
+    const again: GitCommit = { ...EXPECTED_COMMITS[1]!, subject: "See #12 and owner/name#12, then #12 again" };
+    expect(collectCommitReferences("owner/name", [again, ...EXPECTED_COMMITS])).toEqual([
+      { sourceSystem: "github", externalId: "owner/name#12" },
+      { sourceSystem: "github", externalId: "cazzer/toastd#7" },
+    ]);
+    expect(collectCommitReferences("owner/name", [])).toEqual([]);
+  });
+});
+
+describe("resolveCommitEdges", () => {
+  const ROOT_ID = "11111111-1111-4111-8111-111111111111";
+  const COMMIT_ID = "22222222-2222-4222-8222-222222222222";
+  const A_ID = "33333333-3333-4333-8333-333333333333";
+  const B_ID = "44444444-4444-4444-8444-444444444444";
+  const SRC_DIR_ID = "55555555-5555-4555-8555-555555555555";
+  const ISSUE_ID = "66666666-6666-4666-8666-666666666666";
+  const ids = new Map([
+    ["owner/name", ROOT_ID],
+    [`owner/name@${SHA_C}`, COMMIT_ID],
+    ["owner/name:src", SRC_DIR_ID],
+    ["owner/name:src/a.ts", A_ID],
+    ["owner/name:src/b.ts", B_ID],
+  ]);
+  const files = new Set(["owner/name:src/a.ts", "owner/name:src/b.ts"]);
+  const references = new Map([["owner/name#12", ISSUE_ID]]);
+
+  it("writes belongs-to at 1, touches at 0.8 to file rows alone, and mentions at 0.8 to what resolved, counting the rest", () => {
+    // `src` was a file in this commit's day and is a directory now: no
+    // `touches` to a directory, counted with the deleted `gone.txt`.
+    const commit: GitCommit = { ...EXPECTED_COMMITS[0]!, paths: ["src/a.ts", "src/b.ts", "gone.txt", "src"] };
+    const { edges, counts } = resolveCommitEdges({ key: "owner/name", commits: [commit], nodeIdByExternalId: ids, fileExternalIds: files, referenceIdByExternalId: references });
+    expect(edges).toEqual([
+      { srcId: COMMIT_ID, dstId: ROOT_ID, edgeType: "belongs-to", sourceSystem: "git", weight: 1 },
+      { srcId: COMMIT_ID, dstId: A_ID, edgeType: "touches", sourceSystem: "git", weight: 0.8 },
+      { srcId: COMMIT_ID, dstId: B_ID, edgeType: "touches", sourceSystem: "git", weight: 0.8 },
+      { srcId: COMMIT_ID, dstId: ISSUE_ID, edgeType: "mentions", sourceSystem: "git", weight: 0.8 },
+    ]);
+    // cazzer/toastd#7 is not in the map; `#99` sat inside a code span.
+    expect(counts).toEqual({ loaded: 1, touches: 2, skippedPaths: 2, mentions: 1, unresolvedReferences: 1 });
+  });
+
+  it("collapses repeated and equivalent references to one edge, and counts every reference unresolved when nothing resolved", () => {
+    // `#12` three ways is one identity under this key; `#999` is a second.
+    const repeated: GitCommit = { ...EXPECTED_COMMITS[0]!, subject: "Fix #12", body: "See #12 and owner/name#12, then #999.", paths: [] };
+    const resolved = resolveCommitEdges({ key: "owner/name", commits: [repeated], nodeIdByExternalId: ids, fileExternalIds: files, referenceIdByExternalId: references });
+    expect(resolved.edges.filter((e) => e.edgeType === "mentions")).toHaveLength(1);
+    expect(resolved.counts).toEqual({ loaded: 1, touches: 0, skippedPaths: 0, mentions: 1, unresolvedReferences: 1 });
+
+    // A key that is not a slug asks nothing: the loader passes an empty map.
+    const unresolved = resolveCommitEdges({ key: "owner/name", commits: [repeated], nodeIdByExternalId: ids, fileExternalIds: files, referenceIdByExternalId: new Map() });
+    expect(unresolved.edges.map((e) => e.edgeType)).toEqual(["belongs-to"]);
+    expect(unresolved.counts).toEqual({ loaded: 1, touches: 0, skippedPaths: 0, mentions: 0, unresolvedReferences: 2 });
+  });
+
+  it("writes nothing for no commits, and refuses a commit or root with no id in the batch — a loader bug, not history", () => {
+    expect(resolveCommitEdges({ key: "owner/name", commits: [], nodeIdByExternalId: new Map(), fileExternalIds: files, referenceIdByExternalId: references })).toEqual({
+      edges: [],
+      counts: { loaded: 0, touches: 0, skippedPaths: 0, mentions: 0, unresolvedReferences: 0 },
+    });
+    expect(() => resolveCommitEdges({ key: "owner/name", commits: [EXPECTED_COMMITS[1]!], nodeIdByExternalId: ids, fileExternalIds: files, referenceIdByExternalId: references })).toThrow(
+      `owner/name@${SHA_B} has no node id in this batch`,
+    );
+    expect(() => resolveCommitEdges({ key: "other", commits: [EXPECTED_COMMITS[0]!], nodeIdByExternalId: ids, fileExternalIds: files, referenceIdByExternalId: references })).toThrow(
+      "other has no node id in this batch",
+    );
   });
 });

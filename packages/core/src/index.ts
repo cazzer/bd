@@ -356,10 +356,12 @@ export {
   type Subtree,
   type GetSubtreeOptions,
 } from "./tree.js";
-// Git repository loader (git-repo-ingestor change): the pure mapping from
-// `git ls-files` records and file bytes to file/directory nodes and
-// `child_of` candidates, and the one-transaction write of a whole tree.
-// See git-repo.ts.
+// Git repository loader (git-repo-ingestor change; commits in
+// github-prs-and-commits): the pure mapping from `git ls-files` records
+// and file bytes to file/directory nodes and `child_of` candidates, the
+// pure parse of `git log` records into commit nodes and their
+// belongs-to/touches/mentions edges, and the one-transaction write of a
+// whole tree with its commits. See git-repo.ts.
 export {
   parseLsFiles,
   deriveRepoKey,
@@ -372,9 +374,21 @@ export {
   emptySkipCounts,
   resolveGitRepoEdges,
   loadGitRepoTree,
+  parseGitLog,
+  commitExternalId,
+  buildCommitNodes,
+  isRepoSlug,
+  collectCommitReferences,
+  resolveCommitEdges,
+  emptyCommitEdgeCounts,
   GIT_SOURCE_SYSTEM,
   FILE_NODE_TYPE,
   DIRECTORY_NODE_TYPE,
+  COMMIT_NODE_TYPE,
+  TOUCHES_EDGE_TYPE,
+  TOUCHES_WEIGHT,
+  COMMITS_DEFAULT,
+  GIT_LOG_FORMAT,
   GIT_EDGE_WEIGHT,
   MAX_FILE_BYTES,
   GENERATED_FILE_NAMES,
@@ -392,5 +406,10 @@ export {
   type WorkingTreeRead,
   type GitRepoEdgeCandidate,
   type GitRepoTree,
+  type GitCommit,
+  type CommitEdgeCounts,
+  type ResolveCommitEdgesInput,
+  type ResolveCommitEdgesResult,
+  type LoadGitRepoTreeOptions,
   type LoadGitRepoTreeResult,
 } from "./git-repo.js";
