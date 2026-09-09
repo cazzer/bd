@@ -21,6 +21,10 @@ import { degreeToRadius, searchResultToGraphData, weightToEdgeWidth, type GraphC
 import {
   ANNOTATES_EDGE_TYPE,
   buildAnnotationNeighbor,
+  collapseExpansion,
+  holdersForSearch,
+  resetToSeeds,
+  withExpansionHolders,
   buildAssertedLink,
   buildStandaloneNoteNode,
   cursorForExpansion,
@@ -617,5 +621,126 @@ describe("mergeNodePatch — a saved content edit's new title reaches the canvas
     const previous = graphOf([placed(makeNode({ id: "a" }), 0, 0)]);
     const merged = mergeNodePatch(previous, "not-here", { title: "x" });
     expect(merged.nodes).toHaveLength(1);
+  });
+});
+
+// bd-jar: collapsing an expansion. graph-explorer/spec.md's "Expansion is
+// reversible". The property that makes this non-trivial is that a node can
+// be on screen for more than one reason, so collapsing one of them must
+// not take it away.
+describe("collapseExpansion / resetToSeeds — holders (bd-jar)", () => {
+  function graphWith(ids: readonly string[], links: readonly GraphLink[] = []): GraphCanvasData {
+    return graphOf(
+      ids.map((id, i) => placed(makeNode({ id }), i * 10, i * 10)),
+      [...links],
+    );
+  }
+  const edge = (id: string, source: string, target: string): GraphLink => ({
+    id,
+    source,
+    target,
+    edgeType: "child_of",
+    sourceSystem: "git",
+    weight: 1,
+    family: "containment",
+    width: 5,
+  });
+
+  it("removes the nodes an expansion added and nothing else", () => {
+    const graph = graphWith(["seed", "a", "b"], [edge("e1", "a", "seed"), edge("e2", "b", "seed")]);
+    let holders = holdersForSearch([graph.nodes[0]!]);
+    holders = withExpansionHolders(holders, "seed", ["a", "b"]);
+
+    const { graph: after, removedIds } = collapseExpansion(graph, holders, "seed");
+    expect(after.nodes.map((n) => n.id)).toEqual(["seed"]);
+    expect(removedIds.sort()).toEqual(["a", "b"]);
+    expect(after.links).toEqual([]); // an edge goes with its endpoints
+  });
+
+  // The whole reason holders exist rather than a simple "added by" tag.
+  it("keeps a node that a second expansion also holds", () => {
+    const graph = graphWith(["p1", "p2", "shared"]);
+    let holders = holdersForSearch([graph.nodes[0]!, graph.nodes[1]!]);
+    holders = withExpansionHolders(holders, "p1", ["shared"]);
+    holders = withExpansionHolders(holders, "p2", ["shared"]);
+
+    const first = collapseExpansion(graph, holders, "p1");
+    expect(first.graph.nodes.map((n) => n.id)).toContain("shared");
+    expect(first.removedIds).toEqual([]);
+
+    // Collapsing the second one too finally releases it.
+    const second = collapseExpansion(first.graph, first.holders, "p2");
+    expect(second.removedIds).toEqual(["shared"]);
+  });
+
+  it("keeps a node that the query also holds, even after its expansion is collapsed", () => {
+    const graph = graphWith(["seed", "alsoSeed"]);
+    let holders = holdersForSearch(graph.nodes);
+    holders = withExpansionHolders(holders, "seed", ["alsoSeed"]);
+    const { graph: after, removedIds } = collapseExpansion(graph, holders, "seed");
+    expect(removedIds).toEqual([]);
+    expect(after.nodes.map((n) => n.id).sort()).toEqual(["alsoSeed", "seed"]);
+  });
+
+  it("never removes the collapsed node itself", () => {
+    const graph = graphWith(["p", "child"]);
+    let holders = holdersForSearch([graph.nodes[0]!]);
+    holders = withExpansionHolders(holders, "p", ["child"]);
+    const { graph: after } = collapseExpansion(graph, holders, "p");
+    expect(after.nodes.map((n) => n.id)).toEqual(["p"]);
+  });
+
+  // graph-explorer/spec.md: "everything remaining stays where it was".
+  it("leaves survivors at their exact positions, as the same objects", () => {
+    const graph = graphWith(["seed", "gone"]);
+    const seedBefore = graph.nodes[0] as PositionedNode;
+    const { x, y } = seedBefore;
+    let holders = holdersForSearch([graph.nodes[0]!]);
+    holders = withExpansionHolders(holders, "seed", ["gone"]);
+
+    const { graph: after } = collapseExpansion(graph, holders, "seed");
+    const seedAfter = after.nodes[0] as PositionedNode;
+    expect(seedAfter).toBe(seedBefore); // identity, not a copy — force-graph holds these by reference
+    expect(seedAfter.x).toBe(x);
+    expect(seedAfter.y).toBe(y);
+    expect(seedAfter.fx).toBe(x); // pinned, so the reheat cannot move it
+    expect(seedAfter.fy).toBe(y);
+  });
+
+  it("resetToSeeds drops every expansion at once and keeps the query's own nodes", () => {
+    const graph = graphWith(["s1", "s2", "e1", "e2"]);
+    let holders = holdersForSearch([graph.nodes[0]!, graph.nodes[1]!]);
+    holders = withExpansionHolders(holders, "s1", ["e1"]);
+    holders = withExpansionHolders(holders, "e1", ["e2"]);
+
+    const { graph: after, removedIds } = resetToSeeds(graph, holders);
+    expect(after.nodes.map((n) => n.id).sort()).toEqual(["s1", "s2"]);
+    expect(removedIds.sort()).toEqual(["e1", "e2"]);
+  });
+
+  it("resetToSeeds is a no-op when nothing has been expanded", () => {
+    const graph = graphWith(["s1", "s2"]);
+    const holders = holdersForSearch(graph.nodes);
+    const { graph: after, removedIds } = resetToSeeds(graph, holders);
+    expect(removedIds).toEqual([]);
+    expect(after.nodes).toHaveLength(2);
+  });
+
+  // Losing a node the person can SEE is worse than keeping one that
+  // collapse cannot reach, so an untracked node is kept by both paths.
+  it("keeps a node with no holder entry rather than silently deleting it", () => {
+    const graph = graphWith(["tracked", "untracked"]);
+    const holders = holdersForSearch([graph.nodes[0]!]);
+    expect(collapseExpansion(graph, holders, "tracked").graph.nodes.map((n) => n.id)).toContain("untracked");
+    expect(resetToSeeds(graph, holders).graph.nodes.map((n) => n.id)).toContain("untracked");
+  });
+
+  it("does not mutate the holder map it was given", () => {
+    const graph = graphWith(["p", "child"]);
+    let holders = holdersForSearch([graph.nodes[0]!]);
+    holders = withExpansionHolders(holders, "p", ["child"]);
+    const snapshot = new Map([...holders].map(([k, v]) => [k, [...v].sort().join(",")]));
+    collapseExpansion(graph, holders, "p");
+    expect(new Map([...holders].map(([k, v]) => [k, [...v].sort().join(",")]))).toEqual(snapshot);
   });
 });

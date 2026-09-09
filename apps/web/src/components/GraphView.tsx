@@ -122,6 +122,11 @@ import {
   withExpansionError,
   withExpansionLoading,
   withExpansionResult,
+  withExpansionHolders,
+  holdersForSearch,
+  collapseExpansion,
+  resetToSeeds,
+  type HolderMap,
   type ExpansionEntries,
   type UnlinkedNote,
 } from "../graph/expansion.js";
@@ -183,6 +188,17 @@ export function GraphView() {
   const [status, setStatus] = useState<Status>({ kind: "idle" });
   const [graph, setGraph] = useState<GraphCanvasData>(EMPTY_GRAPH);
   const [expansions, setExpansions] = useState<ExpansionEntries>(new Map());
+
+  /**
+   * Why each drawn node is on screen (bd-jar, graph/expansion.ts's
+   * `HolderMap`) — the query, or the expansions that introduced it, or
+   * several at once. Collapsing an expansion drops only the nodes left
+   * holding nothing, so a node reached two ways survives losing one of
+   * them. Kept beside the graph rather than on `GraphNode` because
+   * `mergeGraphData` merges nodes with `Object.assign`, which would
+   * replace a holder set rather than union it.
+   */
+  const [holders, setHolders] = useState<HolderMap>(new Map());
   const [expansionError, setExpansionError] = useState<string | null>(null);
   // The node the detail panel reflects (bd-hmd.6) — null means closed.
   // Deliberately just an id, not a copy of the node: DetailPanel always
@@ -394,6 +410,9 @@ export function GraphView() {
         // update() -> d3-force-3d's initializeNodes) and why this is
         // also the function bd-hmd.5's expansion will call.
         setGraph((previous) => mergeGraphData(previous, searchResultToGraphData(result)));
+        // A search replaces the view, so it replaces the holders too —
+        // the old map described nodes that are no longer drawn (bd-jar).
+        setHolders(holdersForSearch(searchResultToGraphData(result).nodes));
         // A fresh query replaces the whole view (unlike expansion, which
         // accumulates) — a node selected before this search may no
         // longer be drawn at all, so the panel closes rather than show
@@ -483,6 +502,11 @@ export function GraphView() {
       const parentPosition = parent && typeof parent.x === "number" && typeof parent.y === "number" ? { x: parent.x, y: parent.y } : undefined;
       return mergeExpansion(previous, { parentId: result.canonicalId, parentPosition, neighbors: result.neighbors });
     });
+    // bd-jar: record that this expansion is now a reason each neighbour
+    // is drawn. Outside the setGraph updater on purpose — two pieces of
+    // state, each updated once, rather than one updater with a side
+    // effect in it.
+    setHolders((previous) => withExpansionHolders(previous, result.canonicalId, result.neighbors.map((n) => n.nodeId)));
     // bd-e9n, design.md decision 5, review follow-up: expansion does NOT
     // bump `fitRequestId` — see that state's own doc comment above. An
     // earlier version did, which re-fit the whole view on the first
@@ -882,6 +906,47 @@ export function GraphView() {
   }, []);
 
   /**
+   * Collapse one node's expansion (bd-jar, graph-explorer/spec.md's
+   * "Expansion is reversible"). Drops the nodes that expansion added and
+   * nothing else holds, clears its expansion entry so the badge returns
+   * and a re-expansion refetches, and deselects if the selected node was
+   * one of the removed.
+   */
+  function handleCollapse(nodeId: string) {
+    setGraph((previousGraph) => {
+      const { graph: next, holders: nextHolders, removedIds } = collapseExpansion(previousGraph, holders, nodeId);
+      setHolders(nextHolders);
+      setExpansions((previous) => {
+        const entries = new Map(previous);
+        entries.delete(nodeId);
+        for (const id of removedIds) entries.delete(id); // a removed node's own expansion state goes with it
+        return entries;
+      });
+      if (selectedNodeId !== null && removedIds.includes(selectedNodeId)) {
+        setSelectedNodeId(null);
+        setDetailExpanded(false);
+        navigate(routeFor(null), "replace");
+      }
+      return next;
+    });
+  }
+
+  /** Discard every expansion, leaving the current search result — without re-running the query (bd-jar). */
+  function handleResetToSeeds() {
+    setGraph((previousGraph) => {
+      const { graph: next, holders: nextHolders, removedIds } = resetToSeeds(previousGraph, holders);
+      setHolders(nextHolders);
+      setExpansions(new Map());
+      if (selectedNodeId !== null && removedIds.includes(selectedNodeId)) {
+        setSelectedNodeId(null);
+        setDetailExpanded(false);
+        navigate(routeFor(null), "replace");
+      }
+      return next;
+    });
+  }
+
+  /**
    * TypePanel row click (bd-14q). Reads `focusedType` from this render's
    * own closure rather than from inside a `setFocusedType` updater —
    * this is a plain event handler, not one nested inside another state
@@ -971,6 +1036,9 @@ export function GraphView() {
   // bd-857: what the type control leads with — the types on the canvas,
   // not the store's. Recomputed only when `graph.nodes` changes identity.
   const drawnTypes = useMemo(() => drawnTypeCounts(graph.nodes), [graph.nodes]);
+
+  /** How many nodes have been expanded — gates the "Reset to results" control (bd-jar). */
+  const expandedNodeCount = expansions.size;
 
   // Right column width + GraphCanvas's `insetRight` (bd-e9n, design.md
   // decision 5) — a plain derivation of state already held, computed
@@ -1104,6 +1172,8 @@ export function GraphView() {
               onEdgeAsserted={handleEdgeAsserted}
               onEdgeRetracted={handleEdgeRetracted}
               onEdgeReweighted={handleEdgeReweighted}
+              isExpanded={expansions.has(selectedNodeId)}
+              onCollapse={() => handleCollapse(selectedNodeId)}
               defaultView={defaultViews.get(selectedNodeId) ?? null}
               onOpenDefaultView={handleOpenDefaultView}
             />
@@ -1112,10 +1182,26 @@ export function GraphView() {
       </div>
 
       {/* Bottom-left: unlinked-notes disclosure. Deliberately not gated on a search result: a standalone note can be created, and an unlinked one found, with nothing on screen at all. */}
-      <div className="pointer-events-none fixed bottom-4 left-4 z-20">
+      <div className="pointer-events-none fixed bottom-4 left-4 z-20 flex items-center gap-2">
         <div className="pointer-events-auto">
           <UnlinkedNotes onShow={handleShowUnlinkedNote} />
         </div>
+        {/*
+          bd-jar: the way back. Shown only once an expansion exists, since
+          with none it would reset to what is already drawn. Collapsing a
+          single node lives on that node (DetailPanel); this is the "undo
+          all of it" that used to require re-running the search.
+        */}
+        {expandedNodeCount > 0 && (
+          <button
+            type="button"
+            onClick={handleResetToSeeds}
+            className="glass pointer-events-auto rounded-xl px-3 py-2 text-xs font-medium text-fg hover:bg-surface-strong focus:outline-none focus:ring-2 focus:ring-accent"
+            title="Discard every expansion and return to the search result"
+          >
+            Reset to results
+          </button>
+        )}
       </div>
 
       {/* Bottom-center: expansion-error toast (used to be an inline banner under the header). */}

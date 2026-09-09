@@ -11,9 +11,12 @@ import {
   EDGE_WIDTH_MAX,
   EDGE_WIDTH_MIN,
   mergeGraphData,
+  NODE_RADIUS_CAP_DEGREE,
   NODE_RADIUS_MAX,
   NODE_RADIUS_MIN,
   NODE_RADIUS_SCALE,
+  NODE_RING_WIDTH_MAX,
+  degreeToRingWidth,
   searchResultToGraphData,
   setNodeDegree,
   weightToEdgeWidth,
@@ -76,17 +79,50 @@ function makeResult(nodes: SearchResultNode[], edges: SearchResultEdge[]): Searc
 // --- degree -> radius: "Node size encodes connectedness" ------------------
 
 describe("degreeToRadius", () => {
-  it("a hub with four times the degree draws at about twice (sqrt(4)) the radius, not four — both comfortably under NODE_RADIUS_MAX (see the cap-specific tests below for degrees large enough to actually hit it; the original 3-vs-30/10x demonstration no longer fits under the cap bd-4ye added, since NODE_RADIUS_MAX = NODE_RADIUS_MIN * 3 = 9 is well below radius(30))", () => {
+  it("a hub with four times the degree draws at about twice (sqrt(4)) the radius, not four", () => {
     const normal = degreeToRadius(1);
     const hub = degreeToRadius(4);
 
-    // NODE_RADIUS_SCALE = 4: radius(1) = 4*sqrt(1) = 4, radius(4) =
-    // 4*sqrt(4) = 8 — ratio 2, matching sqrt(4) exactly (both stay
-    // under NODE_RADIUS_MAX, so the cap does not distort the ratio).
-    expect(normal).toBeCloseTo(4, 5);
-    expect(hub).toBeCloseTo(8, 5);
-    expect(hub / normal).toBeCloseTo(2, 5);
+    // NODE_RADIUS_SCALE = 3: radius(1) = 3, radius(4) = 6 — ratio 2,
+    // matching sqrt(4) exactly (both under NODE_RADIUS_MAX, so the cap
+    // does not distort the ratio).
+    expect(normal).toBeCloseTo(3, 5);
+    expect(hub).toBeCloseTo(6, 5);
     expect(hub / normal).toBeCloseTo(Math.sqrt(4), 5);
+  });
+
+  // graph-explorer/spec.md's headline scenario, which the pre-bd-jar
+  // constants silently violated: at SCALE 4 / MAX 9 the cap engaged at
+  // degree 6, so for ANY pair above that the factor was 1, not three.
+  // This asserts it at the two ends of the store's real range instead of
+  // at a hand-picked pair that happens to fit.
+  it("a ten-fold degree difference gives about three times the radius, across the store's real range", () => {
+    for (const [low, high] of [
+      [1, 10],
+      [2, 20],
+    ] as const) {
+      const ratio = degreeToRadius(high) / degreeToRadius(low);
+      expect(ratio, `degree ${low} vs ${high}`).toBeGreaterThan(2.5);
+      expect(ratio, `degree ${low} vs ${high}`).toBeLessThan(3.5);
+    }
+  });
+
+  // The regression this retune exists to prevent. Measured distribution
+  // (live store, 2026-09-09): p50=2 p75=4 p90=7 p95=11 p99=22 max=329.
+  // The cap must not engage before the 99th percentile, or the encoding
+  // flattens exactly the nodes a reader is scanning for.
+  it("does not saturate before the store's 99th-percentile degree", () => {
+    const MEASURED_P90 = 7;
+    const MEASURED_P95 = 11;
+    const MEASURED_P99 = 22;
+    expect(degreeToRadius(MEASURED_P90)).toBeLessThan(NODE_RADIUS_MAX);
+    expect(degreeToRadius(MEASURED_P95)).toBeLessThan(NODE_RADIUS_MAX);
+    // Strictly increasing all the way up through p95 — no plateau in the
+    // band that holds the interesting nodes.
+    for (let d = 1; d < MEASURED_P95; d++) {
+      expect(degreeToRadius(d + 1), `degree ${d} -> ${d + 1}`).toBeGreaterThan(degreeToRadius(d));
+    }
+    expect(NODE_RADIUS_CAP_DEGREE).toBeGreaterThanOrEqual(MEASURED_P99 - 1);
   });
 
   it("scales with sqrt(degree), not degree itself", () => {
@@ -97,8 +133,9 @@ describe("degreeToRadius", () => {
     expect(degreeToRadius(0)).toBe(NODE_RADIUS_MIN);
   });
 
-  it("NODE_RADIUS_MAX is roughly 3x NODE_RADIUS_MIN, per design.md decision 3", () => {
-    expect(NODE_RADIUS_MAX).toBe(NODE_RADIUS_MIN * 3);
+  it("NODE_RADIUS_CAP_DEGREE is derived from the two constants, so it cannot drift from them", () => {
+    expect(NODE_RADIUS_CAP_DEGREE).toBeCloseTo((NODE_RADIUS_MAX / NODE_RADIUS_SCALE) ** 2, 10);
+    expect(degreeToRadius(NODE_RADIUS_CAP_DEGREE)).toBeCloseTo(NODE_RADIUS_MAX, 5);
   });
 
   it("a degree just under the one where sqrt scaling reaches the cap still draws at its own sqrt-scaled radius — the cap does not engage early", () => {
@@ -190,6 +227,43 @@ describe("colorForNodeType", () => {
   it("the fallback colour is not equal to any ranked type's colour", () => {
     const ranked = ["doc", "gh-issue", "repo"].map((t) => colorForNodeType(t, colors));
     expect(ranked).not.toContain(FALLBACK_COLOR);
+  });
+});
+
+// --- degree past the cap: the ring (bd-jar) --------------------------------
+//
+// graph-explorer/spec.md's "A hub past the bound is still identifiable ...
+// by a channel other than size". Radius stays capped so a hub cannot
+// swamp the canvas; the ring is what keeps a 329-degree node from
+// reading identically to a 22-degree one.
+
+describe("degreeToRingWidth", () => {
+  it("draws no ring for the 99% of nodes still on the size curve", () => {
+    for (const d of [0, 1, 2, 7, 11, 20, NODE_RADIUS_CAP_DEGREE]) {
+      expect(degreeToRingWidth(d), `degree ${d}`).toBe(0);
+    }
+  });
+
+  it("appears only once size has saturated, so a ring means exactly one thing", () => {
+    expect(degreeToRingWidth(NODE_RADIUS_CAP_DEGREE)).toBe(0);
+    expect(degreeToRingWidth(NODE_RADIUS_CAP_DEGREE + 1)).toBeGreaterThan(0);
+  });
+
+  it("grows monotonically with degree past the cap", () => {
+    const widths = [25, 40, 60, 98, 200, 329].map(degreeToRingWidth);
+    for (let i = 1; i < widths.length; i++) {
+      expect(widths[i]!).toBeGreaterThanOrEqual(widths[i - 1]!);
+    }
+  });
+
+  it("separates the store's largest hub from a node just past the cap", () => {
+    expect(degreeToRingWidth(329)).toBeGreaterThan(degreeToRingWidth(25) + 1);
+  });
+
+  it("is bounded, so the ring never outgrows the node it wraps", () => {
+    for (const d of [329, 5_000, Number.MAX_SAFE_INTEGER]) {
+      expect(degreeToRingWidth(d)).toBeLessThanOrEqual(NODE_RING_WIDTH_MAX);
+    }
   });
 });
 

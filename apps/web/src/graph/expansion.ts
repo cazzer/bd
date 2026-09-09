@@ -47,6 +47,7 @@
 
 import type { GraphCanvasData, GraphLink, GraphNode } from "./encoding.js";
 import { degreeToRadius, mergeGraphData, weightToEdgeWidth } from "./encoding.js";
+import { endpointId } from "./nodeEdges.js";
 import { familyKeyForEdgeType } from "./palette.js";
 import type { trpc } from "../trpc.js";
 
@@ -451,4 +452,130 @@ export function expandableNodeIds(entries: ExpansionEntries): ReadonlySet<string
     if (entry.hasMore) ids.add(id);
   }
   return ids;
+}
+
+// --- Collapsing an expansion (bd-jar, design.md decision 6) ---------------
+//
+// Until this, the canvas only ever grew: every function above merges, none
+// removes, so two clicks on a hub turned a legible 40-node result into a
+// blob and the only way back was to run the search again — losing every
+// other expansion with it.
+//
+// What makes removal non-trivial is that a node can be on screen for more
+// than one reason. A file reached by expanding a directory may also be a
+// search seed, or a neighbour of a second directory expanded later.
+// Collapsing one of those must not take it away.
+//
+// So presence is tracked as a set of HOLDERS per node: the sentinel
+// `QUERY_HOLDER` for anything the current search returned, plus the id of
+// every node whose expansion introduced it. Collapsing X removes X from
+// every holder set and drops only the nodes left holding nothing.
+//
+// Why holders and not an undo stack of graph snapshots: a stack grows
+// with exploration, and replaying a snapshot restores the POSITIONS
+// recorded in it, which is exactly the spatial-memory violation this
+// module's pin-then-merge choreography exists to prevent. Holders are
+// O(nodes) regardless of how long someone explores, and removal keeps the
+// surviving node OBJECTS — identity, `x`/`y` and all — so nothing that
+// stays on screen moves.
+//
+// Kept as a map beside the graph rather than a field on `GraphNode`
+// deliberately: `mergeGraphData` merges nodes with `Object.assign(existing,
+// incoming)`, which would REPLACE a holder set rather than union it, and
+// every merge path above would then have to remember to union by hand.
+// A structure no write path can silently corrupt beats one that relies on
+// every future caller remembering.
+
+/** Marks a node as belonging to the current search result rather than to any expansion. Not a node id — no node can be named "query" since ids are uuids. */
+export const QUERY_HOLDER = "query";
+
+export type HolderMap = ReadonlyMap<string, ReadonlySet<string>>;
+
+/** Every node in a fresh search result, held by the query alone. Replaces the previous map wholesale: a new search is a new view, and the old holders described nodes that are no longer drawn. */
+export function holdersForSearch(nodes: readonly GraphNode[]): HolderMap {
+  return new Map(nodes.map((node) => [node.id, new Set([QUERY_HOLDER])]));
+}
+
+/** Records that `parentId`'s expansion is now a reason each of `nodeIds` is on screen. A node already held by something else gains a holder rather than replacing it. */
+export function withExpansionHolders(holders: HolderMap, parentId: string, nodeIds: readonly string[]): HolderMap {
+  const next = new Map<string, Set<string>>();
+  for (const [id, set] of holders) next.set(id, new Set(set));
+  for (const id of nodeIds) {
+    const set = next.get(id) ?? new Set<string>();
+    set.add(parentId);
+    next.set(id, set);
+  }
+  // The parent itself is held by whatever put it on screen; expanding it
+  // does not make it hold itself, or collapsing it would remove it.
+  return next;
+}
+
+/** Adds a single node under one holder — for the standalone-note and annotation paths, which add a node without being an expansion. */
+export function withHolder(holders: HolderMap, nodeId: string, holder: string): HolderMap {
+  return withExpansionHolders(holders, holder, [nodeId]);
+}
+
+function pruneTo(previous: GraphCanvasData, keptIds: ReadonlySet<string>): GraphCanvasData {
+  // Pin first: the survivors keep their exact positions, so removing part
+  // of the graph never re-lays-out the part that stays (graph-explorer/
+  // spec.md, "everything remaining stays where it was").
+  pinPlacedNodes(previous.nodes as readonly PositionedNode[]);
+  return {
+    // The SAME node objects, filtered — not copies. force-graph holds
+    // these by reference and has written x/y onto them.
+    nodes: previous.nodes.filter((node) => keptIds.has(node.id)),
+    links: previous.links.filter((link) => keptIds.has(endpointId(link.source)) && keptIds.has(endpointId(link.target))),
+  };
+}
+
+export interface CollapseResult {
+  graph: GraphCanvasData;
+  holders: HolderMap;
+  /** Ids actually removed — the caller drops their expansion entries so a re-expansion refetches. */
+  removedIds: string[];
+}
+
+/**
+ * Undoes one node's expansion. `parentId` itself always stays: it is on
+ * screen for whatever reason put it there, which expanding it did not
+ * change.
+ */
+export function collapseExpansion(previous: GraphCanvasData, holders: HolderMap, parentId: string): CollapseResult {
+  const next = new Map<string, Set<string>>();
+  const removedIds: string[] = [];
+  for (const [id, set] of holders) {
+    const without = new Set(set);
+    without.delete(parentId);
+    if (without.size === 0 && id !== parentId) {
+      removedIds.push(id);
+      continue;
+    }
+    next.set(id, without);
+  }
+  // A node with no holder entry at all (added before this map existed, or
+  // by a path that forgot to record one) is kept rather than silently
+  // deleted — losing a node the person can see is worse than keeping one
+  // collapse cannot reach.
+  const keptIds = new Set(previous.nodes.filter((n) => !removedIds.includes(n.id)).map((n) => n.id));
+  return { graph: pruneTo(previous, keptIds), holders: next, removedIds };
+}
+
+/** Discards every expansion, leaving the current search result. Does not re-run the query — the nodes are already here. */
+export function resetToSeeds(previous: GraphCanvasData, holders: HolderMap): CollapseResult {
+  const next = new Map<string, Set<string>>();
+  const removedIds: string[] = [];
+  for (const node of previous.nodes) {
+    const set = holders.get(node.id);
+    if (set === undefined) {
+      next.set(node.id, new Set([QUERY_HOLDER])); // unknown provenance — kept, see collapseExpansion
+      continue;
+    }
+    if (!set.has(QUERY_HOLDER)) {
+      removedIds.push(node.id);
+      continue;
+    }
+    next.set(node.id, new Set([QUERY_HOLDER]));
+  }
+  const keptIds = new Set(previous.nodes.filter((n) => !removedIds.includes(n.id)).map((n) => n.id));
+  return { graph: pruneTo(previous, keptIds), holders: next, removedIds };
 }

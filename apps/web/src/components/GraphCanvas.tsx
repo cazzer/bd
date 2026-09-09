@@ -60,7 +60,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import ForceGraph2D, { type ForceGraphMethods } from "react-force-graph-2d";
 import { graphAriaSummary, nodeAccessibleDescription } from "../graph/accessibility.js";
-import type { GraphCanvasData, GraphLink, GraphNode } from "../graph/encoding.js";
+import { degreeToRingWidth, type GraphCanvasData, type GraphLink, type GraphNode } from "../graph/encoding.js";
 import { releasePins, type PositionedNode } from "../graph/expansion.js";
 import { robustBbox, ROBUST_BBOX_MIN_POINTS } from "../graph/fitBounds.js";
 import { HALO_TIER_FOCUSED, HALO_TIER_NEIGHBOR, HALO_TIER_SEED, HALO_TIER_SELECTED, selectHaloedNodes } from "../graph/haloBudget.js";
@@ -425,6 +425,23 @@ function drawNode(node: DrawableNode, ctx: CanvasRenderingContext2D, globalScale
   ctx.arc(x, y, node.radius, 0, 2 * Math.PI);
   ctx.fillStyle = fillColor;
   ctx.fill();
+
+  // bd-jar: degree past the radius cap, carried as a ring. Radius is
+  // deliberately bounded (encoding.ts's NODE_RADIUS_MAX) so a 329-degree
+  // hub cannot swamp the canvas — but bounded alone made every node past
+  // the cap identical, so this is what still separates them. Stroked
+  // just inside the circle's edge, in the node's own type colour, so it
+  // reads as "more of this node" rather than as a second object.
+  const ringWidth = degreeToRingWidth(node.degree);
+  if (ringWidth > 0) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(x, y, node.radius + ringWidth / 2, 0, 2 * Math.PI);
+    ctx.strokeStyle = fillColor;
+    ctx.lineWidth = ringWidth;
+    ctx.stroke();
+    ctx.restore();
+  }
 
   if (expandableNodeIds.has(node.id)) {
     const badgeRadius = EXPANDABLE_BADGE_RADIUS_PX / globalScale;

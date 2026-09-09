@@ -118,6 +118,10 @@ export interface DetailPanelProps {
    * (renderer null) names nothing to open. The panel only ever offers,
    * never navigates on its own.
    */
+  /** Whether this node has been expanded, so the panel can offer to undo it (bd-jar). */
+  isExpanded?: boolean;
+  /** "Collapse" was chosen — GraphView owns the graph and does the removal (graph/expansion.ts's `collapseExpansion`). */
+  onCollapse?: () => void;
   defaultView?: ResolvedDefaultView | null;
   /** "Open as feed · …" / "Open as code · …" / "Open as timeline · …" was chosen — GraphView.tsx pushes `/feed?view=<id>`, `/code?view=<id>&node=<selected>`, or `/timeline?view=<id>&node=<selected>` (it owns the guards a push out of the graph must disarm first, so the navigation is its call, not this panel's). */
   onOpenDefaultView?: (view: OfferedView) => void;
@@ -508,7 +512,7 @@ function ConnectForm({ selfId, allNodes, onAsserted }: { selfId: string; allNode
   );
 }
 
-export function DetailPanel({ nodeId, allNodes, allLinks, onClose, onExpandedChange, onContentSaved, onAnnotated, onEdgeAsserted, onEdgeRetracted, onEdgeReweighted, defaultView, onOpenDefaultView }: DetailPanelProps) {
+export function DetailPanel({ nodeId, allNodes, allLinks, onClose, onExpandedChange, onContentSaved, onAnnotated, onEdgeAsserted, onEdgeRetracted, onEdgeReweighted, isExpanded, onCollapse, defaultView, onOpenDefaultView }: DetailPanelProps) {
   const [state, setState] = useState<FetchState>({ kind: "loading" });
   // bd-e9n, design.md decision 6 — see this file's header. Defaults to
   // "summary" on every mount (a fresh `nodeId`, per App.tsx's `key`).
@@ -710,6 +714,23 @@ export function DetailPanel({ nodeId, allNodes, allLinks, onClose, onExpandedCha
           <InfoRow label="source" value={graphNode.sourceSystem} />
           <InfoRow label="degree" value={String(graphNode.degree)} />
         </div>
+      )}
+
+      {/*
+        bd-jar: undo THIS node's expansion. Offered only when it has one,
+        because with none it would remove nothing. Sits above the
+        "Open as ..." offer since it acts on the canvas the person is
+        looking at, where that one navigates away.
+      */}
+      {isExpanded && onCollapse && (
+        <button
+          type="button"
+          onClick={onCollapse}
+          className="mb-3 w-full rounded-lg border border-hairline px-3 py-1.5 text-left text-xs font-medium text-fg hover:bg-surface-strong focus:outline-none focus:ring-2 focus:ring-accent"
+          title="Remove the neighbours this node's expansion added"
+        >
+          Collapse expansion
+        </button>
       )}
 
       {offer && onOpenDefaultView && (

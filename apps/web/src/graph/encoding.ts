@@ -41,8 +41,13 @@ export type SearchResultEdge = FoundSearchResult["edges"][number];
 // "Size is stable across views" scenario), the same way its colour
 // (palette.ts) never depends on what else is in the result.
 
-/** Pixels of radius per unit of sqrt(degree). */
-export const NODE_RADIUS_SCALE = 4;
+/**
+ * Pixels of radius per unit of sqrt(degree).
+ *
+ * Retuned 4 -> 3 (bd-jar) together with NODE_RADIUS_MAX, to move where
+ * the cap engages. See that constant for the measurement that forced it.
+ */
+export const NODE_RADIUS_SCALE = 3;
 
 /**
  * Floor, not a base added to every value: sqrt(0) = 0, which would draw
@@ -54,21 +59,65 @@ export const NODE_RADIUS_SCALE = 4;
 export const NODE_RADIUS_MIN = 3;
 
 /**
- * Ceiling on a node's radius (bd-4ye, design.md decision 3: "adds a
- * ceiling ... at roughly 3x NODE_RADIUS_MIN — the same 'about a factor
- * of three, not ten' language the existing spec requirement already
- * uses for a 10x-degree hub, now enforced as an actual cap rather than
- * left as an emergent property of sqrt scaling that a large enough
- * degree spread can still blow past"). Radius stays monotonic and
- * sqrt-scaled up to this ceiling; a degree large enough to blow past it
- * draws at exactly this value instead, same as any other node past the
- * cap — graph-explorer/spec.md's "A hub above the cap is drawn at the
- * cap radius" scenario. This never touches `degree` itself — a node's
- * real, uncapped degree stays visible in the detail panel regardless of
- * whether its drawn radius hit the ceiling (DetailPanel.tsx's meta row
- * reads `degree` directly, never `radius`).
+ * Ceiling on a node's radius. Introduced by bd-4ye so a hub could not
+ * swamp the canvas; RAISED from 3x to 14 by bd-jar, because the value it
+ * was set to made the whole channel useless above the 90th percentile.
+ *
+ * The measurement (live store, 2026-09-09): degree p50=2, p75=4, p90=7,
+ * p95=11, p99=22, max=329. At the old SCALE 4 / MAX 9, the cap engaged
+ * where `4*sqrt(d) >= 9`, i.e. **degree 6** — the p90. So roughly one
+ * node in ten drew at an identical 9px, and it was the top tenth: every
+ * hub a reader is scanning for, flattened into one size. In a 40-node
+ * sample search, 16 nodes spanning degree 6 to 98 were the same size.
+ *
+ * That also silently violated this capability's own scenario "one node
+ * has ten times the degree of another -> its radius is larger by a
+ * factor of about three": above degree 6 the actual factor was 1.
+ *
+ * SCALE 3 / MAX 14 moves the cap to `3*sqrt(d) >= 14`, i.e. degree ~22 —
+ * the measured p99. 99% of nodes now sit on the discriminating sqrt
+ * curve where a 10x degree difference really is ~3.16x radius (d=2 ->
+ * 4.2, d=11 -> 10.0, d=20 -> 13.4). Raising the cap further is not the
+ * answer: uncapped sqrt puts the 329-degree hub at a 54px radius, which
+ * is exactly the swamping bd-4ye added the cap to prevent. Degree past
+ * the cap is carried by `degreeToRingWidth` instead.
+ *
+ * This never touches `degree` itself — a node's real, uncapped degree
+ * stays visible in the detail panel regardless of whether its drawn
+ * radius hit the ceiling (DetailPanel.tsx's meta row reads `degree`
+ * directly, never `radius`).
  */
-export const NODE_RADIUS_MAX = NODE_RADIUS_MIN * 3;
+export const NODE_RADIUS_MAX = 14;
+
+/**
+ * Degree at which the radius saturates — everything above this draws at
+ * NODE_RADIUS_MAX and is separated by the ring instead. Derived from the
+ * two constants above rather than restated, so it cannot drift from them.
+ */
+export const NODE_RADIUS_CAP_DEGREE = (NODE_RADIUS_MAX / NODE_RADIUS_SCALE) ** 2;
+
+/** Ring width in pixels per doubling of degree past the cap. */
+export const NODE_RING_WIDTH_PER_DOUBLING = 0.9;
+
+/** Ceiling on the ring, so the store's largest hub stays a node rather than becoming a target. */
+export const NODE_RING_WIDTH_MAX = 4;
+
+/**
+ * The channel that carries degree once radius has saturated (bd-jar,
+ * design.md decision 5) — graph-explorer/spec.md's "A hub past the bound
+ * is still identifiable ... by a channel other than size".
+ *
+ * 0 at or below the cap, so nothing changes for 99% of nodes and the
+ * ring means exactly one thing when it appears: "this node is off the
+ * size scale". Grows with log2 of how far past the cap the degree is, so
+ * the store's spread from 22 to 329 (nearly four doublings) stays
+ * legible without the ring outgrowing the node it wraps.
+ */
+export function degreeToRingWidth(degree: number): number {
+  if (degree <= NODE_RADIUS_CAP_DEGREE) return 0;
+  const doublings = Math.log2(degree / NODE_RADIUS_CAP_DEGREE);
+  return Math.min(NODE_RING_WIDTH_MAX, doublings * NODE_RING_WIDTH_PER_DOUBLING);
+}
 
 export function degreeToRadius(degree: number): number {
   return Math.min(NODE_RADIUS_MAX, Math.max(NODE_RADIUS_MIN, NODE_RADIUS_SCALE * Math.sqrt(Math.max(0, degree))));
