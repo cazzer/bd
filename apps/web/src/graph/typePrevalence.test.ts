@@ -7,7 +7,7 @@
 
 import { describe, expect, it } from "vitest";
 import type { GraphLink, GraphNode } from "./encoding.js";
-import { drawnTypeCounts, rankNeighborTypes, splitPaletteOverflow, topStoreTypes, type TypeCount } from "./typePrevalence.js";
+import { drawnTypeCounts, rankNeighborTypes, splitPaletteOverflow, topStoreTypes, typeColorsForStore, type TypeCount } from "./typePrevalence.js";
 import { assignTypeColors, colorForNodeType, FALLBACK_COLOR } from "./palette.js";
 
 function makeNode(id: string, nodeType: string): GraphNode {
@@ -186,5 +186,57 @@ describe("splitPaletteOverflow", () => {
     const { coloured, overflow } = splitPaletteOverflow([count("a", 3), count("b", 1)], (t) => colorForNodeType(t, colors), FALLBACK_COLOR);
     expect(overflow).toEqual([]);
     expect(coloured).toHaveLength(2);
+  });
+});
+
+// bd-v1y review: the cross-view colour invariant. timeline-view/spec.md's
+// "A type looks the same across views" was, until this helper existed,
+// maintained by two .tsx files independently performing the same
+// expression — and components carry no tests in this repo, so nothing
+// could have noticed one drifting from the other.
+describe("typeColorsForStore — one derivation for every view", () => {
+  const summary: TypeCount[] = [
+    { nodeType: "gh-pr", count: 584 },
+    { nodeType: "file", count: 565 },
+    { nodeType: "directory", count: 193 },
+    { nodeType: "gh-issue", count: 192 },
+    { nodeType: "work_item", count: 82 },
+    { nodeType: "commit", count: 78 },
+    { nodeType: "repo", count: 17 },
+    { nodeType: "openspec-spec", count: 14 },
+    { nodeType: "doc", count: 2 },
+  ];
+
+  it("assigns by store-wide prevalence rank, not by input order", () => {
+    const shuffled = [...summary].reverse();
+    expect([...typeColorsForStore(shuffled)]).toEqual([...typeColorsForStore(summary)]);
+  });
+
+  it("gives the same type the same colour whichever view asks", () => {
+    // Two callers, same store summary, must agree entry for entry.
+    const graphSide = typeColorsForStore(summary);
+    const timelineSide = typeColorsForStore(summary);
+    for (const t of summary) {
+      expect(colorForNodeType(t.nodeType, timelineSide)).toBe(colorForNodeType(t.nodeType, graphSide));
+    }
+  });
+
+  it("takes the WHOLE summary, so a caller cannot narrow the ranking and shift every colour", () => {
+    // The specific drift this guards: "the palette only has eight slots
+    // anyway", so rank the top 8 and drop the rest. That changes nothing
+    // for the first eight and turns the ninth from the fallback into
+    // whatever slot the truncation frees — a different colour in one view.
+    const truncated = assignTypeColors(topStoreTypes(summary, 8).map((t) => t.nodeType));
+    const full = typeColorsForStore(summary);
+    for (const t of summary.slice(0, 8)) {
+      expect(colorForNodeType(t.nodeType, truncated)).toBe(colorForNodeType(t.nodeType, full));
+    }
+    // ...and the point: they part company past the palette.
+    expect(truncated.has("doc")).toBe(false);
+    expect(colorForNodeType("doc", full)).toBe(FALLBACK_COLOR);
+  });
+
+  it("is empty for an empty store rather than throwing", () => {
+    expect([...typeColorsForStore([])]).toEqual([]);
   });
 });

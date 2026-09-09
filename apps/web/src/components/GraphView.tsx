@@ -134,8 +134,7 @@ import {
   type ExpansionEntries,
   type UnlinkedNote,
 } from "../graph/expansion.js";
-import { assignTypeColors } from "../graph/palette.js";
-import { drawnTypeCounts, rankNeighborTypes, topStoreTypes, type TypeCount } from "../graph/typePrevalence.js";
+import { drawnTypeCounts, rankNeighborTypes, topStoreTypes, typeColorsForStore, type TypeCount } from "../graph/typePrevalence.js";
 import { endpointId } from "../graph/nodeEdges.js";
 import { navigate } from "../lib/navigate.js";
 import { graphRouteFromSearch, parseRoute, type GraphRoute } from "../lib/route.js";
@@ -1060,10 +1059,7 @@ export function GraphView() {
    * GraphCanvas, TypePanel, and SearchBar so none of them can disagree
    * about what colour a type is.
    */
-  const typeColors = useMemo(() => {
-    const rankedTypeNames = topStoreTypes(nodeTypeCounts, nodeTypeCounts.length).map((t) => t.nodeType);
-    return assignTypeColors(rankedTypeNames);
-  }, [nodeTypeCounts]);
+  const typeColors = useMemo(() => typeColorsForStore(nodeTypeCounts), [nodeTypeCounts]);
 
   // The edge legend (bd-o1e, graph/edgeLegend.ts): derived from the DRAWN
   // links, so it names the relations and source systems on this canvas

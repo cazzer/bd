@@ -20,6 +20,7 @@
 
 import type { GraphLink, GraphNode } from "./encoding.js";
 import { endpointId } from "./nodeEdges.js";
+import { assignTypeColors } from "./palette.js";
 
 export interface TypeCount {
   nodeType: string;
@@ -126,4 +127,26 @@ export function splitPaletteOverflow(
     (colorOf(row.nodeType) === fallbackColor ? overflow : coloured).push(row);
   }
   return { coloured, overflow };
+}
+
+/**
+ * The one derivation of "what colour is each node type" (bd-v1y review,
+ * tasks.md 5.3).
+ *
+ * Every view that draws a node type reads this, so a `commit` is the
+ * same green in the graph, the type panel, the search bar and the
+ * timeline. That cross-view agreement is a spec requirement
+ * (timeline-view: "A type looks the same across views"), and until this
+ * existed it was maintained by two `.tsx` files independently performing
+ * the same three-call expression — with no test able to notice if one
+ * drifted, since components in this repo carry no tests. A plausible
+ * cleanup on either side ("the palette only has eight slots anyway", so
+ * `topStoreTypes(counts, 8)`) would have silently given a type one
+ * colour in one view and another elsewhere.
+ *
+ * Takes the full store summary, not a pre-ranked list: the ranking IS
+ * the part that has to match.
+ */
+export function typeColorsForStore(nodeTypes: readonly TypeCount[]): Map<string, string> {
+  return assignTypeColors(topStoreTypes(nodeTypes, nodeTypes.length).map((t) => t.nodeType));
 }

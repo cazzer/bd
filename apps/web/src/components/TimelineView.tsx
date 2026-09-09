@@ -111,8 +111,8 @@
 
 import { TRPCClientError } from "@trpc/client";
 import { useEffect, useMemo, useState, type CSSProperties, type MouseEvent } from "react";
-import { assignTypeColors, colorForNodeType } from "../graph/palette.js";
-import { topStoreTypes, type TypeCount } from "../graph/typePrevalence.js";
+import { colorForNodeType } from "../graph/palette.js";
+import { typeColorsForStore, type TypeCount } from "../graph/typePrevalence.js";
 import { extractLinks, pickRowFields } from "../lib/feedRow.js";
 import { navigate } from "../lib/navigate.js";
 import { formatRoute, type GraphRoute } from "../lib/route.js";
@@ -174,6 +174,19 @@ interface ReadyPage {
   key: string;
   viewId: string;
   node: string;
+  /**
+   * The narrowing these rows were LOADED under (bd-v1y review).
+   *
+   * Distinct from the address's current `chosen`, and the distinction is
+   * load-bearing: while a new page is in flight the previous page's rows
+   * stay on screen dimmed, so a chip the person just selected is already
+   * in the address's set but has no rows in the shown page yet. Counting
+   * against the address made such a chip print "0" — a claim that there
+   * are none, about rows that had not been read. Counting against this
+   * instead makes the deselected-chip guard fire for exactly the types
+   * the shown rows cannot speak for.
+   */
+  chosen: readonly string[] | null;
   rows: TimelineRow[];
   hasMore: boolean;
   nextCursor: TimelineCursor | null;
@@ -260,15 +273,13 @@ export function TimelineView({ viewId, node, types }: TimelineViewProps) {
   }, []);
 
   /**
-   * The SAME derivation GraphView performs (design.md decision 8):
-   * `getStoreSummary().nodeTypes` ranked by `topStoreTypes`'s comparator
-   * and mapped onto palette.ts's categorical slots in that order, so a
-   * type is the same colour in both views. Deliberately duplicated
-   * rather than extracted: the shared hook tasks.md 5.3 suggests would
-   * live in files another agent owns this session — worth doing, and
-   * left as a follow-up rather than a merge conflict.
+   * The same map GraphView draws from (design.md decision 8), now via
+   * one shared derivation rather than two copies of the same expression
+   * — see `typeColorsForStore`. That is what makes "a type looks the
+   * same across views" a property of the code rather than of two files
+   * happening to agree.
    */
-  const typeColors = useMemo(() => assignTypeColors(topStoreTypes(nodeTypeCounts, nodeTypeCounts.length).map((t) => t.nodeType)), [nodeTypeCounts]);
+  const typeColors = useMemo(() => typeColorsForStore(nodeTypeCounts), [nodeTypeCounts]);
 
   // The view, keyed on `viewId`: the shell re-renders this component with
   // a new id when the address changes view (same `key`, so no remount);
@@ -382,6 +393,7 @@ export function TimelineView({ viewId, node, types }: TimelineViewProps) {
           key,
           viewId: forViewId,
           node: anchorId,
+          chosen,
           rows: answer.rows,
           hasMore: answer.hasMore,
           nextCursor: answer.nextCursor,
@@ -536,7 +548,11 @@ export function TimelineView({ viewId, node, types }: TimelineViewProps) {
                 // nothing loaded there is nothing to count, and a "0"
                 // against no page at all would read as a claim about the
                 // store rather than about what is shown.
-                const count = shown === null || shown.rows.length === 0 ? null : chipCountLabel(type, selection?.chosen ?? null, rowTypeCounts);
+                // `shown.chosen`, not `selection.chosen`: the counts
+                // describe the rows on screen, so the narrowing they are
+                // judged against has to be the one those rows were loaded
+                // under. See ReadyPage.chosen.
+                const count = shown === null || shown.rows.length === 0 ? null : chipCountLabel(type, shown.chosen, rowTypeCounts);
                 return (
                   <button
                     key={type}
@@ -546,12 +562,25 @@ export function TimelineView({ viewId, node, types }: TimelineViewProps) {
                     onClick={() => toggleChip(type)}
                     className={`flex min-h-11 items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium focus:outline-none focus:ring-2 focus:ring-accent sm:min-h-0 ${
                       pressed ? "border-accent/60 bg-accent/20 text-fg" : "border-hairline bg-surface text-fg-muted hover:text-fg"
-                    } ${count?.empty === true ? "opacity-60" : ""}`}
+                    }`}
                   >
                     <span aria-hidden="true" className="size-2 shrink-0 rounded-full" style={{ backgroundColor: colorForNodeType(type, typeColors) }} />
                     {type}
+                    {/*
+                      bd-v1y review: the count is the ONLY channel saying
+                      "this would show nothing". An earlier version also
+                      faded an empty chip with opacity-60 — but `empty` is
+                      only ever true for a chip that IS selected, and a
+                      deselected chip stayed at full opacity, so dim meant
+                      on-but-empty and bright meant off. A reader decoding
+                      "faded means off" got it exactly backwards, and the
+                      fade was borrowing the affordance the pressed state
+                      already spends. Emphasis is left to aria-pressed and
+                      the border, and the number carries emptiness on its
+                      own.
+                    */}
                     {count?.text !== null && count?.text !== undefined && (
-                      <span className="font-mono tabular-nums text-fg-muted">{count.text}</span>
+                      <span className={`font-mono tabular-nums ${count.empty ? "text-fg-muted/60" : "text-fg-muted"}`}>{count.text}</span>
                     )}
                   </button>
                 );
@@ -674,7 +703,13 @@ function TimelineRowItem({ row, typeColors }: TimelineRowItemProps) {
   const hasFields = fields.status !== null || fields.priority !== null || fields.assignee !== null;
 
   return (
-    <div data-node-id={row.id} data-node-type={row.nodeType} title={aside} className="glass flex items-stretch justify-between gap-3 p-3 hover:bg-surface-strong">
+    // No `title` on the row container (bd-v1y review): it held the same
+    // string as the sr-only span below, and assistive tech that surfaces
+    // `title` as a description would announce that sentence twice on
+    // every one of fifty rows. Before this change the two held DIFFERENT
+    // strings, so the duplication arrived with it. The hover affordance
+    // moved to the type label, which is aria-hidden.
+    <div data-node-id={row.id} data-node-type={row.nodeType} className="glass flex items-stretch justify-between gap-3 p-3 hover:bg-surface-strong">
       <span aria-hidden="true" style={{ backgroundColor: color }} className="w-1 shrink-0 rounded-full" />
       <div className="min-w-0 flex-1">
         <p className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
@@ -690,7 +725,15 @@ function TimelineRowItem({ row, typeColors }: TimelineRowItemProps) {
           >
             {row.title || "(untitled)"}
           </a>
-          <span aria-hidden="true" style={{ color }} className="shrink-0 text-[11px]">
+          {/*
+            The aside hangs here, on the visible type label — not on the
+            row container. Mouse readers keep the hover reachability the
+            spec asks for ("remains reachable for a row the person
+            inspects"), and because this span is aria-hidden the string
+            reaches the accessibility tree exactly once, through the
+            sr-only span below.
+          */}
+          <span aria-hidden="true" title={aside} style={{ color }} className="shrink-0 text-[11px]">
             {row.nodeType}
           </span>
         </p>

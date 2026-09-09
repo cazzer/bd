@@ -52,16 +52,28 @@ A timeline row SHALL carry a visual indication of its node type, drawn from the 
 - **WHEN** every row on a page shares the same source system and the same relation to the anchor
 - **THEN** that shared text does not occupy each row's primary content, and remains reachable for a row the person inspects
 
-### Requirement: Type chips report what they would show
+### Requirement: Type chips report what the loaded page holds
 
-When the timeline offers type chips, each chip SHALL report how many of the anchor's timed neighbours it accounts for under the current narrowing, so that a person can see a page's type composition and predict what toggling a chip would do without toggling it. A chip that would show nothing SHALL be distinguishable from one that would show many.
+When the timeline offers type chips, each chip that is part of the current narrowing SHALL report how many of the loaded rows it accounts for, under a statement of that scope, so that a person can see a page's type composition and predict what deselecting a chip would do without deselecting it. A chip that accounts for none of the loaded rows SHALL be distinguishable from one that accounts for many. A chip OUTSIDE the current narrowing SHALL report no number at all.
+
+That last clause is the honest limit, not an omission. A deselected chip's rows were never read, so any number shown for it would be invented — and "0" specifically would assert there are none, which is the one actively false reading available. Answering "what would this deselected chip show" needs a per-type read the timeline deliberately does not perform.
 
 #### Scenario: Composition is visible from the chips
 
-- **WHEN** a timeline's rows are entirely of one type although its view names five
-- **THEN** the chips show that concentration, with the other four reporting no items
+- **WHEN** a timeline's loaded rows are entirely of one type, and the other types its view names are also selected
+- **THEN** the chips show that concentration, with the others reporting no items, under a caption naming the loaded rows as the scope of every count
 
 #### Scenario: A chip predicts its own effect
 
-- **WHEN** a person considers deselecting a chip
-- **THEN** the chip states how many items it accounts for, so the effect of deselecting it is known in advance
+- **WHEN** a person considers deselecting a chip that is currently selected
+- **THEN** the chip states how many of the loaded rows it accounts for, so the effect of deselecting it is known in advance
+
+#### Scenario: A deselected chip claims nothing
+
+- **WHEN** a chip is not part of the current narrowing, so none of its rows have been read
+- **THEN** it reports no count rather than reporting zero
+
+#### Scenario: A newly selected chip does not claim zero while its rows load
+
+- **WHEN** a person selects a chip and the page for the widened narrowing has not yet arrived, so the previous page's rows are still on screen
+- **THEN** that chip reports no count until rows loaded under the new narrowing are shown, rather than reporting zero against rows that could not have contained it
