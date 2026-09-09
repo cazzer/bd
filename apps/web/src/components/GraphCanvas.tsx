@@ -67,7 +67,7 @@ import { HALO_TIER_FOCUSED, HALO_TIER_NEIGHBOR, HALO_TIER_SEED, HALO_TIER_SELECT
 import { placeLabels, type LabelCandidate, type LabelPlacement } from "../graph/labelPlacement.js";
 import { shouldLabel, truncateLabel } from "../graph/labelPolicy.js";
 import { edgesTouchingNode, endpointId } from "../graph/nodeEdges.js";
-import { colorForNodeType, edgeFamily } from "../graph/palette.js";
+import { colorForNodeType, edgeFamily, type EdgeFamilyKey } from "../graph/palette.js";
 import { buildLinkTooltip, buildNodeTooltip } from "../graph/tooltip.js";
 
 /**
@@ -539,7 +539,7 @@ function hexToRgba(hex: string, alpha: number): string {
   return rgba;
 }
 
-/** Blends `hex` toward white by `amount` (0-1) — the "light tint" half of an edge's "faintly luminous line" (bd-8ub review, immersive brief item 10), so a low-alpha edge reads as a pale glow rather than just a faded version of the raw, fully-saturated source-system hue. */
+/** Blends `hex` toward white by `amount` (0-1) — the "light tint" half of an edge's "faintly luminous line" (bd-8ub review, immersive brief item 10), so a low-alpha edge reads as a pale glow rather than just a faded version of the raw relation-family stroke. */
 function lightenHex(hex: string, amount: number): string {
   const r = Number.parseInt(hex.slice(1, 3), 16);
   const g = Number.parseInt(hex.slice(3, 5), 16);
@@ -548,7 +548,7 @@ function lightenHex(hex: string, amount: number): string {
   return `#${[mix(r), mix(g), mix(b)].map((c) => c.toString(16).padStart(2, "0")).join("")}`;
 }
 
-/** Fraction of the way from the raw source-system hue toward white, for the tinted link colour above. */
+/** Fraction of the way from the raw relation-family stroke toward white, for the tinted link colour above. */
 const LINK_TINT_AMOUNT = 0.35;
 /**
  * Edge alpha for the common (non-dimmed) case (bd-8ub review, immersive
@@ -575,6 +575,64 @@ const LINK_ARROW_LENGTH_PX = 7;
  * radii, which is what `nodeVal`/`nodeRelSize` below are for.
  */
 const LINK_ARROW_REL_POS = 1;
+
+/**
+ * Scaled dash arrays, memoized on (family, zoom).
+ *
+ * force-graph resolves `linkLineDash` once per link for its draw-order
+ * bucketing and again per link when painting, so a fresh `.map()` in the
+ * accessor allocates two arrays per link per frame — thousands, for a
+ * value determined entirely by the family and the current zoom. Same
+ * reasoning as `rgbaCache` and `tintedLinkColorById` above; this file's
+ * stated discipline is that nothing per-frame allocates for a value that
+ * did not change.
+ *
+ * Cleared whenever the zoom changes, so it holds at most one entry per
+ * family and never grows with the number of links or with how long the
+ * session has been panning.
+ */
+let dashCacheScale = 0;
+const dashCache = new Map<EdgeFamilyKey, number[] | null>();
+function scaledDash(family: EdgeFamilyKey, globalScale: number): number[] | null {
+  const scale = globalScale || 1;
+  if (scale !== dashCacheScale) {
+    dashCache.clear();
+    dashCacheScale = scale;
+  }
+  const cached = dashCache.get(family);
+  if (cached !== undefined) return cached;
+  const { dash } = edgeFamily(family);
+  const scaled = dash.length === 0 ? null : dash.map((segment) => segment / scale);
+  dashCache.set(family, scaled);
+  return scaled;
+}
+
+/**
+ * Arrow length for a link, or 0 for a family that draws no direction.
+ *
+ * The short-link guard is not cosmetic. force-graph positions the head at
+ * `startR + arrowLength + (lineLen - startR - endR - arrowLength) *
+ * relPos`; with `relPos = 1` that is `lineLen - endR`, which goes
+ * NEGATIVE once two nodes are closer together than the target's radius —
+ * drawing the head off the far end of the segment, past the source, away
+ * from both nodes. Feeding force-graph the real radii (see `nodeVal`)
+ * widened that window from `lineLen < 4` to `lineLen < 9`, so this guard
+ * is paying for that fix rather than for a pre-existing bug. Suppressing
+ * the head is the right answer: on a link that short there is no room to
+ * read a direction from anyway.
+ */
+function arrowLength(link: GraphLink, globalScale: number): number {
+  if (!edgeFamily(link.family).arrow) return 0;
+  const scale = globalScale || 1;
+  const length = LINK_ARROW_LENGTH_PX / scale;
+  const source = link.source as unknown as { x?: number; y?: number };
+  const target = link.target as unknown as { x?: number; y?: number; radius?: number };
+  if (typeof source?.x === "number" && typeof source?.y === "number" && typeof target?.x === "number" && typeof target?.y === "number") {
+    const lineLen = Math.hypot(target.x - source.x, target.y - source.y);
+    if (lineLen < (target.radius ?? 0) + length) return 0;
+  }
+  return length;
+}
 
 /**
  * Makes `sqrt(nodeVal(node)) * nodeRelSize` equal this app's own
@@ -990,13 +1048,8 @@ export function GraphCanvas({ data, onNodeExpand, expandableNodeIds = NO_EXPANDA
             // dependency. See weightToEdgeWidth on why width alone is a
             // weak signal in this store.
             linkWidth={(link) => link.width * edgeFamily(link.family).widthScale}
-            linkLineDash={(link) => {
-              const { dash } = edgeFamily(link.family);
-              if (dash.length === 0) return null;
-              const scale = globalScaleRef.current || 1;
-              return dash.map((segment) => segment / scale);
-            }}
-            linkDirectionalArrowLength={(link) => (edgeFamily(link.family).arrow ? LINK_ARROW_LENGTH_PX / (globalScaleRef.current || 1) : 0)}
+            linkLineDash={(link) => scaledDash(link.family, globalScaleRef.current)}
+            linkDirectionalArrowLength={(link) => arrowLength(link, globalScaleRef.current)}
             linkDirectionalArrowRelPos={LINK_ARROW_REL_POS}
             linkDirectionalArrowColor={(link) => hexToRgba(tintedLinkColorById.get(link.id) ?? edgeFamily(link.family).color, isLinkDimmed(link, focusedNodeType, nodeTypesById) ? DIMMED_ALPHA : LINK_ARROW_ALPHA)}
             linkLabel={linkTooltip}

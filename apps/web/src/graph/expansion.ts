@@ -56,10 +56,11 @@ import type { trpc } from "../trpc.js";
 // a dependency-free string constant — pulls the Node-only `pg` driver
 // into the Vite client bundle (human-writes.ts sits behind the same
 // barrel as everything else `@breakdown/core` exports, and the barrel's
-// re-exports are unconditional). palette.ts already established this
-// exact convention (SOURCE_SYSTEM_COLORS keyed by these same literal
-// strings, same reasoning) for the same reason — one more place, not a
-// new pattern.
+// re-exports are unconditional). palette.ts established this exact
+// convention for the same reason; its `SOURCE_SYSTEM_COLORS` table was
+// the original example and bd-o1e deleted it, but the convention it set
+// (duplicate the literal rather than import through the barrel) is
+// unchanged — one more place, not a new pattern.
 export const HUMAN_SOURCE_SYSTEM = "human";
 export const NOTE_NODE_TYPE = "note";
 export const ANNOTATES_EDGE_TYPE = "annotates";
@@ -362,7 +363,7 @@ export function mergeRetractedEdge(previous: GraphCanvasData, linkId: string): G
   return mergeGraphData(previous, { nodes: previous.nodes, links: previous.links.filter((l) => l.id !== linkId) });
 }
 
-/** Changes one link's weight (and its derived colour/width) in place (bd-hmd.6, task 6.5's "reweight") — pins placed nodes first, same reasoning as `mergeRetractedEdge`, then relies on `mergeGraphData`'s `Object.assign(existing, incoming)` for a matching id to mutate the SAME link object force-graph already holds, rather than replacing it. */
+/** Changes one link's weight (and its derived width — its relation family does not depend on weight) in place (bd-hmd.6, task 6.5's "reweight") — pins placed nodes first, same reasoning as `mergeRetractedEdge`, then relies on `mergeGraphData`'s `Object.assign(existing, incoming)` for a matching id to mutate the SAME link object force-graph already holds, rather than replacing it. */
 export function mergeReweightedEdge(previous: GraphCanvasData, linkId: string, weight: number): GraphCanvasData {
   pinPlacedNodes(previous.nodes as readonly PositionedNode[]);
   const links = previous.links.map((l) => (l.id === linkId ? { ...l, weight, width: weightToEdgeWidth(weight) } : l));

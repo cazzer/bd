@@ -96,6 +96,25 @@ Having expanded a node, a person SHALL be able to undo that expansion, removing 
 
 ## MODIFIED Requirements
 
+### Requirement: People can create and connect nodes
+
+The explorer SHALL let a person create a note, either standing alone or as an annotation of an existing node, and SHALL let a person assert, retract, and reweight an edge between two nodes. An edge a person asserts SHALL be attributed to them, and that attribution SHALL be discoverable, but SHALL NOT be carried by how the edge is drawn: a hand-asserted edge and a loaded edge of the same relation are drawn alike, because what an edge MEANS is the thing its appearance is spent on.
+
+#### Scenario: Creating a standalone note
+
+- **WHEN** a person creates a note without connecting it to anything
+- **THEN** it is persisted and findable by search, and its lack of connections is discoverable rather than silent
+
+#### Scenario: Connecting two nodes by hand
+
+- **WHEN** a person draws an edge between two nodes and gives it a relationship type
+- **THEN** the edge is persisted, attributed to the person, and drawn by that relationship type exactly as a loaded edge of the same type would be
+
+#### Scenario: Finding what a person asserted
+
+- **WHEN** a person wants to know which of the drawn edges they asserted themselves
+- **THEN** the interface reports that, both for a single edge on inspection and as a share of the drawn edges
+
 ### Requirement: Node size encodes connectedness
 
 A node SHALL be drawn at a size derived from its degree across the whole store, not its degree within the current view, so that a node is the same size wherever it appears. Size SHALL scale with the square root of degree, because perceived circle size tracks area rather than radius. The encoding SHALL remain discriminating across the range of degrees the store actually contains: two nodes whose degrees differ by an order of magnitude SHALL be drawn at visibly different sizes wherever they fall in that range. Where a bound on drawn size is applied so that a hub does not swamp the canvas, degree beyond that bound SHALL be carried by a further visual channel rather than discarded.

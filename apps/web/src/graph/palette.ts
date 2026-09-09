@@ -192,12 +192,38 @@ export interface EdgeFamily {
   widthScale: number;
 }
 
+// COLOUR IS NEVER THE ONLY SEPARATOR. Every pair of families differs in
+// dash shape or arrowhead, and `edgeLegend.test.ts` asserts exactly that
+// as an invariant — because these strokes are deliberately low-chroma
+// (see this section's header), and an edge is drawn as a 1-5px line that
+// GraphCanvas further lightens toward white and paints at 0.4 alpha. Two
+// low-chroma greys that look distinct as swatches in this file are
+// perceptually the same line on the canvas: measured after that
+// compositing, an earlier version of this table had containment against
+// configuration at dE00 4.88 and reference against unassigned at 3.03,
+// against the dE >= 8 gate the node palette above is held to. Both pairs
+// shared their dash AND arrow, so colour was carrying the whole
+// distinction and failing.
+//
+// So the load is on dash and arrow, which cost nothing perceptually
+// against the node hues:
+//
+//   arrow, solid            containment
+//   arrow, long dashes      dependency
+//   arrow, dash-dot         configuration
+//   no arrow, fine dots     reference
+//   no arrow, sparse dashes unassigned
+//
+// Among the three arrowed families: solid / uniform-dash / alternating
+// dash-dot differ in segment count as well as length. Between the two
+// unarrowed ones: fine 1.5px dots against 4px dashes with 7px gaps —
+// different by a factor, not a hair.
 const EDGE_FAMILIES: Readonly<Record<EdgeFamilyKey, EdgeFamily>> = {
   containment: { key: "containment", label: "contains", color: "#8fa3bd", dash: [], arrow: true, widthScale: 1 },
-  dependency: { key: "dependency", label: "depends", color: "#c2917f", dash: [6, 4], arrow: true, widthScale: 1.2 },
-  reference: { key: "reference", label: "refers", color: "#8a93a6", dash: [1.5, 3], arrow: false, widthScale: 0.85 },
-  configuration: { key: "configuration", label: "configures", color: "#9d93b8", dash: [], arrow: true, widthScale: 0.7 },
-  unassigned: { key: "unassigned", label: "other", color: "#6b7280", dash: [1, 5], arrow: false, widthScale: 0.85 },
+  dependency: { key: "dependency", label: "depends", color: "#c2917f", dash: [9, 5], arrow: true, widthScale: 1.2 },
+  configuration: { key: "configuration", label: "configures", color: "#a68bd0", dash: [7, 3, 1.5, 3], arrow: true, widthScale: 0.8 },
+  reference: { key: "reference", label: "refers", color: "#9aa3b0", dash: [1.5, 3], arrow: false, widthScale: 0.85 },
+  unassigned: { key: "unassigned", label: "other", color: "#6b7280", dash: [4, 7], arrow: false, widthScale: 0.85 },
 };
 
 /**
@@ -217,13 +243,26 @@ const FAMILY_BY_EDGE_TYPE: Readonly<Record<string, EdgeFamilyKey>> = {
   default_view: "configuration",
 };
 
-/** Never throws and never returns undefined — an unrecognised relation gets the reserved `unassigned` styling rather than vanishing. */
+/**
+ * Never throws and never returns undefined — an unrecognised relation
+ * gets the reserved `unassigned` styling rather than vanishing.
+ *
+ * `Object.hasOwn`, not `?? "unassigned"`: `edge_type` is open text with
+ * no CHECK constraint, so an agent may write `"constructor"` or
+ * `"toString"` through `brain_link`, and a plain object literal INHERITS
+ * those keys — `FAMILY_BY_EDGE_TYPE["constructor"]` is the `Object`
+ * function, not undefined, so `??` never fires and `edgeFamily` is then
+ * handed a key that is not an EdgeFamilyKey. That resolved to
+ * `undefined` and threw inside a `useMemo` during render, taking down
+ * the whole GraphView subtree rather than one edge.
+ */
 export function familyKeyForEdgeType(edgeType: string): EdgeFamilyKey {
-  return FAMILY_BY_EDGE_TYPE[edgeType] ?? "unassigned";
+  return Object.hasOwn(FAMILY_BY_EDGE_TYPE, edgeType) ? FAMILY_BY_EDGE_TYPE[edgeType]! : "unassigned";
 }
 
+/** Total over EdgeFamilyKey, and defensive against a key that escaped the type system (see familyKeyForEdgeType) rather than returning undefined into a draw call. */
 export function edgeFamily(key: EdgeFamilyKey): EdgeFamily {
-  return EDGE_FAMILIES[key];
+  return Object.hasOwn(EDGE_FAMILIES, key) ? EDGE_FAMILIES[key] : EDGE_FAMILIES.unassigned;
 }
 
 export function familyForEdgeType(edgeType: string): EdgeFamily {
@@ -232,5 +271,5 @@ export function familyForEdgeType(edgeType: string): EdgeFamily {
 
 /** Every family, in the order the legend lists them. */
 export function knownEdgeFamilies(): readonly EdgeFamily[] {
-  return [EDGE_FAMILIES.containment, EDGE_FAMILIES.dependency, EDGE_FAMILIES.reference, EDGE_FAMILIES.configuration, EDGE_FAMILIES.unassigned];
+  return [EDGE_FAMILIES.containment, EDGE_FAMILIES.dependency, EDGE_FAMILIES.configuration, EDGE_FAMILIES.reference, EDGE_FAMILIES.unassigned];
 }
