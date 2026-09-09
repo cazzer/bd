@@ -7,7 +7,24 @@
 // 3.1: `closes` and `touches` read as phrases in both directions).
 
 import { describe, expect, it } from "vitest";
-import { addressTypesFor, chosenTypes, formatEventTime, linkHost, NO_TYPE_CHOSEN, relationLabel, toggleType } from "./timelineRow.js";
+import {
+  addressTypesFor,
+  chipCountLabel,
+  chipCountsCaption,
+  chosenTypes,
+  countRowsByType,
+  formatEventTime,
+  formatTimeOfDay,
+  GAP_CEILING_PX,
+  GAP_FLOOR_MS,
+  GAP_FLOOR_PX,
+  gapBetween,
+  groupRowsByDay,
+  linkHost,
+  NO_TYPE_CHOSEN,
+  relationLabel,
+  toggleType,
+} from "./timelineRow.js";
 
 describe("chosenTypes", () => {
   it("offers no chips and reads every type when the view names no types (null or absent)", () => {
@@ -170,5 +187,159 @@ describe("linkHost", () => {
 
   it("falls back to the text itself when it is not a URL", () => {
     expect(linkHost("not a url")).toBe("not a url");
+  });
+});
+
+describe("formatTimeOfDay", () => {
+  it("drops the date the group header already states, keeping the canonical instant as the title", () => {
+    const label = formatTimeOfDay("2026-03-04T10:00:00.000Z", { locale: "en-US", timeZone: "UTC" });
+    expect(label.text).toMatch(/^10:00\sAM$/);
+    expect(label.title).toBe("2026-03-04T10:00:00.000Z");
+    expect(label.iso).toBe("2026-03-04T10:00:00.000Z");
+  });
+
+  it("renders the same instant in the viewer's zone", () => {
+    expect(formatTimeOfDay("2026-03-04T10:00:00.000Z", { locale: "en-US", timeZone: "America/New_York" }).text).toMatch(/^5:00\sAM$/);
+  });
+
+  it("shows an unparseable value as the text it is", () => {
+    expect(formatTimeOfDay("last Tuesday", { timeZone: "UTC" })).toEqual({ text: "last Tuesday", title: "last Tuesday", iso: null });
+  });
+});
+
+describe("gapBetween", () => {
+  it("draws the floor for rows inside the burst window, whichever order they are given in", () => {
+    expect(gapBetween("2026-09-04T10:00:00.000Z", "2026-09-04T09:52:00.000Z")).toEqual({ ms: 8 * 60_000, spacingPx: GAP_FLOOR_PX, label: null });
+    expect(gapBetween("2026-09-04T09:52:00.000Z", "2026-09-04T10:00:00.000Z").spacingPx).toBe(GAP_FLOOR_PX);
+    expect(gapBetween("2026-09-04T10:00:00.000Z", "2026-09-04T09:00:00.000Z")).toEqual({ ms: GAP_FLOOR_MS, spacingPx: GAP_FLOOR_PX, label: null });
+  });
+
+  it("grows with the interval between the floor and the ceiling", () => {
+    const twoHours = gapBetween("2026-09-04T10:00:00.000Z", "2026-09-04T08:00:00.000Z");
+    const tenHours = gapBetween("2026-09-04T10:00:00.000Z", "2026-09-04T00:00:00.000Z");
+    expect(twoHours.spacingPx).toBeGreaterThan(GAP_FLOOR_PX);
+    expect(tenHours.spacingPx).toBeGreaterThan(twoHours.spacingPx);
+    expect(tenHours.spacingPx).toBeLessThan(GAP_CEILING_PX);
+  });
+
+  it("names a three-week gap rather than drawing it to scale — the spacing is the ceiling a one-week gap already reaches", () => {
+    const threeWeeks = gapBetween("2026-09-04T00:00:00.000Z", "2026-08-14T00:00:00.000Z");
+    expect(threeWeeks.label).toBe("3 weeks earlier");
+    expect(threeWeeks.spacingPx).toBe(GAP_CEILING_PX);
+    expect(gapBetween("2026-09-04T00:00:00.000Z", "2026-08-28T00:00:00.000Z").spacingPx).toBe(GAP_CEILING_PX);
+    // Proportional spacing would be three times a week's, which is what the bound exists to refuse.
+    expect(threeWeeks.spacingPx).toBeLessThan(3 * GAP_CEILING_PX);
+  });
+
+  it("names the interval in the largest unit that fits, floored, so three weeks never rounds up to a month", () => {
+    expect(gapBetween("2026-09-04T00:00:00.000Z", "2026-09-03T18:00:00.000Z").label).toBe("6 hours earlier");
+    expect(gapBetween("2026-09-04T00:00:00.000Z", "2026-09-02T18:00:00.000Z").label).toBe("1 day earlier");
+    expect(gapBetween("2026-09-04T00:00:00.000Z", "2026-08-21T00:00:00.000Z").label).toBe("2 weeks earlier");
+    expect(gapBetween("2026-09-04T00:00:00.000Z", "2026-06-04T00:00:00.000Z").label).toBe("3 months earlier");
+    expect(gapBetween("2026-09-04T00:00:00.000Z", "2023-09-04T00:00:00.000Z").label).toBe("3 years earlier");
+  });
+
+  it("says nothing about a gap under the label threshold", () => {
+    expect(gapBetween("2026-09-04T00:00:00.000Z", "2026-09-03T18:00:01.000Z").label).toBeNull();
+  });
+
+  it("falls back to the floor and no label when either end did not parse", () => {
+    expect(gapBetween("last Tuesday", "2026-09-04T00:00:00.000Z")).toEqual({ ms: 0, spacingPx: GAP_FLOOR_PX, label: null });
+    expect(gapBetween("2026-09-04T00:00:00.000Z", "")).toEqual({ ms: 0, spacingPx: GAP_FLOOR_PX, label: null });
+  });
+});
+
+describe("groupRowsByDay", () => {
+  const utc = { locale: "en-US", timeZone: "UTC" } as const;
+
+  it("groups eight rows inside one hour together, every one of them at floor spacing", () => {
+    const rows = Array.from({ length: 8 }, (_, i) => ({ occurredAt: new Date(Date.UTC(2026, 8, 4, 10, 56 - i * 8)).toISOString() }));
+    const groups = groupRowsByDay(rows, utc);
+    expect(groups).toHaveLength(1);
+    expect(groups[0]!.entries).toHaveLength(8);
+    expect(groups[0]!.gap).toBeNull();
+    expect(groups[0]!.entries[0]!.gap).toBeNull();
+    expect(groups[0]!.entries.slice(1).map((e) => e.gap?.spacingPx)).toEqual(Array.from({ length: 7 }, () => GAP_FLOOR_PX));
+    expect(groups[0]!.entries.every((e) => e.gap?.label == null)).toBe(true);
+  });
+
+  it("starts a new group at a day boundary and names each day once", () => {
+    const groups = groupRowsByDay(
+      [
+        { occurredAt: "2026-09-04T00:30:00.000Z" },
+        { occurredAt: "2026-09-03T23:30:00.000Z" },
+        { occurredAt: "2026-09-03T09:00:00.000Z" },
+      ],
+      utc,
+    );
+    expect(groups.map((g) => g.key)).toEqual(["2026-09-04", "2026-09-03"]);
+    expect(groups.map((g) => g.entries.length)).toEqual([1, 2]);
+    expect(groups[0]!.label).toBe("Fri, Sep 4, 2026");
+    expect(groups[1]!.label).toBe("Thu, Sep 3, 2026");
+  });
+
+  it("carries the gap across a group boundary on the group, not on its first row", () => {
+    const groups = groupRowsByDay([{ occurredAt: "2026-09-04T02:00:00.000Z" }, { occurredAt: "2026-09-03T02:00:00.000Z" }], utc);
+    expect(groups[1]!.entries[0]!.gap).toBeNull();
+    expect(groups[1]!.gap).toEqual(gapBetween("2026-09-04T02:00:00.000Z", "2026-09-03T02:00:00.000Z"));
+    expect(groups[1]!.gap?.label).toBe("1 day earlier");
+  });
+
+  it("breaks groups on the viewer's own day, not on UTC's", () => {
+    const rows = [{ occurredAt: "2026-09-04T03:00:00.000Z" }, { occurredAt: "2026-09-04T01:00:00.000Z" }];
+    expect(groupRowsByDay(rows, utc).map((g) => g.key)).toEqual(["2026-09-04"]);
+    expect(groupRowsByDay(rows, { locale: "en-US", timeZone: "America/New_York" }).map((g) => g.key)).toEqual(["2026-09-03"]);
+  });
+
+  it("keeps the rows' own order and never merges two runs of one day", () => {
+    const groups = groupRowsByDay([{ occurredAt: "2026-09-04T10:00:00.000Z" }, { occurredAt: "2026-09-03T10:00:00.000Z" }, { occurredAt: "2026-09-04T09:00:00.000Z" }], utc);
+    expect(groups.map((g) => g.key)).toEqual(["2026-09-04", "2026-09-03", "2026-09-04"]);
+  });
+
+  it("groups a row whose time did not parse alone, labelled as the text it is", () => {
+    const groups = groupRowsByDay([{ occurredAt: "2026-09-04T10:00:00.000Z" }, { occurredAt: "whenever" }], utc);
+    expect(groups.map((g) => g.key)).toEqual(["2026-09-04", "?whenever"]);
+    expect(groups[1]!.label).toBe("whenever");
+    expect(groups[1]!.gap).toEqual({ ms: 0, spacingPx: GAP_FLOOR_PX, label: null });
+  });
+
+  it("returns nothing for no rows", () => {
+    expect(groupRowsByDay([], utc)).toEqual([]);
+  });
+});
+
+describe("countRowsByType and the chip labels", () => {
+  const rows = [{ nodeType: "commit" }, { nodeType: "commit" }, { nodeType: "gh-pr" }];
+
+  it("counts the loaded page's composition", () => {
+    expect([...countRowsByType(rows)]).toEqual([
+      ["commit", 2],
+      ["gh-pr", 1],
+    ]);
+    expect(countRowsByType([]).size).toBe(0);
+  });
+
+  it("reports a chosen chip's share of the loaded rows, zero distinguishably", () => {
+    const counts = countRowsByType(rows);
+    const chosen = ["commit", "gh-pr", "work_item"];
+    expect(chipCountLabel("commit", chosen, counts)).toEqual({ text: "2", empty: false, title: "2 of the rows loaded are commit" });
+    expect(chipCountLabel("gh-pr", chosen, counts)).toEqual({ text: "1", empty: false, title: "1 of the rows loaded is a gh-pr" });
+    expect(chipCountLabel("work_item", chosen, counts)).toEqual({ text: "0", empty: true, title: "no work_item among the rows loaded" });
+  });
+
+  it("reports no number for a deselected chip, whose rows were never read", () => {
+    const label = chipCountLabel("repo", ["commit"], countRowsByType(rows));
+    expect(label.text).toBeNull();
+    expect(label.empty).toBe(false);
+    expect(label.title).toContain("deselected");
+  });
+
+  it("counts every chip when the view names no types to narrow by", () => {
+    expect(chipCountLabel("commit", null, countRowsByType(rows)).text).toBe("2");
+  });
+
+  it("gives the counts their scope, never implying a store-wide total", () => {
+    expect(chipCountsCaption(50, true)).toBe("counts are of the 50 rows loaded — more exist");
+    expect(chipCountsCaption(12, false)).toBe("counts are of all 12 rows");
   });
 });

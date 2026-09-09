@@ -44,10 +44,57 @@
 // title is a real link to `/graph?node=<row>` whose plain left click goes
 // through `navigate(…, "push")` — middle-click, cmd-click, and copy-link
 // work natively, and the row's time, type, source, relation, and fields
-// are ordinary text beside it, so a screen reader hears all of it rather
-// than a label that replaced it. "Open in graph" pushes the anchor the
-// same way, so back returns here with the chips as the address kept them.
+// are ordinary text beside it — visible for the ones that discriminate,
+// screen-reader text for the ones demoted below (see "How a page READS")
+// — so a screen reader hears all of it rather than a label that replaced
+// it. "Open in graph" pushes the anchor the same way, so back returns
+// here with the chips as the address kept them.
 // Links found in a row's metadata sit beside the title, never inside it.
+//
+// How a page READS (readable-graph-and-timeline, design.md decisions 7
+// and 8). The flat list this replaced drew fifty identically sized,
+// evenly spaced cards, each repeating the same date and the same
+// `commit · git · belongs-to →` — three tokens of no discriminating
+// power per row, on a page that conveyed order and nothing else. Four
+// changes, all of them client-side derivations of the read this view
+// already makes:
+//
+//   - DAY GROUPS. `groupRowsByDay` (lib/timelineRow.ts) splits the page
+//     on the viewer's own calendar day; the day is named once on a
+//     sticky header that stays visible while its rows are read, and a
+//     row carries only its time of day.
+//   - ELAPSED TIME AS SPACE. Each row is pushed down by the clamped log
+//     of the interval above it — bounded at both ends, so a burst packs
+//     at the floor and one ancient item cannot take the page. Past six
+//     hours the gap also names itself ("18 hours earlier"), because
+//     beyond the ceiling space alone stops being able to say how long.
+//   - TYPE AS COLOUR. The same `getStoreSummary()`-ranked
+//     `assignTypeColors` map GraphView derives, so a `commit` is the
+//     same green here as on the canvas. Drawn as the row's left edge and
+//     its chip's swatch.
+//   - CONSTANT TEXT DEMOTED. `type · source` and the relation pill no
+//     longer occupy the row body: the type is the colour edge plus a
+//     short right-aligned label, and source and relation live in the
+//     row's hover title and its screen-reader text, which still spells
+//     the relation's DIRECTION out exactly as before.
+//
+// Day, not week (design.md's open question, answered from the rendered
+// page): the sample anchor's fifty rows span four calendar days, so day
+// grouping puts four headers on a page of fifty rows — often enough to
+// be the unit a reader thinks in, rare enough that a header never
+// approaches one per row. The failure mode week grouping guards against
+// is a sparse timeline drawing a header per row; the gap marker already
+// covers that case with better information (it names the interval),
+// which week grouping would not. Revisit only if a real anchor is found
+// whose rows are days apart AND whose headers outnumber its content.
+//
+// The chip counts are the loaded page's composition, not the store's
+// (tasks.md 5.5): `timeline` answers one narrowing per call and reports
+// no per-type breakdown, and design.md's Non-Goals rule out adding a
+// procedure that would. So each chip counts the rows on screen, under a
+// caption that names that scope, and a deselected chip — whose rows were
+// never read — reports no number rather than a false zero. See lib/
+// timelineRow.ts's own section header.
 //
 // The empty states — no view, not a view, no anchor, anchor not found,
 // nothing timed, no type chosen — each keep the "Timeline" heading, the
@@ -63,11 +110,28 @@
 // it is in the address bar.
 
 import { TRPCClientError } from "@trpc/client";
-import { useEffect, useMemo, useState, type MouseEvent } from "react";
+import { useEffect, useMemo, useState, type CSSProperties, type MouseEvent } from "react";
+import { assignTypeColors, colorForNodeType } from "../graph/palette.js";
+import { topStoreTypes, type TypeCount } from "../graph/typePrevalence.js";
 import { extractLinks, pickRowFields } from "../lib/feedRow.js";
 import { navigate } from "../lib/navigate.js";
 import { formatRoute, type GraphRoute } from "../lib/route.js";
-import { addressTypesFor, chosenTypes, formatEventTime, linkHost, relationLabel, toggleType, type TypeSelection } from "../lib/timelineRow.js";
+import {
+  addressTypesFor,
+  chipCountLabel,
+  chipCountsCaption,
+  chosenTypes,
+  countRowsByType,
+  formatEventTime,
+  formatTimeOfDay,
+  GAP_FLOOR_PX,
+  groupRowsByDay,
+  linkHost,
+  relationLabel,
+  toggleType,
+  type TimelineGap,
+  type TypeSelection,
+} from "../lib/timelineRow.js";
 import { viewFilterOf, type ViewFilter, type ViewNode } from "../lib/viewFilter.js";
 import { trpc } from "../trpc.js";
 
@@ -169,6 +233,42 @@ export function TimelineView({ viewId, node, types }: TimelineViewProps) {
   const [view, setView] = useState<ViewState>(viewId === null ? { kind: "no-view" } : { kind: "loading" });
   const [anchor, setAnchor] = useState<AnchorState>(node === null ? { kind: "none" } : { kind: "loading" });
   const [page, setPage] = useState<PageState>({ kind: "idle" });
+  const [nodeTypeCounts, setNodeTypeCounts] = useState<TypeCount[]>([]);
+
+  // The store's type ranking, read once on mount — the fourth read this
+  // view makes, and the only one that is purely cosmetic. Best-effort
+  // exactly as GraphView's `refreshStoreSummary` is: a failure leaves the
+  // list empty, every type then resolves to `FALLBACK_COLOR`, and the
+  // page draws with one neutral edge colour rather than surfacing an
+  // error for a colour.
+  useEffect(() => {
+    let cancelled = false;
+
+    async function load() {
+      try {
+        const summary = await trpc.getStoreSummary.query();
+        if (!cancelled) setNodeTypeCounts(summary.nodeTypes);
+      } catch {
+        // best-effort — see the comment above
+      }
+    }
+
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  /**
+   * The SAME derivation GraphView performs (design.md decision 8):
+   * `getStoreSummary().nodeTypes` ranked by `topStoreTypes`'s comparator
+   * and mapped onto palette.ts's categorical slots in that order, so a
+   * type is the same colour in both views. Deliberately duplicated
+   * rather than extracted: the shared hook tasks.md 5.3 suggests would
+   * live in files another agent owns this session — worth doing, and
+   * left as a follow-up rather than a merge conflict.
+   */
+  const typeColors = useMemo(() => assignTypeColors(topStoreTypes(nodeTypeCounts, nodeTypeCounts.length).map((t) => t.nodeType)), [nodeTypeCounts]);
 
   // The view, keyed on `viewId`: the shell re-renders this component with
   // a new id when the address changes view (same `key`, so no remount);
@@ -350,6 +450,16 @@ export function TimelineView({ viewId, node, types }: TimelineViewProps) {
   const shown: ReadyPage | null = page.kind === "ready" ? page : page.kind === "loading" ? page.stale : null;
   const pageLoading = page.kind === "loading";
 
+  // The rows as the page draws them — calendar-day groups, each row
+  // carrying the gap above it (lib/timelineRow.ts). Pure, so it is
+  // memoized on the loaded page's identity: `shown` changes only when a
+  // read lands or "load more" appends, never per render.
+  const shownRows = shown?.rows;
+  const groups = useMemo(() => (shownRows === undefined ? [] : groupRowsByDay(shownRows)), [shownRows]);
+  // The loaded page's type composition, for the chips — see the module
+  // header on why this is the page's and not the store's.
+  const rowTypeCounts = useMemo(() => countRowsByType(shownRows ?? []), [shownRows]);
+
   // The status line, always mounted so the header keeps its height and a
   // change is announced: the count (or the one zero-row sentence) while a
   // page is shown, "Loading…" while anything loads, the view's name while
@@ -418,23 +528,36 @@ export function TimelineView({ viewId, node, types }: TimelineViewProps) {
         </header>
 
         {showChips && (
-          <div role="group" aria-label="Node types" className="mb-4 flex flex-wrap gap-2">
-            {chips.map((type) => {
-              const pressed = selection?.chosen?.includes(type) ?? false;
-              return (
-                <button
-                  key={type}
-                  type="button"
-                  aria-pressed={pressed}
-                  onClick={() => toggleChip(type)}
-                  className={`min-h-11 rounded-full border px-3 py-1 text-xs font-medium focus:outline-none focus:ring-2 focus:ring-accent sm:min-h-0 ${
-                    pressed ? "border-accent/60 bg-accent/20 text-fg" : "border-hairline bg-surface text-fg-muted hover:text-fg"
-                  }`}
-                >
-                  {type}
-                </button>
-              );
-            })}
+          <div className="mb-4">
+            <div role="group" aria-label="Node types" className="flex flex-wrap gap-2">
+              {chips.map((type) => {
+                const pressed = selection?.chosen?.includes(type) ?? false;
+                // A count only once a page with rows is on screen: with
+                // nothing loaded there is nothing to count, and a "0"
+                // against no page at all would read as a claim about the
+                // store rather than about what is shown.
+                const count = shown === null || shown.rows.length === 0 ? null : chipCountLabel(type, selection?.chosen ?? null, rowTypeCounts);
+                return (
+                  <button
+                    key={type}
+                    type="button"
+                    aria-pressed={pressed}
+                    title={count?.title}
+                    onClick={() => toggleChip(type)}
+                    className={`flex min-h-11 items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium focus:outline-none focus:ring-2 focus:ring-accent sm:min-h-0 ${
+                      pressed ? "border-accent/60 bg-accent/20 text-fg" : "border-hairline bg-surface text-fg-muted hover:text-fg"
+                    } ${count?.empty === true ? "opacity-60" : ""}`}
+                  >
+                    <span aria-hidden="true" className="size-2 shrink-0 rounded-full" style={{ backgroundColor: colorForNodeType(type, typeColors) }} />
+                    {type}
+                    {count?.text !== null && count?.text !== undefined && (
+                      <span className="font-mono tabular-nums text-fg-muted">{count.text}</span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+            {shown !== null && shown.rows.length > 0 && <p className="mt-1.5 text-[11px] text-fg-muted">{chipCountsCaption(shown.rows.length, shown.hasMore)}</p>}
           </div>
         )}
 
@@ -446,11 +569,28 @@ export function TimelineView({ viewId, node, types }: TimelineViewProps) {
         {errorMessage === null && copy !== null && <p className="glass p-4 text-sm text-fg-muted">{copy}</p>}
 
         {shown !== null && shown.rows.length > 0 && (
-          <ol aria-label="Timeline rows" aria-busy={pageLoading} className={`space-y-2 transition-opacity ${pageLoading ? "opacity-50" : ""}`}>
-            {shown.rows.map((row) => (
-              <TimelineRowItem key={row.id} row={row} />
+          <div role="group" aria-label="Timeline rows" aria-busy={pageLoading} className={`transition-opacity ${pageLoading ? "opacity-50" : ""}`}>
+            {groups.map((group, index) => (
+              // Keyed by position as well as day: two runs of one day are
+              // two groups (lib/timelineRow.ts's `groupRowsByDay`), and
+              // the key must stay unique when that happens.
+              <section key={`${group.key}#${index}`} aria-label={group.label} style={marginForGap(group.gap)}>
+                {group.gap?.label != null && <GapMarker label={group.gap.label} />}
+                <h2 className="sticky top-0 z-10 mb-2 flex items-baseline gap-2 bg-ground px-2 py-2 text-xs font-semibold text-fg">
+                  {group.label}
+                  <span className="font-normal text-fg-muted">{group.entries.length}</span>
+                </h2>
+                <ol>
+                  {group.entries.map(({ row, gap }) => (
+                    <li key={row.id} style={marginForGap(gap)}>
+                      {gap?.label != null && <GapMarker label={gap.label} />}
+                      <TimelineRowItem row={row} typeColors={typeColors} />
+                    </li>
+                  ))}
+                </ol>
+              </section>
             ))}
-          </ol>
+          </div>
         )}
 
         {page.kind === "ready" && page.hasMore && (
@@ -475,43 +615,87 @@ export function TimelineView({ viewId, node, types }: TimelineViewProps) {
   );
 }
 
-interface TimelineRowItemProps {
-  row: TimelineRow;
+/** Roughly a `GapMarker`'s own height: taken out of a labelled gap's spacing so the marker sits INSIDE the space the interval earned rather than adding to it. */
+const GAP_MARKER_PX = 22;
+
+/** A gap drawn as space above the thing that follows it — nothing at all for the first row on the page, which has no interval above it. */
+function marginForGap(gap: TimelineGap | null): CSSProperties | undefined {
+  if (gap === null) {
+    return undefined;
+  }
+  return { marginTop: gap.label === null ? gap.spacingPx : Math.max(GAP_FLOOR_PX, gap.spacingPx - GAP_MARKER_PX) };
 }
 
 /**
- * One row: the time (the canonical instant on hover), the title as a link
- * into the graph, `type · source`, the relation to the anchor (the arrow
- * for sighted readers, the spelled-out direction for a screen reader),
+ * The named gap (design.md decision 7): past six hours the space alone
+ * stops being able to say how long, so the interval says it in words.
+ * Not `aria-hidden` — "18 hours earlier" is exactly what a reader who
+ * cannot see the spacing is otherwise missing.
+ */
+function GapMarker({ label }: { label: string }) {
+  return (
+    <p className="flex items-center gap-2 py-1 text-[11px] text-fg-muted">
+      <span aria-hidden="true" className="h-px flex-1 bg-hairline" />
+      {label}
+      <span aria-hidden="true" className="h-px flex-1 bg-hairline" />
+    </p>
+  );
+}
+
+interface TimelineRowItemProps {
+  row: TimelineRow;
+  /** The store-ranked type-colour map this view derives (design.md decision 8) — the same one GraphCanvas draws from. */
+  typeColors: ReadonlyMap<string, string>;
+}
+
+/**
+ * One row: its time of DAY (the day itself is on the group's header, the
+ * full instant in the screen-reader text and on hover), the title as a
+ * link into the graph, the node type as a colour edge and a short label,
  * the work-item fields when present; links from the metadata beside it,
  * named by their host.
+ *
+ * Source system and relation are no longer row text (spec: "Text that is
+ * identical on every row of a page SHALL NOT occupy the row's primary
+ * content" — every row of the sample page said `commit · git ·
+ * belongs-to →`). They moved to the row's hover title and its sr-only
+ * text, which keeps `relation.title`'s spelled-out DIRECTION verbatim:
+ * the accessible name says as much as it ever did, the picture says less.
  */
-function TimelineRowItem({ row }: TimelineRowItemProps) {
-  const time = formatEventTime(row.occurredAt);
+function TimelineRowItem({ row, typeColors }: TimelineRowItemProps) {
+  const clock = formatTimeOfDay(row.occurredAt);
+  const instant = formatEventTime(row.occurredAt);
   const relation = relationLabel(row.edgeType, row.direction);
   const fields = pickRowFields(row.metadata);
   const links = extractLinks(row.metadata);
   const route = graphRouteFor(row.id);
+  const color = colorForNodeType(row.nodeType, typeColors);
+  const aside = `${row.nodeType} · ${row.sourceSystem} · ${relation.title}`;
+  const hasFields = fields.status !== null || fields.priority !== null || fields.assignee !== null;
 
   return (
-    <li data-node-id={row.id} data-node-type={row.nodeType} className="glass flex items-start justify-between gap-3 p-3 hover:bg-surface-strong">
+    <div data-node-id={row.id} data-node-type={row.nodeType} title={aside} className="glass flex items-stretch justify-between gap-3 p-3 hover:bg-surface-strong">
+      <span aria-hidden="true" style={{ backgroundColor: color }} className="w-1 shrink-0 rounded-full" />
       <div className="min-w-0 flex-1">
         <p className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
-          <time dateTime={time.iso ?? undefined} title={time.title} className="shrink-0 font-mono text-xs text-fg-muted">
-            {time.text}
+          <time dateTime={clock.iso ?? undefined} title={clock.title} className="shrink-0 font-mono text-xs text-fg-muted">
+            {/* Sighted readers get the time alone — the day is on the header above. A screen reader, which has no header to look up at, gets the whole instant. */}
+            <span aria-hidden="true">{clock.text}</span>
+            <span className="sr-only">{instant.text}</span>
           </time>
-          <a href={formatRoute(route)} onClick={pushOnPlainClick(route)} className="min-w-0 rounded text-sm font-medium text-fg line-clamp-2 hover:underline focus:outline-none focus:ring-2 focus:ring-accent sm:line-clamp-1">
+          <a
+            href={formatRoute(route)}
+            onClick={pushOnPlainClick(route)}
+            className="min-w-0 flex-1 rounded text-sm font-medium text-fg line-clamp-2 hover:underline focus:outline-none focus:ring-2 focus:ring-accent sm:line-clamp-1"
+          >
             {row.title || "(untitled)"}
           </a>
+          <span aria-hidden="true" style={{ color }} className="shrink-0 text-[11px]">
+            {row.nodeType}
+          </span>
         </p>
-        <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-fg-muted">
-          <span>
-            {row.nodeType} · {row.sourceSystem}
-          </span>
-          <span title={relation.title} className="rounded-full border border-hairline bg-surface-strong px-2 py-0.5 text-[11px]">
-            <span aria-hidden="true">{relation.text}</span>
-            <span className="sr-only">{relation.title}</span>
-          </span>
+        <span className="sr-only">{aside}</span>
+        <p className={`mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-fg-muted ${hasFields ? "" : "hidden"}`}>
           {fields.status !== null && (
             <span>
               status <span className="text-fg">{fields.status}</span>
@@ -538,6 +722,6 @@ function TimelineRowItem({ row }: TimelineRowItemProps) {
           ))}
         </span>
       )}
-    </li>
+    </div>
   );
 }
