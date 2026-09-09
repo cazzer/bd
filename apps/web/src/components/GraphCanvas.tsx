@@ -35,7 +35,7 @@
 // Relevance (bd-cfc, openspec/changes/explorer-legibility/design.md
 // decisions 1 and 4): a node's label (graph/labelPolicy.ts's
 // `shouldLabel`, via `computeLabelPlacements`) and its halo treatment
-// (`drawNode`'s `isRelevant`) both read the SAME four categories — seed,
+// (`computeHaloedNodes`) both read the SAME four categories — seed,
 // selected, direct neighbour of the selection, type-focus match —
 // computed once per relevant node per frame, never a second
 // classification invented for either concern. The "direct neighbours of
@@ -64,7 +64,7 @@ import { degreeToRingWidth, type GraphCanvasData, type GraphLink, type GraphNode
 import { releasePins, type PositionedNode } from "../graph/expansion.js";
 import { robustBbox, ROBUST_BBOX_MIN_POINTS } from "../graph/fitBounds.js";
 import { HALO_TIER_FOCUSED, HALO_TIER_NEIGHBOR, HALO_TIER_SEED, HALO_TIER_SELECTED, selectHaloedNodes } from "../graph/haloBudget.js";
-import { placeLabels, type LabelCandidate, type LabelPlacement } from "../graph/labelPlacement.js";
+import { placeLabels, type LabelCandidate, type LabelPlacement, type Obstacle } from "../graph/labelPlacement.js";
 import { shouldLabel, truncateLabel } from "../graph/labelPolicy.js";
 import { edgesTouchingNode, endpointId } from "../graph/nodeEdges.js";
 import { colorForNodeType, edgeFamily, type EdgeFamilyKey } from "../graph/palette.js";
@@ -180,7 +180,7 @@ const FOCUSED_HALO_STOPS: ReadonlyArray<{ radiusScale: number; alpha: number }> 
  * two-stop halo on every node produced at density. Applying the FULL
  * (ambient or focused) halo only to relevant nodes, and this single ring
  * to everything else, is what makes that trade — see drawNode's own
- * `isRelevant` branch.
+ * halo-tier branch (`computeHaloedNodes`).
  */
 const AMBIENT_SINGLE_RING_STOPS: ReadonlyArray<{ radiusScale: number; alpha: number }> = [{ radiusScale: 1.6, alpha: 0.08 }];
 
@@ -351,7 +351,18 @@ function computeLabelPlacements(nodes: readonly DrawableNode[], globalScale: num
       priority: isSelected ? 3 : isSeed ? 2 : isNeighborOfSelected ? 1 : 0,
     });
   }
-  const placements = placeLabels(candidates, fontSize);
+  // Every node that is NOT a label candidate is still an obstacle
+  // (bd-6qo review): at default zoom `shouldLabel` admits only
+  // seed/selected/neighbour, so without this the ambient nodes — the
+  // majority, in an expanded view — are invisible to the collision test
+  // and a displaced label happily lands on one.
+  const candidateIds = new Set(candidates.map((c) => c.id));
+  const obstacles: Obstacle[] = [];
+  for (const node of nodes) {
+    if (candidateIds.has(node.id)) continue;
+    obstacles.push({ x: node.x ?? 0, y: node.y ?? 0, radius: node.radius });
+  }
+  const placements = placeLabels(candidates, fontSize, { obstacles });
   return new Map(placements.map((p) => [p.id, p]));
 }
 
@@ -367,9 +378,10 @@ interface DrawContext {
   /** App.tsx's store-wide rank map (bd-4ye) — the SAME map GraphCanvas, TypePanel, and SearchBar all read, so none of them can disagree about a type's colour. */
   typeColors: ReadonlyMap<string, string>;
   focusedNodeType: string | null | undefined;
-  selectedNodeId: string | null | undefined;
-  /** One-hop neighbours of `selectedNodeId`, computed once per (data, selectedNodeId) — see `GraphCanvas`'s own `useMemo`. */
-  neighborIdsOfSelected: ReadonlySet<string>;
+  // `selectedNodeId` and `neighborIdsOfSelected` used to live here too,
+  // for drawNode's halo branch. bd-6qo moved halos to `drawHalos`, which
+  // `onRenderFramePre` calls with those two values directly, so carrying
+  // them on this object as well left two fields nothing read.
 }
 
 /**
@@ -952,7 +964,19 @@ export function GraphCanvas({ data, onNodeExpand, expandableNodeIds = NO_EXPANDA
   // Built once per React render (not per frame — see DrawContext's own
   // comment), so `drawNode`'s per-frame closure below only ever reads an
   // already-computed object, never allocates one.
-  const drawContext: DrawContext = { typeColors, focusedNodeType, selectedNodeId, neighborIdsOfSelected };
+  /**
+   * The haloed set, memoized (bd-6qo review). It reads only `data.nodes`,
+   * the selection and the focused type — no positions, no `globalScale` —
+   * so it is per-frame-STABLE, and this file's own discipline
+   * (`nodeTypesById`, `tintedLinkColorById`) is that anything per-frame
+   * stable is computed once per render, not once per frame.
+   */
+  const haloedNodeIds = useMemo(
+    () => computeHaloedNodes(data.nodes as DrawableNode[], selectedNodeId, neighborIdsOfSelected, focusedNodeType),
+    [data.nodes, selectedNodeId, neighborIdsOfSelected, focusedNodeType],
+  );
+
+  const drawContext: DrawContext = { typeColors, focusedNodeType };
 
   useEffect(() => {
     const el = containerRef.current;
@@ -1035,8 +1059,7 @@ export function GraphCanvas({ data, onNodeExpand, expandableNodeIds = NO_EXPANDA
               labelPlacementsRef.current = computeLabelPlacements(data.nodes as DrawableNode[], globalScale, selectedNodeId, neighborIdsOfSelected);
               // bd-6qo: halos are painted HERE, before force-graph paints
               // links, so edges stay visible through a dense selection.
-              const haloed = computeHaloedNodes(data.nodes as DrawableNode[], selectedNodeId, neighborIdsOfSelected, focusedNodeType);
-              drawHalos(data.nodes as DrawableNode[], ctx, haloed, drawContext);
+              drawHalos(data.nodes as DrawableNode[], ctx, haloedNodeIds, drawContext);
             }}
             nodeVal={nodeVal}
             nodeRelSize={NODE_REL_SIZE}

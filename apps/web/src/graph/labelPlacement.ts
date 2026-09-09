@@ -86,6 +86,13 @@ export interface LabelCandidate {
   priority: number;
 }
 
+/** A node that is not a label candidate this frame but still occupies space a label must avoid. */
+export interface Obstacle {
+  x: number;
+  y: number;
+  radius: number;
+}
+
 export interface LabelPlacement {
   id: string;
   visible: boolean;
@@ -158,8 +165,8 @@ function nearestPointOnBox(box: Box, x: number, y: number): { x: number; y: numb
 
 export const DEFAULT_LABEL_GAP = 2;
 export const DEFAULT_LABEL_LINE_HEIGHT_RATIO = 1.2;
-/** Average glyph width as a fraction of font size, for a crude label-width estimate — see labelBox below for why this stays an estimate rather than a real text measurement. */
-const AVG_CHAR_WIDTH_RATIO = 0.56;
+/** Average glyph width as a fraction of font size, for a crude label-width estimate — see labelBox below for why this stays an estimate rather than a real text measurement. Exported so tests compute the same boxes rather than re-declaring the constant, the way STACK_GAP already is. */
+export const AVG_CHAR_WIDTH_RATIO = 0.56;
 
 interface Box {
   left: number;
@@ -265,20 +272,26 @@ function outwardFrom(centroid: { x: number; y: number }, candidate: LabelCandida
  * against its own node list without a second lookup.
  *
  * O(n²): every candidate's box is checked against every previously-
- * placed box (`placedBoxes.some(...)`, below). Left as-is — measured
- * (this repo, 20-call average, uniformly scattered candidates) at
- * ~0.7ms/call at 200 nodes and ~2.6ms/call at 1000, called once per
- * animation frame only while the simulation is running or during
- * pan/zoom (GraphCanvas.tsx's `onRenderFramePre`), never on every
- * frame indefinitely — comfortably inside a 16ms frame budget at this
- * ticket's scale (the seeded corpus has 9 nodes; bd-hmd.5's expansion
- * stays in "the hundreds" per design.md). If node counts ever reach the
- * thousands, bucket candidates into a spatial grid keyed by position
- * and only check a candidate against boxes in nearby cells — not
- * needed now, and doing it now would be optimizing against a scale
- * this app doesn't reach.
+ * placed box (`placedBoxes.some(...)`, below), and since bd-6qo a
+ * candidate that fails all four cardinal slots pays up to 40 more scans
+ * (5 distances x 8 angles) before it is dropped.
+ *
+ * Re-measured after displacement (this repo, 20-call average, old vs
+ * new): 200 scattered 0.79ms -> 0.56ms; 200 dense 1.54ms -> 0.28ms; 500
+ * dense 5.95ms -> 0.45ms; 1000 scattered 7.91ms -> 6.79ms. Faster in
+ * every case, because a candidate that FINDS a displaced slot stops
+ * scanning, where before it exhausted its four slots and was dropped
+ * having done the same work. The worst case is a dense cluster where
+ * most candidates fail both phases and pay all 44 scans.
+ *
+ * Called once per animation frame only while the simulation is running
+ * or during pan/zoom (GraphCanvas.tsx's `onRenderFramePre`), never every
+ * frame indefinitely — comfortably inside a 16ms budget at this app's
+ * scale (design.md keeps expansion in "the hundreds"). If node counts
+ * ever reach the thousands, bucket boxes into a spatial grid keyed by
+ * position and only check nearby cells — not needed now.
  */
-export function placeLabels(candidates: readonly LabelCandidate[], fontSize: number, options?: { gap?: number }): LabelPlacement[] {
+export function placeLabels(candidates: readonly LabelCandidate[], fontSize: number, options?: { gap?: number; obstacles?: readonly Obstacle[] }): LabelPlacement[] {
   const gap = options?.gap ?? DEFAULT_LABEL_GAP;
   const lineHeight = fontSize * DEFAULT_LABEL_LINE_HEIGHT_RATIO;
 
@@ -288,10 +301,23 @@ export function placeLabels(candidates: readonly LabelCandidate[], fontSize: num
     return a.id < b.id ? -1 : a.id > b.id ? 1 : 0; // deterministic tie-break, never left to object insertion order
   });
 
-  // Every node's own circle is an obstacle from the start, even before
-  // any label is placed — a label must not sit on top of an unrelated
-  // node.
-  const placedBoxes: Box[] = candidates.map((c) => nodeBox(c.x, c.y, c.radius));
+  // Every node's circle is an obstacle from the start, even before any
+  // label is placed — a label must not sit on top of an unrelated node.
+  //
+  // `obstacles` is how a caller supplies the nodes that are NOT label
+  // candidates (bd-6qo review). Candidates alone used to be the whole
+  // obstacle set, which was survivable while labels stayed within four
+  // slots of their own node — but displacement flies a label up to ~10
+  // line-heights away, across canvas holding nodes this function could
+  // not see. At default zoom `shouldLabel` admits only seed / selected /
+  // neighbour nodes, so in a hub selection the ~200 ambient nodes were
+  // all invisible to the collision test and most displaced labels landed
+  // on one. The caller knows about every node; this function should be
+  // told about every node.
+  const placedBoxes: Box[] = [
+    ...candidates.map((c) => nodeBox(c.x, c.y, c.radius)),
+    ...(options?.obstacles ?? []).map((o) => nodeBox(o.x, o.y, o.radius)),
+  ];
   const placements = new Map<string, LabelPlacement>();
 
   // The crowd's centre, for the outward direction a displaced label

@@ -6,7 +6,7 @@
 // on the implementation to grade its own homework.
 
 import { describe, expect, it } from "vitest";
-import { DEFAULT_LABEL_GAP, DEFAULT_LABEL_LINE_HEIGHT_RATIO, placeLabels, STACK_GAP, type LabelCandidate } from "./labelPlacement.js";
+import { AVG_CHAR_WIDTH_RATIO, DEFAULT_LABEL_GAP, DEFAULT_LABEL_LINE_HEIGHT_RATIO, placeLabels, STACK_GAP, type LabelCandidate } from "./labelPlacement.js";
 
 const FONT_SIZE = 12;
 const RADIUS = 5;
@@ -19,8 +19,6 @@ const ABOVE_FAR_DY = ABOVE_DY - LINE_HEIGHT - STACK_GAP; // ~-37.8 — one row f
 function candidate(overrides: Partial<LabelCandidate> & { id: string }): LabelCandidate {
   return { x: 0, y: 0, radius: RADIUS, text: overrides.id, alwaysShow: false, priority: 0, ...overrides };
 }
-
-const AVG_CHAR_WIDTH_RATIO = 0.56; // mirrors labelPlacement.ts's own estimate — see labelBox there
 
 /**
  * The invariant this whole module exists to protect, asserted directly
@@ -126,13 +124,34 @@ describe("placeLabels — five coincident candidates: four cardinal slots, then 
   });
 
   // `alwaysShow` decides processing ORDER, never outcome — the property
-  // the explorer-legibility review established, and one displacement does
-  // not change: with priority and alwaysShow equal across the set, the id
-  // tie-break alone settles who gets which slot.
-  it("alwaysShow does not change the outcome when every candidate shares it", () => {
-    const ambient = placeLabels(fiveCoincident(false), FONT_SIZE);
-    const always = placeLabels(fiveCoincident(true), FONT_SIZE);
-    expect(always).toEqual(ambient);
+  // the explorer-legibility review established, which displacement does
+  // not change.
+  //
+  // This has to be asserted with a MIXED set. An earlier version compared
+  // two uniform runs (all-false against all-true) and expected them
+  // equal, which cannot fail for any implementation: `alwaysShow` is read
+  // in exactly one place, the sort comparator, and only when two
+  // candidates DIFFER — so in a uniform set that clause never fires. The
+  // rule it was named for had no coverage at all.
+  it("an alwaysShow candidate is processed ahead of an ambient one of higher priority", () => {
+    const ambientHigh = candidate({ id: "ambient", alwaysShow: false, priority: 100 });
+    const alwaysLow = candidate({ id: "always", alwaysShow: true, priority: 0 });
+    const placements = placeLabels([ambientHigh, alwaysLow], FONT_SIZE);
+    const byId = new Map(placements.map((p) => [p.id, p]));
+    // Both coincide, so whoever goes first takes the preferred "below"
+    // slot and the other falls through to "above". alwaysShow wins that
+    // race despite being 100 priority points behind.
+    expect(byId.get("always")!.dy).toBe(BELOW_DY);
+    expect(byId.get("ambient")!.dy).toBe(ABOVE_DY);
+  });
+
+  it("but alwaysShow buys no force-placement — it still has to find room like everything else", () => {
+    // 60 coincident candidates exhaust every cardinal and displaced slot;
+    // being alwaysShow does not exempt the losers from being dropped.
+    const crowd = Array.from({ length: 60 }, (_, i) => candidate({ id: `c${String(i).padStart(2, "0")}`, alwaysShow: true, priority: 60 - i }));
+    const placements = placeLabels(crowd, FONT_SIZE);
+    expect(placements.some((p) => !p.visible)).toBe(true);
+    expectNoOverlaps(placements, crowd);
   });
 });
 

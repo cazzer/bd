@@ -26,19 +26,36 @@
 //
 // Pure and node-testable; GraphCanvas draws what this returns.
 
-/** Highest first. Mirrors GraphCanvas's label priority tiers exactly — see the module header on why the two must agree. */
+/** Highest first. The same tiers GraphCanvas computes for label priority, reused rather than redefined so one description of "how relevant is this node" serves both — but they do not select the same SET; see the module header. */
 export const HALO_TIER_SELECTED = 3;
 export const HALO_TIER_SEED = 2;
 export const HALO_TIER_NEIGHBOR = 1;
 export const HALO_TIER_FOCUSED = 0;
 
 /**
- * How many nodes may carry a halo at once. Twelve is enough that a
- * modest neighbourhood is fully emphasised and small enough that the
- * halos stay separable at the densities this app actually reaches — the
- * review's 28-neighbour case is the one being bounded.
+ * How many NEIGHBOURS-OF-THE-SELECTION may carry a halo at once.
+ *
+ * The budget applies to this tier alone (see `selectHaloedNodes`), and
+ * that is the correction the first version of this module needed. It
+ * capped all four tiers against one shared allowance of 12, with seeds
+ * ranked ABOVE neighbours — and a search returns up to
+ * DEFAULT_SEED_LIMIT (10) seeds. So selecting the degree-98 hub spent
+ * the budget on 10 seeds plus the selected node and left exactly ONE
+ * haloed neighbour, picked by lexicographic node id, which has no
+ * relation to anything on screen. The wash was gone and so was the
+ * neighbourhood, which is the signal selection exists to draw.
+ *
+ * It was worse for type focus, which sits at the lowest tier: 10 seeds
+ * ate the allowance and two matching nodes glowed, silently reverting
+ * bd-8ub should-fix 9 ("a brighter halo on the MATCHING nodes ... rather
+ * than the payoff resting on the dimming alone").
+ *
+ * Only this tier is unbounded by nature. Seeds are already bounded by
+ * the seed limit AND carry a second, unbudgeted channel (the dashed seed
+ * ring), so they need no allowance here. Focus matches are the
+ * deliberate "all of them" case. The selected node is one node.
  */
-export const MAX_HALOED_NODES = 12;
+export const MAX_HALOED_NEIGHBORS = 12;
 
 export interface HaloCandidate {
   id: string;
@@ -47,15 +64,31 @@ export interface HaloCandidate {
 }
 
 /**
- * The at-most-`max` most relevant candidates, highest tier first, ties
- * broken by id.
+ * Every candidate except the neighbour tier, which is capped at `max`
+ * (ties within it broken by id, so the chosen set is stable frame to
+ * frame rather than flickering as the simulation reorders nodes).
  *
- * The selected node holds the top tier, so it is never the node dropped
- * — that is a property of the ordering, not of luck, and
- * graph-explorer/spec.md's "Selecting a hub" scenario depends on it.
+ * The selected node, the seeds and the focus matches all pass through
+ * untouched — see MAX_HALOED_NEIGHBORS for why bounding them too was a
+ * mistake. The 28-neighbours-of-one-hub case that motivated this module
+ * is still bounded, which was the actual failure.
  */
-export function selectHaloedNodes(candidates: readonly HaloCandidate[], max: number = MAX_HALOED_NODES): Set<string> {
-  if (max <= 0) return new Set();
-  const ordered = [...candidates].sort((a, b) => b.tier - a.tier || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-  return new Set(ordered.slice(0, max).map((c) => c.id));
+export function selectHaloedNodes(candidates: readonly HaloCandidate[], max: number = MAX_HALOED_NEIGHBORS): Set<string> {
+  const chosen = new Set<string>();
+  const neighbors: HaloCandidate[] = [];
+  for (const candidate of candidates) {
+    if (candidate.tier === HALO_TIER_NEIGHBOR) {
+      neighbors.push(candidate);
+    } else {
+      chosen.add(candidate.id);
+    }
+  }
+  if (max > 0) {
+    // Sorted by id alone: every candidate here shares one tier, so id is
+    // the only tie-break there is, and it must be deterministic or the
+    // haloed set would churn between frames.
+    neighbors.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    for (const candidate of neighbors.slice(0, max)) chosen.add(candidate.id);
+  }
+  return chosen;
 }
