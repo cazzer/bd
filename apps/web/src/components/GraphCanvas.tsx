@@ -481,8 +481,25 @@ function drawNode(node: DrawableNode, ctx: CanvasRenderingContext2D, globalScale
   ctx.restore();
 }
 
-/** Hit-test region for a node — must match `drawNode`'s circle so hover/click land where the node is actually drawn, per react-force-graph-2d's own convention for custom nodeCanvasObject. */
-function paintNodePointerArea(node: DrawableNode, color: string, ctx: CanvasRenderingContext2D): void {
+/**
+ * Hit-test region for a node — must match `drawNode`'s circle so
+ * hover/click land where the node is actually drawn, per
+ * react-force-graph-2d's own convention for custom nodeCanvasObject.
+ *
+ * bd-857: a node suppressed by a type focus paints NO pointer area.
+ * `drawNode` renders it at `DIMMED_ALPHA` (0.12), which is deep enough
+ * that a reader has genuinely narrowed the canvas to one type — but the
+ * hit area never carried that alpha, so every suppressed node stayed
+ * fully clickable and hoverable. Something you can barely see and can
+ * still click by accident is worse than either showing it or hiding it:
+ * clicking one expanded a node the reader could not read, and the
+ * tooltip fired over apparently-empty space.
+ *
+ * The focused type itself, and everything while no focus is on, is
+ * unaffected.
+ */
+function paintNodePointerArea(node: DrawableNode, color: string, ctx: CanvasRenderingContext2D, focusedNodeType: string | null | undefined): void {
+  if (focusedNodeType && node.nodeType !== focusedNodeType) return;
   const x = node.x ?? 0;
   const y = node.y ?? 0;
   ctx.beginPath();
@@ -1007,7 +1024,7 @@ export function GraphCanvas({ data, onNodeExpand, expandableNodeIds = NO_EXPANDA
             nodeVal={nodeVal}
             nodeRelSize={NODE_REL_SIZE}
             nodeCanvasObject={(node, ctx, globalScale) => drawNode(node, ctx, globalScale, labelPlacementsRef.current, expandableNodeIds, drawContext)}
-            nodePointerAreaPaint={paintNodePointerArea}
+            nodePointerAreaPaint={(node, color, ctx) => paintNodePointerArea(node, color, ctx, focusedNodeType)}
             nodeLabel={nodeTooltip}
             onNodeClick={(node) => onNodeExpand?.(node as GraphNode)}
             // Release (bd-hmd.5): fires once the simulation actually stops

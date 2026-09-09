@@ -126,7 +126,7 @@ import {
   type UnlinkedNote,
 } from "../graph/expansion.js";
 import { assignTypeColors } from "../graph/palette.js";
-import { rankNeighborTypes, topStoreTypes, type TypeCount } from "../graph/typePrevalence.js";
+import { drawnTypeCounts, rankNeighborTypes, topStoreTypes, type TypeCount } from "../graph/typePrevalence.js";
 import { navigate } from "../lib/navigate.js";
 import { graphRouteFromSearch, parseRoute, type GraphRoute } from "../lib/route.js";
 import { matchNodeTypes } from "../lib/typeMatch.js";
@@ -968,6 +968,10 @@ export function GraphView() {
   // or expansion, not per render.
   const edgeLegend = useMemo(() => edgeLegendOf(graph.links), [graph.links]);
 
+  // bd-857: what the type control leads with — the types on the canvas,
+  // not the store's. Recomputed only when `graph.nodes` changes identity.
+  const drawnTypes = useMemo(() => drawnTypeCounts(graph.nodes), [graph.nodes]);
+
   // Right column width + GraphCanvas's `insetRight` (bd-e9n, design.md
   // decision 5) — a plain derivation of state already held, computed
   // during render like `typePanelSelection`/`typeSuggestions` above, no
@@ -1080,7 +1084,7 @@ export function GraphView() {
       */}
       <div className={`pointer-events-none fixed top-4 right-4 bottom-4 z-10 flex ${rightColumnWidthClass} flex-col items-stretch gap-3`}>
         <div className="glass pointer-events-auto shrink-0 p-3">
-          <TypePanel storeTypes={nodeTypeCounts} selected={typePanelSelection} focusedType={focusedType} onToggleFocus={handleToggleTypeFocus} typeColors={typeColors} edgeLegend={edgeLegend} />
+          <TypePanel drawnTypes={drawnTypes} storeTypes={nodeTypeCounts} selected={typePanelSelection} focusedType={focusedType} onToggleFocus={handleToggleTypeFocus} typeColors={typeColors} edgeLegend={edgeLegend} />
         </div>
         {selectedNodeId && (
           <div className="pointer-events-auto min-h-0 flex-1">

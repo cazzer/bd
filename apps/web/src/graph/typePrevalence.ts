@@ -30,6 +30,28 @@ function sortByCountThenName(a: TypeCount, b: TypeCount): number {
   return b.count - a.count || a.nodeType.localeCompare(b.nodeType);
 }
 
+/**
+ * How many nodes of each type are DRAWN right now (bd-857), ranked by the
+ * same tie-break as everything else here.
+ *
+ * The third ranking, and the one the type control leads with. It used to
+ * lead with `topStoreTypes` — store-wide counts — beside a canvas showing
+ * a search result, so it read `gh-pr 584` while the canvas held no
+ * `gh-pr` at all. A legend that does not describe the picture beside it
+ * is worse than no legend: a reader takes it as a key.
+ *
+ * `topStoreTypes` stays, and stays useful — "552 more of these exist
+ * that you are not looking at" is real information. It is just the
+ * secondary figure now, not the headline.
+ */
+export function drawnTypeCounts(nodes: readonly GraphNode[]): TypeCount[] {
+  const counts = new Map<string, number>();
+  for (const node of nodes) {
+    counts.set(node.nodeType, (counts.get(node.nodeType) ?? 0) + 1);
+  }
+  return [...counts.entries()].map(([nodeType, count]) => ({ nodeType, count })).sort(sortByCountThenName);
+}
+
 /** Top `limit` store-wide types by count — the type control's default (no node selected) view. */
 export function topStoreTypes(nodeTypes: readonly TypeCount[], limit: number): TypeCount[] {
   return [...nodeTypes].sort(sortByCountThenName).slice(0, limit);
@@ -75,4 +97,33 @@ export function rankNeighborTypes(nodeId: string, nodes: readonly GraphNode[], l
   }
 
   return [...counts.entries()].map(([nodeType, count]) => ({ nodeType, count })).sort(sortByCountThenName);
+}
+
+/**
+ * Splits ranked types into the ones the palette gave a colour and the
+ * ones it did not (bd-857).
+ *
+ * `assignTypeColors` hands out CATEGORICAL_PALETTE's eight slots by
+ * store-wide rank and gives everything past that the same
+ * `FALLBACK_COLOR`. Those types are indistinguishable ON THE CANVAS, so
+ * the control names them as one group rather than listing them as
+ * separate rows that happen to look alike.
+ *
+ * Membership is decided by the colour a type actually resolves to, not
+ * by its position in this list — a fallback-coloured type can rank high
+ * on the canvas while ranking low store-wide, and it is still
+ * indistinguishable when drawn. Order within each half is preserved, so
+ * the caller's ranking survives the split.
+ */
+export function splitPaletteOverflow(
+  rows: readonly TypeCount[],
+  colorOf: (nodeType: string) => string,
+  fallbackColor: string,
+): { coloured: TypeCount[]; overflow: TypeCount[] } {
+  const coloured: TypeCount[] = [];
+  const overflow: TypeCount[] = [];
+  for (const row of rows) {
+    (colorOf(row.nodeType) === fallbackColor ? overflow : coloured).push(row);
+  }
+  return { coloured, overflow };
 }

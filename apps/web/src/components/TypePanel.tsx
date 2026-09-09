@@ -21,9 +21,9 @@
 // remains satisfied now that GraphLegend itself is gone — this is the
 // one piece of this component that isn't node-type ranking.
 
-import { colorForNodeType } from "../graph/palette.js";
+import { colorForNodeType, FALLBACK_COLOR } from "../graph/palette.js";
 import type { EdgeLegend } from "../graph/edgeLegend.js";
-import { topStoreTypes, type TypeCount } from "../graph/typePrevalence.js";
+import { splitPaletteOverflow, topStoreTypes, type TypeCount } from "../graph/typePrevalence.js";
 
 const DEFAULT_VISIBLE_COUNT = 8;
 
@@ -35,7 +35,17 @@ export interface TypePanelSelection {
 }
 
 export interface TypePanelProps {
-  /** getStoreSummary().nodeTypes — the full store-wide list; this component itself slices to the top 8 plus disclosure. */
+  /**
+   * The types actually DRAWN, ranked (bd-857, typePrevalence.ts's
+   * `drawnTypeCounts`). The primary figure in the no-selection view.
+   *
+   * Before this, the panel led with `storeTypes` — so it read
+   * `gh-pr 584` beside a canvas holding no `gh-pr` at all. A legend that
+   * does not describe the picture next to it is worse than no legend,
+   * because a reader takes it as a key to what they are looking at.
+   */
+  drawnTypes: TypeCount[];
+  /** getStoreSummary().nodeTypes — the full store-wide list. Still shown, as the SECONDARY figure beside each drawn count ("and 552 more of these exist"), and as the whole list when nothing is drawn yet. */
   storeTypes: TypeCount[];
   /** null when no node is selected. */
   selected?: TypePanelSelection | null;
@@ -58,16 +68,20 @@ export interface TypePanelProps {
 function TypeRow({
   nodeType,
   count,
+  storeCount,
   focused,
   onToggleFocus,
   typeColors,
 }: {
   nodeType: string;
   count: number;
+  /** How many exist in the whole store, when that is more than are drawn. Secondary and dimmed — see TypePanelProps.storeTypes. */
+  storeCount?: number | null;
   focused: boolean;
   onToggleFocus: (nodeType: string) => void;
   typeColors: ReadonlyMap<string, string>;
 }) {
+  const showStore = typeof storeCount === "number" && storeCount > count;
   return (
     <li>
       <button
@@ -80,21 +94,79 @@ function TypeRow({
       >
         <span aria-hidden className="inline-block h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: colorForNodeType(nodeType, typeColors) }} />
         <span className="flex-1 truncate text-fg">{nodeType}</span>
-        <span className="shrink-0 text-fg-muted">{count}</span>
+        <span className="shrink-0 text-fg">{count}</span>
+        {showStore && (
+          <span className="shrink-0 text-[10px] text-fg-muted" title={`${storeCount} in the store`}>
+            /{storeCount}
+          </span>
+        )}
       </button>
     </li>
   );
 }
 
-export function TypePanel({ storeTypes, selected, focusedType, onToggleFocus, typeColors, edgeLegend }: TypePanelProps) {
-  const heading = selected ? `around ${selected.title || "(untitled)"}` : "Types";
+/**
+ * The types the palette ran out of colours for, as one named group
+ * (bd-857).
+ *
+ * `assignTypeColors` hands out CATEGORICAL_PALETTE's eight slots by
+ * store-wide rank and gives every type past that the same
+ * `FALLBACK_COLOR`. The panel used to hide those behind an "N more
+ * types" disclosure, where they appeared as ordinary rows — six separate
+ * entries, all drawing identically, presented as though they were
+ * distinguishable. Naming them as one group is the honest version: the
+ * canvas genuinely cannot tell them apart, and the reader should know
+ * that before they try.
+ */
+function OverflowGroup({ types, typeColors }: { types: TypeCount[]; typeColors: ReadonlyMap<string, string> }) {
+  const total = types.reduce((sum, t) => sum + t.count, 0);
+  return (
+    <details>
+      <summary className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1 text-[13px] hover:bg-surface-strong">
+        <span aria-hidden className="inline-block h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: FALLBACK_COLOR }} />
+        <span className="flex-1 truncate text-fg-muted">
+          other ({types.length} type{types.length === 1 ? "" : "s"}, drawn alike)
+        </span>
+        <span className="shrink-0 text-fg-muted">{total}</span>
+      </summary>
+      <ul className="mt-1 ml-4 flex flex-col gap-0.5">
+        {types.map((t) => (
+          <li key={t.nodeType} className="flex items-center gap-2 px-2 py-0.5 text-[12px] text-fg-muted">
+            <span className="flex-1 truncate">{t.nodeType}</span>
+            <span className="shrink-0">{t.count}</span>
+          </li>
+        ))}
+      </ul>
+    </details>
+  );
+}
+
+export function TypePanel({ drawnTypes, storeTypes, selected, focusedType, onToggleFocus, typeColors, edgeLegend }: TypePanelProps) {
+  const heading = selected ? `around ${selected.title || "(untitled)"}` : drawnTypes.length > 0 ? "On the canvas" : "In the store";
   // `topStoreTypes(storeTypes, storeTypes.length)` — "top all of them" —
   // reuses the one tested sort/tie-break rather than re-sorting inline;
   // slicing into visible/rest happens here since only this component
   // knows about the disclosure.
-  const rows = selected ? selected.ranked : topStoreTypes(storeTypes, storeTypes.length);
-  const visible = selected ? rows : rows.slice(0, DEFAULT_VISIBLE_COUNT);
-  const rest = selected ? [] : rows.slice(DEFAULT_VISIBLE_COUNT);
+  // bd-857. Three views, and which one is showing decides what the counts
+  // MEAN — so the heading says so rather than leaving the reader to infer
+  // it from numbers that used to be silently store-wide:
+  //   - a node is selected: its drawn neighbourhood's types (unchanged).
+  //   - nodes are drawn: their types, counted on the canvas, with the
+  //     store's own count as a dimmed secondary figure.
+  //   - nothing is drawn (the state the explorer opens in): the store's
+  //     types, which is the only thing there is to describe.
+  const showingDrawn = !selected && drawnTypes.length > 0;
+  const rows = selected ? selected.ranked : showingDrawn ? drawnTypes : topStoreTypes(storeTypes, storeTypes.length);
+  const storeCountByType = new Map(storeTypes.map((t) => [t.nodeType, t.count]));
+
+  // Types the palette had no colour left for draw identically, so they are
+  // grouped rather than listed as though they were distinguishable. Split
+  // out of the ranked rows wherever they fall, not just past a fixed
+  // position — a fallback-coloured type can rank above a coloured one on
+  // the canvas even though it ranked below it store-wide.
+  const { coloured, overflow } = splitPaletteOverflow(rows, (t) => colorForNodeType(t, typeColors), FALLBACK_COLOR);
+  const visible = selected ? coloured : coloured.slice(0, DEFAULT_VISIBLE_COUNT);
+  const rest = selected ? [] : coloured.slice(DEFAULT_VISIBLE_COUNT);
 
   return (
     <div className="flex flex-col gap-2 text-xs">
@@ -106,7 +178,15 @@ export function TypePanel({ storeTypes, selected, focusedType, onToggleFocus, ty
         <>
           <ul className="flex flex-col gap-0.5">
             {visible.map((row) => (
-              <TypeRow key={row.nodeType} nodeType={row.nodeType} count={row.count} focused={focusedType === row.nodeType} onToggleFocus={onToggleFocus} typeColors={typeColors} />
+              <TypeRow
+                key={row.nodeType}
+                nodeType={row.nodeType}
+                count={row.count}
+                storeCount={showingDrawn ? storeCountByType.get(row.nodeType) : null}
+                focused={focusedType === row.nodeType}
+                onToggleFocus={onToggleFocus}
+                typeColors={typeColors}
+              />
             ))}
           </ul>
           {rest.length > 0 && (
@@ -116,11 +196,20 @@ export function TypePanel({ storeTypes, selected, focusedType, onToggleFocus, ty
               </summary>
               <ul className="mt-1 flex flex-col gap-0.5">
                 {rest.map((row) => (
-                  <TypeRow key={row.nodeType} nodeType={row.nodeType} count={row.count} focused={focusedType === row.nodeType} onToggleFocus={onToggleFocus} typeColors={typeColors} />
+                  <TypeRow
+                    key={row.nodeType}
+                    nodeType={row.nodeType}
+                    count={row.count}
+                    storeCount={showingDrawn ? storeCountByType.get(row.nodeType) : null}
+                    focused={focusedType === row.nodeType}
+                    onToggleFocus={onToggleFocus}
+                    typeColors={typeColors}
+                  />
                 ))}
               </ul>
             </details>
           )}
+          {overflow.length > 0 && <OverflowGroup types={overflow} typeColors={typeColors} />}
         </>
       )}
 

@@ -7,7 +7,8 @@
 
 import { describe, expect, it } from "vitest";
 import type { GraphLink, GraphNode } from "./encoding.js";
-import { rankNeighborTypes, topStoreTypes, type TypeCount } from "./typePrevalence.js";
+import { drawnTypeCounts, rankNeighborTypes, splitPaletteOverflow, topStoreTypes, type TypeCount } from "./typePrevalence.js";
+import { assignTypeColors, colorForNodeType, FALLBACK_COLOR } from "./palette.js";
 
 function makeNode(id: string, nodeType: string): GraphNode {
   return {
@@ -115,5 +116,75 @@ describe("topStoreTypes", () => {
 
   it("returns [] for no store types", () => {
     expect(topStoreTypes([], 8)).toEqual([]);
+  });
+});
+
+// bd-857: the ranking the type control leads with — what is DRAWN, not
+// what the store holds.
+describe("drawnTypeCounts", () => {
+  it("counts the nodes on the canvas, not the store", () => {
+    const nodes = [makeNode("a", "file"), makeNode("b", "file"), makeNode("c", "commit")];
+    expect(drawnTypeCounts(nodes)).toEqual([
+      { nodeType: "file", count: 2 },
+      { nodeType: "commit", count: 1 },
+    ]);
+  });
+
+  it("shares the count-desc-then-name-asc tie-break every other ranking here uses", () => {
+    const nodes = [makeNode("a", "zebra"), makeNode("b", "alpha")];
+    expect(drawnTypeCounts(nodes).map((t) => t.nodeType)).toEqual(["alpha", "zebra"]);
+  });
+
+  it("is empty for an empty canvas — the state the explorer opens in", () => {
+    expect(drawnTypeCounts([])).toEqual([]);
+  });
+
+  // The exact shape of the bug: the store holds fourteen types, the
+  // canvas holds four, and the control must not present the other ten as
+  // though they were drawn.
+  it("names no type that is absent from the canvas", () => {
+    const drawn = drawnTypeCounts([makeNode("a", "file"), makeNode("b", "commit")]);
+    expect(drawn.map((t) => t.nodeType)).toEqual(["commit", "file"]);
+    expect(drawn.some((t) => t.nodeType === "gh-pr")).toBe(false);
+  });
+});
+
+// bd-857: the palette-overflow grouping. graph-explorer/spec.md's "Types
+// beyond the palette are grouped, not disguised".
+describe("splitPaletteOverflow", () => {
+  const count = (nodeType: string, count: number): TypeCount => ({ nodeType, count });
+
+  it("splits at exactly the palette boundary — eight colours, everything after shares the fallback", () => {
+    const ranked = Array.from({ length: 11 }, (_, i) => count(`t${String(i).padStart(2, "0")}`, 100 - i));
+    const colors = assignTypeColors(ranked.map((r) => r.nodeType));
+    const { coloured, overflow } = splitPaletteOverflow(ranked, (t) => colorForNodeType(t, colors), FALLBACK_COLOR);
+    expect(coloured).toHaveLength(8);
+    expect(overflow).toHaveLength(3);
+    expect(overflow.map((r) => r.nodeType)).toEqual(["t08", "t09", "t10"]);
+  });
+
+  it("groups by the colour a type resolves to, not by its position in the list", () => {
+    // The canvas ranking is not the store ranking: a fallback-coloured
+    // type can sit at the top of what is drawn and still be
+    // indistinguishable when drawn, which is the thing being reported.
+    const colors = assignTypeColors(["a", "b", "c", "d", "e", "f", "g", "h", "rare"]);
+    const drawnRanking = [count("rare", 50), count("a", 2)];
+    const { coloured, overflow } = splitPaletteOverflow(drawnRanking, (t) => colorForNodeType(t, colors), FALLBACK_COLOR);
+    expect(overflow.map((r) => r.nodeType)).toEqual(["rare"]);
+    expect(coloured.map((r) => r.nodeType)).toEqual(["a"]);
+  });
+
+  it("preserves the caller's order within each half", () => {
+    const colors = assignTypeColors(["a", "b", "c", "d", "e", "f", "g", "h", "x", "y"]);
+    const { coloured, overflow } = splitPaletteOverflow([count("b", 9), count("y", 8), count("a", 7), count("x", 6)], (t) => colorForNodeType(t, colors), FALLBACK_COLOR);
+    expect(coloured.map((r) => r.nodeType)).toEqual(["b", "a"]);
+    expect(overflow.map((r) => r.nodeType)).toEqual(["y", "x"]);
+  });
+
+  it("puts nothing in the overflow group when every drawn type has its own colour", () => {
+    const colors = assignTypeColors(["a", "b"]);
+    const { coloured, overflow } = splitPaletteOverflow([count("a", 3), count("b", 1)], (t) => colorForNodeType(t, colors), FALLBACK_COLOR);
+    expect(overflow).toEqual([]);
+    expect(coloured).toHaveLength(2);
   });
 });
