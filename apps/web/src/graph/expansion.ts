@@ -486,7 +486,16 @@ export function expandableNodeIds(entries: ExpansionEntries): ReadonlySet<string
 // A structure no write path can silently corrupt beats one that relies on
 // every future caller remembering.
 
-/** Marks a node as belonging to the current search result rather than to any expansion. Not a node id — no node can be named "query" since ids are uuids. */
+/**
+ * Marks a node as on screen for a reason that is not an expansion: a
+ * search result, a note the person just created, an annotation, or a
+ * deep-linked node drawn on its own. Not a node id — no node can be
+ * named "query", since ids are uuids.
+ *
+ * The distinction that matters is ROOT versus derived. A root-held node
+ * survives collapsing anything; a node held only by other nodes survives
+ * exactly as long as one of those does.
+ */
 export const QUERY_HOLDER = "query";
 
 export type HolderMap = ReadonlyMap<string, ReadonlySet<string>>;
@@ -540,24 +549,76 @@ export interface CollapseResult {
  * screen for whatever reason put it there, which expanding it did not
  * change.
  */
-export function collapseExpansion(previous: GraphCanvasData, holders: HolderMap, parentId: string): CollapseResult {
-  const next = new Map<string, Set<string>>();
-  const removedIds: string[] = [];
-  for (const [id, set] of holders) {
-    const without = new Set(set);
-    without.delete(parentId);
-    if (without.size === 0 && id !== parentId) {
-      removedIds.push(id);
-      continue;
+/**
+ * Which nodes are still held, transitively.
+ *
+ * A node survives if it is held by QUERY_HOLDER, or by another node that
+ * itself survives. Computed as a reachability fixpoint rather than one
+ * pass over the holder sets, because holding is a CHAIN: expand S to
+ * reach F, then expand F to reach C, and C's holder set names F, not S.
+ * A single pass removing `parentId` from every set empties F's set and
+ * drops it, but leaves C holding {F} — a set nothing can ever empty
+ * again, since F is gone and cannot be collapsed a second time. C then
+ * floats unreachable and unremovable for the life of the query, with its
+ * only edge pruned away underneath it.
+ *
+ * That was the first version of this function, and its own test suite
+ * built the s1 -> e1 -> e2 chain that exposes it but only ever ran it
+ * through `resetToSeeds`.
+ *
+ * A node with no holder entry at all is treated as root-held: losing a
+ * node the person can see is worse than keeping one collapse cannot
+ * reach.
+ */
+function reachableIds(nodes: readonly GraphNode[], holders: HolderMap): Set<string> {
+  const present = new Set(nodes.map((n) => n.id));
+  const reachable = new Set<string>();
+  const frontier: string[] = [];
+
+  for (const node of nodes) {
+    const set = holders.get(node.id);
+    if (set === undefined || set.has(QUERY_HOLDER)) {
+      reachable.add(node.id);
+      frontier.push(node.id);
     }
-    next.set(id, without);
   }
-  // A node with no holder entry at all (added before this map existed, or
-  // by a path that forgot to record one) is kept rather than silently
-  // deleted — losing a node the person can see is worse than keeping one
-  // collapse cannot reach.
-  const keptIds = new Set(previous.nodes.filter((n) => !removedIds.includes(n.id)).map((n) => n.id));
-  return { graph: pruneTo(previous, keptIds), holders: next, removedIds };
+
+  // Anything held by a node already known to survive, survives too —
+  // repeated until nothing new is found. Bounded by the node count, since
+  // an id enters `reachable` at most once.
+  while (frontier.length > 0) {
+    const holder = frontier.pop()!;
+    for (const node of nodes) {
+      if (reachable.has(node.id)) continue;
+      if (!present.has(node.id)) continue;
+      if (holders.get(node.id)?.has(holder)) {
+        reachable.add(node.id);
+        frontier.push(node.id);
+      }
+    }
+  }
+  return reachable;
+}
+
+export function collapseExpansion(previous: GraphCanvasData, holders: HolderMap, parentId: string): CollapseResult {
+  // Drop this expansion's claim, then ask what is still reachable.
+  const without = new Map<string, Set<string>>();
+  for (const [id, set] of holders) {
+    const trimmed = new Set(set);
+    trimmed.delete(parentId);
+    without.set(id, trimmed);
+  }
+  // The collapsed node itself always stays: it is on screen for whatever
+  // put it there, which expanding it did not change.
+  const kept = reachableIds(previous.nodes, without);
+  kept.add(parentId);
+
+  const removedIds = previous.nodes.filter((n) => !kept.has(n.id)).map((n) => n.id);
+  const next = new Map<string, Set<string>>();
+  for (const [id, set] of without) {
+    if (kept.has(id)) next.set(id, set);
+  }
+  return { graph: pruneTo(previous, kept), holders: next, removedIds };
 }
 
 /** Discards every expansion, leaving the current search result. Does not re-run the query — the nodes are already here. */
@@ -566,15 +627,13 @@ export function resetToSeeds(previous: GraphCanvasData, holders: HolderMap): Col
   const removedIds: string[] = [];
   for (const node of previous.nodes) {
     const set = holders.get(node.id);
-    if (set === undefined) {
-      next.set(node.id, new Set([QUERY_HOLDER])); // unknown provenance — kept, see collapseExpansion
+    // No entry, or root-held: kept. Everything else is here only because
+    // of an expansion, which is exactly what reset discards.
+    if (set === undefined || set.has(QUERY_HOLDER)) {
+      next.set(node.id, new Set([QUERY_HOLDER]));
       continue;
     }
-    if (!set.has(QUERY_HOLDER)) {
-      removedIds.push(node.id);
-      continue;
-    }
-    next.set(node.id, new Set([QUERY_HOLDER]));
+    removedIds.push(node.id);
   }
   const keptIds = new Set(previous.nodes.filter((n) => !removedIds.includes(n.id)).map((n) => n.id));
   return { graph: pruneTo(previous, keptIds), holders: next, removedIds };

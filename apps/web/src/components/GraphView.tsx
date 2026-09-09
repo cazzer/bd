@@ -124,6 +124,10 @@ import {
   withExpansionResult,
   withExpansionHolders,
   holdersForSearch,
+  pinPlacedNodes,
+  type PositionedNode,
+  withHolder,
+  QUERY_HOLDER,
   collapseExpansion,
   resetToSeeds,
   type HolderMap,
@@ -132,6 +136,7 @@ import {
 } from "../graph/expansion.js";
 import { assignTypeColors } from "../graph/palette.js";
 import { drawnTypeCounts, rankNeighborTypes, topStoreTypes, type TypeCount } from "../graph/typePrevalence.js";
+import { endpointId } from "../graph/nodeEdges.js";
 import { navigate } from "../lib/navigate.js";
 import { graphRouteFromSearch, parseRoute, type GraphRoute } from "../lib/route.js";
 import { matchNodeTypes } from "../lib/typeMatch.js";
@@ -413,6 +418,14 @@ export function GraphView() {
         // A search replaces the view, so it replaces the holders too —
         // the old map described nodes that are no longer drawn (bd-jar).
         setHolders(holdersForSearch(searchResultToGraphData(result).nodes));
+        // ...and the expansion bookkeeping with them (bd-jar review).
+        // Left behind, it made "Reset to results" appear over a canvas
+        // with nothing to reset — where clicking it removed nothing but
+        // still handed force-graph a new graphData array, provoking a
+        // full 200-tick reheat for a no-op — and offered "Collapse
+        // expansion" on a node whose expansion belonged to a previous
+        // search.
+        setExpansions(new Map());
         // A fresh query replaces the whole view (unlike expansion, which
         // accumulates) — a node selected before this search may no
         // longer be drawn at all, so the panel closes rather than show
@@ -566,6 +579,11 @@ export function GraphView() {
       setNodeDegree(merged.nodes, target.id, newTargetDegree);
       return merged;
     });
+    // bd-jar review: the note is ROOT-held, not held by the annotated
+    // node. It reuses mergeExpansion's shape, but it is the person's own
+    // writing rather than something an expansion found, so collapsing
+    // the annotated node must not take it away.
+    setHolders((previous) => withHolder(previous, result.noteId, QUERY_HOLDER));
     // Outside the updater, deliberately — see this function's own doc
     // comment on why the updater above runs twice under StrictMode; a
     // network call triggered from inside it would double-fire the same
@@ -598,6 +616,10 @@ export function GraphView() {
     if (!live.current) return;
     const node = buildStandaloneNoteNode(result, title);
     setGraph((previous) => mergeStandaloneNode(previous, node));
+    // bd-jar review: a node added outside an expansion is ROOT-held, or
+    // "Reset to results" would keep it forever with nothing able to
+    // remove it (collapse only ever drops expansion-held nodes).
+    setHolders((previous) => withHolder(previous, node.id, QUERY_HOLDER));
     setSelectedNodeId(result.id);
     setDetailExpanded(false); // bd-e9n: opens as a summary, same as any other selection
     navigate(routeFor(result.id), "replace"); // url-addressable-views: a selection change, so a replace
@@ -609,6 +631,10 @@ export function GraphView() {
   function handleShowUnlinkedNote(note: UnlinkedNote) {
     const node = graphNodeFromUnlinkedNote(note);
     setGraph((previous) => mergeStandaloneNode(previous, node));
+    // bd-jar review: a node added outside an expansion is ROOT-held, or
+    // "Reset to results" would keep it forever with nothing able to
+    // remove it (collapse only ever drops expansion-held nodes).
+    setHolders((previous) => withHolder(previous, node.id, QUERY_HOLDER));
     setSelectedNodeId(note.id);
     setDetailExpanded(false); // bd-e9n: opens as a summary, same as any other selection
     navigate(routeFor(note.id), "replace"); // url-addressable-views: a selection change, so a replace
@@ -822,6 +848,10 @@ export function GraphView() {
     }
     const node = graphNodeFromUnlinkedNote(lookedUp);
     setGraph((previous) => mergeStandaloneNode(previous, node));
+    // bd-jar review: a node added outside an expansion is ROOT-held, or
+    // "Reset to results" would keep it forever with nothing able to
+    // remove it (collapse only ever drops expansion-held nodes).
+    setHolders((previous) => withHolder(previous, node.id, QUERY_HOLDER));
     selectNode(node);
     // The survivor's id when a merged-away id resolved; otherwise this IS
     // `route`, and the re-assert described above.
@@ -913,37 +943,41 @@ export function GraphView() {
    * one of the removed.
    */
   function handleCollapse(nodeId: string) {
-    setGraph((previousGraph) => {
-      const { graph: next, holders: nextHolders, removedIds } = collapseExpansion(previousGraph, holders, nodeId);
-      setHolders(nextHolders);
-      setExpansions((previous) => {
-        const entries = new Map(previous);
-        entries.delete(nodeId);
-        for (const id of removedIds) entries.delete(id); // a removed node's own expansion state goes with it
-        return entries;
-      });
-      if (selectedNodeId !== null && removedIds.includes(selectedNodeId)) {
-        setSelectedNodeId(null);
-        setDetailExpanded(false);
-        navigate(routeFor(null), "replace");
-      }
-      return next;
+    // Computed HERE, not inside a setGraph updater. An updater must be
+    // pure — React may invoke it for a render it then discards, and
+    // twice under StrictMode — and `navigate` writes browser history,
+    // which is neither. `handleAnnotated` above states this rule for its
+    // own network call; an earlier version of this function broke it.
+    // `graph` and `holders` come from this render's closure, which is
+    // safe because every setter that writes them is batched with its
+    // setGraph in one tick.
+    const { graph: next, holders: nextHolders, removedIds } = collapseExpansion(graph, holders, nodeId);
+    setGraph(next);
+    setHolders(nextHolders);
+    setExpansions((previous) => {
+      const entries = new Map(previous);
+      entries.delete(nodeId);
+      for (const id of removedIds) entries.delete(id); // a removed node's own expansion state goes with it
+      return entries;
     });
+    if (selectedNodeId !== null && removedIds.includes(selectedNodeId)) {
+      setSelectedNodeId(null);
+      setDetailExpanded(false);
+      navigate(routeFor(null), "replace");
+    }
   }
 
   /** Discard every expansion, leaving the current search result — without re-running the query (bd-jar). */
   function handleResetToSeeds() {
-    setGraph((previousGraph) => {
-      const { graph: next, holders: nextHolders, removedIds } = resetToSeeds(previousGraph, holders);
-      setHolders(nextHolders);
-      setExpansions(new Map());
-      if (selectedNodeId !== null && removedIds.includes(selectedNodeId)) {
-        setSelectedNodeId(null);
-        setDetailExpanded(false);
-        navigate(routeFor(null), "replace");
-      }
-      return next;
-    });
+    const { graph: next, holders: nextHolders, removedIds } = resetToSeeds(graph, holders);
+    setGraph(next);
+    setHolders(nextHolders);
+    setExpansions(new Map());
+    if (selectedNodeId !== null && removedIds.includes(selectedNodeId)) {
+      setSelectedNodeId(null);
+      setDetailExpanded(false);
+      navigate(routeFor(null), "replace");
+    }
   }
 
   /**
@@ -963,6 +997,11 @@ export function GraphView() {
    * earlier via a search suggestion) is never this handler's to remove.
    */
   function handleToggleTypeFocus(nodeType: string) {
+    // Narrowing hands force-graph a different graphData array, which it
+    // answers with a reheat. Pinning first keeps every surviving node
+    // exactly where it was, the same guarantee expansion and collapse
+    // already rely on (graph/expansion.ts's header).
+    pinPlacedNodes(graph.nodes as readonly PositionedNode[]);
     const turningOn = focusedType !== nodeType;
     setFocusedType(turningOn ? nodeType : null);
     if (turningOn) {
@@ -1040,6 +1079,33 @@ export function GraphView() {
   /** How many nodes have been expanded — gates the "Reset to results" control (bd-jar). */
   const expandedNodeCount = expansions.size;
 
+  /**
+   * What the canvas actually draws (bd-857 review). A type focus REMOVES
+   * the other types rather than only dimming them, which is what
+   * graph-explorer/spec.md requires ("SHALL narrow what is drawn to that
+   * type, not merely restyle it") and what task 3.3 originally argued
+   * against on the grounds that dimming to 0.12 alpha was close enough.
+   *
+   * Three things went wrong under dimming that narrowing fixes at once:
+   * the type panel counted the dimmed nodes as drawn, so it reported
+   * "file 26, commit 8" while 13 of those were ghosts; the dimmed nodes
+   * stayed in GraphCanvas's sr-only list as live expand controls, so a
+   * keyboard user could reach and expand nodes a mouse user had just
+   * been denied; and suppressing the pointer area to close that gap was
+   * a patch on the symptom.
+   *
+   * `graph` still holds every node, so unfocusing restores them with
+   * their positions — these are the same objects, filtered, not copies.
+   */
+  const visibleGraph = useMemo(() => {
+    if (!focusedType) return graph;
+    const keptIds = new Set(graph.nodes.filter((n) => n.nodeType === focusedType).map((n) => n.id));
+    return {
+      nodes: graph.nodes.filter((n) => keptIds.has(n.id)),
+      links: graph.links.filter((l) => keptIds.has(endpointId(l.source)) && keptIds.has(endpointId(l.target))),
+    };
+  }, [graph, focusedType]);
+
   // Right column width + GraphCanvas's `insetRight` (bd-e9n, design.md
   // decision 5) — a plain derivation of state already held, computed
   // during render like `typePanelSelection`/`typeSuggestions` above, no
@@ -1080,7 +1146,7 @@ export function GraphView() {
       {/* The map is the page (design.md) — the canvas's own fixed, full-viewport layer, sized independently of every panel below. */}
       <div className="fixed inset-0">
         <GraphCanvas
-          data={graph}
+          data={visibleGraph}
           onNodeExpand={handleNodeClick}
           expandableNodeIds={expandableNodeIds(expansions)}
           focusedNodeType={focusedType}

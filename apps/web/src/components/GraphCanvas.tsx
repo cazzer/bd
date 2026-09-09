@@ -205,6 +205,9 @@ const LABEL_COLOR = "#e2e8f0"; // slate-200 — matches --color-fg, legible on t
  */
 const LABEL_FONT_SIZE_PX = 12;
 
+/** The inside rim marking a node whose degree is past the radius cap (bd-jar). Light enough to read against every palette hue, since it sits on top of the node's own fill. */
+const HUB_RIM_COLOR = "rgba(226, 232, 240, 0.8)";
+
 /** Leader line for a displaced label (bd-6qo). Dimmer than the label itself — it is a pointer, not content. */
 const LEADER_COLOR = "rgba(226, 232, 240, 0.35)";
 const LEADER_WIDTH_PX = 1;
@@ -438,18 +441,30 @@ function drawNode(node: DrawableNode, ctx: CanvasRenderingContext2D, globalScale
   ctx.fillStyle = fillColor;
   ctx.fill();
 
-  // bd-jar: degree past the radius cap, carried as a ring. Radius is
-  // deliberately bounded (encoding.ts's NODE_RADIUS_MAX) so a 329-degree
-  // hub cannot swamp the canvas — but bounded alone made every node past
-  // the cap identical, so this is what still separates them. Stroked
-  // just inside the circle's edge, in the node's own type colour, so it
-  // reads as "more of this node" rather than as a second object.
+  // bd-jar: degree past the radius cap, carried as a rim INSIDE the
+  // node. Radius is deliberately bounded (encoding.ts's
+  // NODE_RADIUS_MAX) so a 329-degree hub cannot swamp the canvas, but
+  // bounded alone made every node past the cap identical.
+  //
+  // Inside, and in a contrasting colour, for two reasons the first
+  // version got wrong by stroking OUTSIDE in the node's own fill colour:
+  // that stroke spanned [radius, radius + width] in the same colour as a
+  // fill spanning [0, radius], so there was no boundary to see and a
+  // degree-329 node simply rendered as a larger solid disc — the size
+  // channel continued on a log curve, which is precisely what the spec
+  // requirement ("by a channel other than size") rules out. It also grew
+  // past the dashed seed ring at [radius+2, radius+4] and painted over
+  // it, so a high-degree search hit lost its "this is a hit" mark.
+  //
+  // A rim inside the disc cannot be mistaken for size, cannot reach the
+  // seed ring, and leaves radius, hit area, halo and label gap all still
+  // keyed on `node.radius` alone.
   const ringWidth = degreeToRingWidth(node.degree);
   if (ringWidth > 0) {
     ctx.save();
     ctx.beginPath();
-    ctx.arc(x, y, node.radius + ringWidth / 2, 0, 2 * Math.PI);
-    ctx.strokeStyle = fillColor;
+    ctx.arc(x, y, Math.max(ringWidth / 2, node.radius - ringWidth / 2), 0, 2 * Math.PI);
+    ctx.strokeStyle = HUB_RIM_COLOR;
     ctx.lineWidth = ringWidth;
     ctx.stroke();
     ctx.restore();
@@ -515,20 +530,17 @@ function drawNode(node: DrawableNode, ctx: CanvasRenderingContext2D, globalScale
  * hover/click land where the node is actually drawn, per
  * react-force-graph-2d's own convention for custom nodeCanvasObject.
  *
- * bd-857: a node suppressed by a type focus paints NO pointer area.
- * `drawNode` renders it at `DIMMED_ALPHA` (0.12), which is deep enough
- * that a reader has genuinely narrowed the canvas to one type — but the
- * hit area never carried that alpha, so every suppressed node stayed
- * fully clickable and hoverable. Something you can barely see and can
- * still click by accident is worse than either showing it or hiding it:
- * clicking one expanded a node the reader could not read, and the
- * tooltip fired over apparently-empty space.
- *
- * The focused type itself, and everything while no focus is on, is
- * unaffected.
+ * No type-focus special case here any more (bd-857 review): a focus now
+ * REMOVES the other types from `data` upstream in GraphView, so a
+ * suppressed node is not in this canvas's node list at all and there is
+ * nothing to suppress. An earlier version painted no pointer area for a
+ * dimmed node, which fixed "invisible but clickable" for the mouse while
+ * leaving the sr-only node list below advertising the same nodes as live
+ * expand controls — a keyboard user could reach what a mouse user could
+ * not. Narrowing upstream closes both at once, because both surfaces
+ * read the same filtered `data`.
  */
-function paintNodePointerArea(node: DrawableNode, color: string, ctx: CanvasRenderingContext2D, focusedNodeType: string | null | undefined): void {
-  if (focusedNodeType && node.nodeType !== focusedNodeType) return;
+function paintNodePointerArea(node: DrawableNode, color: string, ctx: CanvasRenderingContext2D): void {
   const x = node.x ?? 0;
   const y = node.y ?? 0;
   ctx.beginPath();
@@ -1064,7 +1076,7 @@ export function GraphCanvas({ data, onNodeExpand, expandableNodeIds = NO_EXPANDA
             nodeVal={nodeVal}
             nodeRelSize={NODE_REL_SIZE}
             nodeCanvasObject={(node, ctx, globalScale) => drawNode(node, ctx, globalScale, labelPlacementsRef.current, expandableNodeIds, drawContext)}
-            nodePointerAreaPaint={(node, color, ctx) => paintNodePointerArea(node, color, ctx, focusedNodeType)}
+            nodePointerAreaPaint={paintNodePointerArea}
             nodeLabel={nodeTooltip}
             onNodeClick={(node) => onNodeExpand?.(node as GraphNode)}
             // Release (bd-hmd.5): fires once the simulation actually stops

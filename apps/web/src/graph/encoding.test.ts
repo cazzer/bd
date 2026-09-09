@@ -256,8 +256,14 @@ describe("degreeToRingWidth", () => {
     }
   });
 
-  it("separates the store's largest hub from a node just past the cap", () => {
+  // A width difference in the returned number is not the same as a
+  // difference a reader can see — the first version of the draw stroked
+  // this in the node's own fill colour, abutting the fill, where no
+  // width is visible at all. The number still has to be big enough to
+  // matter once drawn, which is what this pins.
+  it("separates the store's largest hub from a node just past the cap by a drawable width", () => {
     expect(degreeToRingWidth(329)).toBeGreaterThan(degreeToRingWidth(25) + 1);
+    expect(degreeToRingWidth(329)).toBeGreaterThan(1); // sub-pixel rims read as nothing
   });
 
   it("is bounded, so the ring never outgrows the node it wraps", () => {

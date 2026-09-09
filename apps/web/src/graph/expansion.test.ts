@@ -707,6 +707,65 @@ describe("collapseExpansion / resetToSeeds — holders (bd-jar)", () => {
     expect(seedAfter.fy).toBe(y);
   });
 
+  // The case the first version of collapseExpansion got wrong, and the
+  // reason it got wrong: holding is a CHAIN. A grandchild's holder set
+  // names its own parent, not the node being collapsed, so removing the
+  // collapsed node from every set empties the child's but leaves the
+  // grandchild holding a set nothing can ever empty again.
+  //
+  // This test file already built this exact s -> f -> c shape and only
+  // ever ran it through resetToSeeds, which is why the bug passed.
+  it("removes a grandchild when the expansion that reached its parent is collapsed", () => {
+    const graph = graphWith(["s", "f", "c"], [edge("e1", "f", "s"), edge("e2", "c", "f")]);
+    let holders = holdersForSearch([graph.nodes[0]!]);
+    holders = withExpansionHolders(holders, "s", ["f"]);
+    holders = withExpansionHolders(holders, "f", ["c"]);
+
+    const { graph: after, removedIds } = collapseExpansion(graph, holders, "s");
+    expect(after.nodes.map((n) => n.id)).toEqual(["s"]);
+    expect(removedIds.sort()).toEqual(["c", "f"]);
+    expect(after.links).toEqual([]);
+  });
+
+  it("removes a whole chain however deep, and keeps a branch the query also holds", () => {
+    const graph = graphWith(["s", "a", "b", "c", "d", "alsoSeed"]);
+    let holders = holdersForSearch([graph.nodes[0]!, graph.nodes[5]!]);
+    holders = withExpansionHolders(holders, "s", ["a"]);
+    holders = withExpansionHolders(holders, "a", ["b"]);
+    holders = withExpansionHolders(holders, "b", ["c"]);
+    holders = withExpansionHolders(holders, "c", ["d", "alsoSeed"]);
+
+    const { graph: after, removedIds } = collapseExpansion(graph, holders, "s");
+    expect(removedIds.sort()).toEqual(["a", "b", "c", "d"]);
+    // alsoSeed was reached by the chain too, but the QUERY holds it.
+    expect(after.nodes.map((n) => n.id).sort()).toEqual(["alsoSeed", "s"]);
+  });
+
+  it("keeps a grandchild that a second, surviving expansion also reaches", () => {
+    const graph = graphWith(["s", "f", "other", "c"]);
+    let holders = holdersForSearch([graph.nodes[0]!, graph.nodes[2]!]);
+    holders = withExpansionHolders(holders, "s", ["f"]);
+    holders = withExpansionHolders(holders, "f", ["c"]);
+    holders = withExpansionHolders(holders, "other", ["c"]);
+
+    const { graph: after, removedIds } = collapseExpansion(graph, holders, "s");
+    expect(removedIds).toEqual(["f"]);
+    expect(after.nodes.map((n) => n.id).sort()).toEqual(["c", "other", "s"]);
+  });
+
+  it("terminates on a holder cycle rather than looping", () => {
+    // Two expansions that reached each other. Neither is root-held, so
+    // both go; the point is that the fixpoint stops.
+    const graph = graphWith(["s", "x", "y"]);
+    let holders = holdersForSearch([graph.nodes[0]!]);
+    holders = withExpansionHolders(holders, "x", ["y"]);
+    holders = withExpansionHolders(holders, "y", ["x"]);
+
+    const { graph: after, removedIds } = collapseExpansion(graph, holders, "s");
+    expect(removedIds.sort()).toEqual(["x", "y"]);
+    expect(after.nodes.map((n) => n.id)).toEqual(["s"]);
+  });
+
   it("resetToSeeds drops every expansion at once and keeps the query's own nodes", () => {
     const graph = graphWith(["s1", "s2", "e1", "e2"]);
     let holders = holdersForSearch([graph.nodes[0]!, graph.nodes[1]!]);

@@ -5,7 +5,7 @@
 //   - no node selected: `storeTypes` is the full, unsliced
 //     `getStoreSummary().nodeTypes` — this component itself sorts (via
 //     `topStoreTypes`, never trusting the caller's order) and takes the
-//     top 8, with a disclosure for the rest.
+//     top 8; everything past the palette lands in the overflow group.
 //   - a node selected: `selected.ranked` is already
 //     `rankNeighborTypes(selectedId, graph.nodes, graph.links)`, derived
 //     by App.tsx during its own render (no extra fetch) — shown in full,
@@ -25,6 +25,7 @@ import { colorForNodeType, FALLBACK_COLOR } from "../graph/palette.js";
 import type { EdgeLegend } from "../graph/edgeLegend.js";
 import { splitPaletteOverflow, topStoreTypes, type TypeCount } from "../graph/typePrevalence.js";
 
+/** CATEGORICAL_PALETTE's slot count — every type past it shares FALLBACK_COLOR and lands in the overflow group instead. */
 const DEFAULT_VISIBLE_COUNT = 8;
 
 export interface TypePanelSelection {
@@ -71,7 +72,7 @@ function TypeRow({
   storeCount,
   focused,
   onToggleFocus,
-  typeColors,
+  swatchColor,
 }: {
   nodeType: string;
   count: number;
@@ -79,7 +80,7 @@ function TypeRow({
   storeCount?: number | null;
   focused: boolean;
   onToggleFocus: (nodeType: string) => void;
-  typeColors: ReadonlyMap<string, string>;
+  swatchColor: string;
 }) {
   const showStore = typeof storeCount === "number" && storeCount > count;
   return (
@@ -92,7 +93,7 @@ function TypeRow({
           focused ? "border-accent bg-surface-strong" : "border-transparent hover:bg-surface-strong"
         }`}
       >
-        <span aria-hidden className="inline-block h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: colorForNodeType(nodeType, typeColors) }} />
+        <span aria-hidden className="inline-block h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: swatchColor }} />
         <span className="flex-1 truncate text-fg">{nodeType}</span>
         <span className="shrink-0 text-fg">{count}</span>
         {showStore && (
@@ -118,10 +119,24 @@ function TypeRow({
  * canvas genuinely cannot tell them apart, and the reader should know
  * that before they try.
  */
-function OverflowGroup({ types, typeColors }: { types: TypeCount[]; typeColors: ReadonlyMap<string, string> }) {
+function OverflowGroup({
+  types,
+  storeCountByType,
+  showStore,
+  focusedType,
+  onToggleFocus,
+}: {
+  types: TypeCount[];
+  storeCountByType: ReadonlyMap<string, number>;
+  showStore: boolean;
+  focusedType: string | null;
+  onToggleFocus: (nodeType: string) => void;
+}) {
   const total = types.reduce((sum, t) => sum + t.count, 0);
   return (
-    <details>
+    // Open when one of its types is focused, so the row a person is
+    // acting on is never hidden inside a collapsed disclosure.
+    <details open={focusedType !== null && types.some((t) => t.nodeType === focusedType)}>
       <summary className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1 text-[13px] hover:bg-surface-strong">
         <span aria-hidden className="inline-block h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: FALLBACK_COLOR }} />
         <span className="flex-1 truncate text-fg-muted">
@@ -129,12 +144,26 @@ function OverflowGroup({ types, typeColors }: { types: TypeCount[]; typeColors: 
         </span>
         <span className="shrink-0 text-fg-muted">{total}</span>
       </summary>
+      {/*
+        These are real controls, not labels (bd-857 review). The first
+        version rendered them as plain spans, which removed the ONLY path
+        to type focus for any type outside the store's top-8 rank — the
+        search bar's suggestions add a chip but never set the focus. That
+        is the exact row a reader most wants to act on: this commit's own
+        argument is that a fallback-coloured type can rank first on the
+        canvas.
+      */}
       <ul className="mt-1 ml-4 flex flex-col gap-0.5">
         {types.map((t) => (
-          <li key={t.nodeType} className="flex items-center gap-2 px-2 py-0.5 text-[12px] text-fg-muted">
-            <span className="flex-1 truncate">{t.nodeType}</span>
-            <span className="shrink-0">{t.count}</span>
-          </li>
+          <TypeRow
+            key={t.nodeType}
+            nodeType={t.nodeType}
+            count={t.count}
+            storeCount={showStore ? storeCountByType.get(t.nodeType) : null}
+            focused={focusedType === t.nodeType}
+            onToggleFocus={onToggleFocus}
+            swatchColor={FALLBACK_COLOR}
+          />
         ))}
       </ul>
     </details>
@@ -165,8 +194,12 @@ export function TypePanel({ drawnTypes, storeTypes, selected, focusedType, onTog
   // position — a fallback-coloured type can rank above a coloured one on
   // the canvas even though it ranked below it store-wide.
   const { coloured, overflow } = splitPaletteOverflow(rows, (t) => colorForNodeType(t, typeColors), FALLBACK_COLOR);
-  const visible = selected ? coloured : coloured.slice(0, DEFAULT_VISIBLE_COUNT);
-  const rest = selected ? [] : coloured.slice(DEFAULT_VISIBLE_COUNT);
+  // No slice, and no "N more types" disclosure: CATEGORICAL_PALETTE has
+  // DEFAULT_VISIBLE_COUNT slots, so `coloured` can never exceed it and
+  // the disclosure that used to sit here was unreachable code (bd-857
+  // review). Everything past the palette is in `overflow` below, which is
+  // where the disclosure actually belongs.
+  const visible = coloured;
 
   return (
     <div className="flex flex-col gap-2 text-xs">
@@ -185,31 +218,13 @@ export function TypePanel({ drawnTypes, storeTypes, selected, focusedType, onTog
                 storeCount={showingDrawn ? storeCountByType.get(row.nodeType) : null}
                 focused={focusedType === row.nodeType}
                 onToggleFocus={onToggleFocus}
-                typeColors={typeColors}
+                swatchColor={colorForNodeType(row.nodeType, typeColors)}
               />
             ))}
           </ul>
-          {rest.length > 0 && (
-            <details>
-              <summary className="cursor-pointer text-[11px] text-fg-muted hover:text-fg">
-                {rest.length} more type{rest.length === 1 ? "" : "s"}
-              </summary>
-              <ul className="mt-1 flex flex-col gap-0.5">
-                {rest.map((row) => (
-                  <TypeRow
-                    key={row.nodeType}
-                    nodeType={row.nodeType}
-                    count={row.count}
-                    storeCount={showingDrawn ? storeCountByType.get(row.nodeType) : null}
-                    focused={focusedType === row.nodeType}
-                    onToggleFocus={onToggleFocus}
-                    typeColors={typeColors}
-                  />
-                ))}
-              </ul>
-            </details>
+          {overflow.length > 0 && (
+            <OverflowGroup types={overflow} storeCountByType={storeCountByType} showStore={showingDrawn} focusedType={focusedType} onToggleFocus={onToggleFocus} />
           )}
-          {overflow.length > 0 && <OverflowGroup types={overflow} typeColors={typeColors} />}
         </>
       )}
 
