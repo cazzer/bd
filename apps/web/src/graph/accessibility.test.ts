@@ -28,7 +28,7 @@ describe("graphAriaSummary", () => {
   it("pluralises correctly for exactly one node and one edge", () => {
     const data: GraphCanvasData = {
       nodes: [makeGraphNode({ id: "a" })],
-      links: [{ id: "e1", source: "a", target: "a", edgeType: "sibling", sourceSystem: "repo", weight: 1, color: "#000", width: 1 }],
+      links: [{ id: "e1", source: "a", target: "a", edgeType: "sibling", sourceSystem: "repo", weight: 1, family: "unassigned", width: 1 }],
     };
     expect(graphAriaSummary(data)).toBe("Graph of 1 node and 1 edge.");
   });
@@ -36,7 +36,7 @@ describe("graphAriaSummary", () => {
   it("pluralises correctly for several nodes and edges — the seeded corpus's own shape", () => {
     const data: GraphCanvasData = {
       nodes: Array.from({ length: 9 }, (_, i) => makeGraphNode({ id: `n${i}` })),
-      links: Array.from({ length: 16 }, (_, i) => ({ id: `e${i}`, source: "n0", target: "n1", edgeType: "part-of-change", sourceSystem: "repo", weight: 0.6, color: "#000", width: 3 })),
+      links: Array.from({ length: 16 }, (_, i) => ({ id: `e${i}`, source: "n0", target: "n1", edgeType: "part-of-change", sourceSystem: "repo", weight: 0.6, family: "containment", width: 3 })),
     };
     expect(graphAriaSummary(data)).toBe("Graph of 9 nodes and 16 edges.");
   });

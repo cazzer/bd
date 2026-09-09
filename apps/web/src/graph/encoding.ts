@@ -11,7 +11,7 @@
 // deliberately thin) drawing code.
 
 import type { trpc } from "../trpc.js";
-import { colorForSourceSystem } from "./palette.js";
+import { familyKeyForEdgeType, type EdgeFamilyKey } from "./palette.js";
 
 // --- API result types --------------------------------------------------
 //
@@ -85,6 +85,19 @@ export function degreeToRadius(degree: number): number {
 export const EDGE_WIDTH_MIN = 1;
 export const EDGE_WIDTH_MAX = 5;
 
+/**
+ * Weight → stroke width. Kept, but demoted (bd-o1e): measured against the
+ * live store, `weight` takes essentially two values — a sample search
+ * returned 32 edges at 1.0 and 25 at 0.8, which this maps to 5px and
+ * 4.2px. That difference is not readable, so width is a SECONDARY cue
+ * behind the relation's dash and arrowhead, not something a reader can
+ * learn an edge from. Left as a linear map rather than stretched to
+ * exaggerate the gap: the honest answer is that the store's weights
+ * barely vary, and a scale that manufactured contrast would be drawing a
+ * distinction the data does not contain. If agent-asserted edges ever
+ * spread their confidence across the range, this becomes informative on
+ * its own with no change here.
+ */
 export function weightToEdgeWidth(weight: number): number {
   const clamped = Math.min(1, Math.max(0, weight));
   return EDGE_WIDTH_MIN + (EDGE_WIDTH_MAX - EDGE_WIDTH_MIN) * clamped;
@@ -135,8 +148,8 @@ export interface GraphNode {
   radius: number;
   /**
    * NOT populated by this module, or by graph/expansion.ts's node
-   * builders (bd-4ye) — unlike an edge's colour (`colorForSourceSystem`,
-   * a small fixed table, safe to bake in once), a node's TYPE colour now
+   * builders (bd-4ye) — unlike an edge's relation family
+   * (`familyKeyForEdgeType`, a small fixed table, safe to bake in once), a node's TYPE colour now
    * depends on the store's current rank ordering (palette.ts's
    * `assignTypeColors`, design.md decision 2), which is session state
    * these pure functions have no access to and shouldn't need threaded
@@ -160,7 +173,21 @@ export interface GraphLink {
   edgeType: string;
   sourceSystem: string;
   weight: number;
-  color: string;
+  /**
+   * How this edge is DRAWN (bd-o1e, design.md decision 1) — resolved from
+   * `edgeType` at encode time, unlike a node's type colour, which
+   * GraphCanvas resolves live because it depends on the store's current
+   * prevalence ranking (see `GraphNode.color`). A relation's family does
+   * not depend on session state, so baking it in here is safe and keeps
+   * the per-frame link accessors to one Map lookup.
+   *
+   * Replaced the old `color` field, which held `colorForSourceSystem`'s
+   * answer — a channel that, in this store, drew every edge the same
+   * fallback grey. Source system is still on the link (above) for the
+   * tooltip and the legend's composition line; it just no longer decides
+   * how the edge looks.
+   */
+  family: EdgeFamilyKey;
   width: number;
 }
 
@@ -204,7 +231,7 @@ export function searchResultToGraphData(result: SearchResult | null): GraphCanva
     edgeType: edge.edgeType,
     sourceSystem: edge.sourceSystem,
     weight: edge.weight,
-    color: colorForSourceSystem(edge.sourceSystem),
+    family: familyKeyForEdgeType(edge.edgeType),
     width: weightToEdgeWidth(edge.weight),
   }));
 

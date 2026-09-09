@@ -21,7 +21,8 @@
 // remains satisfied now that GraphLegend itself is gone — this is the
 // one piece of this component that isn't node-type ranking.
 
-import { colorForNodeType, knownSourceSystemColors } from "../graph/palette.js";
+import { colorForNodeType } from "../graph/palette.js";
+import type { EdgeLegend } from "../graph/edgeLegend.js";
 import { topStoreTypes, type TypeCount } from "../graph/typePrevalence.js";
 
 const DEFAULT_VISIBLE_COUNT = 8;
@@ -44,6 +45,14 @@ export interface TypePanelProps {
   onToggleFocus: (nodeType: string) => void;
   /** App.tsx's store-wide type-colour rank map (bd-4ye, palette.ts's `assignTypeColors`) — the SAME map GraphCanvas and SearchBar read, so a row's swatch never disagrees with the canvas. */
   typeColors: ReadonlyMap<string, string>;
+  /**
+   * The relation families and source-system composition of the edges
+   * actually drawn (bd-o1e, graph/edgeLegend.ts). Replaced the static
+   * `knownSourceSystemColors()` footer, which named `repo`/`human`/`agent`
+   * — three source systems present on essentially no edge in this store,
+   * beside a canvas whose edges were all `git`.
+   */
+  edgeLegend: EdgeLegend;
 }
 
 function TypeRow({
@@ -77,7 +86,7 @@ function TypeRow({
   );
 }
 
-export function TypePanel({ storeTypes, selected, focusedType, onToggleFocus, typeColors }: TypePanelProps) {
+export function TypePanel({ storeTypes, selected, focusedType, onToggleFocus, typeColors, edgeLegend }: TypePanelProps) {
   const heading = selected ? `around ${selected.title || "(untitled)"}` : "Types";
   // `topStoreTypes(storeTypes, storeTypes.length)` — "top all of them" —
   // reuses the one tested sort/tie-break rather than re-sorting inline;
@@ -115,15 +124,51 @@ export function TypePanel({ storeTypes, selected, focusedType, onToggleFocus, ty
         </>
       )}
 
-      <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-hairline pt-2">
-        <span className="text-[10px] font-medium text-fg-muted uppercase">edge source</span>
-        {knownSourceSystemColors().map(([system, color]) => (
-          <span key={system} className="flex items-center gap-1">
-            <span aria-hidden className="inline-block h-0.5 w-3 shrink-0" style={{ backgroundColor: color }} />
-            <span className="font-mono text-[10px] text-fg-muted">{system}</span>
-          </span>
-        ))}
-      </div>
+      {edgeLegend.total > 0 && (
+        <div className="mt-1 flex flex-col gap-1 border-t border-hairline pt-2">
+          {/*
+            bd-o1e: the relation legend. One entry per family PRESENT on
+            the canvas, each swatch drawn with that family's own dash so
+            the legend and the edge look alike — an SVG line rather than a
+            filled span, because a dash pattern is the thing being named.
+          */}
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span className="text-[10px] font-medium text-fg-muted uppercase">edge relation</span>
+            {edgeLegend.families.map(({ family, count }) => (
+              <span key={family.key} className="flex items-center gap-1" title={`${count} ${count === 1 ? "edge" : "edges"}`}>
+                <svg aria-hidden width="14" height="4" viewBox="0 0 14 4" className="shrink-0 overflow-visible">
+                  <line
+                    x1="0"
+                    y1="2"
+                    x2="14"
+                    y2="2"
+                    stroke={family.color}
+                    strokeWidth="1.5"
+                    strokeDasharray={family.dash.length > 0 ? family.dash.join(" ") : undefined}
+                  />
+                  {family.arrow && <path d="M14 2 L10.5 0.2 L10.5 3.8 Z" fill={family.color} />}
+                </svg>
+                <span className="font-mono text-[10px] text-fg-muted">{family.label}</span>
+              </span>
+            ))}
+          </div>
+          {/*
+            The composition line — what survives of the removed "Edge
+            provenance is visible" requirement (see graph/edgeLegend.ts's
+            header). One source system listed here IS "every edge in this
+            view came from one loader", said outright.
+          */}
+          <p className="text-[10px] text-fg-muted">
+            <span className="font-medium uppercase">from</span>{" "}
+            {edgeLegend.sourceSystems.map(({ sourceSystem, count }, i) => (
+              <span key={sourceSystem}>
+                {i > 0 && " · "}
+                <span className="font-mono">{sourceSystem}</span> {count}
+              </span>
+            ))}
+          </p>
+        </div>
+      )}
     </div>
   );
 }

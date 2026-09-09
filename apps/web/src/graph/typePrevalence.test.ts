@@ -31,7 +31,7 @@ function makeLink(id: string, source: string | GraphNode, target: string | Graph
     edgeType: "relates_to",
     sourceSystem: "repo",
     weight: 0.5,
-    color: "#000000",
+    family: "unassigned",
     width: 1,
   };
 }

@@ -47,7 +47,7 @@
 
 import type { GraphCanvasData, GraphLink, GraphNode } from "./encoding.js";
 import { degreeToRadius, mergeGraphData, weightToEdgeWidth } from "./encoding.js";
-import { colorForSourceSystem } from "./palette.js";
+import { familyKeyForEdgeType } from "./palette.js";
 import type { trpc } from "../trpc.js";
 
 // --- Client-side mirrors of packages/core/src/human-writes.ts's write
@@ -212,7 +212,7 @@ export function mergeExpansion(previous: GraphCanvasData, params: ExpansionParam
       edgeType: neighbor.edgeType,
       sourceSystem: neighbor.edgeSourceSystem,
       weight: neighbor.weight,
-      color: colorForSourceSystem(neighbor.edgeSourceSystem),
+      family: familyKeyForEdgeType(neighbor.edgeType),
       width: weightToEdgeWidth(neighbor.weight),
     });
   }
@@ -329,13 +329,13 @@ export function mergeStandaloneNode(previous: GraphCanvasData, node: GraphNode):
 
 /**
  * A hand-drawn edge (bd-hmd.6, task 6.5's "assert ... between two
- * nodes"), as a `GraphLink` ready to merge — colour/width come from the
- * same `colorForSourceSystem`/`weightToEdgeWidth` every other edge uses,
- * so a hand-authored edge gets the SAME provenance styling `human` edges
- * already have everywhere else in this app (graph-explorer/spec.md: "a
- * hand-drawn edge is drawn with hand-authored provenance styling") —
- * nothing new to encode, just the existing `human` styling applied here
- * too.
+ * nodes"), as a `GraphLink` ready to merge — family/width come from the
+ * same `familyKeyForEdgeType`/`weightToEdgeWidth` every other edge uses,
+ * so a hand-authored edge is drawn by its RELATION exactly as a loaded
+ * one is (bd-o1e, design.md decision 1). It reads as hand-authored by
+ * carrying `human` as its source system, which the tooltip and the
+ * legend's composition line report — the styling itself no longer
+ * depends on where an edge came from.
  */
 export function buildAssertedLink(result: { id: string }, input: { srcId: string; dstId: string; edgeType: string; weight?: number }): GraphLink {
   const weight = input.weight ?? 1.0; // matches packages/core/src/edges.ts's own default when omitted
@@ -346,7 +346,7 @@ export function buildAssertedLink(result: { id: string }, input: { srcId: string
     edgeType: input.edgeType,
     sourceSystem: HUMAN_SOURCE_SYSTEM,
     weight,
-    color: colorForSourceSystem(HUMAN_SOURCE_SYSTEM),
+    family: familyKeyForEdgeType(input.edgeType),
     width: weightToEdgeWidth(weight),
   };
 }

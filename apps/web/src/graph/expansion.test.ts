@@ -16,8 +16,8 @@
 // own header for why that's structurally out of reach for a test.
 
 import { describe, expect, it } from "vitest";
-import { colorForSourceSystem } from "./palette.js";
-import { degreeToRadius, searchResultToGraphData, weightToEdgeWidth, type GraphCanvasData, type GraphNode, type SearchResult, type SearchResultNode } from "./encoding.js";
+import { familyKeyForEdgeType } from "./palette.js";
+import { degreeToRadius, searchResultToGraphData, weightToEdgeWidth, type GraphCanvasData, type GraphLink, type GraphNode, type SearchResult, type SearchResultNode } from "./encoding.js";
 import {
   ANNOTATES_EDGE_TYPE,
   buildAnnotationNeighbor,
@@ -290,7 +290,7 @@ describe("mergeExpansion — expanding onto an already-drawn node", () => {
   it("does not duplicate the edge either, when the same edge id is re-fetched (e.g. an overlapping page)", () => {
     const parent = placed(makeNode({ id: "parent" }), 0, 0);
     const other = placed(makeNode({ id: "other" }), 5, 5);
-    const existingLink = { id: "e1", source: "parent", target: "other", edgeType: "sibling", sourceSystem: "repo", weight: 0.3, color: "#000", width: 1 };
+    const existingLink: GraphLink = { id: "e1", source: "parent", target: "other", edgeType: "sibling", sourceSystem: "repo", weight: 0.3, family: "unassigned", width: 1 };
     const previous = graphOf([parent, other], [existingLink]);
 
     const merged = mergeExpansion(previous, {
@@ -520,13 +520,23 @@ describe("graphNodeFromUnlinkedNote", () => {
 });
 
 describe("buildAssertedLink / mergeAssertedEdge — hand-drawn edges (task 6.5)", () => {
-  it("gets the SAME provenance styling every other human edge gets — graph-explorer/spec.md's 'a hand-drawn edge is drawn with hand-authored provenance styling'", () => {
+  it("is drawn by its RELATION like any loaded edge, and still carries `human` as its provenance (bd-o1e)", () => {
     const link = buildAssertedLink({ id: "edge-1" }, { srcId: "a", dstId: "b", edgeType: "relates-to", weight: 0.8 });
+    // Provenance is still on the link — it is what the tooltip and the
+    // legend's composition line report; it just no longer decides how the
+    // edge is drawn.
     expect(link.sourceSystem).toBe(HUMAN_SOURCE_SYSTEM);
-    expect(link.color).toBe(colorForSourceSystem(HUMAN_SOURCE_SYSTEM));
     expect(link.width).toBe(weightToEdgeWidth(0.8));
-    // Distinguishable from a repo edge's styling specifically — the scenario's own wording ("visually distinct").
-    expect(link.color).not.toBe(colorForSourceSystem("repo"));
+    // `relates-to` is not in the family table, so it takes the reserved
+    // fallback rather than being dropped or throwing.
+    expect(link.family).toBe(familyKeyForEdgeType("relates-to"));
+    expect(link.family).toBe("unassigned");
+  });
+
+  it("a hand-drawn edge of a KNOWN relation draws as that relation, not as something hand-drawn", () => {
+    const link = buildAssertedLink({ id: "edge-2" }, { srcId: "a", dstId: "b", edgeType: "blocks" });
+    expect(link.family).toBe("dependency");
+    expect(link.sourceSystem).toBe(HUMAN_SOURCE_SYSTEM);
   });
 
   it("defaults weight to 1.0 when omitted, matching packages/core/src/edges.ts's own default", () => {
@@ -553,8 +563,8 @@ describe("mergeRetractedEdge — hand edge retraction (task 6.5)", () => {
   it("removes exactly the named link and nothing else, pinning placed nodes", () => {
     const a = placed(makeNode({ id: "a" }), 1, 1);
     const b = placed(makeNode({ id: "b" }), 2, 2);
-    const keep = { id: "keep", source: "a", target: "b", edgeType: "sibling", sourceSystem: "repo", weight: 0.4, color: "#000", width: 1 };
-    const gone = { id: "gone", source: "a", target: "b", edgeType: "relates-to", sourceSystem: "human", weight: 1, color: "#111", width: 5 };
+    const keep: GraphLink = { id: "keep", source: "a", target: "b", edgeType: "sibling", sourceSystem: "repo", weight: 0.4, family: "unassigned", width: 1 };
+    const gone: GraphLink = { id: "gone", source: "a", target: "b", edgeType: "relates-to", sourceSystem: "human", weight: 1, family: "unassigned", width: 5 };
     const previous = graphOf([a, b], [keep, gone]);
 
     const merged = mergeRetractedEdge(previous, "gone");
@@ -575,7 +585,7 @@ describe("mergeReweightedEdge — hand edge reweighting (task 6.5)", () => {
   it("changes weight and recomputes width for exactly the named link, mutating the SAME link object", () => {
     const a = placed(makeNode({ id: "a" }), 1, 1);
     const b = placed(makeNode({ id: "b" }), 2, 2);
-    const link = { id: "e1", source: "a", target: "b", edgeType: "relates-to", sourceSystem: "human", weight: 0.2, color: "#111", width: weightToEdgeWidth(0.2) };
+    const link: GraphLink = { id: "e1", source: "a", target: "b", edgeType: "relates-to", sourceSystem: "human", weight: 0.2, family: "unassigned", width: weightToEdgeWidth(0.2) };
     const previous = graphOf([a, b], [link]);
 
     const merged = mergeReweightedEdge(previous, "e1", 0.9);

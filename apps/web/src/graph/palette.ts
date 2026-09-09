@@ -38,11 +38,10 @@
 // re-fetched (App.tsx: on load, and after a write that could add a new
 // node_type) — the same cadence `nodeTypeCounts` state already follows.
 //
-// `source_system` stays a small, genuinely fixed set (packages/core/src/
-// seed.ts's SOURCE_SYSTEM, editability.ts's EDITABLE_SOURCE_SYSTEMS) —
-// no ingestor has ever added a fourth one, so SOURCE_SYSTEM_COLORS below
-// is left as the fixed table it always was; only node_type's assignment
-// moved to rank.
+// `source_system` is no longer a colour at all (bd-o1e) — the reasoning
+// this comment used to carry, that it was "a small, genuinely fixed set",
+// was true of `repo`/`human`/`agent` and false of the loaders that
+// actually write edges. See the note where that table used to live.
 //
 // CATEGORICAL_PALETTE has 8 slots; validated (2026-09-01, dark-ground
 // re-tune — bd-ktj) against this module's own --color-ground surface
@@ -128,19 +127,110 @@ export function colorForNodeType(nodeType: string, colors: ReadonlyMap<string, s
   return colors.get(nodeType) ?? FALLBACK_COLOR;
 }
 
-/** packages/core/src/seed.ts's SOURCE_SYSTEM ("repo") plus editability.ts's EDITABLE_SOURCE_SYSTEMS ("human", "agent"). Fixed, unlike node_type's rank-based assignment above — see module header for why this table stays a table. */
-const SOURCE_SYSTEM_COLORS: Readonly<Record<string, string>> = {
-  repo: CATEGORICAL_PALETTE[0],
-  human: CATEGORICAL_PALETTE[1],
-  agent: CATEGORICAL_PALETTE[2],
-};
+// `SOURCE_SYSTEM_COLORS`, `colorForSourceSystem` and
+// `knownSourceSystemColors` lived here until bd-o1e removed them. They
+// mapped `repo`/`human`/`agent` onto palette entries and decided an
+// edge's drawn colour. The premise was wrong in practice: those three
+// name 39 of the store's 1750 nodes and essentially none of its 3248
+// edges, which come from `git` (838), `github` (791) and `beads` (82) —
+// so every edge in a real search resolved to `FALLBACK_COLOR` while
+// TypePanel's footer advertised three colours present on no edge.
+//
+// Source system did not stop mattering; it stopped being a COLOUR.
+// graph/edgeLegend.ts reports it as a composition count, which states
+// "every edge here came from one loader" more directly than a uniform
+// colour ever implied it. The channel it vacated went to the relation
+// families below.
 
-/** Colour for an edge, keyed by `source_system`. Same fallback rule as `colorForNodeType`. */
-export function colorForSourceSystem(sourceSystem: string): string {
-  return SOURCE_SYSTEM_COLORS[sourceSystem] ?? FALLBACK_COLOR;
+// --- Edge relation families (readable-graph-and-timeline, bd-o1e,
+// design.md decision 1) ----------------------------------------------------
+//
+// What replaced `colorForSourceSystem` as the channel an edge is DRAWN
+// from. The old encoding spent edge colour on source system against a
+// table that knew `repo`/`human`/`agent` while the store's edges are
+// `git` (838), `github` (791) and `beads` (82) — so every edge in a real
+// search drew `FALLBACK_COLOR` and the legend advertised three colours
+// present on no edge. Meanwhile `edgeType`, which is what the typed-edge
+// architecture exists to express, was reachable only by hovering.
+//
+// Why dash + arrowhead rather than colour-by-edgeType (the obvious
+// reading of that finding, and the one this change deliberately did not
+// take): `assignTypeColors` above already spends eight saturated hues on
+// NODE types. A second categorical hue scale on edges puts two colour
+// legends in one picture, and a blue line beside a blue node then encodes
+// nothing shared. Dash pattern and arrowhead are channels nothing else
+// uses, and they read at the low stroke weights edges are drawn at.
+// Family strokes are therefore deliberately LOW-CHROMA — they must not
+// compete with the node palette for the reader's colour attention.
+//
+// Why families rather than one style per edge type: `edge_type` is open
+// text (the same reason `node_type` is — a new relation must never need a
+// migration). Nine types exist today; a family table with a defined
+// fallback admits a tenth without a design change, a per-type table does
+// not. `sibling` is deliberately left out: it is one edge in the whole
+// store and it is not in design.md's table, so it exercises the fallback
+// rather than being quietly assigned a home it was never designed one for.
+
+export type EdgeFamilyKey = "containment" | "dependency" | "reference" | "configuration" | "unassigned";
+
+export interface EdgeFamily {
+  key: EdgeFamilyKey;
+  /** Shown in the legend — names the relation, not the mechanism. */
+  label: string;
+  /** `#rrggbb`; low-chroma by design (see this section's header). */
+  color: string;
+  /**
+   * Dash lengths in SCREEN pixels. GraphCanvas divides these by
+   * `globalScale` before `setLineDash`, the same idiom `LABEL_FONT_SIZE_PX`
+   * and `EXPANDABLE_BADGE_RADIUS_PX` already use, so a dash holds its
+   * appearance as the canvas zooms. Empty means solid.
+   */
+  dash: readonly number[];
+  /** Whether direction is drawn. Source → target, always. */
+  arrow: boolean;
+  /** Multiplies the weight-derived width, so a structural relation can read lighter than a dependency. */
+  widthScale: number;
 }
 
-/** Every (source_system -> colour) pair this module knows, for the legend. */
-export function knownSourceSystemColors(): ReadonlyArray<readonly [string, string]> {
-  return Object.entries(SOURCE_SYSTEM_COLORS);
+const EDGE_FAMILIES: Readonly<Record<EdgeFamilyKey, EdgeFamily>> = {
+  containment: { key: "containment", label: "contains", color: "#8fa3bd", dash: [], arrow: true, widthScale: 1 },
+  dependency: { key: "dependency", label: "depends", color: "#c2917f", dash: [6, 4], arrow: true, widthScale: 1.2 },
+  reference: { key: "reference", label: "refers", color: "#8a93a6", dash: [1.5, 3], arrow: false, widthScale: 0.85 },
+  configuration: { key: "configuration", label: "configures", color: "#9d93b8", dash: [], arrow: true, widthScale: 0.7 },
+  unassigned: { key: "unassigned", label: "other", color: "#6b7280", dash: [1, 5], arrow: false, widthScale: 0.85 },
+};
+
+/**
+ * The assignment itself. Source → target reads as: a `child_of` edge
+ * points from the child TO its container, which is the direction both
+ * `child_of` and `belongs-to` are already stored in (see the git and
+ * GitHub loaders), so the arrowhead needs no per-type reversal.
+ */
+const FAMILY_BY_EDGE_TYPE: Readonly<Record<string, EdgeFamilyKey>> = {
+  child_of: "containment",
+  "belongs-to": "containment",
+  "part-of-change": "containment",
+  blocks: "dependency",
+  closes: "dependency",
+  mentions: "reference",
+  touches: "reference",
+  default_view: "configuration",
+};
+
+/** Never throws and never returns undefined — an unrecognised relation gets the reserved `unassigned` styling rather than vanishing. */
+export function familyKeyForEdgeType(edgeType: string): EdgeFamilyKey {
+  return FAMILY_BY_EDGE_TYPE[edgeType] ?? "unassigned";
+}
+
+export function edgeFamily(key: EdgeFamilyKey): EdgeFamily {
+  return EDGE_FAMILIES[key];
+}
+
+export function familyForEdgeType(edgeType: string): EdgeFamily {
+  return EDGE_FAMILIES[familyKeyForEdgeType(edgeType)];
+}
+
+/** Every family, in the order the legend lists them. */
+export function knownEdgeFamilies(): readonly EdgeFamily[] {
+  return [EDGE_FAMILIES.containment, EDGE_FAMILIES.dependency, EDGE_FAMILIES.reference, EDGE_FAMILIES.configuration, EDGE_FAMILIES.unassigned];
 }

@@ -10,7 +10,7 @@ import type { GraphLink } from "./encoding.js";
 import { edgesTouchingNode, endpointId } from "./nodeEdges.js";
 
 function link(overrides: Partial<GraphLink> & { id: string; source: GraphLink["source"]; target: GraphLink["target"] }): GraphLink {
-  return { edgeType: "relates-to", sourceSystem: "human", weight: 1, color: "#000", width: 1, ...overrides };
+  return { edgeType: "relates-to", sourceSystem: "human", weight: 1, family: "unassigned", width: 1, ...overrides };
 }
 
 describe("endpointId", () => {

@@ -66,7 +66,7 @@ import { robustBbox, ROBUST_BBOX_MIN_POINTS } from "../graph/fitBounds.js";
 import { placeLabels, type LabelCandidate, type LabelPlacement } from "../graph/labelPlacement.js";
 import { shouldLabel, truncateLabel } from "../graph/labelPolicy.js";
 import { edgesTouchingNode, endpointId } from "../graph/nodeEdges.js";
-import { colorForNodeType } from "../graph/palette.js";
+import { colorForNodeType, edgeFamily } from "../graph/palette.js";
 import { buildLinkTooltip, buildNodeTooltip } from "../graph/tooltip.js";
 
 /**
@@ -447,8 +447,8 @@ function linkTooltip(link: GraphLink): string {
 }
 
 /**
- * `link.color` is always a `#rrggbb` hex string (palette.ts's
- * `colorForSourceSystem`/`FALLBACK_COLOR` never produce anything else) —
+ * A family's colour is always a `#rrggbb` hex string (palette.ts's
+ * `EDGE_FAMILIES` table never holds anything else) —
  * this only ever runs on that known shape, converting it to an rgba
  * string so a dimmed edge can carry reduced alpha the same way a dimmed
  * node's fill does. `linkColor` (below) only returns a colour string;
@@ -492,6 +492,54 @@ const LINK_TINT_AMOUNT = 0.35;
  * node's fill.
  */
 const LINK_ALPHA = 0.4;
+
+/**
+ * Arrowhead size in SCREEN pixels (bd-o1e) — divided by `globalScale` at
+ * the accessor, like every other screen-space length in this file.
+ * Deliberately small: direction is a cue on an edge, not a feature of it.
+ */
+const LINK_ARROW_LENGTH_PX = 7;
+
+/**
+ * 1 puts the arrowhead flush against the target node's edge — force-graph
+ * does the node-radius backoff itself (`posAlongLine = startR +
+ * arrowLength + (lineLen - startR - endR - arrowLength) * relPos`), so
+ * `relPos` is a fraction of the gap BETWEEN the two circles, not of the
+ * centre-to-centre line. That only works if force-graph knows the real
+ * radii, which is what `nodeVal`/`nodeRelSize` below are for.
+ */
+const LINK_ARROW_REL_POS = 1;
+
+/**
+ * Makes `sqrt(nodeVal(node)) * nodeRelSize` equal this app's own
+ * `node.radius` (bd-o1e). force-graph derives a node's radius from those
+ * two for three purposes, and every one of them was wrong here before,
+ * because nothing ever set them: `nodeVal` defaults to `undefined` and
+ * `nodeRelSize` to 4, so force-graph believed every node had radius 4
+ * while `drawNode` was drawing 3 to 9.
+ *
+ * The visible consequence was that arrowheads vanished. Links are drawn
+ * beneath nodes, and the arrow backoff used the believed radius (4) —
+ * so on any node larger than that the head landed inside the circle and
+ * the node painted over it. That hit exactly the wrong nodes: every
+ * `child_of` edge in a repository's neighbourhood points AT the repo,
+ * the largest node on screen, so containment direction disappeared
+ * precisely where a reader most needs it.
+ *
+ * Feeding the true radius through fixes the other two consumers with it
+ * — `getGraphBbox` (which `fitToFreeArea` builds on, and which was
+ * under-counting large nodes when fitting) and the default pointer-area
+ * paint (already overridden here by `paintNodePointerArea`, so no change
+ * in practice). Squaring is exact rather than approximate: force-graph
+ * takes the square root straight back out.
+ */
+const NODE_REL_SIZE = 1;
+function nodeVal(node: GraphNode): number {
+  return node.radius * node.radius;
+}
+
+/** Arrowheads are drawn solid rather than at LINK_ALPHA — a 5px triangle at 0.4 alpha is invisible, and the head is the whole point of drawing direction. */
+const LINK_ARROW_ALPHA = 0.95;
 
 /** A link dims only when BOTH endpoints fail to match the focused type — an edge with at least one endpoint of the focused type stays at full strength, since it's still part of "what's connected to the focused type." */
 function isLinkDimmed(link: GraphLink, focusedNodeType: string | null | undefined, nodeTypesById: ReadonlyMap<string, string>): boolean {
@@ -682,6 +730,19 @@ export function GraphCanvas({ data, onNodeExpand, expandableNodeIds = NO_EXPANDA
   // nothing here is rendered by React).
   const labelPlacementsRef = useRef<Map<string, LabelPlacement>>(new Map());
 
+  // The current zoom, captured in `onRenderFramePre` and read by the link
+  // accessors below (bd-o1e). force-graph runs that hook once per frame
+  // BEFORE it draws links, so this ref is always this frame's value by
+  // the time a link accessor reads it. It exists because `linkLineDash`
+  // and `linkDirectionalArrowLength` are given only the link — unlike
+  // `nodeCanvasObject`, which receives `globalScale` directly — while
+  // force-graph draws links inside the zoom transform, so a dash length
+  // handed over raw would be in GRAPH units and would visibly stretch as
+  // the canvas zooms. Dividing by this reproduces the `/ globalScale`
+  // idiom `LABEL_FONT_SIZE_PX` and `EXPANDABLE_BADGE_RADIUS_PX` already
+  // use, so a relation's dash reads the same at every zoom level.
+  const globalScaleRef = useRef(1);
+
   // node id -> node type, for `isLinkDimmed` (a link's endpoints carry
   // only an id, or force-graph's resolved node object, per nodeEdges.ts's
   // header — never the type directly). Rebuilt only when `data.nodes`
@@ -706,7 +767,7 @@ export function GraphCanvas({ data, onNodeExpand, expandableNodeIds = NO_EXPANDA
   const tintedLinkColorById = useMemo(() => {
     const map = new Map<string, string>();
     for (const link of data.links) {
-      map.set(link.id, lightenHex(link.color, LINK_TINT_AMOUNT));
+      map.set(link.id, lightenHex(edgeFamily(link.family).color, LINK_TINT_AMOUNT));
     }
     return map;
   }, [data.links]);
@@ -812,8 +873,11 @@ export function GraphCanvas({ data, onNodeExpand, expandableNodeIds = NO_EXPANDA
             // in `data.nodes`, so reading them here reflects this frame's
             // actual layout. See computeLabelPlacements' own doc comment.
             onRenderFramePre={(ctx, globalScale) => {
+              globalScaleRef.current = globalScale;
               labelPlacementsRef.current = computeLabelPlacements(data.nodes as DrawableNode[], globalScale, selectedNodeId, neighborIdsOfSelected);
             }}
+            nodeVal={nodeVal}
+            nodeRelSize={NODE_REL_SIZE}
             nodeCanvasObject={(node, ctx, globalScale) => drawNode(node, ctx, globalScale, labelPlacementsRef.current, expandableNodeIds, drawContext)}
             nodePointerAreaPaint={paintNodePointerArea}
             nodeLabel={nodeTooltip}
@@ -847,10 +911,24 @@ export function GraphCanvas({ data, onNodeExpand, expandableNodeIds = NO_EXPANDA
               }
             }}
             linkColor={(link) => {
-              const tinted = tintedLinkColorById.get(link.id) ?? link.color;
+              const tinted = tintedLinkColorById.get(link.id) ?? edgeFamily(link.family).color;
               return hexToRgba(tinted, isLinkDimmed(link, focusedNodeType, nodeTypesById) ? DIMMED_ALPHA : LINK_ALPHA);
             }}
-            linkWidth={(link) => link.width}
+            // bd-o1e: dash and arrowhead are the channels that carry the
+            // RELATION (design.md decision 1); width still carries weight,
+            // scaled per family so a structural edge reads lighter than a
+            // dependency. See weightToEdgeWidth on why width alone is a
+            // weak signal in this store.
+            linkWidth={(link) => link.width * edgeFamily(link.family).widthScale}
+            linkLineDash={(link) => {
+              const { dash } = edgeFamily(link.family);
+              if (dash.length === 0) return null;
+              const scale = globalScaleRef.current || 1;
+              return dash.map((segment) => segment / scale);
+            }}
+            linkDirectionalArrowLength={(link) => (edgeFamily(link.family).arrow ? LINK_ARROW_LENGTH_PX / (globalScaleRef.current || 1) : 0)}
+            linkDirectionalArrowRelPos={LINK_ARROW_REL_POS}
+            linkDirectionalArrowColor={(link) => hexToRgba(tintedLinkColorById.get(link.id) ?? edgeFamily(link.family).color, isLinkDimmed(link, focusedNodeType, nodeTypesById) ? DIMMED_ALPHA : LINK_ARROW_ALPHA)}
             linkLabel={linkTooltip}
             cooldownTicks={200}
           />

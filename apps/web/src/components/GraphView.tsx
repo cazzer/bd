@@ -103,6 +103,7 @@ import { GraphCanvas } from "./GraphCanvas.js";
 import { SearchBar, type SearchBarStatus } from "./SearchBar.js";
 import { TypePanel } from "./TypePanel.js";
 import { UnlinkedNotes } from "./UnlinkedNotes.js";
+import { edgeLegendOf } from "../graph/edgeLegend.js";
 import { EMPTY_GRAPH, mergeGraphData, searchResultToGraphData, setNodeDegree, type GraphCanvasData, type GraphNode, type SearchResult } from "../graph/encoding.js";
 import {
   buildAnnotationNeighbor,
@@ -960,6 +961,13 @@ export function GraphView() {
     return assignTypeColors(rankedTypeNames);
   }, [nodeTypeCounts]);
 
+  // The edge legend (bd-o1e, graph/edgeLegend.ts): derived from the DRAWN
+  // links, so it names the relations and source systems on this canvas
+  // rather than a static table. Recomputed only when `graph.links` itself
+  // changes identity — mergeGraphData hands back a new array per search
+  // or expansion, not per render.
+  const edgeLegend = useMemo(() => edgeLegendOf(graph.links), [graph.links]);
+
   // Right column width + GraphCanvas's `insetRight` (bd-e9n, design.md
   // decision 5) — a plain derivation of state already held, computed
   // during render like `typePanelSelection`/`typeSuggestions` above, no
@@ -1072,7 +1080,7 @@ export function GraphView() {
       */}
       <div className={`pointer-events-none fixed top-4 right-4 bottom-4 z-10 flex ${rightColumnWidthClass} flex-col items-stretch gap-3`}>
         <div className="glass pointer-events-auto shrink-0 p-3">
-          <TypePanel storeTypes={nodeTypeCounts} selected={typePanelSelection} focusedType={focusedType} onToggleFocus={handleToggleTypeFocus} typeColors={typeColors} />
+          <TypePanel storeTypes={nodeTypeCounts} selected={typePanelSelection} focusedType={focusedType} onToggleFocus={handleToggleTypeFocus} typeColors={typeColors} edgeLegend={edgeLegend} />
         </div>
         {selectedNodeId && (
           <div className="pointer-events-auto min-h-0 flex-1">

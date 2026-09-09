@@ -5,7 +5,7 @@
 // each describe block's comment for which scenario it is.
 
 import { describe, expect, it } from "vitest";
-import { assignTypeColors, CATEGORICAL_PALETTE, colorForNodeType, colorForSourceSystem, FALLBACK_COLOR } from "./palette.js";
+import { assignTypeColors, CATEGORICAL_PALETTE, colorForNodeType, familyKeyForEdgeType, FALLBACK_COLOR } from "./palette.js";
 import {
   degreeToRadius,
   EDGE_WIDTH_MAX,
@@ -193,18 +193,11 @@ describe("colorForNodeType", () => {
   });
 });
 
-describe("colorForSourceSystem", () => {
-  it("gives repo, human, and agent distinct colours", () => {
-    const colors = ["repo", "human", "agent"].map(colorForSourceSystem);
-    expect(new Set(colors).size).toBe(3);
-  });
-
-  it("falls back to the stable fallback colour for an unrecognised source system", () => {
-    expect(colorForSourceSystem("some-future-loader")).toBe(FALLBACK_COLOR);
-  });
-});
-
-// --- weight -> edge width: "Edge provenance is visible" --------------------
+// --- weight -> edge width ------------------------------------------------
+//
+// bd-o1e: width still carries weight, but it is no longer the channel a
+// reader learns an edge from — see weightToEdgeWidth's own comment on the
+// two weights this store actually holds.
 
 describe("weightToEdgeWidth", () => {
   it("maps the weight range [0, 1] onto [EDGE_WIDTH_MIN, EDGE_WIDTH_MAX] linearly", () => {
@@ -292,13 +285,19 @@ describe("searchResultToGraphData", () => {
         edgeType: "part-of-change",
         sourceSystem: "repo",
         weight: 0.6,
-        color: colorForSourceSystem("repo"),
+        family: familyKeyForEdgeType("part-of-change"),
         width: weightToEdgeWidth(0.6),
       },
     ]);
   });
 
-  it("the seeded corpus's edges (15 part-of-change + 1 sibling, all source_system=repo) render with one uniform colour — the bd-8no finding made visible", () => {
+  it("distinguishes relations that share a source system — the bd-o1e finding, inverted", () => {
+    // The corpus this replaces asserted the OPPOSITE and called it
+    // correct: 15 part-of-change plus 1 sibling, all source_system=repo,
+    // "render with one uniform colour". That uniformity was the bug —
+    // two genuinely different relations drawing identically because the
+    // encoding was keyed on the thing they had in common. Keyed on
+    // relation, the same corpus separates.
     const nodes = Array.from({ length: 2 }, (_, i) => makeNode({ id: `n${i}` }));
     const edges = [
       ...Array.from({ length: 15 }, (_, i) => makeEdge({ edgeId: `poc-${i}`, srcNodeId: "n0", dstNodeId: "n1", edgeType: "part-of-change", sourceSystem: "repo", weight: 0.6 })),
@@ -306,13 +305,12 @@ describe("searchResultToGraphData", () => {
     ];
     const graph = searchResultToGraphData(makeResult(nodes, edges));
 
-    const colors = new Set(graph.links.map((l) => l.color));
-    expect(colors.size).toBe(1); // one source_system -> one colour, uniformly
-    expect([...colors][0]).toBe(colorForSourceSystem("repo"));
+    const families = new Set(graph.links.map((l) => l.family));
+    expect(families.size).toBe(2);
+    expect(families).toContain(familyKeyForEdgeType("part-of-change")); // containment
+    expect(families).toContain("unassigned"); // `sibling` is deliberately unmapped — it exercises the fallback
 
-    // Thickness still tracks each edge's own weight — uniformity is about
-    // provenance (colour), not an assertion that every edge looks
-    // pixel-identical.
+    // Width still tracks each edge's own weight.
     const widths = new Set(graph.links.map((l) => l.width));
     expect(widths.size).toBe(2); // 0.6 and 0.3 map to two distinct widths
   });
