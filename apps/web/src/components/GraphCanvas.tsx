@@ -63,6 +63,7 @@ import { graphAriaSummary, nodeAccessibleDescription } from "../graph/accessibil
 import type { GraphCanvasData, GraphLink, GraphNode } from "../graph/encoding.js";
 import { releasePins, type PositionedNode } from "../graph/expansion.js";
 import { robustBbox, ROBUST_BBOX_MIN_POINTS } from "../graph/fitBounds.js";
+import { HALO_TIER_FOCUSED, HALO_TIER_NEIGHBOR, HALO_TIER_SEED, HALO_TIER_SELECTED, selectHaloedNodes } from "../graph/haloBudget.js";
 import { placeLabels, type LabelCandidate, type LabelPlacement } from "../graph/labelPlacement.js";
 import { shouldLabel, truncateLabel } from "../graph/labelPolicy.js";
 import { edgesTouchingNode, endpointId } from "../graph/nodeEdges.js";
@@ -204,6 +205,10 @@ const LABEL_COLOR = "#e2e8f0"; // slate-200 — matches --color-fg, legible on t
  */
 const LABEL_FONT_SIZE_PX = 12;
 
+/** Leader line for a displaced label (bd-6qo). Dimmer than the label itself — it is a pointer, not content. */
+const LEADER_COLOR = "rgba(226, 232, 240, 0.35)";
+const LEADER_WIDTH_PX = 1;
+
 type DrawableNode = GraphNode & { x?: number; y?: number };
 
 /**
@@ -259,6 +264,58 @@ function labelText(node: DrawableNode): string {
  * (labelPolicy.test.ts) — it's simply never exercised by a live signal
  * from this canvas today, the same honest state bd-hmd.4 left it in.
  */
+/**
+ * Every node's halo, drawn in one pass (bd-6qo).
+ *
+ * Called from `onRenderFramePre`, which force-graph runs BEFORE it paints
+ * links — that ordering IS the fix for "halos hid the edges". While halos
+ * were drawn inside `nodeCanvasObject` they landed after the links and
+ * covered them, so selecting a hub replaced its whole neighbourhood's
+ * structure with a wash of overlapping glows.
+ *
+ * `haloedIds` is the budgeted set (graph/haloBudget.ts). A node outside
+ * it still gets the faint single ring every ambient node gets — it is
+ * only the two-stop emphasis that is rationed, so nothing disappears,
+ * it just stops being shouted.
+ */
+function drawHalos(nodes: readonly DrawableNode[], ctx: CanvasRenderingContext2D, haloedIds: ReadonlySet<string>, context: DrawContext): void {
+  for (const node of nodes) {
+    const x = node.x ?? 0;
+    const y = node.y ?? 0;
+    const isFocusedMatch = Boolean(context.focusedNodeType) && node.nodeType === context.focusedNodeType;
+    // Same dimming rule drawNode applies to the node itself, so a halo
+    // never outlives the node it belongs to when a type focus is on.
+    ctx.save();
+    if (context.focusedNodeType && !isFocusedMatch) {
+      ctx.globalAlpha = DIMMED_ALPHA;
+    }
+    const stops = haloedIds.has(node.id) ? (isFocusedMatch ? FOCUSED_HALO_STOPS : AMBIENT_HALO_STOPS) : AMBIENT_SINGLE_RING_STOPS;
+    drawHalo(ctx, x, y, node.radius, colorForNodeType(node.nodeType, context.typeColors), stops);
+    ctx.restore();
+  }
+}
+
+/**
+ * Which nodes may carry the two-stop halo this frame — the same
+ * relevance tiers `computeLabelPlacements` uses for label priority, so
+ * the node that keeps its halo is the node that keeps its label.
+ */
+function computeHaloedNodes(nodes: readonly DrawableNode[], selectedNodeId: string | null | undefined, neighborIdsOfSelected: ReadonlySet<string>, focusedNodeType: string | null | undefined): Set<string> {
+  const candidates = [];
+  for (const node of nodes) {
+    const isSelected = node.id === selectedNodeId;
+    const isSeed = node.provenance.kind === "seed";
+    const isNeighborOfSelected = neighborIdsOfSelected.has(node.id);
+    const isFocusedMatch = Boolean(focusedNodeType) && node.nodeType === focusedNodeType;
+    if (!isSelected && !isSeed && !isNeighborOfSelected && !isFocusedMatch) continue;
+    candidates.push({
+      id: node.id,
+      tier: isSelected ? HALO_TIER_SELECTED : isSeed ? HALO_TIER_SEED : isNeighborOfSelected ? HALO_TIER_NEIGHBOR : HALO_TIER_FOCUSED,
+    });
+  }
+  return selectHaloedNodes(candidates);
+}
+
 function computeLabelPlacements(nodes: readonly DrawableNode[], globalScale: number, selectedNodeId: string | null | undefined, neighborIdsOfSelected: ReadonlySet<string>): Map<string, LabelPlacement> {
   const fontSize = LABEL_FONT_SIZE_PX / globalScale;
   const candidates: LabelCandidate[] = [];
@@ -347,19 +404,11 @@ function drawNode(node: DrawableNode, ctx: CanvasRenderingContext2D, globalScale
   }
 
   const isSeed = node.provenance.kind === "seed";
-  // bd-cfc, design.md decision 4: "Halos follow relevance too" — reuses
-  // the SAME relevance categories decision 1 already establishes for
-  // labels, computed once here and read by both the halo branch below
-  // and (via computeLabelPlacements, called separately in
-  // onRenderFramePre) the label draw path.
-  const isSelected = node.id === context.selectedNodeId;
-  const isNeighborOfSelected = context.neighborIdsOfSelected.has(node.id);
-  const isRelevant = isSeed || isSelected || isNeighborOfSelected || isFocusedMatch;
-
-  // Drawn first, so it sits behind the seed ring, fill, badge, and label
-  // below — see AMBIENT_HALO_STOPS'/FOCUSED_HALO_STOPS'/
-  // AMBIENT_SINGLE_RING_STOPS' own comments.
-  drawHalo(ctx, x, y, node.radius, fillColor, isRelevant ? (isFocusedMatch ? FOCUSED_HALO_STOPS : AMBIENT_HALO_STOPS) : AMBIENT_SINGLE_RING_STOPS);
+  // bd-6qo: halos no longer draw here. They moved to `drawHalos`, called
+  // from `onRenderFramePre` — which force-graph runs BEFORE it paints
+  // links, so a halo now sits beneath the edges instead of covering
+  // them. See that function's own comment. What remains in this function
+  // is the node itself: seed ring, fill, expandable badge, label.
 
   if (isSeed) {
     ctx.save();
@@ -407,6 +456,23 @@ function drawNode(node: DrawableNode, ctx: CanvasRenderingContext2D, globalScale
   // (`nodeTooltip`, below) and the detail panel.
   const label = labelText(node);
   const fontSize = LABEL_FONT_SIZE_PX / globalScale;
+
+  // bd-6qo: a DISPLACED label sits too far from its node for proximity
+  // to identify it, so labelPlacement hands back a leader segment and
+  // this draws it. A label in one of the four cardinal slots has no
+  // leader and needs none — a line to a label already touching its own
+  // node is noise.
+  if (placement.leader) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(placement.leader.x1, placement.leader.y1);
+    ctx.lineTo(placement.leader.x2, placement.leader.y2);
+    ctx.strokeStyle = LEADER_COLOR;
+    ctx.lineWidth = LEADER_WIDTH_PX / globalScale;
+    ctx.stroke();
+    ctx.restore();
+  }
+
   ctx.font = `${fontSize}px sans-serif`;
   ctx.textAlign = "center";
   ctx.textBaseline = "top";
@@ -875,6 +941,10 @@ export function GraphCanvas({ data, onNodeExpand, expandableNodeIds = NO_EXPANDA
             onRenderFramePre={(ctx, globalScale) => {
               globalScaleRef.current = globalScale;
               labelPlacementsRef.current = computeLabelPlacements(data.nodes as DrawableNode[], globalScale, selectedNodeId, neighborIdsOfSelected);
+              // bd-6qo: halos are painted HERE, before force-graph paints
+              // links, so edges stay visible through a dense selection.
+              const haloed = computeHaloedNodes(data.nodes as DrawableNode[], selectedNodeId, neighborIdsOfSelected, focusedNodeType);
+              drawHalos(data.nodes as DrawableNode[], ctx, haloed, drawContext);
             }}
             nodeVal={nodeVal}
             nodeRelSize={NODE_REL_SIZE}

@@ -20,6 +20,44 @@ function candidate(overrides: Partial<LabelCandidate> & { id: string }): LabelCa
   return { x: 0, y: 0, radius: RADIUS, text: overrides.id, alwaysShow: false, priority: 0, ...overrides };
 }
 
+const AVG_CHAR_WIDTH_RATIO = 0.56; // mirrors labelPlacement.ts's own estimate — see labelBox there
+
+/**
+ * The invariant this whole module exists to protect, asserted directly
+ * rather than via any one placement's coordinates: no VISIBLE label
+ * overlaps another visible label or any node's circle.
+ *
+ * Added with displacement (bd-6qo). It matters more than it used to:
+ * before, several of these tests pinned an exact `dy` per node, which
+ * proved non-overlap only incidentally and broke the moment the set of
+ * available slots changed. This states the property itself, so it keeps
+ * holding whatever new slots get added later.
+ */
+function expectNoOverlaps(placements: ReturnType<typeof placeLabels>, candidates: readonly LabelCandidate[], fontSize = FONT_SIZE): void {
+  const lineHeight = fontSize * DEFAULT_LABEL_LINE_HEIGHT_RATIO;
+  const byId = new Map(candidates.map((c) => [c.id, c]));
+  const boxes = placements
+    .filter((p) => p.visible)
+    .map((p) => {
+      const c = byId.get(p.id)!;
+      const width = Math.max(c.text.length, 1) * fontSize * AVG_CHAR_WIDTH_RATIO;
+      const x = c.x + p.dx;
+      const y = c.y + p.dy;
+      return { id: p.id, left: x - width / 2, right: x + width / 2, top: y, bottom: y + lineHeight };
+    });
+  const nodes = candidates.map((c) => ({ id: c.id, left: c.x - c.radius, right: c.x + c.radius, top: c.y - c.radius, bottom: c.y + c.radius }));
+  const hit = (a: { left: number; right: number; top: number; bottom: number }, b: typeof a) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+
+  for (let i = 0; i < boxes.length; i++) {
+    for (let j = i + 1; j < boxes.length; j++) {
+      expect(hit(boxes[i]!, boxes[j]!), `label ${boxes[i]!.id} overlaps label ${boxes[j]!.id}`).toBe(false);
+    }
+    for (const node of nodes) {
+      expect(hit(boxes[i]!, node), `label ${boxes[i]!.id} overlaps node ${node.id}`).toBe(false);
+    }
+  }
+}
+
 describe("placeLabels — uncrowded nodes", () => {
   it("two widely separated nodes both get their default (below) slot", () => {
     const candidates = [candidate({ id: "a", x: 0, y: 0 }), candidate({ id: "b", x: 200, y: 0 })];
@@ -58,44 +96,43 @@ describe("placeLabels — two coincident nodes (identical x/y): priority decides
   });
 });
 
-describe("placeLabels — slot exhaustion at one point (5 coincident candidates, only 4 candidate slots exist)", () => {
+describe("placeLabels — five coincident candidates: four cardinal slots, then displacement", () => {
   // All five candidates sit at the identical (0,0), so each of the four
-  // candidateOffsets slots is at one shared absolute position for all
-  // of them (see candidateOffsets' header for why exactly four — not
-  // more — slots are geometrically guaranteed non-overlapping
-  // regardless of label width). Processed in id order (equal priority,
-  // equal alwaysShow — the tie-break), the first four each grab one of
-  // the four slots; the fifth finds all of them already occupied.
+  // candidateOffsets slots is at one shared absolute position for all of
+  // them (see candidateOffsets' header for why exactly four — not more —
+  // slots are geometrically guaranteed non-overlapping regardless of
+  // label width). Processed in id order (equal priority, equal
+  // alwaysShow — the tie-break), the first four each grab one cardinal
+  // slot. bd-6qo changed what happens to the fifth: it used to be
+  // dropped, and is now displaced outward with a leader.
   const fiveCoincident = (alwaysShow: boolean) => Array.from({ length: 5 }, (_, i) => candidate({ id: `n${i}`, alwaysShow }));
 
-  it("a non-alwaysShow candidate with no free slot left is hidden, not overlapped", () => {
-    const placements = placeLabels(fiveCoincident(false), FONT_SIZE);
+  it.each([
+    ["ambient", false],
+    ["alwaysShow", true],
+  ])("the first four take the cardinal slots and the fifth (%s) is displaced with a leader", (_label, alwaysShow) => {
+    const candidates = fiveCoincident(alwaysShow as boolean);
+    const placements = placeLabels(candidates, FONT_SIZE);
     const byId = new Map(placements.map((p) => [p.id, p]));
     expect(byId.get("n0")).toEqual({ id: "n0", visible: true, dx: 0, dy: BELOW_DY });
     expect(byId.get("n1")).toEqual({ id: "n1", visible: true, dx: 0, dy: ABOVE_DY });
     expect(byId.get("n2")).toEqual({ id: "n2", visible: true, dx: 0, dy: BELOW_FAR_DY });
     expect(byId.get("n3")).toEqual({ id: "n3", visible: true, dx: 0, dy: ABOVE_FAR_DY });
-    // A hidden label carries no drawable offset — GraphCanvas must not draw it.
-    expect(byId.get("n4")).toEqual({ id: "n4", visible: false, dx: 0, dy: 0 });
+
+    const fifth = byId.get("n4")!;
+    expect(fifth.visible).toBe(true);
+    expect(fifth.leader).toBeDefined();
+    expectNoOverlaps(placements, candidates);
   });
 
-  it("an alwaysShow candidate with no free slot left is ALSO hidden, not force-placed on top of another label (explorer-legibility review, hub-density fix)", () => {
-    // Before this fix, the fifth fell back to n0's already-claimed
-    // default slot instead of disappearing — exactly the overlap this
-    // review found at hub density (several seeds/neighbours converging
-    // on one node). With every candidate's priority and alwaysShow
-    // status equal here, the id tie-break still decides processing
-    // order, so the result is identical to the non-alwaysShow case
-    // above: alwaysShow no longer changes whether a candidate can be
-    // dropped, only that it's tried first (see the next describe block
-    // for what DOES still decide who wins a contested slot).
-    const placements = placeLabels(fiveCoincident(true), FONT_SIZE);
-    const byId = new Map(placements.map((p) => [p.id, p]));
-    expect(byId.get("n0")).toEqual({ id: "n0", visible: true, dx: 0, dy: BELOW_DY });
-    expect(byId.get("n1")).toEqual({ id: "n1", visible: true, dx: 0, dy: ABOVE_DY });
-    expect(byId.get("n2")).toEqual({ id: "n2", visible: true, dx: 0, dy: BELOW_FAR_DY });
-    expect(byId.get("n3")).toEqual({ id: "n3", visible: true, dx: 0, dy: ABOVE_FAR_DY });
-    expect(byId.get("n4")).toEqual({ id: "n4", visible: false, dx: 0, dy: 0 });
+  // `alwaysShow` decides processing ORDER, never outcome — the property
+  // the explorer-legibility review established, and one displacement does
+  // not change: with priority and alwaysShow equal across the set, the id
+  // tie-break alone settles who gets which slot.
+  it("alwaysShow does not change the outcome when every candidate shares it", () => {
+    const ambient = placeLabels(fiveCoincident(false), FONT_SIZE);
+    const always = placeLabels(fiveCoincident(true), FONT_SIZE);
+    expect(always).toEqual(ambient);
   });
 });
 
@@ -107,14 +144,55 @@ describe("placeLabels — priority decides who is dropped when two labels can't 
   // the three fillers, then low — high claims the slot first (nothing
   // placed yet), the fillers claim the remaining three, and low finds
   // every slot already taken.
-  it("two labels that cannot both fit: only the higher-priority one is placed, the lower-priority one is dropped", () => {
+  // bd-6qo changed the outcome here, and deliberately: the loser of the
+  // slot contest used to be dropped outright, and is now displaced clear
+  // of the crowd with a leader line instead. Priority still decides who
+  // gets the PREFERRED slot — that part is unchanged, and is what this
+  // block is named for — but losing it no longer costs a node its
+  // identity on the canvas.
+  it("two labels that cannot both fit: the higher-priority one keeps the preferred slot, the lower-priority one is displaced with a leader", () => {
     const high = candidate({ id: "high", priority: 2, alwaysShow: true });
     const low = candidate({ id: "low", priority: 0, alwaysShow: true });
     const fillers = ["filler-a", "filler-b", "filler-c"].map((id) => candidate({ id, priority: 1, alwaysShow: true }));
-    const placements = placeLabels([high, low, ...fillers], FONT_SIZE);
+    const candidates = [high, low, ...fillers];
+    const placements = placeLabels(candidates, FONT_SIZE);
     const byId = new Map(placements.map((p) => [p.id, p]));
+
     expect(byId.get("high")).toEqual({ id: "high", visible: true, dx: 0, dy: BELOW_DY });
-    expect(byId.get("low")).toEqual({ id: "low", visible: false, dx: 0, dy: 0 });
+
+    const lowPlacement = byId.get("low")!;
+    expect(lowPlacement.visible).toBe(true);
+    expect(lowPlacement.leader).toBeDefined(); // displaced, so it must claim its node explicitly
+    // Displaced further from its node than any cardinal slot reaches —
+    // measured as a distance, since displacement is not confined to the
+    // vertical the cardinal slots are.
+    expect(Math.hypot(lowPlacement.dx, lowPlacement.dy)).toBeGreaterThan(Math.abs(ABOVE_FAR_DY));
+    expectNoOverlaps(placements, candidates);
+  });
+
+  it("a label with room in a cardinal slot carries no leader — a line to a label sitting against its own node is noise", () => {
+    const placements = placeLabels([candidate({ id: "alone" })], FONT_SIZE);
+    expect(placements[0]!.leader).toBeUndefined();
+  });
+
+  // The one case where a label is still lost: displacement is bounded, so
+  // a point crowded past every cardinal AND every displaced slot has
+  // nowhere left to put one. This is what keeps "displaced" from meaning
+  // "placed anywhere, overlap be damned" — the old force-placement bug.
+  it("still drops a label once every cardinal AND every displaced position is taken", () => {
+    // Displacement is bounded — DISPLACED_STEPS x DISPLACED_ANGLES, on
+    // top of the four cardinal slots — so a point crowded past all of
+    // them has nowhere left to put a label. That bound is what keeps
+    // "displaced" from degenerating into the old force-placement bug:
+    // there is always a case where the answer is still "no room", and
+    // the answer is still "then do not draw it", never "draw it anyway".
+    const n = 60;
+    const crowd = Array.from({ length: n }, (_, i) => candidate({ id: `c${String(i).padStart(2, "0")}`, priority: n - i, alwaysShow: true }));
+    const placements = placeLabels(crowd, FONT_SIZE);
+    expect(placements.some((p) => !p.visible)).toBe(true);
+    // The highest-priority candidates are the ones that survive.
+    expect(placements.find((p) => p.id === "c00")!.visible).toBe(true);
+    expectNoOverlaps(placements, crowd);
   });
 
   it("unrelated labels are unaffected by that contest", () => {
@@ -173,13 +251,43 @@ describe("placeLabels — the reviewed corpus scenario: a 7-node dense cluster, 
     expect(byId.get("cluster-0")).toEqual({ id: "cluster-0", visible: true, dx: 0, dy: belowFarDy(6) });
   });
 
-  it("some same-priority (seed) nodes win a slot and some lose, not every one guaranteed anymore", () => {
+  it("same-priority (seed) nodes still take different cardinal slots, nearest-preferred first", () => {
     expect(byId.get("cluster-1")).toEqual({ id: "cluster-1", visible: true, dx: 0, dy: aboveDy(7) });
     expect(byId.get("cluster-2")).toEqual({ id: "cluster-2", visible: true, dx: 0, dy: aboveFarDy(8) });
-    expect(byId.get("cluster-3")).toEqual({ id: "cluster-3", visible: false, dx: 0, dy: 0 });
-    expect(byId.get("cluster-4")).toEqual({ id: "cluster-4", visible: false, dx: 0, dy: 0 });
-    expect(byId.get("cluster-5")).toEqual({ id: "cluster-5", visible: false, dx: 0, dy: 0 });
-    expect(byId.get("cluster-6")).toEqual({ id: "cluster-6", visible: true, dx: 0, dy: belowFarDy(12) });
+  });
+
+  // bd-6qo: before displacement, cluster-3, -4 and -5 were dropped here
+  // and this block asserted exactly that. The whole point of the change
+  // is that a crowded cluster no longer costs those nodes their labels —
+  // on the review's own screenshot the cardinal-only version labelled 6
+  // of 40 nodes.
+  it("the nodes that lost the cardinal contest are displaced rather than dropped", () => {
+    for (const id of ["cluster-3", "cluster-4", "cluster-5", "cluster-6"]) {
+      const placement = byId.get(id)!;
+      expect(placement.visible, `${id} should be displaced, not dropped`).toBe(true);
+      expect(placement.leader, `${id} is displaced so it must carry a leader`).toBeDefined();
+    }
+  });
+
+  it("every node in the cluster keeps a label, and none of them overlap", () => {
+    expect(placements.filter((p) => p.visible)).toHaveLength(placements.length);
+    expectNoOverlaps(placements, [...cluster, ...isolated]);
+  });
+
+  it("a displaced label's leader starts at its node and ends on its own label box", () => {
+    const placement = byId.get("cluster-3")!;
+    const node = cluster[3]!;
+    const leader = placement.leader!;
+    // Starts on the node's circumference, not at its centre.
+    expect(Math.hypot(leader.x1 - node.x, leader.y1 - node.y)).toBeCloseTo(node.radius + DEFAULT_LABEL_GAP, 5);
+    // Ends within the label's own box.
+    const width = Math.max(node.text.length, 1) * FONT_SIZE * AVG_CHAR_WIDTH_RATIO;
+    const bx = node.x + placement.dx;
+    const by = node.y + placement.dy;
+    expect(leader.x2).toBeGreaterThanOrEqual(bx - width / 2 - 1e-6);
+    expect(leader.x2).toBeLessThanOrEqual(bx + width / 2 + 1e-6);
+    expect(leader.y2).toBeGreaterThanOrEqual(by - 1e-6);
+    expect(leader.y2).toBeLessThanOrEqual(by + LINE_HEIGHT + 1e-6);
   });
 
   it("nodes far outside the cluster are unaffected by its slot contest", () => {
@@ -189,18 +297,24 @@ describe("placeLabels — the reviewed corpus scenario: a 7-node dense cluster, 
 });
 
 describe("placeLabels — a hovered (non-seed) node contests slots exactly like any other alwaysShow candidate", () => {
-  it("a non-seed, alwaysShow node with the lowest priority in a full crowd is dropped, not force-placed (explorer-legibility review)", () => {
-    // Before this fix, "always placed, never hidden" was alwaysShow's
-    // own guarantee regardless of priority — this exact geometry used to
-    // assert the opposite of what's asserted below. It no longer holds:
-    // alwaysShow now only decides processing ORDER (ahead of ambient
-    // nodes), not whether a candidate can lose a contest for the last
-    // slot.
+  it("a non-seed, alwaysShow node with the lowest priority loses the cardinal contest and is displaced, never force-placed", () => {
+    // This geometry has been asserted three ways as the requirement
+    // moved. Originally alwaysShow guaranteed "always placed, never
+    // hidden" — which force-placed a label on top of whatever was there.
+    // The explorer-legibility review replaced that with "dropped, full
+    // stop". bd-6qo replaces THAT with displacement, which is the
+    // version that satisfies both concerns at once: the label survives,
+    // and it still has to pass the same overlap test as everything else.
     const crowd = Array.from({ length: 4 }, (_, i) => candidate({ id: `blocker${i}`, alwaysShow: true }));
-    const hovered = candidate({ id: "hovered-not-a-seed", alwaysShow: true, priority: -1 }); // lowest priority — processed last, finds nothing free
-    const placements = placeLabels([...crowd, hovered], FONT_SIZE);
-    expect(placements.find((p) => p.id === "hovered-not-a-seed")).toEqual({ id: "hovered-not-a-seed", visible: false, dx: 0, dy: 0 });
-    // The crowd that beat it is unaffected — still all four visible.
-    expect(placements.filter((p) => p.id.startsWith("blocker")).every((p) => p.visible)).toBe(true);
+    const hovered = candidate({ id: "hovered-not-a-seed", alwaysShow: true, priority: -1 }); // lowest priority — processed last, finds no cardinal slot free
+    const candidates = [...crowd, hovered];
+    const placements = placeLabels(candidates, FONT_SIZE);
+
+    const placement = placements.find((p) => p.id === "hovered-not-a-seed")!;
+    expect(placement.visible).toBe(true);
+    expect(placement.leader).toBeDefined();
+    // The crowd that beat it to the cardinal slots is unaffected.
+    expect(placements.filter((p) => p.id.startsWith("blocker")).every((p) => p.visible && p.leader === undefined)).toBe(true);
+    expectNoOverlaps(placements, candidates);
   });
 });

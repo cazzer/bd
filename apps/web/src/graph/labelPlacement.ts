@@ -20,10 +20,22 @@
 // neighbour-of-selected > everything else, see computeLabelPlacements'
 // own comment); for each, in that order, try a fixed set of label
 // positions around the node and take the first one that doesn't overlap
-// any node-circle or label already placed this frame. ANY candidate that
-// finds no free slot is dropped (visible: false) — including an
-// alwaysShow one — its identity is still one hover away via GraphCanvas's
-// tooltip (graph/tooltip.ts), never gone entirely.
+// any node-circle or label already placed this frame. A candidate that
+// finds no free slot among those is then DISPLACED (bd-6qo): pushed out
+// along the vector away from the crowd's centroid until it finds room,
+// and drawn with a leader line back to its node, because a label far
+// from its node no longer identifies itself by proximity. Only a
+// candidate that finds room nowhere — cardinal or displaced — is dropped
+// (visible: false), its identity still one hover away via GraphCanvas's
+// tooltip (graph/tooltip.ts).
+//
+// Why displacement is safe where force-placement was not (see the
+// paragraph below): a displaced label passes the SAME `overlaps` test as
+// every other placement. It never lands on top of anything. It only
+// travels to find room — so the guarantee "every visible label is
+// non-overlapping" is unchanged, and what improves is how often a label
+// is visible at all. Measured on the review's own screenshot, the
+// cardinal-only version labelled 6 of 40 nodes.
 //
 // explorer-legibility review (bd-cfc/bd-e9n): an earlier version placed
 // an alwaysShow candidate anyway, on top of whatever already occupied
@@ -37,14 +49,16 @@
 // keeps the node someone is actually looking at from losing a slot to a
 // lower-relevance one.
 //
-// Coupled with palette.ts: that module's six-node-type categorical
-// palette exceeds the CVD-safe "all pairs simultaneously visible" gate
-// and leans on "colour is never the only channel — every node is also
-// labelled" as its mitigation. That mitigation is now conditional, not
-// universal: a node this function hides still has its type in
-// GraphCanvas's hover tooltip, but hover-only identity is weaker than an
-// always-on label (it requires the person to act, not just look). See
-// palette.ts's own comment for the honest version of that claim.
+// Coupled with palette.ts: that module's categorical palette exceeds the
+// CVD-safe "all pairs simultaneously visible" gate and leans on "colour
+// is never the only channel — every node is also labelled" as its
+// mitigation. That mitigation is still conditional rather than universal
+// — a node this function drops has its type only in GraphCanvas's hover
+// tooltip, and hover-only identity is weaker than an always-on label
+// (it requires the person to act, not just look) — but displacement
+// (bd-6qo) narrows the gap considerably, since a label is now dropped
+// only when the whole outward ray is blocked too. See palette.ts's own
+// comment for the honest version of that claim.
 
 export interface LabelCandidate {
   id: string;
@@ -78,6 +92,68 @@ export interface LabelPlacement {
   /** Offset from the node's (x, y) to the label's top-center anchor, in the same graph-space units. Meaningless when `visible` is false. */
   dx: number;
   dy: number;
+  /**
+   * Set only for a DISPLACED label (bd-6qo) — one pushed clear of its
+   * crowded neighbourhood, far enough that "the label nearest the node"
+   * no longer identifies it. Absolute graph-space endpoints, from the
+   * node's edge to the nearest point of the label's box, for GraphCanvas
+   * to stroke. Absent for a label in one of the four cardinal slots,
+   * which sits against its node and needs no line to claim it.
+   */
+  leader?: { x1: number; y1: number; x2: number; y2: number };
+}
+
+/**
+ * How far out a displaced label is tried, as multiples of the label's own
+ * line height beyond the last cardinal slot. Tried nearest-first, so a
+ * label travels only as far as it must — a label close to its node is
+ * easier to associate with it, whatever the leader line says.
+ */
+const DISPLACED_STEPS = [2, 3.5, 5, 7, 9.5] as const;
+
+/**
+ * Directions tried at each distance, as radians off the outward vector.
+ * Straight out first, then fanning symmetrically around it.
+ *
+ * Without the fan, every label in one cluster displaces along very nearly
+ * the same ray — the outward vectors of nodes packed close together all
+ * point the same way — so they queue up behind each other and the ones at
+ * the back of the queue run out of steps and get dropped anyway. That is
+ * not hypothetical: it is what the 7-node cluster in labelPlacement.test.ts
+ * does, and the effect is amplified whenever the candidate set contains
+ * distant outliers, because they drag the centroid far enough that the
+ * whole cluster's outward vectors become near-parallel.
+ *
+ * The fan makes the outward vector a PREFERENCE rather than the only
+ * option, which is the right strength for it: it is a decent guess about
+ * where the free space is, not a fact.
+ */
+const DISPLACED_ANGLES = [0, Math.PI / 4, -Math.PI / 4, Math.PI / 2, -Math.PI / 2, (3 * Math.PI) / 4, -(3 * Math.PI) / 4, Math.PI] as const;
+
+function rotate(v: { x: number; y: number }, radians: number): { x: number; y: number } {
+  const cos = Math.cos(radians);
+  const sin = Math.sin(radians);
+  return { x: v.x * cos - v.y * sin, y: v.x * sin + v.y * cos };
+}
+
+/** Below this the outward vector is noise (a node sitting on the centroid), so a fixed direction is used instead of a random one. */
+const OUTWARD_EPSILON = 1e-6;
+
+/** Straight up — the fallback outward direction. Matches the "above" cardinal slot, so a displaced label on a centroid node reads as an extension of the slot it just failed to get. */
+const DEFAULT_OUTWARD = { x: 0, y: -1 } as const;
+
+function clamp(value: number, lo: number, hi: number): number {
+  return value < lo ? lo : value > hi ? hi : value;
+}
+
+/**
+ * The point of `box` nearest to `(x, y)`. Used for the leader's far end,
+ * so the line stops at the label's edge rather than driving through it —
+ * which is what a naive "draw to the anchor" would do for any label
+ * displaced upward, the anchor being the box's TOP.
+ */
+function nearestPointOnBox(box: Box, x: number, y: number): { x: number; y: number } {
+  return { x: clamp(x, box.left, box.right), y: clamp(y, box.top, box.bottom) };
 }
 
 export const DEFAULT_LABEL_GAP = 2;
@@ -157,6 +233,26 @@ function candidateOffsets(radius: number, lineHeight: number): ReadonlyArray<{ d
   ];
 }
 
+function centroidOf(candidates: readonly LabelCandidate[]): { x: number; y: number } {
+  if (candidates.length === 0) return { x: 0, y: 0 };
+  let x = 0;
+  let y = 0;
+  for (const c of candidates) {
+    x += c.x;
+    y += c.y;
+  }
+  return { x: x / candidates.length, y: y / candidates.length };
+}
+
+/** Unit vector pointing from the crowd's centre out through this candidate — the direction with the most room in it, on average. */
+function outwardFrom(centroid: { x: number; y: number }, candidate: LabelCandidate): { x: number; y: number } {
+  const dx = candidate.x - centroid.x;
+  const dy = candidate.y - centroid.y;
+  const length = Math.hypot(dx, dy);
+  if (length < OUTWARD_EPSILON) return DEFAULT_OUTWARD;
+  return { x: dx / length, y: dy / length };
+}
+
 /**
  * Places (or hides) a label for every candidate — see module header for
  * the full algorithm. `fontSize` must be the same graph-space value the
@@ -198,6 +294,14 @@ export function placeLabels(candidates: readonly LabelCandidate[], fontSize: num
   const placedBoxes: Box[] = candidates.map((c) => nodeBox(c.x, c.y, c.radius));
   const placements = new Map<string, LabelPlacement>();
 
+  // The crowd's centre, for the outward direction a displaced label
+  // travels along (bd-6qo). One centroid over every candidate, not a
+  // per-node local neighbourhood: the cluster this is escaping IS the
+  // candidate set (labelPolicy has already filtered to eligible nodes),
+  // and a k-nearest recomputation per candidate would turn an O(n^2)
+  // pass into an O(n^2 log n) one for a direction that barely differs.
+  const centroid = centroidOf(candidates);
+
   for (const candidate of ordered) {
     const offsets = candidateOffsets(candidate.radius + gap, lineHeight);
     let chosen: { dx: number; dy: number } | undefined;
@@ -208,16 +312,55 @@ export function placeLabels(candidates: readonly LabelCandidate[], fontSize: num
         break;
       }
     }
-    // explorer-legibility review: no force-placement fallback here for
-    // `alwaysShow` — a candidate that finds no free slot is dropped, full
-    // stop, regardless of relevance. See module header for why (an
-    // earlier version placed an alwaysShow candidate on top of whatever
-    // was already there, which is exactly the overlap this function
-    // exists to prevent).
-    const placedOffset = chosen;
-    if (placedOffset) {
-      placements.set(candidate.id, { id: candidate.id, visible: true, dx: placedOffset.dx, dy: placedOffset.dy });
-      placedBoxes.push(labelBox(candidate.x + placedOffset.dx, candidate.y + placedOffset.dy, candidate.text, fontSize, lineHeight));
+
+    // Still no cardinal slot: try displacing the label clear of the crowd
+    // instead of dropping it (bd-6qo, graph-explorer/spec.md's "A node's
+    // identity survives a crowded canvas"). This REPLACED the older
+    // "dropped, full stop" behaviour, which was itself a correction of an
+    // even older force-placement fallback — the distinction that makes
+    // this safe and force-placement not is that a displaced label still
+    // has to pass the same `overlaps` test as every other placement. It
+    // never lands on top of anything; it only travels to find room, and
+    // is still dropped if it cannot.
+    let displaced: { dx: number; dy: number; leader: NonNullable<LabelPlacement["leader"]> } | undefined;
+    if (!chosen) {
+      const outward = outwardFrom(centroid, candidate);
+      const base = candidate.radius + gap + lineHeight;
+      // Distance outer, angle inner: nearest free spot wins, and the
+      // outward direction only breaks ties between spots equally far
+      // away. Preferring the outward direction across ALL distances
+      // instead would send a label much further from its node than it
+      // needs to go, for a direction that is only a guess.
+      outer: for (const step of DISPLACED_STEPS) {
+        const distance = base + step * lineHeight;
+        for (const angle of DISPLACED_ANGLES) {
+          const direction = rotate(outward, angle);
+          const dx = direction.x * distance;
+          const dy = direction.y * distance;
+          const box = labelBox(candidate.x + dx, candidate.y + dy, candidate.text, fontSize, lineHeight);
+          if (placedBoxes.some((other) => overlaps(box, other))) continue;
+          const end = nearestPointOnBox(box, candidate.x, candidate.y);
+          displaced = {
+            dx,
+            dy,
+            leader: {
+              x1: candidate.x + direction.x * (candidate.radius + gap),
+              y1: candidate.y + direction.y * (candidate.radius + gap),
+              x2: end.x,
+              y2: end.y,
+            },
+          };
+          break outer;
+        }
+      }
+    }
+
+    if (chosen) {
+      placements.set(candidate.id, { id: candidate.id, visible: true, dx: chosen.dx, dy: chosen.dy });
+      placedBoxes.push(labelBox(candidate.x + chosen.dx, candidate.y + chosen.dy, candidate.text, fontSize, lineHeight));
+    } else if (displaced) {
+      placements.set(candidate.id, { id: candidate.id, visible: true, dx: displaced.dx, dy: displaced.dy, leader: displaced.leader });
+      placedBoxes.push(labelBox(candidate.x + displaced.dx, candidate.y + displaced.dy, candidate.text, fontSize, lineHeight));
     } else {
       placements.set(candidate.id, { id: candidate.id, visible: false, dx: 0, dy: 0 });
     }
