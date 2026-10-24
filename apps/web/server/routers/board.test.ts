@@ -151,4 +151,22 @@ describe("beadsProjects", () => {
     expect(mine).toMatchObject({ key: REGISTRY_KEY, path: `/tmp/${REGISTRY_KEY}` });
     expect(typeof mine?.updatedAt).toBe("string");
   });
+
+  it("joins each project's last-ingest outcome from the watcher, null when none", async () => {
+    const at = "2026-10-24T10:00:00.000Z";
+    const watcher = {
+      outcomes: () => [{ project: REGISTRY_KEY, ok: false as const, at, error: "bd list failed" }],
+    } as unknown as NonNullable<Context["watcher"]>;
+    await upsertNodes(db, beadsRun, [
+      { nodeType: "beads_project", sourceSystem: "beads", externalId: `project:${OTHER}`, title: OTHER, content: "", metadata: { project: OTHER, path: `/tmp/${OTHER}` } },
+      { nodeType: "beads_project", sourceSystem: "beads", externalId: `project:${REGISTRY_KEY}`, title: REGISTRY_KEY, content: "", metadata: { project: REGISTRY_KEY, path: `/tmp/${REGISTRY_KEY}` } },
+    ]);
+
+    const withWatcher = (await caller({ watcher }).beadsProjects()).projects;
+    expect(withWatcher.find((p) => p.key === REGISTRY_KEY)?.lastIngest).toEqual({ ok: false, at, error: "bd list failed" });
+    expect(withWatcher.find((p) => p.key === OTHER)?.lastIngest).toBeNull();
+
+    const without = (await caller().beadsProjects()).projects;
+    expect(without.find((p) => p.key === REGISTRY_KEY)?.lastIngest).toBeNull();
+  });
 });

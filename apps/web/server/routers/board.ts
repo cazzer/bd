@@ -55,10 +55,26 @@ const boardProcedure = publicProcedure.input(boardInputSchema).query(async ({ ct
   );
 });
 
+export type LastIngest =
+  | { ok: true; at: string; changed: boolean; nodes: { created: number; updated: number; unchanged: number } }
+  | { ok: false; at: string; error: string };
+
 const beadsProjectsProcedure = publicProcedure.query(async ({ ctx }) => {
   try {
     const projects = await listBeadsProjects(ctx.db);
-    return { projects: projects.map(toBeadsProjectDto) };
+    // Core cannot know a rolled-back failure, so the last-ingest outcome is joined here from the watcher's in-memory record: null with no watcher or no attempt yet.
+    const outcomes = new Map((ctx.watcher?.outcomes() ?? []).map((o) => [o.project, o]));
+    return {
+      projects: projects.map((p) => {
+        const o = outcomes.get(p.key);
+        const lastIngest: LastIngest | null = !o
+          ? null
+          : o.ok
+            ? { ok: true, at: o.at, changed: o.changed, nodes: o.nodes }
+            : { ok: false, at: o.at, error: o.error };
+        return { ...toBeadsProjectDto(p), lastIngest };
+      }),
+    };
   } catch (err) {
     throw mapCoreError("beadsProjects", err);
   }
