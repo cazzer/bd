@@ -66,9 +66,11 @@ function section(heading: string, body: string | null | undefined): string {
  * present, so full-text search sees everything a person wrote. Throws
  * `InvalidEventTimeError` when `created_at` does not parse and
  * `InvalidWorkItemError` when the row violates the work-item contract,
- * each naming `index`.
+ * each naming `index`. `options.project`, when given, is written as the
+ * item's `project` key (validated by the contract, so a bad key is an
+ * `InvalidWorkItemError` naming `project`).
  */
-export function mapBeadsIssueToNode(issue: BeadsIssue, index?: number): NodeInput {
+export function mapBeadsIssueToNode(issue: BeadsIssue, index?: number, options: { project?: string } = {}): NodeInput {
   const metadata: Record<string, unknown> = {
     status: issue.status,
     priority: issue.priority,
@@ -81,6 +83,7 @@ export function mapBeadsIssueToNode(issue: BeadsIssue, index?: number): NodeInpu
     source_created_at: issue.created_at ?? null,
     source_updated_at: issue.updated_at ?? null,
     [OCCURRED_AT_KEY]: issue.created_at ?? null,
+    ...(options.project === undefined ? {} : { project: options.project }),
     ...(issue.labels && issue.labels.length > 0 ? { labels: issue.labels } : {}),
   };
   // Event time first, so an unparseable created_at is named as occurred_at

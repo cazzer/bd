@@ -483,6 +483,30 @@ export class InvalidWorkItemError extends KnowledgeStoreError {
 }
 
 /**
+ * A beads load would take over something another project owns
+ * (live-beads-board design.md decision 3): an item already stored under a
+ * different `project`, or a project key already registered at a different
+ * checkout path. Names both sides so the person can tell a copied
+ * tracker from a mistyped key. Nothing was written.
+ */
+export class BeadsProjectConflictError extends KnowledgeStoreError {
+  constructor(
+    readonly project: string,
+    readonly kind: "item" | "path",
+    /** The bead id for `item`; the requested checkout path for `path`. */
+    readonly subject: string,
+    /** The other project owning the item for `item`; the path the key is registered at for `path`. */
+    readonly existing: string,
+  ) {
+    super(
+      kind === "item"
+        ? `beads project conflict: item ${JSON.stringify(subject)} is already owned by project ${JSON.stringify(existing)}, so it cannot be loaded for project ${JSON.stringify(project)}`
+        : `beads project conflict: project ${JSON.stringify(project)} is already registered at ${JSON.stringify(existing)}, so it cannot be loaded from ${JSON.stringify(subject)}`,
+    );
+  }
+}
+
+/**
  * `patchWorkItem()` was aimed at a node whose `node_type` is not
  * `"work_item"`. Names the node and its actual type so a caller knows this
  * is the wrong tool for that node, not a transient failure.
