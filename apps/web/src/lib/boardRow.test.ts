@@ -5,6 +5,7 @@ import {
   BOARD_COLUMN_ORDER,
   buildLanes,
   chosenChips,
+  compareCards,
   filterProjects,
   HIGHLIGHT_MS,
   MAX_BOARD_PROJECTS,
@@ -60,9 +61,22 @@ describe("buildLanes", () => {
     expect(noEpic!.columns.ready.map((c) => c.id)).toEqual(["orphan"]);
   });
 
+  it("does not collapse an open epic whose cards are all closed", () => {
+    const [lane] = buildLanes([card("a", { epicId: "e", column: "closed" })], [epic("e", "open")]);
+    expect(lane!.collapsedByDefault).toBe(false);
+  });
+
   it("keeps an epic with no cards as a header-only lane and omits an empty No epic lane", () => {
     const lanes = buildLanes([], [epic("e")]);
     expect(lanes.map((l) => [l.title, l.cardCount])).toEqual([["e", 0]]);
+  });
+});
+
+describe("compareCards", () => {
+  it("breaks a priority and recency tie by id, so equal cards never reshuffle", () => {
+    expect(compareCards(card("a"), card("b"))).toBeLessThan(0);
+    expect(compareCards(card("b"), card("a"))).toBeGreaterThan(0);
+    expect(compareCards(card("a"), card("a"))).toBe(0);
   });
 });
 
@@ -93,6 +107,13 @@ describe("chips", () => {
     expect(toggleChip(offered, ["c", "a"], "a")).toEqual(["c"]);
     expect(toggleChip(offered, ["c"], "c")).toEqual(["c"]);
     expect(toggleChip(["a"], [], "a")).toEqual([]);
+  });
+
+  it("toggles against a stale address by first reducing it to the offered chips", () => {
+    const offered = ["a", "b", "c"];
+    expect(toggleChip(offered, ["gone", "b"], "a")).toEqual(["a", "b"]);
+    expect(toggleChip(offered, ["gone"], "b")).toEqual(["a", "c"]);
+    expect(toggleChip(offered, ["gone", "b"], "b")).toEqual(["b"]);
   });
 
   it("round-trips the toggled selection through the address", () => {
