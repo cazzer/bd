@@ -191,7 +191,7 @@ export function mapError(toolName: string, err: unknown): CallToolResult {
 
   // --- Views (brain_write of a view) ---
   if (err instanceof InvalidViewError) {
-    return actionable(err, "Fix that field on the named item and retry; nothing from this call was persisted. renderer is one of graph, feed, code, timeline; filter is an object of brain_list options (nodeTypes, sourceSystems, updatedSince, where) without limit or cursor.");
+    return actionable(err, "Fix that field on the named item and retry; nothing from this call was persisted. renderer is one of graph, feed, code, timeline, board; filter is an object of brain_list options (nodeTypes, sourceSystems, updatedSince, where) without limit or cursor.");
   }
 
   // --- Event time (brain_write of any node) ---

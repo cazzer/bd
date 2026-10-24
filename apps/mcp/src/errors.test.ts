@@ -254,11 +254,11 @@ describe("mapError: work-items change", () => {
   });
 
   it("maps InvalidViewError to a message naming the item, the field, and what a valid view carries", () => {
-    const text = (mapError("brain_write", new InvalidViewError("at batch index 2 (agent/open-work)", "renderer", "kanban", "must be one of graph, feed, code, timeline")).content[0] as { text: string }).text;
+    const text = (mapError("brain_write", new InvalidViewError("at batch index 2 (agent/open-work)", "renderer", "kanban", "must be one of graph, feed, code, timeline, board")).content[0] as { text: string }).text;
     expect(text).toMatch(/batch index 2 \(agent\/open-work\)/);
     expect(text).toMatch(/renderer \(got "kanban"\)/);
     expect(text).toMatch(/nothing from this call was persisted/i);
-    expect(text).toMatch(/graph, feed, code, timeline/);
+    expect(text).toMatch(/graph, feed, code, timeline, board/);
     expect(text).toMatch(/without limit or cursor/);
   });
 

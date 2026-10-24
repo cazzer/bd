@@ -96,7 +96,7 @@ describe("normalizeViewMetadata", () => {
     const out = normalizeViewMetadata({ renderer: "feed", filter: FEED_FILTER, note: "kept" });
     expect(out).toEqual({ renderer: "feed", filter: FEED_FILTER, note: "kept" });
     expect(out["filter"]).not.toBe(FEED_FILTER);
-    for (const renderer of ["graph", "feed", "code", "timeline"]) {
+    for (const renderer of ["graph", "feed", "code", "timeline", "board"]) {
       expect(normalizeViewMetadata({ renderer, filter: {} })["renderer"]).toBe(renderer);
     }
     expect(normalizeViewMetadata({ renderer: "timeline", filter: { nodeTypes: ["gh-issue", "work_item"] } })).toEqual({ renderer: "timeline", filter: { nodeTypes: ["gh-issue", "work_item"] } });
@@ -107,7 +107,7 @@ describe("normalizeViewMetadata", () => {
     expect(e.field).toBe("renderer");
     expect(e.value).toBe("kanban");
     expect(e.item).toBe("at batch index 3 (agent/v)");
-    expect(e.message).toBe('invalid view at batch index 3 (agent/v): renderer (got "kanban") must be one of graph, feed, code, timeline');
+    expect(e.message).toBe('invalid view at batch index 3 (agent/v): renderer (got "kanban") must be one of graph, feed, code, timeline, board');
     expect(rejection({ filter: {} }).field).toBe("renderer");
     expect(rejection(undefined).field).toBe("renderer");
     expect(rejection(undefined).message).toMatch(/^invalid view: renderer/);

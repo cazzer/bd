@@ -706,12 +706,14 @@ export function GraphView() {
 
   /**
    * DetailPanel's "Open as feed · <title>" / "Open as code · <title>" /
-   * "Open as timeline · <title>" (node-views, design.md decision 8;
-   * code-view, design.md decision 5; timeline-view, design.md decision 6):
+   * "Open as timeline · <title>" / "Open as board · <title>" (node-views,
+   * design.md decision 8; code-view, design.md decision 5; timeline-view,
+   * design.md decision 6; live-beads-board, design.md decision 7):
    * a push, so back returns to this node in the graph. The code address
    * carries the selected node, so a file reached here is read directly;
    * the timeline's carries it as the anchor, with no types chosen so every
-   * chip starts selected; the feed's has no node to carry.
+   * chip starts selected; the feed's and the board's have no node to carry
+   * (the board starts with every project chosen).
    */
   function handleOpenDefaultView(view: OfferedView) {
     leaveView();
@@ -721,6 +723,10 @@ export function GraphView() {
     }
     if (view.renderer === "timeline") {
       navigate({ view: "timeline", viewId: view.id, node: selectedNodeId, types: [] }, "push");
+      return;
+    }
+    if (view.renderer === "board") {
+      navigate({ view: "board", viewId: view.id, projects: [] }, "push");
       return;
     }
     navigate({ view: "feed", viewId: view.id }, "push");

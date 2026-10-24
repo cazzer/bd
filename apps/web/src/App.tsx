@@ -52,6 +52,10 @@ const CodeView = lazy(async () => ({ default: (await import("./components/CodeVi
 // view, design.md decision 6); it shares CodeView's fallback.
 const TimelineView = lazy(async () => ({ default: (await import("./components/TimelineView.js")).TimelineView }));
 
+// The board (live-beads-board): lazy like the timeline; a placeholder until
+// the board component lands (task group 4).
+const BoardView = lazy(async () => ({ default: (await import("./components/BoardView.js")).BoardView }));
+
 const LOADING_VIEW = (
   <main className="flex h-dvh w-screen items-center justify-center">
     <p className="text-sm text-fg-muted">Loading…</p>
@@ -107,6 +111,12 @@ export function App() {
       return (
         <Suspense fallback={LOADING_VIEW}>
           <TimelineView key="timeline" viewId={route.viewId} node={route.node} types={route.types} />
+        </Suspense>
+      );
+    case "board":
+      return (
+        <Suspense fallback={LOADING_VIEW}>
+          <BoardView key="board" viewId={route.viewId} projects={route.projects} />
         </Suspense>
       );
   }

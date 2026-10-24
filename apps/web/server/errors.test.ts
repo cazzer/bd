@@ -10,13 +10,13 @@ import { mapCoreError } from "./errors.js";
 
 describe("mapCoreError", () => {
   it("maps InvalidViewError to BAD_REQUEST naming the item and field (node-views)", () => {
-    const coreErr = new InvalidViewError("at batch index 1 (agent/kanban-view)", "renderer", "kanban", "must be one of graph, feed, code, timeline");
+    const coreErr = new InvalidViewError("at batch index 1 (agent/kanban-view)", "renderer", "kanban", "must be one of graph, feed, code, timeline, board");
     const trpcErr = mapCoreError("createView", coreErr);
 
     expect(trpcErr.code).toBe("BAD_REQUEST");
     expect(trpcErr.message).toContain("at batch index 1 (agent/kanban-view)");
     expect(trpcErr.message).toContain('renderer (got "kanban")');
-    expect(trpcErr.message).toContain("graph, feed, code, timeline");
+    expect(trpcErr.message).toContain("graph, feed, code, timeline, board");
     expect(trpcErr.cause).toBeUndefined();
   });
 

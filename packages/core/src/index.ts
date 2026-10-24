@@ -281,6 +281,7 @@ export {
   patchWorkItem,
   getWorkItemReadiness,
   buildWorkItemReadinessQuery,
+  buildBlockingCtes,
   type WorkItemStatus,
   PROJECT_KEY_PATTERN,
   type WorkItemFields,
@@ -321,6 +322,23 @@ export {
   type IngestBeadsCheckoutOptions,
   type IngestBeadsCheckoutResult,
 } from "./beads-ingest.js";
+
+// Work board read (live-beads-board change). See board.ts.
+export {
+  getWorkBoard,
+  listBeadsProjects,
+  buildWorkBoardQuery,
+  BOARD_COLUMNS,
+  MAX_BOARD_ITEMS,
+  CLOSED_PER_PROJECT,
+  MAX_BOARD_PROJECTS,
+  type BoardColumn,
+  type BoardCard,
+  type BoardEpic,
+  type WorkBoard,
+  type WorkBoardOptions,
+  type BeadsProject,
+} from "./board.js";
 
 // Node views (node-views change): the view contract, the default_view edge
 // convention, and batched default-view resolution along child_of. See

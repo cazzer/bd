@@ -432,25 +432,17 @@ type RawReadinessResult = {
   cycle_member_ids: string[];
 };
 
-/** Pure: builds the readiness statement from already-validated params. */
-export function buildWorkItemReadinessQuery(params: BuildWorkItemReadinessQueryParams): SQL {
-  const specId = params.specId === null ? sql`NULL::text` : sql`${params.specId}::text`;
+/**
+ * The blocking CTEs, shared verbatim by the readiness query and the board
+ * query (board.ts) so the two can never disagree about what blocks: `blocks`
+ * (folded edges), `open_blocks`, `reach`, `cycle_members`, `blocked_by`.
+ * Store-wide by construction: no CTE here is scoped to a spec or project, so
+ * a cross-project blocker counts. Must be spliced into a `WITH RECURSIVE`
+ * list (it declares a recursive CTE) after the caller's own CTEs, and
+ * carries no trailing comma. Pure.
+ */
+export function buildBlockingCtes(): SQL {
   return sql`
-WITH RECURSIVE
-items AS (
-  SELECT id, title, source_system, external_id, updated_at,
-         -- A work item written without a status key (possible via raw upsertNodes)
-         -- reads as open, matching readWorkItemFields.
-         COALESCE(metadata->>'status', 'open') AS status,
-         CASE WHEN jsonb_typeof(metadata->'priority') = 'number'
-              THEN (metadata->>'priority')::int
-              ELSE ${DEFAULT_WORK_ITEM_PRIORITY}::int END AS priority,
-         metadata->>'assignee' AS assignee,
-         metadata->>'spec_id' AS spec_id
-  FROM resolved_nodes
-  WHERE node_type = ${WORK_ITEM_NODE_TYPE}
-    AND (${specId} IS NULL OR metadata->>'spec_id' = ${specId})
-),
 -- Every blocks edge with both endpoints folded onto canonical ids. A
 -- merge-induced self-loop (loser blocked survivor, then merged into it)
 -- is dropped: it says an item blocks itself, which is not a dependency.
@@ -490,7 +482,32 @@ blocked_by AS (
   SELECT ob.dst_id AS id, array_agg(ob.src_id ORDER BY ob.src_id) AS open_blocker_ids
   FROM open_blocks ob
   GROUP BY ob.dst_id
+)
+`;
+}
+
+/** Pure: builds the readiness statement from already-validated params. */
+export function buildWorkItemReadinessQuery(params: BuildWorkItemReadinessQueryParams): SQL {
+  const specId = params.specId === null ? sql`NULL::text` : sql`${params.specId}::text`;
+  return sql`
+WITH RECURSIVE
+items AS (
+  SELECT id, title, source_system, external_id, updated_at,
+         -- A work item written without a status key (possible via raw upsertNodes)
+         -- reads as open, matching readWorkItemFields.
+         COALESCE(metadata->>'status', 'open') AS status,
+         -- Only a single digit 0-4 reads as stored (readWorkItemFields); a
+         -- raw-written 2.5 or 1e12 must not fail the cast. board.ts agrees.
+         CASE WHEN jsonb_typeof(metadata->'priority') = 'number' AND metadata->>'priority' ~ '^[0-4]$'
+              THEN (metadata->>'priority')::int
+              ELSE ${DEFAULT_WORK_ITEM_PRIORITY}::int END AS priority,
+         metadata->>'assignee' AS assignee,
+         metadata->>'spec_id' AS spec_id
+  FROM resolved_nodes
+  WHERE node_type = ${WORK_ITEM_NODE_TYPE}
+    AND (${specId} IS NULL OR metadata->>'spec_id' = ${specId})
 ),
+${buildBlockingCtes()},
 ready AS (
   SELECT i.*
   FROM items i
