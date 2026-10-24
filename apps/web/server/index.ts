@@ -14,6 +14,7 @@
 
 import { createDb, createPool, DatabaseUrlNotSetError, resolveDatabaseUrl } from "@breakdown/db";
 import { createHTTPServer } from "@trpc/server/adapters/standalone";
+import { createBeadsWatcher } from "./beads-watcher.js";
 import { createContextFactory } from "./context.js";
 import { appRouter } from "./router.js";
 import { describeConnectionError, describeConnectionTarget, verifyDatabaseConnection } from "./startup.js";
@@ -54,10 +55,18 @@ async function main(): Promise<void> {
 
   const db = createDb(pool);
 
+  // Created after the pool and before the HTTP server (design decision 5);
+  // start() returns once the registry is read — the first loads run in the
+  // background so listening is not delayed — and logs/retries a registry
+  // failure itself.
+  const watcher = createBeadsWatcher({ db });
+  const shutdown = new AbortController();
+  await watcher.start();
+
   const port = Number(process.env["WEB_SERVER_PORT"] ?? DEFAULT_PORT);
   const server = createHTTPServer({
     router: appRouter,
-    createContext: createContextFactory(db),
+    createContext: createContextFactory(db, { watcher, shutdownSignal: shutdown.signal }),
     basePath: "/trpc/",
   });
 
@@ -65,10 +74,28 @@ async function main(): Promise<void> {
     console.error(`[breakdown-web] ready on http://${HOST}:${port} — database ${describeConnectionTarget(databaseUrl)}`);
   });
 
+  // One shared guard: a second signal while shutting down exits at once
+  // (130) instead of running the sequence twice.
+  let shuttingDown = false;
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     process.on(signal, () => {
-      server.close();
-      pool.end().finally(() => process.exit(0));
+      if (shuttingDown) process.exit(130);
+      shuttingDown = true;
+      // Order matters (design decision 5): stop watchers/ticks, end
+      // subscriptions (aborted while stop() is still waiting on in-flight
+      // loads, so a subscriber never delays it), let in-flight loads finish
+      // (they write through the pool), then close the server and only then
+      // the pool.
+      void (async () => {
+        const stopping = watcher.stop();
+        shutdown.abort();
+        await stopping;
+        server.close();
+        server.closeAllConnections();
+        await pool.end();
+      })()
+        .catch((err) => console.error("[breakdown-web] error during shutdown:", err))
+        .finally(() => process.exit(0));
     });
   }
 }

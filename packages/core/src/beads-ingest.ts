@@ -81,7 +81,10 @@ const execFileAsync = promisify(execFile);
 const realpathNative = promisify(realpath.native);
 
 /** Runs `bd <args>` in `cwd` and returns stdout. */
-export type RunBd = (args: readonly string[], cwd: string) => Promise<string>;
+export type RunBd = (args: readonly string[], cwd: string, signal?: AbortSignal) => Promise<string>;
+
+/** A hung `bd` must not wedge a project, a refresh, or shutdown: the default runner kills it after this long. */
+export const BD_TIMEOUT_MS = 60_000;
 
 export interface IngestBeadsCheckoutOptions {
   /** The checkout `bd` runs in; resolved to its real absolute path. */
@@ -90,6 +93,8 @@ export interface IngestBeadsCheckoutOptions {
   project?: string;
   /** Replaces the `bd` invocation (tests). Default: `execFile("bd", …)`. */
   runBd?: RunBd;
+  /** Aborts the `bd` invocation (the server's shutdown). */
+  signal?: AbortSignal;
 }
 
 export interface IngestBeadsCheckoutResult {
@@ -109,9 +114,15 @@ export interface IngestBeadsCheckoutResult {
 }
 
 /** The default runner: `bd`'s own stderr is attached to the failure. */
-export const defaultRunBd: RunBd = async (args, cwd) => {
+export const defaultRunBd: RunBd = async (args, cwd, signal) => {
   try {
-    const { stdout } = await execFileAsync("bd", [...args], { cwd, maxBuffer: 64 * 1024 * 1024 });
+    const { stdout } = await execFileAsync("bd", [...args], {
+      cwd,
+      maxBuffer: 64 * 1024 * 1024,
+      timeout: BD_TIMEOUT_MS,
+      killSignal: "SIGKILL",
+      ...(signal ? { signal } : {}),
+    });
     return stdout;
   } catch (err) {
     const stderr = typeof (err as { stderr?: unknown }).stderr === "string" ? (err as { stderr: string }).stderr.trim() : "";
@@ -120,8 +131,8 @@ export const defaultRunBd: RunBd = async (args, cwd) => {
   }
 };
 
-async function fetchIssues(runBd: RunBd, cwd: string): Promise<BeadsIssue[]> {
-  const stdout = await runBd(["list", "--status=all", "--limit=0", "--json"], cwd);
+async function fetchIssues(runBd: RunBd, cwd: string, signal?: AbortSignal): Promise<BeadsIssue[]> {
+  const stdout = await runBd(["list", "--status=all", "--limit=0", "--json"], cwd, signal);
   const parsed: unknown = JSON.parse(stdout);
   if (!Array.isArray(parsed)) {
     throw new Error("bd list --json did not return an array");
@@ -193,7 +204,7 @@ async function assertNoProjectConflict(db: Database, project: string | undefined
 export async function ingestBeadsCheckout(db: Database, options: IngestBeadsCheckoutOptions): Promise<IngestBeadsCheckoutResult> {
   const project = canonicalProject(options.project);
   const checkoutPath = await resolveCheckoutPath(options.dir);
-  const issues = await fetchIssues(options.runBd ?? defaultRunBd, checkoutPath);
+  const issues = await fetchIssues(options.runBd ?? defaultRunBd, checkoutPath, options.signal);
   if (issues.length === 0) {
     throw new Error("no issues to ingest");
   }

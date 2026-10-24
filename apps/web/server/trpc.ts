@@ -72,6 +72,10 @@ export function buildSafeErrorShape(shape: RawErrorShape, error: RawErrorInfo): 
 }
 
 const t = initTRPC.context<Context>().create({
+  // SSE keep-alive for the live board's subscription: the server pings so
+  // idle proxies keep the stream open, and the client treats 45 s of
+  // silence as a dead stream and reconnects (the board re-reads on reconnect).
+  sse: { ping: { enabled: true, intervalMs: 15_000 }, client: { reconnectAfterInactivityMs: 45_000 } },
   errorFormatter: ({ shape, error }) => buildSafeErrorShape(shape, error),
 });
 

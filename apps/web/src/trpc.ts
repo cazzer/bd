@@ -12,16 +12,20 @@
 // that with two fewer dependencies. Revisit if bd-hmd.4/.6 need caching,
 // background refetch, or optimistic mutations across many call sites.
 
-import { createTRPCClient, httpBatchLink } from "@trpc/client";
+import { createTRPCClient, httpBatchLink, httpSubscriptionLink, splitLink } from "@trpc/client";
 import type { AppRouter } from "../server/router.js";
 
 export const trpc = createTRPCClient<AppRouter>({
   links: [
-    httpBatchLink({
+    // Subscriptions (the live board's change stream) travel as SSE;
+    // queries and mutations stay batched.
+    splitLink({
+      condition: (op) => op.type === "subscription",
       // Relative: the browser only ever talks to this dev server's own
       // origin. vite.config.ts proxies this path to the loopback-only
       // tRPC server — the browser never learns its port.
-      url: "/trpc",
+      true: httpSubscriptionLink({ url: "/trpc" }),
+      false: httpBatchLink({ url: "/trpc" }),
     }),
   ],
 });

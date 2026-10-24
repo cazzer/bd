@@ -318,6 +318,7 @@ export {
   ingestBeadsCheckout,
   BEADS_PROJECT_NODE_TYPE,
   BEADS_INGEST_ACTOR,
+  BD_TIMEOUT_MS,
   type RunBd,
   type IngestBeadsCheckoutOptions,
   type IngestBeadsCheckoutResult,
