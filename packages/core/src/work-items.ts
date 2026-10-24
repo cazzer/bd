@@ -79,6 +79,8 @@ export interface WorkItemFields {
   closedAt: string | null;
   closedReason: string | null;
   specId: string | null;
+  /** The tracker a loader owns this item for (live-beads-board); null when it has none. */
+  project: string | null;
 }
 
 // Metadata keys are snake_case to match every other loader's metadata
@@ -91,7 +93,17 @@ const KEY = {
   closedAt: "closed_at",
   closedReason: "closed_reason",
   specId: "spec_id",
+  project: "project",
 } as const;
+
+/**
+ * `project` (live-beads-board design.md decision 1) is a selection key for
+ * views and the board, so a typo'd value would silently form its own
+ * board: lowercase letters, digits, `.`, `_`, `-`, 1..64 characters after
+ * trimming. It is deliberately absent from `WorkItemPatch` — the loader
+ * that owns an item is the only writer of its project.
+ */
+export const PROJECT_KEY_PATTERN = /^[a-z0-9._-]{1,64}$/;
 
 function isStatus(value: unknown): value is WorkItemStatus {
   return typeof value === "string" && (WORK_ITEM_STATUSES as readonly string[]).includes(value);
@@ -160,6 +172,20 @@ export function normalizeWorkItemMetadata(
     else out[key] = value;
   }
 
+  const projectRaw = input[KEY.project];
+  if (projectRaw === undefined || projectRaw === null) {
+    delete out[KEY.project];
+  } else {
+    if (typeof projectRaw !== "string") {
+      throw new InvalidWorkItemError(KEY.project, projectRaw, "must be a string or null", index);
+    }
+    const project = projectRaw.trim();
+    if (project.length === 0) delete out[KEY.project];
+    else if (!PROJECT_KEY_PATTERN.test(project)) {
+      throw new InvalidWorkItemError(KEY.project, projectRaw, "must be 1 to 64 characters of lowercase letters, digits, '.', '_' or '-'", index);
+    } else out[KEY.project] = project;
+  }
+
   const closedAtRaw = input[KEY.closedAt];
   let closedAt: string | null = null;
   if (closedAtRaw !== undefined && closedAtRaw !== null) {
@@ -200,6 +226,7 @@ export function readWorkItemFields(metadata: Record<string, unknown>): WorkItemF
     closedAt: str(KEY.closedAt),
     closedReason: str(KEY.closedReason),
     specId: str(KEY.specId),
+    project: str(KEY.project),
   };
 }
 

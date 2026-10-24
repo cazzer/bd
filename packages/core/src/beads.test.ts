@@ -33,6 +33,23 @@ describe("mapBeadsIssueToNode", () => {
     });
   });
 
+  it("writes project when given and leaves the key absent otherwise", () => {
+    expect(mapBeadsIssueToNode(base, 0, { project: "bd" }).metadata).toMatchObject({ project: "bd", status: "open", spec_id: "work-items" });
+    expect(mapBeadsIssueToNode(base, 0, {}).metadata).not.toHaveProperty("project");
+  });
+
+  it("refuses an invalid project naming project and the batch index", () => {
+    let thrown: unknown;
+    try {
+      mapBeadsIssueToNode(base, 4, { project: "Tides Repo" });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(InvalidWorkItemError);
+    expect((thrown as InvalidWorkItemError).field).toBe("project");
+    expect((thrown as InvalidWorkItemError).index).toBe(4);
+  });
+
   it("writes created_at as a canonical occurred_at beside source_created_at, and none when the issue has no created_at", () => {
     const timed = mapBeadsIssueToNode({ ...base, created_at: "2026-09-01T03:00:00.123456-07:00" });
     expect(timed.metadata).toMatchObject({ occurred_at: "2026-09-01T10:00:00.123Z", source_created_at: "2026-09-01T03:00:00.123456-07:00" });

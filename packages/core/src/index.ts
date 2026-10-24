@@ -31,6 +31,7 @@ export {
   EdgeNotFoundError,
   InvalidListOptionError,
   InvalidWorkItemError,
+  BeadsProjectConflictError,
   NotAWorkItemError,
   InvalidViewError,
   InvalidEventTimeError,
@@ -281,6 +282,7 @@ export {
   getWorkItemReadiness,
   buildWorkItemReadinessQuery,
   type WorkItemStatus,
+  PROJECT_KEY_PATTERN,
   type WorkItemFields,
   type NormalizeWorkItemOptions,
   type WorkItemPatch,
@@ -307,6 +309,18 @@ export {
   type BeadsEdgeCandidate,
   type DeriveBeadsEdgesResult,
 } from "./beads.js";
+
+// The beads loader as a library (live-beads-board): one checkout in, one
+// attributed ingest run, optional project registration and collision guard.
+// See beads-ingest.ts.
+export {
+  ingestBeadsCheckout,
+  BEADS_PROJECT_NODE_TYPE,
+  BEADS_INGEST_ACTOR,
+  type RunBd,
+  type IngestBeadsCheckoutOptions,
+  type IngestBeadsCheckoutResult,
+} from "./beads-ingest.js";
 
 // Node views (node-views change): the view contract, the default_view edge
 // convention, and batched default-view resolution along child_of. See

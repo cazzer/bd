@@ -74,6 +74,28 @@ describe("normalizeWorkItemMetadata", () => {
     expect(normalizeWorkItemMetadata(undefined)).toEqual({ status: "open", priority: 2 });
   });
 
+  it("stores a trimmed project, drops an empty or null one, and leaves an absent one absent", () => {
+    expect(normalizeWorkItemMetadata({ project: "  tides.repo_1-x " })).toMatchObject({ project: "tides.repo_1-x" });
+    for (const project of ["", "   ", null]) {
+      expect(normalizeWorkItemMetadata({ project })).not.toHaveProperty("project");
+    }
+    expect(normalizeWorkItemMetadata({})).not.toHaveProperty("project");
+  });
+
+  it("refuses a malformed or oversized project, naming project", () => {
+    for (const project of ["Tides Repo", "UPPER", "a/b", "x".repeat(65), 7]) {
+      let thrown: unknown;
+      try {
+        normalizeWorkItemMetadata({ project }, { index: 2 });
+      } catch (err) {
+        thrown = err;
+      }
+      expect(thrown).toBeInstanceOf(InvalidWorkItemError);
+      expect((thrown as InvalidWorkItemError).field).toBe("project");
+      expect((thrown as InvalidWorkItemError).index).toBe(2);
+    }
+  });
+
   it("rejects a status outside the contract, naming the field and value", () => {
     let thrown: unknown;
     try {
@@ -125,6 +147,7 @@ describe("normalizeWorkItemMetadata", () => {
       closedAt: null,
       closedReason: null,
       specId: null,
+      project: null,
     });
   });
 });
@@ -139,7 +162,7 @@ describe("patchWorkItem", () => {
     expect(result.id).toBe(id);
     expect(result.action).toBe("updated");
     expect(result.before.status).toBe("open");
-    expect(result.after).toEqual({ status: "in_progress", priority: 1, assignee: null, closedAt: null, closedReason: null, specId: SPEC });
+    expect(result.after).toEqual({ status: "in_progress", priority: 1, assignee: null, closedAt: null, closedReason: null, specId: SPEC, project: null });
 
     const after = await getNodeHistory(db, id);
     expect(after.revisions).toHaveLength(before.revisions.length + 1);
@@ -149,6 +172,15 @@ describe("patchWorkItem", () => {
     expect(newest?.contentHash).toBe(before.revisions[0]?.contentHash);
     expect(newest?.ingestRun.id).toBe(patcher.id);
     expect(newest?.ingestRun.actor).toBe("patcher");
+  });
+
+  it("a status patch leaves project intact", async () => {
+    const id = await writeItem("patch-project", { status: "open", project: "keepme" });
+    const result = await patchWorkItem(db, run, id, { status: "in_progress" });
+    expect(result.before.project).toBe("keepme");
+    expect(result.after.project).toBe("keepme");
+    const [row] = await db.select().from(nodes).where(eq(nodes.id, id));
+    expect(row?.metadata).toMatchObject({ project: "keepme", status: "in_progress" });
   });
 
   it("closing stamps closed_at and reopening clears it; a no-op patch reports unchanged", async () => {
