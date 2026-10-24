@@ -26,7 +26,7 @@ import { mapCoreError } from "../errors.js";
 import { publicProcedure, router } from "../trpc.js";
 
 export const boardInputSchema = z.object({
-  /** Project keys to read; absent reads every project. */
+  /** Project keys to read; absent reads every registered project, an empty list reads none. */
   projects: z
     .array(z.string().regex(PROJECT_KEY_PATTERN, `must match ${PROJECT_KEY_PATTERN}`))
     .max(MAX_BOARD_PROJECTS, `must contain at most ${MAX_BOARD_PROJECTS} projects`)

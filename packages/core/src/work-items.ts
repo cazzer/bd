@@ -496,7 +496,9 @@ items AS (
          -- A work item written without a status key (possible via raw upsertNodes)
          -- reads as open, matching readWorkItemFields.
          COALESCE(metadata->>'status', 'open') AS status,
-         CASE WHEN jsonb_typeof(metadata->'priority') = 'number'
+         -- Only a single digit 0-4 reads as stored (readWorkItemFields); a
+         -- raw-written 2.5 or 1e12 must not fail the cast. board.ts agrees.
+         CASE WHEN jsonb_typeof(metadata->'priority') = 'number' AND metadata->>'priority' ~ '^[0-4]$'
               THEN (metadata->>'priority')::int
               ELSE ${DEFAULT_WORK_ITEM_PRIORITY}::int END AS priority,
          metadata->>'assignee' AS assignee,

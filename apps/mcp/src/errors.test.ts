@@ -258,7 +258,7 @@ describe("mapError: work-items change", () => {
     expect(text).toMatch(/batch index 2 \(agent\/open-work\)/);
     expect(text).toMatch(/renderer \(got "kanban"\)/);
     expect(text).toMatch(/nothing from this call was persisted/i);
-    expect(text).toMatch(/graph, feed, code, timeline/);
+    expect(text).toMatch(/graph, feed, code, timeline, board/);
     expect(text).toMatch(/without limit or cursor/);
   });
 

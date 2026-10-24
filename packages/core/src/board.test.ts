@@ -11,6 +11,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Database } from "@breakdown/db";
 import { edges, ingestRuns, nodes } from "@breakdown/db";
 import { getWorkBoard, listBeadsProjects, CLOSED_PER_PROJECT, type BoardCard, type WorkBoard } from "./board.js";
+import { mergeNodes } from "./merge.js";
+import { getWorkItemReadiness } from "./work-items.js";
 import { upsertEdges } from "./edges.js";
 import { InvalidLookupOptionError } from "./errors.js";
 import { closeIngestRun, openIngestRun, type IngestRunHandle } from "./ingest-runs.js";
@@ -26,6 +28,18 @@ let db: Database;
 let run: IngestRunHandle;
 let beadsRun: IngestRunHandle;
 let testNo = 0;
+const registered: string[] = [];
+const extraRunIds: string[] = [];
+
+/** Registers project keys the way beads-ingest.ts does, so the all-projects board offers them. */
+async function register(...keys: string[]): Promise<void> {
+  registered.push(...keys);
+  await upsertNodes(
+    db,
+    beadsRun,
+    keys.map((k) => ({ nodeType: "beads_project", sourceSystem: "beads", externalId: `project:${k}`, title: k, content: "", metadata: { project: k, path: `/tmp/${k}` } })),
+  );
+}
 
 beforeAll(async () => {
   ({ pool, db } = connectTestDb());
@@ -38,8 +52,8 @@ afterAll(async () => {
   await closeIngestRun(db, beadsRun);
   await db.delete(edges).where(eq(edges.sourceSystem, SRC));
   await db.delete(nodes).where(eq(nodes.sourceSystem, SRC));
-  await db.delete(nodes).where(and(eq(nodes.sourceSystem, "beads"), eq(nodes.externalId, `project:${REGISTRY_KEY}`)));
-  await db.delete(ingestRuns).where(inArray(ingestRuns.id, [run.id, beadsRun.id]));
+  await db.delete(nodes).where(and(eq(nodes.sourceSystem, "beads"), inArray(nodes.externalId, [`project:${REGISTRY_KEY}`, ...registered.map((k) => `project:${k}`)])));
+  await db.delete(ingestRuns).where(inArray(ingestRuns.id, [run.id, beadsRun.id, ...extraRunIds]));
   await pool.end();
 });
 
@@ -54,6 +68,8 @@ interface Spec {
   ext: string;
   project: string;
   status?: string;
+  rawPriority?: unknown;
+  specId?: string;
   priority?: number;
   issueType?: string;
   closedAt?: string;
@@ -74,7 +90,8 @@ async function items(specs: Spec[]): Promise<Map<string, string>> {
       metadata: {
         project: s.project,
         status: s.status ?? "open",
-        priority: s.priority ?? 2,
+        priority: "rawPriority" in s ? s.rawPriority : (s.priority ?? 2),
+        ...(s.specId ? { spec_id: s.specId } : {}),
         ...(s.issueType ? { issue_type: s.issueType } : {}),
         ...(s.closedAt ? { closed_at: s.closedAt } : {}),
       },
@@ -274,11 +291,13 @@ describe("getWorkBoard closed cap and project scoping", () => {
     expect(board.truncated).toBe(false);
   });
 
-  it("reads only the named projects, and every project when none is named", async () => {
+  it("reads only the named projects, and every registered project when none is named", async () => {
     const { a, b, tag } = scope();
+    await register(a, b);
     const ids = await items([
       { ext: `${tag}-in-a`, project: a },
       { ext: `${tag}-in-b`, project: b },
+      { ext: `${tag}-scratch`, project: `scratch-${tag}` },
     ]);
     const inA = ids.get(`${tag}-in-a`)!;
     const inB = ids.get(`${tag}-in-b`)!;
@@ -289,15 +308,23 @@ describe("getWorkBoard closed cap and project scoping", () => {
     const both = await getWorkBoard(db, { projects: [a, b] });
     expect(both.cards.map((c) => c.id).sort()).toEqual([inA, inB].sort());
 
-    for (const options of [{}, { projects: [] as string[] }]) {
-      const all = await getWorkBoard(db, options);
-      const mine = all.cards.filter((c) => c.externalId.startsWith(tag));
-      expect(mine.map((c) => c.id).sort()).toEqual([inA, inB].sort());
-    }
+    const all = await getWorkBoard(db);
+    const mine = all.cards.filter((c) => c.externalId.startsWith(tag));
+    expect(mine.map((c) => c.id).sort()).toEqual([inA, inB].sort());
+    expect(all.cards.map((c) => c.id)).not.toContain(ids.get(`${tag}-scratch`));
+  });
+
+  it("answers an empty board for an explicit empty selection, without reading anything", async () => {
+    const { a, tag } = scope();
+    await register(a);
+    await items([{ ext: `${tag}-x`, project: a }]);
+
+    expect(await getWorkBoard(db, { projects: [] })).toEqual({ cards: [], epics: [], omittedClosed: {}, truncated: false });
   });
 
   it("ignores work items that carry no project", async () => {
     const { a, tag } = scope();
+    await register(a);
     const result = await upsertNodes(db, run, [
       { nodeType: "work_item", sourceSystem: SRC, externalId: `${tag}-noproject`, title: "No project", content: "", metadata: { status: "open", priority: 2 } },
     ]);
@@ -311,6 +338,101 @@ describe("getWorkBoard closed cap and project scoping", () => {
   it("rejects malformed project keys before querying", async () => {
     await expect(getWorkBoard(db, { projects: ["Not A Key"] })).rejects.toBeInstanceOf(InvalidLookupOptionError);
     await expect(getWorkBoard(db, { projects: Array.from({ length: 21 }, (_, i) => `k${i}`) })).rejects.toBeInstanceOf(InvalidLookupOptionError);
+  });
+});
+
+describe("getWorkBoard cap, priority, epics, merges", () => {
+  it("under the item cap, open work survives over closed rows and omittedClosed stays exact", async () => {
+    const { a, tag } = scope();
+    const open: Spec[] = [0, 1, 2].map((i) => ({ ext: `${tag}-o${i}`, project: a }));
+    await items(open);
+    const specs: Spec[] = [];
+    for (let i = 0; i < CLOSED_PER_PROJECT + 2; i++) {
+      specs.push({ ext: `${tag}-c${String(i).padStart(2, "0")}`, project: a, status: "closed", closedAt: `2026-08-${String(i + 1).padStart(2, "0")}T00:00:00.000Z` });
+    }
+    // Written after the open items, so every closed row is more recently updated than every open one.
+    await items(specs);
+
+    const board = await getWorkBoard(db, { projects: [a], maxItems: 5 });
+
+    expect(board.truncated).toBe(true);
+    expect(board.cards).toHaveLength(5);
+    expect(board.cards.filter((c) => c.column === "ready").map((c) => c.externalId).sort()).toEqual([`${tag}-o0`, `${tag}-o1`, `${tag}-o2`]);
+    expect(board.cards.filter((c) => c.column === "closed")).toHaveLength(2);
+    expect(board.omittedClosed).toEqual({ [a]: 2 });
+  });
+
+  it("is not truncated when the matching items fit exactly, and rejects a bad cap", async () => {
+    const { a, tag } = scope();
+    await items([{ ext: `${tag}-1`, project: a }, { ext: `${tag}-2`, project: a }]);
+    expect((await getWorkBoard(db, { projects: [a], maxItems: 2 })).truncated).toBe(false);
+    await expect(getWorkBoard(db, { projects: [a], maxItems: 0 })).rejects.toBeInstanceOf(InvalidLookupOptionError);
+  });
+
+  it("reads a malformed stored priority as the default instead of failing the board or the readiness query", async () => {
+    const { a, tag } = scope();
+    const specId = `spec-${tag}`;
+    const ids = await items([
+      { ext: `${tag}-frac`, project: a, rawPriority: 2.5, specId },
+      { ext: `${tag}-huge`, project: a, rawPriority: 1e12, specId },
+      { ext: `${tag}-high`, project: a, rawPriority: 7, specId },
+      { ext: `${tag}-str`, project: a, rawPriority: "1", specId },
+      { ext: `${tag}-ok`, project: a, rawPriority: 0, specId },
+    ]);
+
+    const board = await getWorkBoard(db, { projects: [a] });
+    expect(board.cards.map((c) => c.priority)).toEqual([0, 2, 2, 2, 2]);
+    expect(board.cards[0]!.id).toBe(ids.get(`${tag}-ok`));
+
+    const readiness = await getWorkItemReadiness(db, { specId });
+    expect(readiness.ready.map((r) => r.priority).sort()).toEqual([0, 2, 2, 2, 2]);
+  });
+
+  it("drops a closed epic with no cards from the lanes, and keeps a closed epic that heads a kept card", async () => {
+    const { a, tag } = scope();
+    const ids = await items([
+      { ext: `${tag}-dead`, project: a, issueType: "epic", status: "closed", closedAt: "2026-01-01T00:00:00.000Z" },
+      { ext: `${tag}-done`, project: a, issueType: "epic", status: "closed", closedAt: "2026-01-01T00:00:00.000Z" },
+      { ext: `${tag}-kid`, project: a, status: "closed", closedAt: "2026-01-02T00:00:00.000Z" },
+      { ext: `${tag}-live`, project: a, issueType: "epic" },
+    ]);
+    const id = (n: string) => ids.get(`${tag}-${n}`)!;
+    await link(id("kid"), id("done"), "child_of");
+
+    const board = await getWorkBoard(db, { projects: [a] });
+
+    expect(board.epics.map((e) => e.id).sort()).toEqual([id("done"), id("live")].sort());
+  });
+
+  it("folds child_of endpoints through merged_into: a merged-away epic and a merged-away child", async () => {
+    const { a, tag } = scope();
+    const ids = await items([
+      { ext: `${tag}-epic-survivor`, project: a, issueType: "epic" },
+      { ext: `${tag}-epic-loser`, project: a, issueType: "epic" },
+      { ext: `${tag}-card1`, project: a },
+      { ext: `${tag}-card2`, project: a },
+      { ext: `${tag}-card2-dup`, project: a },
+      { ext: `${tag}-epic2`, project: a, issueType: "epic" },
+    ]);
+    const id = (n: string) => ids.get(`${tag}-${n}`)!;
+    // card1 -> loser epic: the destination folds onto the survivor.
+    await link(id("card1"), id("epic-loser"), "child_of");
+    // card2's duplicate carries the edge; card2 absorbs it, so the walk probes the alias.
+    await link(id("card2-dup"), id("epic2"), "child_of");
+    const mergeRun = await openIngestRun(db, SRC, { actor: "board-test-merge" });
+    try {
+      await mergeNodes(db, id("epic-loser"), id("epic-survivor"), mergeRun);
+      await mergeNodes(db, id("card2-dup"), id("card2"), mergeRun);
+    } finally {
+      await closeIngestRun(db, mergeRun);
+      extraRunIds.push(mergeRun.id);
+    }
+
+    const board = await getWorkBoard(db, { projects: [a] });
+
+    expect(card(board, id("card1")).epicId).toBe(id("epic-survivor"));
+    expect(card(board, id("card2")).epicId).toBe(id("epic2"));
+    expect(board.cards.map((c) => c.id)).not.toContain(id("card2-dup"));
   });
 });
 

@@ -5,11 +5,23 @@
 //
 // The statement, in CTE order:
 //
-//   items        canonical `work_item` nodes (via resolved_nodes) whose
-//                metadata contains {"project": k} for a selected key, or that
-//                carry any `project` when none is named; served by
-//                nodes_metadata_gin_idx. Capped at MAX_BOARD_ITEMS (newest
-//                first); one extra row is read to set `truncated`.
+//   registered   (no project named) the `beads_project` registry nodes' keys.
+//   filtered     canonical `work_item` nodes (via resolved_nodes) whose
+//                metadata contains {"project": k} for a named key, or for any
+//                registered key when none is named — containment against an
+//                array of single-key objects, which nodes_metadata_gin_idx
+//                (jsonb_path_ops) serves; `metadata ? 'project'` is not
+//                servable by that opclass and would seq-scan. A work item
+//                whose project is not registered is not on the all-projects
+//                board (work-board spec). Closed cards are ranked here, per
+//                project, over the whole filtered set.
+//   items_raw    every filtered row except closed cards past rank
+//                CLOSED_PER_PROJECT, ordered open-work-first (non-closed rows
+//                and epics, newest first, then kept closed rows) and cut at
+//                the cap + 1 so `truncated` can be read off it. The cap trims
+//                kept-closed rows before any non-closed row, so an old open
+//                backlog never loses to recently closed rows.
+//   items        the first `maxItems` of items_raw.
 //   blocks,
 //   open_blocks,
 //   reach,
@@ -43,8 +55,8 @@
 // Column rules (work-board spec): closed -> Closed; deferred -> Deferred;
 // in_progress -> In progress, flagged blocked when it has an open blocker or
 // is in a blocking cycle; blocked -> Blocked; anything else is read as open
-// (the readiness query's rule for an unknown status) and is Blocked with an
-// open blocker or a cycle membership, else Ready. `blockedFlag` is set for
+// (`readWorkItemFields`'s rule for a missing or unknown status) and is Blocked
+// with an open blocker or a cycle membership, else Ready. `blockedFlag` is set for
 // every card in Blocked, and for an In progress card with an open blocker or
 // a cycle; it is never set for Closed or Deferred. A closed card names no
 // blockers.
@@ -54,7 +66,16 @@
 // malformed value fail the whole board), a missing `closed_at` last, then
 // most recently updated, then id. The first CLOSED_PER_PROJECT are kept; the
 // rest are counted into `omittedClosed[project]` (only projects that omitted
-// something appear). The closed cap is applied after the 3,000-item cap.
+// something appear), exactly, because the rank runs over the full filtered
+// set before the item cap. Closed epics are not cards and are not ranked.
+//
+// Priority is read as an integer 0-4 only when it is a JSON number whose text
+// is a single digit in that range; anything else (2.5, 1e12, 7) reads as the
+// default, like `readWorkItemFields` and the readiness query — a cast of
+// arbitrary stored numbers would let one raw-written row fail the whole
+// board. `cycle_members` is a subset of `blocked_by` (a cycle member has an
+// open blocker), so the `OR` on cycle membership below is redundant; it is
+// kept so the column rule reads as the spec states it.
 
 import { sql, type SQL } from "drizzle-orm";
 import type { Database } from "@breakdown/db";
@@ -72,7 +93,7 @@ import {
 export const BOARD_COLUMNS = ["ready", "blocked", "in_progress", "deferred", "closed"] as const;
 export type BoardColumn = (typeof BOARD_COLUMNS)[number];
 
-/** Items read for one board; the answer says `truncated` when the store held more. */
+/** Items read for one board (after the per-project closed cap); the answer says `truncated` when the store held more. */
 export const MAX_BOARD_ITEMS = 3000;
 /** Closed cards shown per project; the rest are counted, not listed. */
 export const CLOSED_PER_PROJECT = 25;
@@ -82,8 +103,10 @@ export const MAX_BOARD_PROJECTS = 20;
 const BEADS_PROJECT_NODE_TYPE = "beads_project";
 
 export interface WorkBoardOptions {
-  /** Project keys to read. Absent or empty reads every project. */
+  /** Project keys to read. Absent reads every registered project; an empty array reads none and answers an empty board. */
   projects?: readonly string[];
+  /** Internal, for tests: the item cap, 1..MAX_BOARD_ITEMS. Never exposed over the API. */
+  maxItems?: number;
 }
 
 export interface BoardCard {
@@ -139,7 +162,6 @@ function resolveBoardProjects(options: WorkBoardOptions): string[] | null {
   if (!Array.isArray(projects)) {
     throw new InvalidLookupOptionError("projects", projects, "must be an array of project keys");
   }
-  if (projects.length === 0) return null;
   if (projects.length > MAX_BOARD_PROJECTS) {
     throw new InvalidLookupOptionError("projects", projects.length, `must name at most ${MAX_BOARD_PROJECTS} projects`);
   }
@@ -151,22 +173,27 @@ function resolveBoardProjects(options: WorkBoardOptions): string[] | null {
   return [...new Set(projects)];
 }
 
-/** Pure: builds the board statement from already-validated project keys (null = every project). */
-export function buildWorkBoardQuery(projects: readonly string[] | null): SQL {
-  const projectFilter =
+/** Pure: builds the board statement from already-validated project keys (null = every registered project; non-empty otherwise) and a validated item cap. */
+export function buildWorkBoardQuery(projects: readonly string[] | null, maxItems: number = MAX_BOARD_ITEMS): SQL {
+  const projectKeys =
     projects === null
-      ? sql`metadata ? 'project'`
-      : sql`metadata @> ANY (${sqlArray(
+      ? sql`ARRAY(SELECT jsonb_build_object('project', r.key) FROM registered r)`
+      : sqlArray(
           projects.map((k) => JSON.stringify({ project: k })),
           "jsonb",
-        )})`;
+        );
   return sql`
 WITH RECURSIVE
-items_raw AS (
-  SELECT id, title, external_id, updated_at, metadata,
+registered(key) AS (
+  SELECT metadata->>'project'
+  FROM resolved_nodes
+  WHERE node_type = ${BEADS_PROJECT_NODE_TYPE} AND source_system = 'beads' AND metadata->>'project' IS NOT NULL
+),
+filtered AS (
+  SELECT id, title, external_id, updated_at,
          -- A work item written without a status key reads as open (readWorkItemFields).
          COALESCE(metadata->>'status', 'open') AS status,
-         CASE WHEN jsonb_typeof(metadata->'priority') = 'number'
+         CASE WHEN jsonb_typeof(metadata->'priority') = 'number' AND metadata->>'priority' ~ '^[0-4]$'
               THEN (metadata->>'priority')::int
               ELSE ${DEFAULT_WORK_ITEM_PRIORITY}::int END AS priority,
          metadata->>'project' AS project,
@@ -175,12 +202,25 @@ items_raw AS (
          metadata->>'closed_at' AS closed_at
   FROM resolved_nodes
   WHERE node_type = ${WORK_ITEM_NODE_TYPE}
-    AND ${projectFilter}
-  ORDER BY updated_at DESC, id
-  LIMIT ${MAX_BOARD_ITEMS + 1}::int
+    AND metadata @> ANY (${projectKeys})
+),
+filtered_ranked AS (
+  SELECT f.*,
+         (f.status = 'closed' AND f.issue_type IS DISTINCT FROM 'epic') AS closed_card,
+         row_number() OVER (
+           PARTITION BY f.project, (f.status = 'closed' AND f.issue_type IS DISTINCT FROM 'epic')
+           ORDER BY f.closed_at DESC NULLS LAST, f.updated_at DESC, f.id DESC) AS closed_rank
+  FROM filtered f
+),
+items_raw AS (
+  SELECT id, title, external_id, updated_at, status, priority, project, issue_type, assignee, closed_at, closed_card
+  FROM filtered_ranked
+  WHERE NOT closed_card OR closed_rank <= ${CLOSED_PER_PROJECT}::int
+  ORDER BY closed_card, updated_at DESC, id
+  LIMIT ${maxItems + 1}::int
 ),
 items AS (
-  SELECT * FROM items_raw ORDER BY updated_at DESC, id LIMIT ${MAX_BOARD_ITEMS}::int
+  SELECT * FROM items_raw ORDER BY closed_card, updated_at DESC, id LIMIT ${maxItems}::int
 ),
 ${buildBlockingCtes()},
 -- Every merged-away node grouped by its survivor (views.ts's alias CTE).
@@ -234,25 +274,16 @@ classified AS (
   LEFT JOIN cycle_members cm ON cm.id = i.id
   WHERE i.issue_type IS DISTINCT FROM 'epic'
 ),
-ranked AS (
-  SELECT c.*,
-         CASE WHEN c.board_column = 'closed'
-              THEN row_number() OVER (
-                     PARTITION BY c.project
-                     ORDER BY c.closed_at DESC NULLS LAST, c.updated_at DESC, c.id DESC)
-              END AS closed_rank
-  FROM classified c
-),
-kept AS (
-  SELECT * FROM ranked WHERE closed_rank IS NULL OR closed_rank <= ${CLOSED_PER_PROJECT}::int
-),
 lane_epics AS (
   SELECT e.id, e.title, e.status, e.project
-  FROM items e WHERE e.issue_type = 'epic'
+  FROM items e
+  WHERE e.issue_type = 'epic'
+    -- A closed epic with no card in its lane would be an empty header.
+    AND (e.status <> 'closed' OR e.id IN (SELECT epic_id FROM classified WHERE epic_id IS NOT NULL))
   UNION
   SELECT n.id, n.title, COALESCE(n.metadata->>'status', 'open'), n.metadata->>'project'
   FROM resolved_nodes n
-  WHERE n.id IN (SELECT epic_id FROM kept WHERE epic_id IS NOT NULL)
+  WHERE n.id IN (SELECT epic_id FROM classified WHERE epic_id IS NOT NULL)
 )
 SELECT jsonb_build_object(
   'cards', COALESCE((
@@ -265,7 +296,7 @@ SELECT jsonb_build_object(
                        OR (k.board_column = 'in_progress' AND k.obstructed)),
       'updated_at', k.updated_at, 'closed_at', k.closed_at
     ) ORDER BY k.priority ASC, k.updated_at DESC, k.id DESC)
-    FROM kept k
+    FROM classified k
   ), '[]'::jsonb),
   'epics', COALESCE((
     SELECT jsonb_agg(jsonb_build_object(
@@ -277,11 +308,11 @@ SELECT jsonb_build_object(
     SELECT jsonb_object_agg(o.project, o.omitted)
     FROM (
       SELECT r.project, count(*) - ${CLOSED_PER_PROJECT}::int AS omitted
-      FROM ranked r WHERE r.board_column = 'closed'
+      FROM filtered_ranked r WHERE r.closed_card
       GROUP BY r.project HAVING count(*) > ${CLOSED_PER_PROJECT}::int
     ) o
   ), '{}'::jsonb),
-  'truncated', (SELECT count(*) FROM items_raw) > ${MAX_BOARD_ITEMS}::int
+  'truncated', (SELECT count(*) FROM items_raw) > ${maxItems}::int
 ) AS result
 `;
 }
@@ -316,9 +347,17 @@ type RawBoard = {
  */
 export async function getWorkBoard(db: Database, options: WorkBoardOptions = {}): Promise<WorkBoard> {
   const projects = resolveBoardProjects(options);
+  const maxItems = options.maxItems ?? MAX_BOARD_ITEMS;
+  if (!Number.isInteger(maxItems) || maxItems < 1 || maxItems > MAX_BOARD_ITEMS) {
+    throw new InvalidLookupOptionError("maxItems", maxItems, `must be an integer from 1 to ${MAX_BOARD_ITEMS}`);
+  }
+  // An explicit empty selection names nothing: an empty board, no query.
+  if (projects !== null && projects.length === 0) {
+    return { cards: [], epics: [], omittedClosed: {}, truncated: false };
+  }
   let result: { rows: { result: RawBoard }[] };
   try {
-    result = await db.execute<{ result: RawBoard }>(buildWorkBoardQuery(projects));
+    result = await db.execute<{ result: RawBoard }>(buildWorkBoardQuery(projects, maxItems));
   } catch (err) {
     throw new LookupFailedError(`getWorkBoard query failed${formatPgInfo(asPgError(err))}`, "getWorkBoard", { cause: err });
   }

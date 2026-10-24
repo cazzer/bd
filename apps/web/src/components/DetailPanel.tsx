@@ -660,7 +660,7 @@ export function DetailPanel({ nodeId, allNodes, allLinks, onClose, onExpandedCha
   const edgeViews = edgesTouchingNode(allLinks, nodeId);
   const nodeTitleById = (id: string) => allNodes.find((n) => n.id === id)?.title || id.slice(0, 8);
   // node-views/spec.md, "A node's preferred view is offered, never forced":
-  // a `feed`, `code`, or `timeline` renderer earns the affordance, named
+  // a `feed`, `code`, `timeline`, or `board` renderer earns the affordance, named
   // for the renderer — see `defaultView`'s doc.
   const offer = defaultView?.view && isOfferedRenderer(defaultView.view.renderer) ? { id: defaultView.view.id, renderer: defaultView.view.renderer, title: defaultView.view.title } : null;
 

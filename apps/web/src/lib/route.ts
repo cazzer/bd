@@ -197,7 +197,7 @@ function boardRouteFromSearch(search: string): BoardRoute {
  * `formatRoute(graphRouteFromSearch(search))`. Exactly `/graph`, `/feed`,
  * `/code`, `/timeline`, or `/board` (one trailing slash tolerated, no case folding)
  * is a view; `/`, `/list`, `/graph/x`, `/feed/x`, `/code/x`,
- * `/timeline/x` are all unknown.
+ * `/timeline/x`, `/board/x` are all unknown.
  */
 export function parseRoute(pathname: string, search: string): Route | null {
   const path = pathname.length > 1 && pathname.endsWith("/") ? pathname.slice(0, -1) : pathname;

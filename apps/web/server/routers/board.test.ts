@@ -36,7 +36,7 @@ afterAll(async () => {
   await closeIngestRun(db, beadsRun);
   await db.delete(edges).where(eq(edges.sourceSystem, SRC));
   await db.delete(nodes).where(eq(nodes.sourceSystem, SRC));
-  await db.delete(nodes).where(and(eq(nodes.sourceSystem, "beads"), eq(nodes.externalId, `project:${REGISTRY_KEY}`)));
+  await db.delete(nodes).where(and(eq(nodes.sourceSystem, "beads"), inArray(nodes.externalId, [`project:${REGISTRY_KEY}`, `project:${OTHER}`])));
   await db.delete(ingestRuns).where(inArray(ingestRuns.id, [run.id, beadsRun.id]));
   await pool.end();
 });
@@ -103,10 +103,21 @@ describe("board", () => {
     expect(JSON.parse(JSON.stringify(board))).toEqual(board);
   });
 
-  it("reads every project when none is named", async () => {
-    const ids = await writeItems([{ ext: `${TAG}-any`, project: OTHER }]);
+  it("reads every registered project when none is named, and nothing for an empty list", async () => {
+    await upsertNodes(db, beadsRun, [
+      { nodeType: "beads_project", sourceSystem: "beads", externalId: `project:${OTHER}`, title: OTHER, content: "", metadata: { project: OTHER, path: `/tmp/${OTHER}` } },
+    ]);
+    const ids = await writeItems([
+      { ext: `${TAG}-any`, project: OTHER },
+      { ext: `${TAG}-scratch`, project: `scratch-${TAG}` },
+    ]);
+
     const board = await caller().board({});
     expect(board.cards.map((c) => c.id)).toContain(ids.get(`${TAG}-any`));
+    expect(board.cards.map((c) => c.id)).not.toContain(ids.get(`${TAG}-scratch`));
+
+    const none = await caller().board({ projects: [] });
+    expect(none).toEqual({ cards: [], epics: [], omittedClosed: {}, truncated: false, droppedCardIds: [] });
   });
 
   it("is bounded: a tiny response budget drops cards from the tail and says so", async () => {
