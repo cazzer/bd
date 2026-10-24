@@ -14,11 +14,27 @@
 // written as `occurred_at` through `normalizeOccurredAt` (timeline-view
 // design.md decision 2: the moment a person would place the item at on a
 // timeline), with `source_created_at` kept beside it untouched.
+//
+// Fit-and-keep, as the git loader does for a commit subject: a tracker's
+// history cannot be rewritten, and one long close reason must not refuse a
+// whole project's load. Every bounded string the source supplies —
+// `close_reason`, `owner`, `spec_id`, and the title — is cut to its cap
+// (`fitText`, never mid-surrogate) before the contract sees it, so the
+// contract's own limits stay as strict as every other writer's. The tracker
+// remains authoritative for the full text; the store holds the fitted prefix.
 
 import type { EdgeInput } from "./edges.js";
 import { normalizeOccurredAt, OCCURRED_AT_KEY } from "./event-time.js";
-import type { NodeInput } from "./nodes.js";
-import { BLOCKS_EDGE_TYPE, CHILD_OF_EDGE_TYPE, normalizeWorkItemMetadata, WORK_ITEM_NODE_TYPE } from "./work-items.js";
+import { DEFAULT_MAX_TITLE_LENGTH, type NodeInput } from "./nodes.js";
+import {
+  BLOCKS_EDGE_TYPE,
+  CHILD_OF_EDGE_TYPE,
+  MAX_ASSIGNEE_LENGTH,
+  MAX_CLOSED_REASON_LENGTH,
+  MAX_SPEC_ID_LENGTH,
+  normalizeWorkItemMetadata,
+  WORK_ITEM_NODE_TYPE,
+} from "./work-items.js";
 
 export const BEADS_SOURCE_SYSTEM = "beads";
 export const BEADS_EDGE_WEIGHT = 1.0;
@@ -55,6 +71,13 @@ export interface BeadsDependency {
 /** Beads dependency types this importer understands; anything else is skipped and counted. */
 export const BEADS_DEPENDENCY_TYPES = { blocks: "blocks", parentChild: "parent-child" } as const;
 
+/** `value` cut to at most `max` UTF-16 units without splitting a surrogate pair; shorter values, null, and undefined pass through untouched. */
+export function fitText(value: string | null | undefined, max: number): string | null | undefined {
+  if (typeof value !== "string" || value.length <= max) return value;
+  const last = value.charCodeAt(max - 1);
+  return value.slice(0, last >= 0xd800 && last <= 0xdbff ? max - 1 : max);
+}
+
 function section(heading: string, body: string | null | undefined): string {
   const text = body?.trim();
   return text ? `\n\n## ${heading}\n\n${text}` : "";
@@ -74,10 +97,10 @@ export function mapBeadsIssueToNode(issue: BeadsIssue, index?: number, options: 
   const metadata: Record<string, unknown> = {
     status: issue.status,
     priority: issue.priority,
-    assignee: issue.owner ?? null,
+    assignee: fitText(issue.owner, MAX_ASSIGNEE_LENGTH) ?? null,
     closed_at: issue.closed_at ?? null,
-    closed_reason: issue.close_reason ?? null,
-    spec_id: issue.spec_id ?? null,
+    closed_reason: fitText(issue.close_reason, MAX_CLOSED_REASON_LENGTH) ?? null,
+    spec_id: fitText(issue.spec_id, MAX_SPEC_ID_LENGTH) ?? null,
     issue_type: issue.issue_type ?? null,
     created_by: issue.created_by ?? null,
     source_created_at: issue.created_at ?? null,
@@ -92,7 +115,7 @@ export function mapBeadsIssueToNode(issue: BeadsIssue, index?: number, options: 
     nodeType: WORK_ITEM_NODE_TYPE,
     sourceSystem: BEADS_SOURCE_SYSTEM,
     externalId: issue.id,
-    title: issue.title,
+    title: fitText(issue.title, DEFAULT_MAX_TITLE_LENGTH) ?? issue.title,
     content: `${issue.description?.trim() ?? ""}${section("Acceptance criteria", issue.acceptance_criteria)}${section("Design", issue.design)}${section("Notes", issue.notes)}`,
     metadata: normalizeWorkItemMetadata(normalizeOccurredAt(metadata, { index }), { index }),
   };

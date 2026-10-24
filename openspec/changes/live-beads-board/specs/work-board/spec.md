@@ -13,6 +13,11 @@ Loading a beads checkout with a project key SHALL write every one of its issues 
 - **WHEN** the checkout at `/Users/caleb/dev/tides` is loaded under project `tides`
 - **THEN** every tides issue is stored as a work item with `project` `tides`, and the registered projects include `tides` at that path
 
+#### Scenario: Over-long source text
+
+- **WHEN** an issue's close reason exceeds the store's limit
+- **THEN** the load succeeds and the item carries the reason cut to the limit
+
 #### Scenario: Re-loading changes nothing
 
 - **WHEN** the same checkout is loaded again with no tracker changes

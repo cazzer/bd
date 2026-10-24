@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { deriveBeadsEdges, mapBeadsIssueToNode, resolveBeadsEdges, type BeadsIssue } from "./beads.js";
+import { deriveBeadsEdges, fitText, mapBeadsIssueToNode, resolveBeadsEdges, type BeadsIssue } from "./beads.js";
 import { InvalidEventTimeError, InvalidWorkItemError } from "./errors.js";
+import { DEFAULT_MAX_TITLE_LENGTH } from "./nodes.js";
+import { MAX_ASSIGNEE_LENGTH, MAX_CLOSED_REASON_LENGTH, MAX_SPEC_ID_LENGTH } from "./work-items.js";
 
 const base: BeadsIssue = {
   id: "bd-abc",
@@ -31,6 +33,28 @@ describe("mapBeadsIssueToNode", () => {
       source_updated_at: "2026-09-02T10:00:00Z",
       occurred_at: "2026-09-01T10:00:00.000Z",
     });
+  });
+
+  it("cuts an over-cap close reason to exactly the cap and leaves an at-cap one untouched", () => {
+    const over = mapBeadsIssueToNode({ ...base, status: "closed", closed_at: "2026-09-03T10:00:00Z", close_reason: "r".repeat(MAX_CLOSED_REASON_LENGTH + 500) });
+    expect(over.metadata?.["closed_reason"]).toBe("r".repeat(MAX_CLOSED_REASON_LENGTH));
+    const exact = "e".repeat(MAX_CLOSED_REASON_LENGTH);
+    const at = mapBeadsIssueToNode({ ...base, status: "closed", closed_at: "2026-09-03T10:00:00Z", close_reason: exact });
+    expect(at.metadata?.["closed_reason"]).toBe(exact);
+  });
+
+  it("does not split an astral character at the cap", () => {
+    const reason = `${"a".repeat(MAX_CLOSED_REASON_LENGTH - 1)}😀tail`;
+    const node = mapBeadsIssueToNode({ ...base, status: "closed", closed_at: "2026-09-03T10:00:00Z", close_reason: reason });
+    expect(node.metadata?.["closed_reason"]).toBe("a".repeat(MAX_CLOSED_REASON_LENGTH - 1));
+    expect(fitText("😀😀", 3)).toBe("😀");
+    expect(fitText("short", 10)).toBe("short");
+  });
+
+  it("fits an over-long title, owner, and spec_id instead of refusing", () => {
+    const node = mapBeadsIssueToNode({ ...base, title: "t".repeat(DEFAULT_MAX_TITLE_LENGTH + 10), owner: "o".repeat(MAX_ASSIGNEE_LENGTH + 10), spec_id: "s".repeat(MAX_SPEC_ID_LENGTH + 10) });
+    expect(node.title).toBe("t".repeat(DEFAULT_MAX_TITLE_LENGTH));
+    expect(node.metadata).toMatchObject({ assignee: "o".repeat(MAX_ASSIGNEE_LENGTH), spec_id: "s".repeat(MAX_SPEC_ID_LENGTH) });
   });
 
   it("writes project when given and leaves the key absent otherwise", () => {
