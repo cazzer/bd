@@ -127,19 +127,38 @@ describe("project scheduler", () => {
     expect(load).toHaveBeenCalledTimes(2);
   });
 
-  it("debounces a burst of wakes into a single load", async () => {
-    let fp = "A";
+  it("debounces: nothing loads before DEBOUNCE_MS, then a burst of wakes yields a single load", async () => {
+    let n = 0;
     const load = vi.fn(async () => RESULT());
-    const { scheduler } = make(() => fp, load);
+    const { scheduler } = make(() => `fp${n}`, load);
     await scheduler.loadNow();
+    load.mockClear();
 
-    fp = "B";
-    for (let i = 0; i < 20; i++) {
+    for (let i = 0; i < 5; i++) {
+      n++; // a different fingerprint on every wake, so only the debounce can coalesce them
       scheduler.wake();
-      await vi.advanceTimersByTimeAsync(DEBOUNCE_MS / 4);
+      await vi.advanceTimersByTimeAsync(10);
     }
-    await vi.advanceTimersByTimeAsync(DEBOUNCE_MS + 10);
-    expect(load).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(DEBOUNCE_MS - 5 * 10 - 1);
+    expect(load).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(2);
+    expect(load).toHaveBeenCalledTimes(1);
+  });
+
+  it("a continuous burst does not defer the load past one debounce window", async () => {
+    let n = 0;
+    const load = vi.fn(async () => RESULT());
+    const { scheduler } = make(() => `fp${n}`, load);
+    await scheduler.loadNow();
+    load.mockClear();
+
+    for (let t = 0; t < 2000; t += 100) {
+      n++;
+      scheduler.wake();
+      await vi.advanceTimersByTimeAsync(100);
+      if (t === DEBOUNCE_MS + 100) expect(load).toHaveBeenCalled();
+    }
+    expect(load.mock.calls.length).toBeGreaterThanOrEqual(2);
   });
 
   it("a burst spanning a load yields at most two loads", async () => {
@@ -184,7 +203,7 @@ describe("project scheduler", () => {
     expect(load).toHaveBeenCalledTimes(2);
   });
 
-  it("a null fingerprint always loads", async () => {
+  it("a null fingerprint: fs wakes are ignored, only the tick (and loadNow) loads", async () => {
     const load = vi.fn(async () => RESULT());
     const onNull = vi.fn();
     const scheduler = createProjectScheduler({ project: "p", fingerprint: () => null, load, onOutcome: () => {}, onNullFingerprint: onNull });
@@ -193,25 +212,78 @@ describe("project scheduler", () => {
       scheduler.wake();
       await vi.advanceTimersByTimeAsync(DEBOUNCE_MS + 10);
     }
-    expect(load).toHaveBeenCalledTimes(4);
+    expect(load).toHaveBeenCalledTimes(1);
+    scheduler.tick();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(load).toHaveBeenCalledTimes(2);
     expect(onNull).toHaveBeenCalledTimes(1);
   });
 
-  it("a failed load keeps the old fingerprint so the next wake retries", async () => {
+  it("a null-fingerprint load that is woken by its own bd does not loop", async () => {
+    const holder: { scheduler?: ReturnType<typeof createProjectScheduler> } = {};
+    const load = vi.fn(async () => {
+      for (let i = 0; i < 40; i++) holder.scheduler!.wake(); // ~39 fs events from our own `bd list`
+      await vi.advanceTimersByTimeAsync(0);
+      return RESULT();
+    });
+    holder.scheduler = createProjectScheduler({ project: "p", fingerprint: () => null, load, onOutcome: () => {} });
+    await holder.scheduler.loadNow();
+    await vi.advanceTimersByTimeAsync(DEBOUNCE_MS * 10);
+    expect(load).toHaveBeenCalledTimes(1);
+  });
+
+  it("a failing load that is woken by its own bd does not loop; the tick retries it", async () => {
+    const holder: { scheduler?: ReturnType<typeof createProjectScheduler> } = {};
+    const load = vi.fn(async () => {
+      for (let i = 0; i < 40; i++) holder.scheduler!.wake();
+      await vi.advanceTimersByTimeAsync(0);
+      throw new Error("collision");
+    });
+    holder.scheduler = createProjectScheduler({ project: "p", fingerprint: () => "A", load, onOutcome: () => {} });
+    await holder.scheduler.loadNow();
+    await vi.advanceTimersByTimeAsync(DEBOUNCE_MS * 10);
+    expect(load).toHaveBeenCalledTimes(1);
+
+    holder.scheduler.tick();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
+  it("a failed load is retried by a changed fingerprint or the tick, not by an equal-fingerprint wake", async () => {
     let fail = true;
+    let fp = "A";
     const load = vi.fn(async () => {
       if (fail) throw new Error("bd exploded");
       return RESULT();
     });
-    const { scheduler, outcomes } = make(() => "A", load);
+    const { scheduler, outcomes } = make(() => fp, load);
     const o = await scheduler.loadNow();
     expect(o).toMatchObject({ ok: false, error: "bd exploded" });
 
+    scheduler.wake();
+    await vi.advanceTimersByTimeAsync(DEBOUNCE_MS + 10);
+    expect(load).toHaveBeenCalledTimes(1);
+
     fail = false;
+    fp = "B";
     scheduler.wake();
     await vi.advanceTimersByTimeAsync(DEBOUNCE_MS + 10);
     expect(load).toHaveBeenCalledTimes(2);
     expect(outcomes.map((x) => x.ok)).toEqual([false, true]);
+  });
+
+  it("loadNow() during an in-flight load gets a fresh load, not the stale one", async () => {
+    const { load, calls } = deferredLoad();
+    const { scheduler } = make(() => "A", load);
+    const first = scheduler.loadNow();
+    await vi.advanceTimersByTimeAsync(0);
+    const second = scheduler.loadNow();
+    calls[0]!.resolve(RESULT({ nodes: { created: 1, updated: 0, unchanged: 0 } }));
+    await first;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(load).toHaveBeenCalledTimes(2);
+    calls[1]!.resolve(RESULT({ nodes: { created: 0, updated: 0, unchanged: 9 } }));
+    expect(await second).toMatchObject({ ok: true, nodes: { unchanged: 9 } });
   });
 
   it("stop() awaits an in-flight load and cancels a pending debounce", async () => {
@@ -247,21 +319,30 @@ describe("beads watcher", () => {
       { project: "b", dir: "/x/b" },
     ];
     const wakes = new Map<string, () => void>();
+    const errors = new Map<string, () => void>();
     const closed: string[] = [];
+    const opened: string[] = [];
+    const fps = new Map<string, string>();
+    const registryReads = { fail: false };
     const watcher = createBeadsWatcher({
       db: {} as never,
       ingest: (_db, o) => opts.ingest(o.project),
-      readRegistry: async () => registry,
-      watchDir: (dir, onWake) => {
+      readRegistry: async () => {
+        if (registryReads.fail) throw new Error("db down");
+        return registry.map((r) => ({ ...r }));
+      },
+      watchDir: (dir, onWake, onError) => {
         wakes.set(dir, onWake);
+        errors.set(dir, onError);
+        opened.push(dir);
         return { close: () => closed.push(dir) };
       },
-      fingerprint: (dir) => `fp:${dir}`,
+      fingerprint: (dir) => fps.get(dir) ?? `fp:${dir}`,
       log: () => {},
     });
     const events: BeadsWatcherEvent[] = [];
     watcher.events.on(BEADS_WATCHER_EVENT, (e: BeadsWatcherEvent) => events.push(e));
-    return { watcher, events, wakes, closed, registry };
+    return { watcher, events, wakes, errors, closed, opened, fps, registry, registryReads };
   }
 
   it("emits changed only when the load's changed flag is set", async () => {
@@ -301,6 +382,151 @@ describe("beads watcher", () => {
     await vi.advanceTimersByTimeAsync(SAFETY_TICK_MS + DEBOUNCE_MS + 10);
     expect(ingest).toHaveBeenCalledTimes(2);
     await watcher.stop();
+  });
+
+  it("the safety tick loads a project whose fingerprint moved without any fs event", async () => {
+    const ingest = vi.fn(async () => RESULT());
+    const { watcher, fps } = setup({ ingest, registry: [{ project: "a", dir: "/x/a" }] });
+    await watcher.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ingest).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(SAFETY_TICK_MS - 1);
+    expect(ingest).toHaveBeenCalledTimes(1);
+    fps.set("/x/a", "moved");
+    await vi.advanceTimersByTimeAsync(2);
+    expect(ingest).toHaveBeenCalledTimes(2);
+    await watcher.stop();
+  });
+
+  it("a project whose path changed is re-pointed: old watchers closed, new path loaded, no overlap", async () => {
+    const ingest = vi.fn(async () => RESULT());
+    const { watcher, registry, closed, opened } = setup({ ingest, registry: [{ project: "a", dir: "/x/a" }] });
+    await watcher.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    registry[0] = { project: "a", dir: "/x/a2" };
+    const [r1, r2] = await Promise.all([watcher.reload(), watcher.reload()]); // concurrent reloads
+    expect(r1).toHaveLength(1);
+    expect(r2).toHaveLength(1);
+    expect(closed).toContain("/x/a/.beads");
+    expect(opened.filter((d) => d === "/x/a2/.beads")).toHaveLength(1);
+    await watcher.stop();
+  });
+
+  it("reload() during an in-flight load gets a fresh load", async () => {
+    const calls: Array<() => void> = [];
+    const ingest = vi.fn(
+      () =>
+        new Promise<LoadResult>((resolve) => {
+          calls.push(() => resolve(RESULT()));
+        }),
+    );
+    const { watcher } = setup({ ingest, registry: [{ project: "a", dir: "/x/a" }] });
+    await watcher.start();
+    await vi.advanceTimersByTimeAsync(0);
+    const reloading = watcher.reload();
+    await vi.advanceTimersByTimeAsync(0);
+    calls[0]!();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ingest).toHaveBeenCalledTimes(2);
+    calls[1]!();
+    expect(await reloading).toHaveLength(1);
+    await watcher.stop();
+  });
+
+  it("reload() after stop() tracks nothing and loads nothing", async () => {
+    const ingest = vi.fn(async () => RESULT());
+    const { watcher, opened } = setup({ ingest });
+    await watcher.start();
+    await vi.advanceTimersByTimeAsync(0);
+    await watcher.stop();
+    ingest.mockClear();
+    opened.length = 0;
+
+    expect(await watcher.reload()).toEqual([]);
+    await vi.advanceTimersByTimeAsync(SAFETY_TICK_MS * 2);
+    expect(ingest).not.toHaveBeenCalled();
+    expect(opened).toEqual([]);
+  });
+
+  it("a stopped project's late outcome emits nothing", async () => {
+    let release!: () => void;
+    const ingest = vi.fn(
+      () =>
+        new Promise<LoadResult>((resolve) => {
+          release = () => resolve(RESULT({ changed: true, changedNodeIds: ["late"] }));
+        }),
+    );
+    const { watcher, events } = setup({ ingest, registry: [{ project: "a", dir: "/x/a" }] });
+    await watcher.start();
+    await vi.advanceTimersByTimeAsync(0);
+    const stopping = watcher.stop();
+    release();
+    await stopping;
+    expect(events).toEqual([]);
+    expect(watcher.outcomes()).toEqual([]);
+  });
+
+  it("re-attaches a watcher that errored, on the next tick", async () => {
+    const { watcher, errors, opened } = setup({ ingest: async () => RESULT(), registry: [{ project: "a", dir: "/x/a" }] });
+    await watcher.start();
+    expect(opened).toEqual(["/x/a/.beads"]);
+    errors.get("/x/a/.beads")!();
+    await vi.advanceTimersByTimeAsync(SAFETY_TICK_MS + 1);
+    expect(opened).toEqual(["/x/a/.beads", "/x/a/.beads"]);
+    await watcher.stop();
+  });
+
+  it("a failing start-up registry read is retried from the tick", async () => {
+    const ingest = vi.fn(async () => RESULT());
+    const { watcher, registryReads } = setup({ ingest, registry: [{ project: "a", dir: "/x/a" }] });
+    registryReads.fail = true;
+    await watcher.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ingest).not.toHaveBeenCalled();
+
+    registryReads.fail = false;
+    await vi.advanceTimersByTimeAsync(SAFETY_TICK_MS + 1);
+    expect(ingest).toHaveBeenCalledTimes(1);
+    await watcher.stop();
+  });
+
+  it("a failing project is not re-loaded by wakes (self-trigger) before the tick", async () => {
+    const ingest = vi.fn(async () => {
+      throw new Error("no issues");
+    });
+    const { watcher, wakes } = setup({ ingest, registry: [{ project: "a", dir: "/x/a" }] });
+    await watcher.start();
+    await vi.advanceTimersByTimeAsync(0);
+    for (let i = 0; i < 40; i++) wakes.get("/x/a/.beads")!();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(ingest).toHaveBeenCalledTimes(1);
+    await watcher.stop();
+  });
+
+  it("aborts a hung load's signal after the stop grace period", async () => {
+    let signal: AbortSignal | undefined;
+    const watcher = createBeadsWatcher({
+      db: {} as never,
+      ingest: (_db, o) => {
+        signal = o.signal;
+        return new Promise<LoadResult>((_, reject) => o.signal!.addEventListener("abort", () => reject(new Error("aborted"))));
+      },
+      readRegistry: async () => [{ project: "a", dir: "/x/a" }],
+      watchDir: () => ({ close() {} }),
+      fingerprint: () => "A",
+      stopGraceMs: 1000,
+      log: () => {},
+    });
+    await watcher.start();
+    await vi.advanceTimersByTimeAsync(0);
+    const stopping = watcher.stop();
+    await vi.advanceTimersByTimeAsync(999);
+    expect(signal?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(2);
+    await stopping;
+    expect(signal?.aborted).toBe(true);
   });
 
   it("reload() picks up a project registered after start and drops a removed one", async () => {
