@@ -723,6 +723,10 @@ export function GraphView() {
       navigate({ view: "timeline", viewId: view.id, node: selectedNodeId, types: [] }, "push");
       return;
     }
+    if (view.renderer === "board") {
+      navigate({ view: "board", viewId: view.id, projects: [] }, "push");
+      return;
+    }
     navigate({ view: "feed", viewId: view.id }, "push");
   }
 

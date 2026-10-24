@@ -37,6 +37,9 @@ export const CODE_VIEW_PATH = "/code";
 /** The timeline view's path (timeline-view). `parseRoute` also accepts it with one trailing slash. */
 export const TIMELINE_VIEW_PATH = "/timeline";
 
+/** The board view's path (live-beads-board). `parseRoute` also accepts it with one trailing slash. */
+export const BOARD_VIEW_PATH = "/board";
+
 /** The force-graph view: the submitted query, the node-type filters it was submitted with, and the selected node. `null`/`[]` mean absent. */
 export interface GraphRoute {
   view: "graph";
@@ -82,8 +85,22 @@ export interface TimelineRoute {
   types: string[];
 }
 
+/**
+ * The board view (live-beads-board, design.md decision 7): the id of the
+ * `view` node whose renderer must be `board`, and the chosen project keys
+ * as repeated `project` parameters, in the order given. `null` for the view
+ * is BoardView's "no view" empty state, never a redirect; an empty
+ * `projects` means every project the view offers is chosen, the way the
+ * timeline's empty `types` does.
+ */
+export interface BoardRoute {
+  view: "board";
+  viewId: string | null;
+  projects: string[];
+}
+
 /** Every addressable view. A future view widens this union. */
-export type Route = GraphRoute | FeedRoute | CodeRoute | TimelineRoute;
+export type Route = GraphRoute | FeedRoute | CodeRoute | TimelineRoute | BoardRoute;
 
 /** `s` trimmed, or `null` when it is missing or whitespace-only — mirrors `runSearch`'s own trim, so `?q=%20` and no `q` at all mean the same thing. */
 function nonEmpty(s: string | null): string | null {
@@ -157,10 +174,28 @@ function timelineRouteFromSearch(search: string): TimelineRoute {
 }
 
 /**
+ * The board view's parameters from a query string alone (live-beads-board).
+ * `view` through the same trim as the others'; every `project` trimmed,
+ * empties dropped, duplicates collapsed to their first occurrence; anything
+ * else is ignored.
+ */
+function boardRouteFromSearch(search: string): BoardRoute {
+  const params = new URLSearchParams(search);
+  const projects: string[] = [];
+  for (const raw of params.getAll("project")) {
+    const project = raw.trim();
+    if (project.length > 0 && !projects.includes(project)) {
+      projects.push(project);
+    }
+  }
+  return { view: "board", viewId: nonEmpty(params.get("view")), projects };
+}
+
+/**
  * The route a `pathname` + `search` pair names, or `null` when the path is
  * not a view we have — the caller's cue to redirect to
  * `formatRoute(graphRouteFromSearch(search))`. Exactly `/graph`, `/feed`,
- * `/code`, or `/timeline` (one trailing slash tolerated, no case folding)
+ * `/code`, `/timeline`, or `/board` (one trailing slash tolerated, no case folding)
  * is a view; `/`, `/list`, `/graph/x`, `/feed/x`, `/code/x`,
  * `/timeline/x` are all unknown.
  */
@@ -178,6 +213,9 @@ export function parseRoute(pathname: string, search: string): Route | null {
   if (path === TIMELINE_VIEW_PATH) {
     return timelineRouteFromSearch(search);
   }
+  if (path === BOARD_VIEW_PATH) {
+    return boardRouteFromSearch(search);
+  }
   return null;
 }
 
@@ -185,7 +223,7 @@ export function parseRoute(pathname: string, search: string): Route | null {
  * The URL (path + query string, no origin) for a route. Parameters are
  * emitted in a fixed order — for the graph `q`, each `type` in order,
  * `node`; for the feed just `view`; for the code view `view` then `node`;
- * for the timeline `view`, `node`, then each `type` in order — and
+ * for the timeline `view`, `node`, then each `type` in order; for the board `view`, then each `project` in order — and
  * absent ones are omitted, so two structurally equal routes always
  * format to the same string: lib/navigate.ts relies on that to skip a
  * history write when nothing changed. Round-trips through `parseRoute`.
@@ -200,6 +238,8 @@ export function formatRoute(route: Route): string {
       return formatCodeRoute(route);
     case "timeline":
       return formatTimelineRoute(route);
+    case "board":
+      return formatBoardRoute(route);
   }
 }
 
@@ -252,4 +292,16 @@ function formatTimelineRoute(route: TimelineRoute): string {
   }
   const query = params.toString();
   return query.length > 0 ? `${TIMELINE_VIEW_PATH}?${query}` : TIMELINE_VIEW_PATH;
+}
+
+function formatBoardRoute(route: BoardRoute): string {
+  const params = new URLSearchParams();
+  if (route.viewId !== null) {
+    params.set("view", route.viewId);
+  }
+  for (const project of route.projects) {
+    params.append("project", project);
+  }
+  const query = params.toString();
+  return query.length > 0 ? `${BOARD_VIEW_PATH}?${query}` : BOARD_VIEW_PATH;
 }

@@ -11,12 +11,12 @@ One task group, one bead. Group 1 is the project contract and the ingest as a li
 
 ## 2. Board read, `board` renderer, procedures, route
 
-- [ ] 2.1 Extract the `blocks`/`open_blocks`/cycle CTEs from `buildWorkItemReadinessQuery` into a shared fragment builder; readiness tests stay green unchanged.
-- [ ] 2.2 New `board.ts`: `getWorkBoard(db, { projects? })` per design decision 4 (one statement; columns per the work-board spec; nearest epic via cycle-safe `child_of` walk seeded from a subquery; closed capped at 25 per project with `omittedClosed`; 3,000-item cap with `truncated`) and `listBeadsProjects(db)`. Export from `index.ts`. DB-backed tests in `board.test.ts`: each column rule including status-`blocked` without an edge and in-progress-with-blocker, cross-project blocker counts, grandchild and nested-epic lanes, a `child_of` cycle answers, epics head lanes and are not cards, closed cap and omitted count, project scoping.
-- [ ] 2.3 `views.ts` `VIEW_RENDERERS` gains `board`; update every enumeration: `apps/web/server/errors.ts` and `apps/mcp/src/errors.ts` hints, `apps/mcp/src/tools/write.ts` description, `DetailPanel.tsx` `OfferedRenderer`/`isOfferedRenderer`, `GraphView.tsx` `handleOpenDefaultView` (explicit `board` branch — it currently falls through to feed); tests asserting renderer lists updated; `kanban` stays the rejected fixture.
-- [ ] 2.4 New `apps/web/server/routers/board.ts` with `board` (zod: `projects` ≤ 20 keys of the contract form) and `beadsProjects` queries, bounded via `boundResponse`, merged in `router.ts`; caller tests in `routers/board.test.ts`.
-- [ ] 2.5 `lib/route.ts`: `BOARD_VIEW_PATH`, `BoardRoute { view, viewId, projects }`, parse/format with stable param order, round-trip tests; `App.tsx` lazy case rendering a placeholder that names the route.
-- [ ] 2.6 `pnpm check` green.
+- [x] 2.1 Extract the `blocks`/`open_blocks`/cycle CTEs from `buildWorkItemReadinessQuery` into a shared fragment builder; readiness tests stay green unchanged.
+- [x] 2.2 New `board.ts`: `getWorkBoard(db, { projects? })` per design decision 4 (one statement; columns per the work-board spec; nearest epic via cycle-safe `child_of` walk seeded from a subquery; closed capped at 25 per project with `omittedClosed`; 3,000-item cap with `truncated`) and `listBeadsProjects(db)`. Export from `index.ts`. DB-backed tests in `board.test.ts`: each column rule including status-`blocked` without an edge and in-progress-with-blocker, cross-project blocker counts, grandchild and nested-epic lanes, a `child_of` cycle answers, epics head lanes and are not cards, closed cap and omitted count, project scoping.
+- [x] 2.3 `views.ts` `VIEW_RENDERERS` gains `board`; update every enumeration: `apps/web/server/errors.ts` and `apps/mcp/src/errors.ts` hints, `apps/mcp/src/tools/write.ts` description, `DetailPanel.tsx` `OfferedRenderer`/`isOfferedRenderer`, `GraphView.tsx` `handleOpenDefaultView` (explicit `board` branch — it currently falls through to feed); tests asserting renderer lists updated; `kanban` stays the rejected fixture.
+- [x] 2.4 New `apps/web/server/routers/board.ts` with `board` (zod: `projects` ≤ 20 keys of the contract form) and `beadsProjects` queries, bounded via `boundResponse`, merged in `router.ts`; caller tests in `routers/board.test.ts`.
+- [x] 2.5 `lib/route.ts`: `BOARD_VIEW_PATH`, `BoardRoute { view, viewId, projects }`, parse/format with stable param order, round-trip tests; `App.tsx` lazy case rendering a placeholder that names the route.
+- [x] 2.6 `pnpm check` green.
 
 ## 3. Watcher, change subscription, refresh
 

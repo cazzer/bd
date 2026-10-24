@@ -29,7 +29,7 @@
 // keeps "one predicate, one place" (the UI still never re-derives
 // `sourceSystem === "repo"` itself) without that bundling hazard.
 
-import { isEditableSourceSystem, type ListedNode, type LookedUpNode, type Neighbor, type RecentNode, type RetrievedNode } from "@breakdown/core";
+import { isEditableSourceSystem, type BeadsProject, type BoardCard, type ListedNode, type LookedUpNode, type Neighbor, type RecentNode, type RetrievedNode } from "@breakdown/core";
 
 export type RetrievedNodeDto = Omit<RetrievedNode, "updatedAt"> & { updatedAt: string; isEditable: boolean };
 export type LookedUpNodeDto = Omit<LookedUpNode, "createdAt" | "updatedAt"> & { createdAt: string; updatedAt: string; isEditable: boolean };
@@ -66,4 +66,17 @@ export function toListedNodeDto(node: ListedNode): ListedNodeDto {
  */
 export function toNeighborDto(neighbor: Neighbor): NeighborDto {
   return { ...neighbor, isEditable: isEditableSourceSystem(neighbor.nodeSourceSystem) };
+}
+
+// Board DTOs (live-beads-board): the `Date`s the board read carries, as ISO strings.
+
+export type BoardCardDto = Omit<BoardCard, "updatedAt"> & { updatedAt: string };
+export type BeadsProjectDto = Omit<BeadsProject, "updatedAt"> & { updatedAt: string };
+
+export function toBoardCardDto(card: BoardCard): BoardCardDto {
+  return { ...card, updatedAt: card.updatedAt.toISOString() };
+}
+
+export function toBeadsProjectDto(project: BeadsProject): BeadsProjectDto {
+  return { ...project, updatedAt: project.updatedAt.toISOString() };
 }

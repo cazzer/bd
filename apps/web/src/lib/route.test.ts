@@ -9,7 +9,7 @@
 // parameters and nothing else).
 
 import { describe, expect, it } from "vitest";
-import { CODE_VIEW_PATH, FEED_VIEW_PATH, formatRoute, GRAPH_VIEW_PATH, graphRouteFromSearch, parseRoute, TIMELINE_VIEW_PATH, type CodeRoute, type FeedRoute, type GraphRoute, type Route, type TimelineRoute } from "./route.js";
+import { BOARD_VIEW_PATH, CODE_VIEW_PATH, FEED_VIEW_PATH, formatRoute, GRAPH_VIEW_PATH, graphRouteFromSearch, parseRoute, TIMELINE_VIEW_PATH, type BoardRoute, type CodeRoute, type FeedRoute, type GraphRoute, type Route, type TimelineRoute } from "./route.js";
 
 function graph(partial: Partial<Omit<GraphRoute, "view">> = {}): GraphRoute {
   return { view: "graph", q: null, types: [], node: null, ...partial };
@@ -25,6 +25,10 @@ function code(viewId: string | null = null, node: string | null = null): CodeRou
 
 function timeline(viewId: string | null = null, node: string | null = null, types: string[] = []): TimelineRoute {
   return { view: "timeline", viewId, node, types };
+}
+
+function board(viewId: string | null = null, projects: string[] = []): BoardRoute {
+  return { view: "board", viewId, projects };
 }
 
 /** `formatRoute` output split back into the two strings `parseRoute` takes — what `location.pathname`/`location.search` would hold after a `pushState` of that URL. */
@@ -370,5 +374,35 @@ describe("timeline route (timeline-view)", () => {
   it("still redirects /list, carrying the graph parameters and dropping view (the 'Unknown path still redirects' scenario)", () => {
     expect(parseRoute("/list", "?q=x&view=v1&node=n1&type=a")).toBeNull();
     expect(formatRoute(graphRouteFromSearch("?q=x&view=v1&node=n1&type=a"))).toBe("/graph?q=x&type=a&node=n1");
+  });
+});
+
+describe("board route", () => {
+  it("parses /board with its view and projects, in order", () => {
+    expect(parseRoute("/board", "?view=v1&project=tides&project=bd")).toEqual(board("v1", ["tides", "bd"]));
+    expect(parseRoute("/board/", "?view=v1")).toEqual(board("v1"));
+    expect(BOARD_VIEW_PATH).toBe("/board");
+  });
+
+  it("degrades malformed parameters: empty and duplicate projects dropped, trimmed, whitespace view is null", () => {
+    expect(parseRoute("/board", "?view=%20&project=&project=%20a%20&project=a&project=b")).toEqual(board(null, ["a", "b"]));
+    expect(parseRoute("/board", "")).toEqual(board());
+  });
+
+  it("formats with a stable parameter order: view, then each project", () => {
+    expect(formatRoute(board("v1", ["b", "a"]))).toBe("/board?view=v1&project=b&project=a");
+    expect(formatRoute(board())).toBe("/board");
+    expect(formatRoute(board(null, ["a"]))).toBe("/board?project=a");
+  });
+
+  it("round-trips", () => {
+    for (const r of [board(), board("v1"), board(null, ["a"]), board("v1", ["tides", "strides", "sky.os"])]) {
+      expect(roundTrip(r)).toEqual(r);
+    }
+  });
+
+  it("ignores graph and unknown parameters, and /board/x is unknown", () => {
+    expect(parseRoute("/board", "?q=x&node=n&type=t&view=v1&project=a&zoom=1")).toEqual(board("v1", ["a"]));
+    expect(parseRoute("/board/x", "")).toBeNull();
   });
 });

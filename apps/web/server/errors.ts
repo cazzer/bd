@@ -182,7 +182,7 @@ export function mapCoreError(procedureName: string, err: unknown): TRPCError {
   // writer inherits a field-naming BAD_REQUEST instead of the unmapped
   // fallback below. ---
   if (err instanceof InvalidViewError) {
-    return actionable("BAD_REQUEST", err, "Fix that field on the named item and retry; nothing from this call was persisted. renderer is one of graph, feed, code, timeline; filter is an object of list options (nodeTypes, sourceSystems, updatedSince, where) without limit or cursor.");
+    return actionable("BAD_REQUEST", err, "Fix that field on the named item and retry; nothing from this call was persisted. renderer is one of graph, feed, code, timeline, board; filter is an object of list options (nodeTypes, sourceSystems, updatedSince, where) without limit or cursor.");
   }
 
   // --- Event time (timeline-view). createNote, annotateNode, and
