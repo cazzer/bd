@@ -14,6 +14,7 @@
 
 import { createDb, createPool, DatabaseUrlNotSetError, resolveDatabaseUrl } from "@breakdown/db";
 import { createHTTPServer } from "@trpc/server/adapters/standalone";
+import { createBeadsWatcher } from "./beads-watcher.js";
 import { createContextFactory } from "./context.js";
 import { appRouter } from "./router.js";
 import { describeConnectionError, describeConnectionTarget, verifyDatabaseConnection } from "./startup.js";
@@ -54,10 +55,18 @@ async function main(): Promise<void> {
 
   const db = createDb(pool);
 
+  // Created after the pool and before the HTTP server (design decision 5);
+  // the first loads run in the background so listening is not delayed.
+  const watcher = createBeadsWatcher({ db });
+  const shutdown = new AbortController();
+  await watcher.start().catch((err) => {
+    console.error(`[breakdown-web] beads watcher could not read the project registry: ${err instanceof Error ? err.message : String(err)}`);
+  });
+
   const port = Number(process.env["WEB_SERVER_PORT"] ?? DEFAULT_PORT);
   const server = createHTTPServer({
     router: appRouter,
-    createContext: createContextFactory(db),
+    createContext: createContextFactory(db, { watcher, shutdownSignal: shutdown.signal }),
     basePath: "/trpc/",
   });
 
@@ -66,9 +75,19 @@ async function main(): Promise<void> {
   });
 
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
-    process.on(signal, () => {
-      server.close();
-      pool.end().finally(() => process.exit(0));
+    process.once(signal, () => {
+      // Order matters (design decision 5): stop watchers/ticks, end
+      // subscriptions, let in-flight loads finish (they write through the
+      // pool), then close the server and only then the pool.
+      void (async () => {
+        await watcher.stop();
+        shutdown.abort();
+        server.close();
+        server.closeAllConnections();
+        await pool.end();
+      })()
+        .catch((err) => console.error("[breakdown-web] error during shutdown:", err))
+        .finally(() => process.exit(0));
     });
   }
 }
