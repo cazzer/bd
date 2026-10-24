@@ -491,16 +491,19 @@ export class InvalidWorkItemError extends KnowledgeStoreError {
  */
 export class BeadsProjectConflictError extends KnowledgeStoreError {
   constructor(
-    readonly project: string,
+    /** The project being loaded; null for a load given no `--project`. */
+    readonly project: string | null,
     readonly kind: "item" | "path",
     /** The bead id for `item`; the requested checkout path for `path`. */
     readonly subject: string,
-    /** The other project owning the item for `item`; the path the key is registered at for `path`. */
+    /** The project owning the item for `item`; the path the key is registered at for `path`. */
     readonly existing: string,
   ) {
     super(
       kind === "item"
-        ? `beads project conflict: item ${JSON.stringify(subject)} is already owned by project ${JSON.stringify(existing)}, so it cannot be loaded for project ${JSON.stringify(project)}`
+        ? project === null
+          ? `beads project conflict: item ${JSON.stringify(subject)} is owned by project ${JSON.stringify(existing)} and this load named no project, which would strip it; load with --project ${existing}`
+          : `beads project conflict: item ${JSON.stringify(subject)} is already owned by project ${JSON.stringify(existing)}, so it cannot be loaded for project ${JSON.stringify(project)}`
         : `beads project conflict: project ${JSON.stringify(project)} is already registered at ${JSON.stringify(existing)}, so it cannot be loaded from ${JSON.stringify(subject)}`,
     );
   }

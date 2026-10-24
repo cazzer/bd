@@ -21,24 +21,46 @@
 // it `unchanged` and records no revision. Without `project` the load
 // behaves as it always did: no stamp, no registration.
 //
-// Collision guard: before any write the function reads the export's
-// external ids (`getNodesByExternalId`, chunked to its cap, then `getNodes`
-// for their metadata) and the key's registry node. An item already owned
-// by another project, or the key registered at another path, throws
-// `BeadsProjectConflictError` naming both sides, with no ingest run opened
-// and nothing written. An item with no `project` is adopted. The guard read
-// and the upsert are not one transaction: the server serializes loads per
-// project, and a racing CLI load of the same project can at worst pass the
-// guard twice, which is harmless.
+// The key is canonicalized first (trimmed, checked against
+// `PROJECT_KEY_PATTERN`; an explicitly passed empty key is an error naming
+// `project`) and the canonical value is what items, the registry node, its
+// external id, and the guard all use. The checkout path is `realpath`ed
+// (native, so APFS case folding agrees) before it is stored or compared, so
+// a symlinked and a real path to one checkout are the same registration; a
+// missing directory is an error saying so.
+//
+// Collision guard: before any write, one statement reads the exact
+// `(beads, external_id)` rows the upsert is about to touch — no merge
+// folding, because `upsertNodes` writes those rows as they are, so the
+// owner that matters is the one on the row itself — plus the key's registry
+// row. An item already owned by another project, the key registered at
+// another real path, or (with no project given) ANY owned item throws
+// `BeadsProjectConflictError` naming the bead id and both sides, with no
+// ingest run opened and nothing written. A project-less load must not
+// proceed over an owned item because a node upsert replaces metadata
+// wholesale and would strip `project`. An item with no `project` is
+// adopted. The guard read and the upsert are not one transaction: the
+// server serializes loads per project, and a racing CLI load of the same
+// project can at worst pass the guard twice, which is harmless.
 //
 // `changedNodeIds` is every row the upsert did not report `unchanged` —
 // `content_hash` already decided that, so nothing is diffed here. The
 // registry node counts in `nodes` and `changedNodeIds` like any other row.
+// `changed` is the one flag a caller gates on: `changedNodeIds` non-empty or
+// `edges.created > 0`. `edges.updated` must NEVER count as change:
+// `upsertEdges` has no unchanged state and reports `updated` for every
+// re-asserted edge, so it equals the derived edge count on every re-load.
+//
+// If a failure follows `openIngestRun`, the run is closed with the error
+// recorded in its `stats` (best effort) before the failure is rethrown, so
+// a failed load leaves no run open forever.
 
 import { execFile } from "node:child_process";
+import { realpath } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
-import type { Database } from "@breakdown/db";
+import { nodes, type Database } from "@breakdown/db";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import {
   BEADS_SOURCE_SYSTEM,
   deriveBeadsEdges,
@@ -47,23 +69,24 @@ import {
   type BeadsIssue,
 } from "./beads.js";
 import { upsertEdges } from "./edges.js";
-import { BeadsProjectConflictError } from "./errors.js";
+import { BeadsProjectConflictError, InvalidWorkItemError } from "./errors.js";
 import { closeIngestRun, openIngestRun } from "./ingest-runs.js";
-import { getNodes, getNodesByExternalId, MAX_EXTERNAL_ID_LOOKUPS } from "./lookup.js";
 import { upsertNodes, type NodeInput } from "./nodes.js";
+import { PROJECT_KEY_PATTERN } from "./work-items.js";
 
 export const BEADS_PROJECT_NODE_TYPE = "beads_project";
 export const BEADS_INGEST_ACTOR = "ingest:beads";
 
 const execFileAsync = promisify(execFile);
+const realpathNative = promisify(realpath.native);
 
 /** Runs `bd <args>` in `cwd` and returns stdout. */
 export type RunBd = (args: readonly string[], cwd: string) => Promise<string>;
 
 export interface IngestBeadsCheckoutOptions {
-  /** The checkout `bd` runs in; resolved to an absolute path. */
+  /** The checkout `bd` runs in; resolved to its real absolute path. */
   dir: string;
-  /** Registers and stamps this project key (contract form `[a-z0-9._-]{1,64}`). Omit for a project-less load. */
+  /** Registers and stamps this project key (contract form `[a-z0-9._-]{1,64}`, trimmed). Omit for a project-less load. */
   project?: string;
   /** Replaces the `bd` invocation (tests). Default: `execFile("bd", …)`. */
   runBd?: RunBd;
@@ -71,11 +94,13 @@ export interface IngestBeadsCheckoutOptions {
 
 export interface IngestBeadsCheckoutResult {
   project: string | null;
-  /** The absolute checkout path. */
+  /** The real absolute checkout path. */
   path: string;
   nodes: { created: number; updated: number; unchanged: number };
   edges: { created: number; updated: number };
   changedNodeIds: string[];
+  /** Something a reader could see moved: `changedNodeIds` non-empty or `edges.created > 0`. Never `edges.updated`. */
+  changed: boolean;
   ingestRunId: string;
   issuesFetched: number;
   edgesDerived: number;
@@ -110,28 +135,50 @@ async function fetchIssues(runBd: RunBd, cwd: string): Promise<BeadsIssue[]> {
   return parsed as BeadsIssue[];
 }
 
-/** Throws `BeadsProjectConflictError` when the load would take over another project's item or registry key; reads only. */
-async function assertNoProjectConflict(db: Database, project: string, checkoutPath: string, issueIds: readonly string[]): Promise<void> {
-  const registry = await getNodesByExternalId(db, [{ sourceSystem: BEADS_SOURCE_SYSTEM, externalId: `project:${project}` }]);
-  const registryNodeId = registry.found[0]?.id;
-  if (registryNodeId) {
-    const { nodes } = await getNodes(db, [registryNodeId]);
-    const registeredPath = nodes[0]?.metadata["path"];
-    if (typeof registeredPath === "string" && registeredPath !== checkoutPath) {
-      throw new BeadsProjectConflictError(project, "path", checkoutPath, registeredPath);
-    }
+/** Canonical key: trimmed and valid, else `InvalidWorkItemError` naming `project` (an explicit empty key included). */
+function canonicalProject(project: string | undefined): string | undefined {
+  if (project === undefined) return undefined;
+  const key = typeof project === "string" ? project.trim() : project;
+  if (typeof key !== "string" || key.length === 0) {
+    throw new InvalidWorkItemError("project", project, "must not be empty when given");
   }
+  if (!PROJECT_KEY_PATTERN.test(key)) {
+    throw new InvalidWorkItemError("project", project, "must be 1 to 64 characters of lowercase letters, digits, '.', '_' or '-'");
+  }
+  return key;
+}
 
-  for (let i = 0; i < issueIds.length; i += MAX_EXTERNAL_ID_LOOKUPS) {
-    const chunk = issueIds.slice(i, i + MAX_EXTERNAL_ID_LOOKUPS);
-    const { found } = await getNodesByExternalId(db, chunk.map((externalId) => ({ sourceSystem: BEADS_SOURCE_SYSTEM, externalId })));
-    if (found.length === 0) continue;
-    const { nodes } = await getNodes(db, found.map((f) => f.id));
-    for (const node of nodes) {
-      const owner = node.metadata["project"];
-      if (typeof owner === "string" && owner !== project) {
-        throw new BeadsProjectConflictError(project, "item", node.externalId, owner);
+async function resolveCheckoutPath(dir: string): Promise<string> {
+  try {
+    return await realpathNative(path.resolve(dir));
+  } catch (err) {
+    const code = (err as { code?: unknown }).code;
+    if (code === "ENOENT" || code === "ENOTDIR") {
+      throw new Error(`beads checkout directory does not exist: ${path.resolve(dir)}`);
+    }
+    throw err;
+  }
+}
+
+/** Throws `BeadsProjectConflictError` when the load would take over or strip another project's item, or re-point a registry key; reads only, one statement. */
+async function assertNoProjectConflict(db: Database, project: string | undefined, checkoutPath: string, issueIds: readonly string[]): Promise<void> {
+  const registryId = project === undefined ? null : `project:${project}`;
+  const rows = await db
+    .select({
+      externalId: nodes.externalId,
+      project: sql<string | null>`${nodes.metadata}->>'project'`,
+      path: sql<string | null>`${nodes.metadata}->>'path'`,
+    })
+    .from(nodes)
+    .where(and(eq(nodes.sourceSystem, BEADS_SOURCE_SYSTEM), inArray(nodes.externalId, registryId === null ? [...issueIds] : [...issueIds, registryId])));
+
+  for (const row of rows) {
+    if (row.externalId === registryId) {
+      if (row.path !== null && row.path !== checkoutPath) {
+        throw new BeadsProjectConflictError(project ?? null, "path", checkoutPath, row.path);
       }
+    } else if (row.project !== null && row.project !== project) {
+      throw new BeadsProjectConflictError(project ?? null, "item", row.externalId, row.project);
     }
   }
 }
@@ -140,12 +187,12 @@ async function assertNoProjectConflict(db: Database, project: string, checkoutPa
  * Loads one beads checkout. See the module header. Throws
  * `InvalidWorkItemError` (a bad `project` key, naming `project`, or a row
  * violating the contract), `BeadsProjectConflictError`, or the write
- * path's own errors; a failed `bd` or an empty export throws a plain
- * `Error`.
+ * path's own errors; a failed `bd`, a missing directory, or an empty export
+ * throws a plain `Error`.
  */
 export async function ingestBeadsCheckout(db: Database, options: IngestBeadsCheckoutOptions): Promise<IngestBeadsCheckoutResult> {
-  const checkoutPath = path.resolve(options.dir);
-  const project = options.project;
+  const project = canonicalProject(options.project);
+  const checkoutPath = await resolveCheckoutPath(options.dir);
   const issues = await fetchIssues(options.runBd ?? defaultRunBd, checkoutPath);
   if (issues.length === 0) {
     throw new Error("no issues to ingest");
@@ -161,33 +208,40 @@ export async function ingestBeadsCheckout(db: Database, options: IngestBeadsChec
       content: "",
       metadata: { project, path: checkoutPath },
     });
-    await assertNoProjectConflict(db, project, checkoutPath, issues.map((i) => i.id));
   }
+  await assertNoProjectConflict(db, project, checkoutPath, issues.map((i) => i.id));
   const derived = deriveBeadsEdges(issues, new Set(issues.map((i) => i.id)));
-
-  const run = await openIngestRun(db, BEADS_SOURCE_SYSTEM, { actor: BEADS_INGEST_ACTOR });
-  const nodeResult = await upsertNodes(db, run, nodeInputs);
-  const nodeIdByExternalId = new Map(nodeResult.rows.map((r) => [r.externalId, r.id]));
-  const edgeResult = await upsertEdges(db, run, resolveBeadsEdges(derived.edges, nodeIdByExternalId));
-  await closeIngestRun(db, run, {
+  const stats = {
     cwd: checkoutPath,
     project: project ?? null,
     issuesFetched: issues.length,
     edgesDerived: derived.edges.length,
     skippedUnknownIssue: derived.skippedUnknownIssue,
     skippedUnknownType: derived.skippedUnknownType,
-  });
-
-  return {
-    project: project ?? null,
-    path: checkoutPath,
-    nodes: { created: nodeResult.created, updated: nodeResult.updated, unchanged: nodeResult.unchanged },
-    edges: { created: edgeResult.created, updated: edgeResult.updated },
-    changedNodeIds: nodeResult.rows.filter((r) => r.action !== "unchanged").map((r) => r.id),
-    ingestRunId: run.id,
-    issuesFetched: issues.length,
-    edgesDerived: derived.edges.length,
-    skippedUnknownIssue: derived.skippedUnknownIssue,
-    skippedUnknownType: derived.skippedUnknownType,
   };
+
+  const run = await openIngestRun(db, BEADS_SOURCE_SYSTEM, { actor: BEADS_INGEST_ACTOR });
+  try {
+    const nodeResult = await upsertNodes(db, run, nodeInputs);
+    const nodeIdByExternalId = new Map(nodeResult.rows.map((r) => [r.externalId, r.id]));
+    const edgeResult = await upsertEdges(db, run, resolveBeadsEdges(derived.edges, nodeIdByExternalId));
+    await closeIngestRun(db, run, stats);
+    const changedNodeIds = nodeResult.rows.filter((r) => r.action !== "unchanged").map((r) => r.id);
+    return {
+      project: project ?? null,
+      path: checkoutPath,
+      nodes: { created: nodeResult.created, updated: nodeResult.updated, unchanged: nodeResult.unchanged },
+      edges: { created: edgeResult.created, updated: edgeResult.updated },
+      changedNodeIds,
+      changed: changedNodeIds.length > 0 || edgeResult.created > 0,
+      ingestRunId: run.id,
+      issuesFetched: issues.length,
+      edgesDerived: derived.edges.length,
+      skippedUnknownIssue: derived.skippedUnknownIssue,
+      skippedUnknownType: derived.skippedUnknownType,
+    };
+  } catch (err) {
+    await closeIngestRun(db, run, { ...stats, error: err instanceof Error ? err.message : String(err) }).catch(() => undefined);
+    throw err;
+  }
 }
