@@ -7,6 +7,7 @@
     "node": ">=22.23.1"
   },
   "scripts": {
+    "dev": "pnpm db:up && pnpm db:migrate && pnpm --filter @breakdown/web dev",
     "db:up": "docker compose up -d --wait",
     "db:down": "docker compose down",
     "db:generate": "pnpm --filter @breakdown/db db:generate",

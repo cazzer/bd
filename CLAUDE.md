@@ -78,6 +78,7 @@ pnpm install
 pnpm db:up        # docker: pgvector/pgvector:pg16 on :5432
 pnpm db:migrate
 pnpm check        # typecheck + tests
+pnpm dev          # db:up + db:migrate, then the web app (API server + Vite client)
 ```
 
 _Nothing is implemented yet — the first change (`add-knowledge-graph-core`) defines these scripts._
