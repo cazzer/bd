@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
-import type { Database } from "@breakdown/db";
+import { edges, type Database } from "@breakdown/db";
+import { and, eq, inArray } from "drizzle-orm";
 import {
   DuplicateEdgeInBatchError,
   EdgeUpsertFailedError,
@@ -45,6 +46,8 @@ export interface UpsertEdgesResult {
   updated: number;
   rows: EdgeUpsertResultRow[];
 }
+
+type EdgeWriteTx = Parameters<Parameters<Database["transaction"]>[0]>[0];
 
 // --- Unsafe internals (exported for human-writes.ts only) ------------------
 //
@@ -255,27 +258,74 @@ export async function upsertEdges(
   const result: UpsertEdgesResult = { created: 0, updated: 0, rows: [] };
 
   await db.transaction(async (tx) => {
-    for (const rows of chunks) {
-      let queryResult: { rows: UpsertEdgeRow[] };
-      try {
-        queryResult = await tx.execute<UpsertEdgeRow>(unsafeBuildUpsertEdgesQuery(rows, run.id));
-      } catch (err) {
-        throw unsafeWrapEdgeWriteError(err, rows);
-      }
-
-      for (const row of queryResult.rows) {
-        result.rows.push({
-          id: row.id,
-          srcId: row.src_id,
-          dstId: row.dst_id,
-          edgeType: row.edge_type,
-          sourceSystem: row.source_system,
-          action: row.action,
-        });
-        result[row.action] += 1;
-      }
-    }
+    await writePreparedEdges(tx, chunks, run.id, result);
   });
 
+  return result;
+}
+
+async function writePreparedEdges(tx: EdgeWriteTx, chunks: PreparedEdge[][], ingestRunId: string, result: UpsertEdgesResult): Promise<void> {
+  for (const rows of chunks) {
+    let queryResult: { rows: UpsertEdgeRow[] };
+    try {
+      queryResult = await tx.execute<UpsertEdgeRow>(unsafeBuildUpsertEdgesQuery(rows, ingestRunId));
+    } catch (err) {
+      throw unsafeWrapEdgeWriteError(err, rows);
+    }
+
+    for (const row of queryResult.rows) {
+      result.rows.push({
+        id: row.id,
+        srcId: row.src_id,
+        dstId: row.dst_id,
+        edgeType: row.edge_type,
+        sourceSystem: row.source_system,
+        action: row.action,
+      });
+      result[row.action] += 1;
+    }
+  }
+}
+
+/** Replace one source's relationships within a set of nodes in one transaction. */
+export async function reconcileEdges(
+  db: Database,
+  run: IngestRunHandle,
+  input: readonly EdgeInput[],
+  scopeNodeIds: readonly string[],
+  sourceSystem: string,
+  edgeTypes: readonly string[],
+): Promise<UpsertEdgesResult & { deleted: number }> {
+  const prepared = unsafePrepareEdges(input);
+  if (prepared.some((edge) => edge.sourceSystem !== sourceSystem || !edgeTypes.includes(edge.edgeType))) {
+    throw new Error("every reconciled edge must belong to the requested source and types");
+  }
+  const result: UpsertEdgesResult & { deleted: number } = { created: 0, updated: 0, deleted: 0, rows: [] };
+  const scope = [...new Set(scopeNodeIds)];
+  const scopedIds = new Set(scope);
+  if (prepared.some((edge) => !scopedIds.has(edge.srcId) || !scopedIds.has(edge.dstId))) {
+    throw new Error("every reconciled edge must have both endpoints in scope");
+  }
+  if (scope.length === 0) return result;
+  const wanted = new Set(prepared.map((edge) => `${edge.srcId}\u0000${edge.dstId}\u0000${edge.edgeType}`));
+
+  await db.transaction(async (tx) => {
+    const existing = await tx.select({ id: edges.id, srcId: edges.srcId, dstId: edges.dstId, edgeType: edges.edgeType })
+      .from(edges)
+      .where(and(
+        eq(edges.sourceSystem, sourceSystem),
+        inArray(edges.edgeType, [...edgeTypes]),
+        inArray(edges.srcId, scope),
+        inArray(edges.dstId, scope),
+      ));
+    const staleIds = existing
+      .filter((edge) => !wanted.has(`${edge.srcId}\u0000${edge.dstId}\u0000${edge.edgeType}`))
+      .map((edge) => edge.id);
+    if (staleIds.length > 0) {
+      const deleted = await tx.delete(edges).where(inArray(edges.id, staleIds)).returning({ id: edges.id });
+      result.deleted = deleted.length;
+    }
+    await writePreparedEdges(tx, chunk(prepared, DEFAULT_EDGE_CHUNK_SIZE), run.id, result);
+  });
   return result;
 }

@@ -46,8 +46,8 @@
 // `changedNodeIds` is every row the upsert did not report `unchanged` —
 // `content_hash` already decided that, so nothing is diffed here. The
 // registry node counts in `nodes` and `changedNodeIds` like any other row.
-// `changed` is the one flag a caller gates on: `changedNodeIds` non-empty or
-// `edges.created > 0`. `edges.updated` must NEVER count as change:
+// `changed` is the one flag a caller gates on: changed nodes, created edges,
+// or removed stale edges. `edges.updated` must NEVER count as change:
 // `upsertEdges` has no unchanged state and reports `updated` for every
 // re-asserted edge, so it equals the derived edge count on every re-load.
 //
@@ -68,11 +68,11 @@ import {
   resolveBeadsEdges,
   type BeadsIssue,
 } from "./beads.js";
-import { upsertEdges } from "./edges.js";
+import { reconcileEdges } from "./edges.js";
 import { BeadsProjectConflictError, InvalidWorkItemError } from "./errors.js";
 import { closeIngestRun, openIngestRun } from "./ingest-runs.js";
 import { upsertNodes, type NodeInput } from "./nodes.js";
-import { PROJECT_KEY_PATTERN } from "./work-items.js";
+import { BLOCKS_EDGE_TYPE, CHILD_OF_EDGE_TYPE, PROJECT_KEY_PATTERN } from "./work-items.js";
 
 export const BEADS_PROJECT_NODE_TYPE = "beads_project";
 export const BEADS_INGEST_ACTOR = "ingest:beads";
@@ -103,8 +103,9 @@ export interface IngestBeadsCheckoutResult {
   path: string;
   nodes: { created: number; updated: number; unchanged: number };
   edges: { created: number; updated: number };
+  edgesDeleted: number;
   changedNodeIds: string[];
-  /** Something a reader could see moved: `changedNodeIds` non-empty or `edges.created > 0`. Never `edges.updated`. */
+  /** Something a reader could see moved: changed nodes or created/deleted edges. Never `edges.updated`. */
   changed: boolean;
   ingestRunId: string;
   issuesFetched: number;
@@ -235,16 +236,27 @@ export async function ingestBeadsCheckout(db: Database, options: IngestBeadsChec
   try {
     const nodeResult = await upsertNodes(db, run, nodeInputs);
     const nodeIdByExternalId = new Map(nodeResult.rows.map((r) => [r.externalId, r.id]));
-    const edgeResult = await upsertEdges(db, run, resolveBeadsEdges(derived.edges, nodeIdByExternalId));
-    await closeIngestRun(db, run, stats);
+    const scopeNodeIds = project === undefined
+      ? nodeResult.rows.map((r) => r.id)
+      : (await db.select({ id: nodes.id }).from(nodes).where(and(
+          eq(nodes.sourceSystem, BEADS_SOURCE_SYSTEM),
+          eq(nodes.nodeType, "work_item"),
+          sql`${nodes.metadata}->>'project' = ${project}`,
+        ))).map((r) => r.id);
+    const edgeResult = await reconcileEdges(
+      db, run, resolveBeadsEdges(derived.edges, nodeIdByExternalId), scopeNodeIds,
+      BEADS_SOURCE_SYSTEM, [BLOCKS_EDGE_TYPE, CHILD_OF_EDGE_TYPE],
+    );
+    await closeIngestRun(db, run, { ...stats, edgesDeleted: edgeResult.deleted });
     const changedNodeIds = nodeResult.rows.filter((r) => r.action !== "unchanged").map((r) => r.id);
     return {
       project: project ?? null,
       path: checkoutPath,
       nodes: { created: nodeResult.created, updated: nodeResult.updated, unchanged: nodeResult.unchanged },
       edges: { created: edgeResult.created, updated: edgeResult.updated },
+      edgesDeleted: edgeResult.deleted,
       changedNodeIds,
-      changed: changedNodeIds.length > 0 || edgeResult.created > 0,
+      changed: changedNodeIds.length > 0 || edgeResult.created > 0 || edgeResult.deleted > 0,
       ingestRunId: run.id,
       issuesFetched: issues.length,
       edgesDerived: derived.edges.length,

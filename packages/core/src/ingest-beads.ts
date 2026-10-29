@@ -62,7 +62,7 @@ async function main(): Promise<void> {
     console.log(`[ingest:beads] fetched ${result.issuesFetched} issue(s) via \`bd list --status=all --limit=0 --json\` in ${result.path}${result.project === null ? "" : ` (project ${result.project})`}`);
     console.log(`[ingest:beads] nodes: ${result.nodes.created} created, ${result.nodes.updated} updated, ${result.nodes.unchanged} unchanged`);
     console.log(
-      `[ingest:beads] edges: ${result.edges.created} created, ${result.edges.updated} updated ` +
+      `[ingest:beads] edges: ${result.edges.created} created, ${result.edges.updated} updated, ${result.edgesDeleted} deleted ` +
         `(${result.edgesDerived} derived; skipped ${result.skippedUnknownIssue} naming an unknown issue, ${result.skippedUnknownType} of an unmapped type)`,
     );
     console.log(`[ingest:beads] ingest run ${result.ingestRunId} (source_system=beads, actor=ingest:beads) closed`);

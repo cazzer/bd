@@ -10,10 +10,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Database } from "@breakdown/db";
-import { ingestRuns, nodes } from "@breakdown/db";
+import { edges, ingestRuns, nodes } from "@breakdown/db";
 import { type BeadsIssue } from "./beads.js";
 import { ingestBeadsCheckout, type IngestBeadsCheckoutResult, type RunBd } from "./beads-ingest.js";
 import { BeadsProjectConflictError, InvalidWorkItemError } from "./errors.js";
+import { upsertEdges } from "./edges.js";
 import { openIngestRun } from "./ingest-runs.js";
 import { mergeNodes } from "./merge.js";
 import { connectTestDb, type TestPool, uniqueSuffix } from "./test-helpers.js";
@@ -268,5 +269,55 @@ describe("ingestBeadsCheckout", () => {
     expect(again.edges.updated).toBe(1);
     expect(again.changed).toBe(false);
     expect((await load([issue(90), issue(91, { dependencies: deps, title: "new" })], { project })).changed).toBe(true);
+  });
+
+  it("removes stale dependencies before inserting their reversal", async () => {
+    const project = keyOf("reversed");
+    const a = `${PREFIX}-100`;
+    const b = `${PREFIX}-101`;
+    const first = [issue(100, { dependencies: [{ issue_id: a, depends_on_id: b, type: "blocks" }] }), issue(101)];
+    await load(first, { project });
+
+    const reversed = await load([
+      issue(100),
+      issue(101, { dependencies: [{ issue_id: b, depends_on_id: a, type: "blocks" }] }),
+    ], { project });
+    expect(reversed.nodes.unchanged).toBe(3);
+    expect(reversed.edges).toEqual({ created: 1, updated: 0 });
+    expect(reversed.edgesDeleted).toBe(1);
+    expect(reversed.changed).toBe(true);
+
+    const rows = await rowsOf([a, b]);
+    const ids = new Map(rows.map((row) => [row.externalId, row.id]));
+    const stored = await db.select({ srcId: edges.srcId, dstId: edges.dstId })
+      .from(edges).where(and(eq(edges.sourceSystem, "beads"), inArray(edges.srcId, [...ids.values()])));
+    expect(stored).toEqual([{ srcId: ids.get(a), dstId: ids.get(b) }]);
+
+    const removed = await load([issue(100), issue(101)], { project });
+    expect(removed.nodes.unchanged).toBe(3);
+    expect(removed.edges).toEqual({ created: 0, updated: 0 });
+    expect(removed.edgesDeleted).toBe(1);
+    expect(removed.changed).toBe(true);
+  });
+
+  it("restores pruned edges if a replacement conflicts with another source", async () => {
+    const project = keyOf("rollback");
+    const a = `${PREFIX}-110`;
+    const b = `${PREFIX}-111`;
+    await load([issue(110, { dependencies: [{ issue_id: a, depends_on_id: b, type: "blocks" }] }), issue(111)], { project });
+    const rows = await rowsOf([a, b]);
+    const ids = new Map(rows.map((row) => [row.externalId, row.id]));
+    const humanRun = await openIngestRun(db, "human", { actor: "beads-ingest-test" });
+    runIds.push(humanRun.id);
+    await upsertEdges(db, humanRun, [{ srcId: ids.get(b)!, dstId: ids.get(a)!, edgeType: "blocks", sourceSystem: "human" }]);
+
+    await expect(load([
+      issue(110),
+      issue(111, { dependencies: [{ issue_id: b, depends_on_id: a, type: "blocks" }] }),
+    ], { project })).rejects.toThrow(/23514/);
+
+    const stored = await db.select({ srcId: edges.srcId, dstId: edges.dstId })
+      .from(edges).where(and(eq(edges.sourceSystem, "beads"), inArray(edges.srcId, [...ids.values()])));
+    expect(stored).toEqual([{ srcId: ids.get(b), dstId: ids.get(a) }]);
   });
 });
