@@ -475,7 +475,8 @@ describe("getRegisteredBeadsProject", () => {
   });
 
   it("refuses a registry-shaped node written, or last rewritten, under a non-beads run", async () => {
-    const agentRun = await openIngestRun(db, "agent", { actor: "board-test" });
+    // Any non-beads run stands in for brain_write's `agent` run; not `agent` itself, which apps/mcp's suite deletes when empty.
+    const agentRun = await openIngestRun(db, `agent-board-test-${SUFFIX}`, { actor: "board-test" });
     extraRunIds.push(agentRun.id);
     const forged = `rga-${SUFFIX}`;
     const hijacked = `rgh-${SUFFIX}`;
@@ -488,6 +489,13 @@ describe("getRegisteredBeadsProject", () => {
     await expect(getRegisteredBeadsProject(db, hijacked)).resolves.toBeNull();
     // listBeadsProjects (the board's registry listing) is unchanged: it still lists both.
     expect((await listBeadsProjects(db)).map((p) => p.key)).toEqual(expect.arrayContaining([forged, hijacked]));
+    // Its provenance-checked variant (the watcher's) lists neither, but does list a beads-written key.
+    const trusted = `rgt-${SUFFIX}`;
+    await register(trusted);
+    const keys = (await listBeadsProjects(db, { registeredByBeads: true })).map((p) => p.key);
+    expect(keys).toContain(trusted);
+    expect(keys).not.toContain(forged);
+    expect(keys).not.toContain(hijacked);
   });
 
   it("answers null for an unknown key and throws for a malformed one", async () => {

@@ -259,4 +259,21 @@ describe("default bd runner", () => {
     expect(err).toBeInstanceOf(BdUncertainError);
     expect((err as Error).message).toBe("bd close was killed (SIGKILL)");
   });
+
+  it("says it could not start bd when the checkout is gone, not that bd is missing", async () => {
+    const gone = path.join(dir, "gone");
+    await expect(createBdRunner({ command: "/bin/echo" })(["show", "x-1"], gone)).rejects.toThrow(`could not start bd in ${gone}`);
+  });
+
+  it("settles at the hard deadline when a grandchild holds the output pipes open", async () => {
+    // The background sleep inherits stdout and ignores nothing; killing the stub leaves it holding the pipe.
+    const leaky = stub("leaky-bd", "sleep 4 &\nexec sleep 10");
+    const started = Date.now();
+    const err = await createBdRunner({ command: leaky, timeoutMs: 200, killGraceMs: 200 })(["close", "x-1"], dir).catch((e: unknown) => e);
+    const elapsed = Date.now() - started;
+    expect(err).toBeInstanceOf(BdUncertainError);
+    expect((err as Error).message).toBe("bd close timed out after 0.2 s");
+    expect(elapsed).toBeGreaterThanOrEqual(1_300);
+    expect(elapsed).toBeLessThan(3_000);
+  });
 });
