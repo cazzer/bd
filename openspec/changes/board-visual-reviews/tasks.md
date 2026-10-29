@@ -11,10 +11,10 @@ One task group, one bead. Group 1 is bd-ker.2 (the store learns reviews); group 
 
 ## 2. review-request CLI (bd-ker.1)
 
-- [ ] 2.1 `bin/review-request` (Node ESM, no dependencies, executable) per design decision 7: argument parsing (`<item-id> --summary <text> [--board-url <url>] <image>...`), checkout → main working tree, registered-project lookup over the server's `beadsProjects`, image validation, create-or-reuse the review bead, copy images, `bd update --metadata`, `blocks` dependency for non-epics, Chrome, herdr notification, final message.
-- [ ] 2.2 Pure helpers split into `bin/review-request-lib.mjs` with `node:test` tests run by `pnpm check` (argument parsing, checkout matching, image naming, reuse decision, refusal messages); `bd`, `git`, `open`, `herdr`, and `fetch` injected.
-- [ ] 2.3 Symlink into `~/.local/bin`; README line in `docs/`; dry run against a scratch beads repo registered on a scratch database: unregistered refusal, missing-image refusal, first request, re-request reuse.
-- [ ] 2.4 `pnpm check` green.
+- [x] 2.1 `bin/review-request` (Node ESM, no dependencies, executable) per design decision 7: argument parsing (`<item-id> --summary <text> [--board-url <url>] <image>...`), checkout → main working tree, registered-project lookup over the server's `beadsProjects`, image validation, create-or-reuse the review bead, copy images, `bd update --metadata`, `blocks` dependency for non-epics, Chrome, herdr notification, final message.
+- [x] 2.2 Pure helpers split into `bin/review-request-lib.mjs` with `node:test` tests run by `pnpm check` (argument parsing, checkout matching, image naming, reuse decision, refusal messages); `bd`, `git`, `open`, `herdr`, and `fetch` injected.
+- [x] 2.3 Symlink into `~/.local/bin`; "Visual reviews" section in the root README; dry run against a scratch beads repo registered on a scratch database: unregistered refusal, missing-image refusal, first request, re-request reuse.
+- [x] 2.4 `pnpm check` green.
 
 ## 3. Review decision write-back (bd-ker.4)
 

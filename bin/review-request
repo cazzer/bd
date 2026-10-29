@@ -1,0 +1,30 @@
+#!/usr/bin/env node
+// Entry point; the flow lives in review-request-lib.mjs. See README "Visual reviews".
+import { execFile } from "node:child_process";
+import { homedir } from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { requestReview } from "./review-request-lib.mjs";
+
+const run = (cmd, args, { cwd }) =>
+  new Promise((resolve) => {
+    execFile(cmd, args, { cwd, timeout: 30_000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
+      if (!err) return resolve({ code: 0, stdout, stderr });
+      if (err.code === "ENOENT") return resolve({ code: 127, stdout: "", stderr: err.message });
+      const timedOut = err.killed ? `${cmd} timed out after 30 s` : "";
+      resolve({ code: typeof err.code === "number" ? err.code : 1, stdout: stdout ?? "", stderr: stderr || timedOut || err.message });
+    });
+  });
+
+const { exitCode } = await requestReview({
+  argv: process.argv.slice(2),
+  cwd: process.cwd(),
+  env: process.env,
+  homedir: homedir(),
+  run,
+  fetch: globalThis.fetch,
+  out: console.log,
+  warn: console.error,
+  breakdownRoot: path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."),
+});
+process.exitCode = exitCode;
