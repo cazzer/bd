@@ -21,7 +21,7 @@ import {
 import { formatRoute, parseRoute } from "./route.js";
 
 function card(id: string, over: Partial<BoardCardRow> = {}): BoardCardRow {
-  return { id, externalId: id, title: id, project: "p", priority: 2, issueType: "task", column: "ready", epicId: null, blockedFlag: false, updatedAt: "2026-10-01T00:00:00.000Z", ...over };
+  return { id, externalId: id, title: id, project: "p", priority: 2, issueType: "task", column: "ready", epicId: null, blockedFlag: false, updatedAt: "2026-10-01T00:00:00.000Z", review: false, ...over };
 }
 const epic = (id: string, status = "open", title = id): BoardEpicRow => ({ id, title, status, project: "p" });
 
@@ -119,10 +119,10 @@ describe("chips", () => {
   it("round-trips the toggled selection through the address", () => {
     const offered = ["a", "b", "c"];
     const projects = toggleChip(offered, [], "b");
-    const url = formatRoute({ view: "board", viewId: "v1", projects });
+    const url = formatRoute({ view: "board", viewId: "v1", projects, item: null });
     expect(url).toBe("/board?view=v1&project=a&project=c");
     const route = parseRoute("/board", url.slice(url.indexOf("?")));
-    expect(route).toEqual({ view: "board", viewId: "v1", projects });
+    expect(route).toEqual({ view: "board", viewId: "v1", projects, item: null });
     expect(chosenChips(offered, route && route.view === "board" ? route.projects : [])).toEqual(["a", "c"]);
   });
 

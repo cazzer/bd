@@ -93,6 +93,13 @@
 // or pre-contract value is answered in the contract's shape, a malformed
 // review as `{ invalid: true }`; neither is read off an item that is not a
 // review.
+//
+// The drawer's header names the item's parent: one `child_of` hop from the
+// item (or any id merged into it), the target folded through `merged_into`,
+// kept only when it is a work item of the same project and not the item
+// itself (a merge can make a self-loop). Several parents (two systems each
+// asserted one) resolve to the heavier edge, then `beads`, then the lesser
+// id, so the answer is stable.
 
 import { sql, type SQL } from "drizzle-orm";
 import type { Database } from "@breakdown/db";
@@ -513,9 +520,21 @@ export interface BoardItem {
   review: ReviewMetadata | InvalidReview | null;
   /** Oldest first; empty when there are none. */
   comments: ReviewComment[];
+  /** The item's `child_of` parent in the same project (module header); null when it has none. */
+  parent: { externalId: string; title: string } | null;
 }
 
-type RawItemRow = { id: string; external_id: string; source_system: string; title: string; content: string; metadata: Record<string, unknown> | null; updated_at: string | Date };
+type RawItemRow = {
+  id: string;
+  external_id: string;
+  source_system: string;
+  title: string;
+  content: string;
+  metadata: Record<string, unknown> | null;
+  updated_at: string | Date;
+  parent_external_id: string | null;
+  parent_title: string | null;
+};
 
 /**
  * The canonical work item of `project` whose external id is `externalId`, or
@@ -534,16 +553,33 @@ export async function getBoardItem(db: Database, options: BoardItemOptions): Pro
   let result: { rows: RawItemRow[] };
   try {
     result = await db.execute<RawItemRow>(sql`
-      SELECT r.id, r.external_id, r.source_system, r.title, r.content, r.metadata, r.updated_at
-      FROM nodes n
-      JOIN resolved_nodes r ON r.id = COALESCE(n.merged_into, n.id)
-      WHERE n.node_type = ${WORK_ITEM_NODE_TYPE}
-        AND n.metadata @> ${JSON.stringify({ project })}::jsonb
-        AND n.external_id = ${externalId}
-        AND r.node_type = ${WORK_ITEM_NODE_TYPE}
-        AND r.metadata @> ${JSON.stringify({ project })}::jsonb
-      ORDER BY (n.merged_into IS NULL) DESC, (n.source_system = 'beads') DESC, n.id
-      LIMIT 1
+      WITH item AS (
+        SELECT r.id, r.external_id, r.source_system, r.title, r.content, r.metadata, r.updated_at
+        FROM nodes n
+        JOIN resolved_nodes r ON r.id = COALESCE(n.merged_into, n.id)
+        WHERE n.node_type = ${WORK_ITEM_NODE_TYPE}
+          AND n.metadata @> ${JSON.stringify({ project })}::jsonb
+          AND n.external_id = ${externalId}
+          AND r.node_type = ${WORK_ITEM_NODE_TYPE}
+          AND r.metadata @> ${JSON.stringify({ project })}::jsonb
+        ORDER BY (n.merged_into IS NULL) DESC, (n.source_system = 'beads') DESC, n.id
+        LIMIT 1
+      )
+      SELECT item.*, parent.external_id AS parent_external_id, parent.title AS parent_title
+      FROM item
+      LEFT JOIN LATERAL (
+        SELECT p.external_id, p.title
+        FROM edges e
+        JOIN nodes d ON d.id = e.dst_id
+        JOIN resolved_nodes p ON p.id = COALESCE(d.merged_into, d.id)
+        WHERE e.edge_type = ${CHILD_OF_EDGE_TYPE}
+          AND (e.src_id = item.id OR e.src_id IN (SELECT a.id FROM nodes a WHERE a.merged_into = item.id))
+          AND p.id <> item.id
+          AND p.node_type = ${WORK_ITEM_NODE_TYPE}
+          AND p.metadata @> ${JSON.stringify({ project })}::jsonb
+        ORDER BY e.weight DESC, (e.source_system = 'beads') DESC, p.id
+        LIMIT 1
+      ) parent ON true
     `);
   } catch (err) {
     throw new LookupFailedError(`getBoardItem query failed${formatPgInfo(asPgError(err))}`, "getBoardItem", { cause: err });
@@ -572,5 +608,6 @@ export async function getBoardItem(db: Database, options: BoardItemOptions): Pro
     isReview,
     review: isReview && metadata[REVIEW_METADATA_KEY] !== undefined && metadata[REVIEW_METADATA_KEY] !== null ? normalizeReviewMetadata(metadata[REVIEW_METADATA_KEY]) : null,
     comments: isReview ? normalizeReviewComments(metadata[REVIEW_COMMENTS_KEY]) : [],
+    parent: row.parent_external_id === null || row.parent_title === null ? null : { externalId: row.parent_external_id, title: row.parent_title },
   };
 }

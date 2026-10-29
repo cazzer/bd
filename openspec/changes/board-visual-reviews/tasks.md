@@ -26,11 +26,11 @@ One task group, one bead. Group 1 is bd-ker.2 (the store learns reviews); group 
 ## 4. Board deep link and review drawer (bd-ker.3)
 
 - [ ] 4.1 Checkpoint: 2–3 drawer layouts on fixture data (e.g. right side panel, wide overlay with filmstrip, split board), screenshotted side by side at 1440 and 390 px with a cost note each. Stop; the user picks.
-- [ ] 4.2 `lib/route.ts`: `BoardRoute.item`, parse/format/round-trip tests. Board with no `view` uses every registered project (work-board delta).
-- [ ] 4.3 Image route per design decision 4 in `server/index.ts` (handler module with tests: inside root served, `..` and symlink escape refused, non-image refused, missing 404); Vite proxies `/review-images`.
-- [ ] 4.4 `components/ReviewDrawer.tsx` in the chosen layout: details for any item with "Open in graph"; for reviews, summary, gallery with enlarge, thread, Accept / Request changes wired to `reviewDecision` with error and partial states; waiting state for an item not loaded yet; card activation opens the drawer; review cards marked.
-- [ ] 4.5 Live check in a browser (Playwright): deep link opens the drawer; close drops `item`; accept moves the card without reload against a scratch tracker.
-- [ ] 4.6 `pnpm check` green.
+- [x] 4.2 `lib/route.ts`: `BoardRoute.item`, parse/format/round-trip tests. Board with no `view` uses every registered project (work-board delta).
+- [x] 4.3 Image route per design decision 4 in `server/index.ts` (handler module with tests: inside root served, `..` and symlink escape refused, non-image refused, missing 404); Vite proxies `/review-images`.
+- [x] 4.4 `components/ReviewDrawer.tsx` in the chosen layout: details for any item with "Open in graph"; for reviews, summary, gallery with enlarge, thread, Accept / Request changes wired to `reviewDecision` with error and partial states; waiting state for an item not loaded yet; card activation opens the drawer; review cards marked.
+- [x] 4.5 Live check in a browser (Playwright): deep link opens the drawer; close drops `item`; accept moves the card without reload against a scratch tracker.
+- [x] 4.6 `pnpm check` green.
 
 ## 5. Push the decision to the requesting pane (bd-ker.5)
 

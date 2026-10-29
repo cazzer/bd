@@ -726,7 +726,7 @@ export function GraphView() {
       return;
     }
     if (view.renderer === "board") {
-      navigate({ view: "board", viewId: view.id, projects: [] }, "push");
+      navigate({ view: "board", viewId: view.id, projects: [], item: null }, "push");
       return;
     }
     navigate({ view: "feed", viewId: view.id }, "push");

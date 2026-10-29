@@ -116,7 +116,7 @@ export function App() {
     case "board":
       return (
         <Suspense fallback={LOADING_VIEW}>
-          <BoardView key="board" viewId={route.viewId} projects={route.projects} />
+          <BoardView key="board" viewId={route.viewId} projects={route.projects} item={route.item} />
         </Suspense>
       );
   }

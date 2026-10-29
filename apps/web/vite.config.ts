@@ -26,6 +26,11 @@ export default defineConfig({
         target: `http://127.0.0.1:${serverPort}`,
         changeOrigin: true,
       },
+      // Review screenshots (board-visual-reviews, design.md decision 4), served by the same server.
+      "/review-images": {
+        target: `http://127.0.0.1:${serverPort}`,
+        changeOrigin: true,
+      },
     },
   },
 });

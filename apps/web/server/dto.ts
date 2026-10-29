@@ -29,7 +29,9 @@
 // keeps "one predicate, one place" (the UI still never re-derives
 // `sourceSystem === "repo"` itself) without that bundling hazard.
 
-import { isEditableSourceSystem, type BeadsProject, type BoardCard, type BoardItem, type ListedNode, type LookedUpNode, type Neighbor, type RecentNode, type RetrievedNode } from "@breakdown/core";
+import path from "node:path";
+import { isEditableSourceSystem, REVIEW_IMAGE_ROOT, type BeadsProject, type BoardCard, type BoardItem, type ListedNode, type LookedUpNode, type Neighbor, type RecentNode, type RetrievedNode } from "@breakdown/core";
+import { reviewImageUrl } from "./review-images.js";
 
 export type RetrievedNodeDto = Omit<RetrievedNode, "updatedAt"> & { updatedAt: string; isEditable: boolean };
 export type LookedUpNodeDto = Omit<LookedUpNode, "createdAt" | "updatedAt"> & { createdAt: string; updatedAt: string; isEditable: boolean };
@@ -72,14 +74,31 @@ export function toNeighborDto(neighbor: Neighbor): NeighborDto {
 
 export type BoardCardDto = Omit<BoardCard, "updatedAt"> & { updatedAt: string };
 export type BeadsProjectDto = Omit<BeadsProject, "updatedAt"> & { updatedAt: string };
-export type BoardItemDto = Omit<BoardItem, "updatedAt"> & { updatedAt: string };
+/**
+ * One review screenshot as the drawer shows it: the stored absolute `path`,
+ * its file `name`, and the image route's `url` for it — null when the path
+ * is outside the review image root, so the drawer shows it missing without
+ * a request (board-visual-reviews, design.md decision 4).
+ */
+export interface ReviewImageDto {
+  path: string;
+  name: string;
+  url: string | null;
+}
+/** `reviewImages` is empty unless the item carries a valid review. */
+export type BoardItemDto = Omit<BoardItem, "updatedAt"> & { updatedAt: string; reviewImages: ReviewImageDto[] };
 
 export function toBoardCardDto(card: BoardCard): BoardCardDto {
   return { ...card, updatedAt: card.updatedAt.toISOString() };
 }
 
-export function toBoardItemDto(item: BoardItem): BoardItemDto {
-  return { ...item, updatedAt: item.updatedAt.toISOString() };
+export function toBoardItemDto(item: BoardItem, reviewImageRoot: string = REVIEW_IMAGE_ROOT): BoardItemDto {
+  const images = item.review !== null && !("invalid" in item.review) ? item.review.images : [];
+  return {
+    ...item,
+    updatedAt: item.updatedAt.toISOString(),
+    reviewImages: images.map((p) => ({ path: p, name: path.basename(p), url: reviewImageUrl(p, reviewImageRoot) })),
+  };
 }
 
 export function toBeadsProjectDto(project: BeadsProject): BeadsProjectDto {

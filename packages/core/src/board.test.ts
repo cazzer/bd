@@ -633,6 +633,46 @@ describe("getBoardItem", () => {
     expect(await getBoardItem(db, { project: b, externalId: `${tag}-crosssurvivor` })).toMatchObject({ id: ids.get(`${tag}-crosssurvivor`), project: b });
   });
 
+  it("names the item's child_of parent in its project, folded through merges, and null otherwise", async () => {
+    const { a, b, tag } = scope();
+    const ids = await rawItems([
+      { ext: `${tag}-epic`, project: a, title: "The epic", metadata: { issue_type: "epic" } },
+      { ext: `${tag}-child`, project: a },
+      { ext: `${tag}-orphan`, project: a },
+      { ext: `${tag}-crosschild`, project: a },
+      { ext: `${tag}-foreign`, project: b },
+      { ext: `${tag}-oldparent`, project: a },
+      { ext: `${tag}-newparent`, project: a, title: "Survivor parent" },
+      { ext: `${tag}-viaold`, project: a },
+      { ext: `${tag}-aliaschild`, project: a },
+      { ext: `${tag}-aliassurvivor`, project: a },
+      { ext: `${tag}-selfchild`, project: a },
+      { ext: `${tag}-selfparent`, project: a },
+    ]);
+    const id = (n: string) => ids.get(`${tag}-${n}`)!;
+    await link(id("child"), id("epic"), "child_of");
+    await link(id("crosschild"), id("foreign"), "child_of");
+    await link(id("viaold"), id("oldparent"), "child_of");
+    await link(id("aliaschild"), id("epic"), "child_of");
+    await link(id("selfchild"), id("selfparent"), "child_of");
+    const mergeRun = await openIngestRun(db, SRC, { actor: "board-test-merge" });
+    try {
+      await mergeNodes(db, id("oldparent"), id("newparent"), mergeRun);
+      await mergeNodes(db, id("aliaschild"), id("aliassurvivor"), mergeRun);
+      await mergeNodes(db, id("selfparent"), id("selfchild"), mergeRun);
+    } finally {
+      await closeIngestRun(db, mergeRun);
+      extraRunIds.push(mergeRun.id);
+    }
+
+    expect((await getBoardItem(db, { project: a, externalId: `${tag}-child` }))?.parent).toEqual({ externalId: `${tag}-epic`, title: "The epic" });
+    expect((await getBoardItem(db, { project: a, externalId: `${tag}-orphan` }))?.parent).toBeNull();
+    expect((await getBoardItem(db, { project: a, externalId: `${tag}-crosschild` }))?.parent).toBeNull();
+    expect((await getBoardItem(db, { project: a, externalId: `${tag}-viaold` }))?.parent).toEqual({ externalId: `${tag}-newparent`, title: "Survivor parent" });
+    expect((await getBoardItem(db, { project: a, externalId: `${tag}-aliassurvivor` }))?.parent).toEqual({ externalId: `${tag}-epic`, title: "The epic" });
+    expect((await getBoardItem(db, { project: a, externalId: `${tag}-selfchild` }))?.parent).toBeNull();
+  });
+
   it("refuses a malformed project key or item id", async () => {
     await expect(getBoardItem(db, { project: "Not A Key", externalId: "x" })).rejects.toBeInstanceOf(InvalidLookupOptionError);
     await expect(getBoardItem(db, { project: "ok", externalId: "" })).rejects.toBeInstanceOf(InvalidLookupOptionError);

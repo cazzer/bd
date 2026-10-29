@@ -5,7 +5,8 @@
 // and unique project keys; nothing asserts a store-wide count.
 
 import { randomUUID } from "node:crypto";
-import { closeIngestRun, openIngestRun, upsertEdges, upsertNodes, type IngestRunHandle } from "@breakdown/core";
+import path from "node:path";
+import { closeIngestRun, openIngestRun, REVIEW_IMAGE_ROOT, upsertEdges, upsertNodes, type IngestRunHandle } from "@breakdown/core";
 import { createDb, createPool, edges, ingestRuns, nodes, resolveDatabaseUrl, type Database } from "@breakdown/db";
 import { and, eq, inArray } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -183,6 +184,36 @@ describe("boardItem", () => {
     expect(typeof item?.updatedAt).toBe("string");
     expect(new Date(item!.updatedAt).toISOString()).toBe(item!.updatedAt);
     expect(JSON.parse(JSON.stringify(item))).toEqual(item);
+  });
+
+  it("gives each review image its route URL when it is under the review image root, null otherwise", async () => {
+    const inside = path.join(REVIEW_IMAGE_ROOT, PROJECT, `${TAG}-ri`, "01-board shot.png");
+    await upsertNodes(db, run, [
+      {
+        nodeType: "work_item",
+        sourceSystem: SRC,
+        externalId: `${TAG}-ri`,
+        title: "Review: images",
+        content: "",
+        metadata: { project: PROJECT, status: "open", priority: 1, labels: ["review"], review: { images: [inside, "/etc/passwd.png"], pane: null, summary: "" } },
+      },
+    ]);
+
+    const { item } = await caller().boardItem({ project: PROJECT, item: `${TAG}-ri` });
+
+    expect(item?.reviewImages).toEqual([
+      { path: inside, name: "01-board shot.png", url: `/review-images/${PROJECT}/${TAG}-ri/01-board%20shot.png` },
+      { path: "/etc/passwd.png", name: "passwd.png", url: null },
+    ]);
+  });
+
+  it("carries no review images for a plain item or a malformed review", async () => {
+    await upsertNodes(db, run, [
+      { nodeType: "work_item", sourceSystem: SRC, externalId: `${TAG}-bad`, title: "bad", content: "", metadata: { project: PROJECT, status: "open", priority: 1, labels: ["review"], review: { images: "x.png" } } },
+    ]);
+    await writeItems([{ ext: `${TAG}-plain-item`, project: PROJECT }]);
+    expect((await caller().boardItem({ project: PROJECT, item: `${TAG}-bad` })).item?.reviewImages).toEqual([]);
+    expect((await caller().boardItem({ project: PROJECT, item: `${TAG}-plain-item` })).item?.reviewImages).toEqual([]);
   });
 
   it("answers { item: null } for an item not in that project", async () => {

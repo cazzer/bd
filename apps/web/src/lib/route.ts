@@ -87,16 +87,20 @@ export interface TimelineRoute {
 
 /**
  * The board view (live-beads-board, design.md decision 7): the id of the
- * `view` node whose renderer must be `board`, and the chosen project keys
- * as repeated `project` parameters, in the order given. `null` for the view
- * is BoardView's "no view" empty state, never a redirect; an empty
- * `projects` means every project the view offers is chosen, the way the
- * timeline's empty `types` does.
+ * `view` node whose renderer must be `board`, the chosen project keys as
+ * repeated `project` parameters, in the order given, and the external id
+ * (a bead id) of the item whose drawer is open (board-visual-reviews,
+ * design.md decision 2). `null` for the view is a board of every
+ * registered project (board-visual-reviews, design.md decision 3), never a
+ * redirect; an empty `projects` means every project the view offers is
+ * chosen, the way the timeline's empty `types` does; `null` for the item
+ * means no drawer is open.
  */
 export interface BoardRoute {
   view: "board";
   viewId: string | null;
   projects: string[];
+  item: string | null;
 }
 
 /** Every addressable view. A future view widens this union. */
@@ -175,9 +179,9 @@ function timelineRouteFromSearch(search: string): TimelineRoute {
 
 /**
  * The board view's parameters from a query string alone (live-beads-board).
- * `view` through the same trim as the others'; every `project` trimmed,
- * empties dropped, duplicates collapsed to their first occurrence; anything
- * else is ignored.
+ * `view` and `item` through the same trim as the others'; every `project`
+ * trimmed, empties dropped, duplicates collapsed to their first occurrence;
+ * anything else is ignored.
  */
 function boardRouteFromSearch(search: string): BoardRoute {
   const params = new URLSearchParams(search);
@@ -188,7 +192,7 @@ function boardRouteFromSearch(search: string): BoardRoute {
       projects.push(project);
     }
   }
-  return { view: "board", viewId: nonEmpty(params.get("view")), projects };
+  return { view: "board", viewId: nonEmpty(params.get("view")), projects, item: nonEmpty(params.get("item")) };
 }
 
 /**
@@ -223,7 +227,8 @@ export function parseRoute(pathname: string, search: string): Route | null {
  * The URL (path + query string, no origin) for a route. Parameters are
  * emitted in a fixed order — for the graph `q`, each `type` in order,
  * `node`; for the feed just `view`; for the code view `view` then `node`;
- * for the timeline `view`, `node`, then each `type` in order; for the board `view`, then each `project` in order — and
+ * for the timeline `view`, `node`, then each `type` in order; for the board
+ * `view`, each `project` in order, then `item` — and
  * absent ones are omitted, so two structurally equal routes always
  * format to the same string: lib/navigate.ts relies on that to skip a
  * history write when nothing changed. Round-trips through `parseRoute`.
@@ -301,6 +306,9 @@ function formatBoardRoute(route: BoardRoute): string {
   }
   for (const project of route.projects) {
     params.append("project", project);
+  }
+  if (route.item !== null) {
+    params.set("item", route.item);
   }
   const query = params.toString();
   return query.length > 0 ? `${BOARD_VIEW_PATH}?${query}` : BOARD_VIEW_PATH;
