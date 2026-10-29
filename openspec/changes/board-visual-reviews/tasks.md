@@ -34,7 +34,7 @@ One task group, one bead. Group 1 is bd-ker.2 (the store learns reviews); group 
 
 ## 5. Push the decision to the requesting pane (bd-ker.5)
 
-- [ ] 5.1 `review-writer.ts`: after a successful write, `herdr agent prompt <pane> 'Review <id> accepted|changes requested: <message>'` per design decision 6; result `notified: { ok, reason? }`; logged on failure.
-- [ ] 5.2 Tests: live pane receives the exact text; no pane, bad pane id, non-zero exit, and timeout each leave the decision written and report why.
-- [ ] 5.3 Drawer shows notified / not notified with the reason.
-- [ ] 5.4 End-to-end once against a scratch tracker and a real herdr pane; `pnpm check` green.
+- [x] 5.1 `review-writer.ts`: after a successful write, `herdr agent prompt <pane> 'Review <id> accepted|changes requested: <message>'` per design decision 6; result `notified: { ok, reason? }`; logged on failure.
+- [x] 5.2 Tests: live pane receives the exact text; no pane, bad pane id, non-zero exit, and timeout each leave the decision written and report why.
+- [x] 5.3 Drawer shows notified / not notified with the reason.
+- [x] 5.4 End-to-end once against a scratch tracker and a real herdr pane; `pnpm check` green. (Run against a PATH stub `herdr` that logged the exact argv, and against the real herdr with a nonexistent pane; no live agent pane was prompted.)

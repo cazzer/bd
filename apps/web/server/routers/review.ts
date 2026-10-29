@@ -36,15 +36,17 @@
 // a step that timed out and may have landed, so the drawer can show the
 // tracker's message and what is already there. Whenever a write command ran
 // at all, the watcher is woken for the project so the board shows whatever
-// landed without waiting for an fs event. `notified` is null until bd-ker.5
-// adds the push to the requesting pane.
+// landed without waiting for an fs event. `notified` is the writer's push to
+// the requesting pane (review-writer.ts header): `{ ok: true, pane }`,
+// `{ ok: false, reason }`, or null when the decision was not fully written
+// and nobody was told. A failed notification never fails the request.
 
 import { stat } from "node:fs/promises";
 import { getBoardItem, getRegisteredBeadsProject, MAX_REVIEW_COMMENT_LENGTH, PROJECT_KEY_PATTERN } from "@breakdown/core";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { mapCoreError } from "../errors.js";
-import { ReviewDecisionInFlightError, ReviewRecordRefusedError, type ReviewStep } from "../review-writer.js";
+import { ReviewDecisionInFlightError, ReviewRecordRefusedError, type ReviewNotified, type ReviewStep } from "../review-writer.js";
 import { publicProcedure, router } from "../trpc.js";
 
 /** Room left in a comment for the `Changes requested: ` prefix. */
@@ -80,8 +82,8 @@ export interface ReviewDecisionResult {
   partial?: boolean;
   /** A step that timed out or was killed and may have been written. */
   uncertain?: ReviewStep;
-  /** Whether the requesting pane was told; null until bd-ker.5. */
-  notified: null;
+  /** Whether the requesting pane was told; null when the decision was not fully written. */
+  notified: ReviewNotified | null;
 }
 
 const reviewDecisionProcedure = publicProcedure.input(reviewDecisionInputSchema).mutation(async ({ ctx, input }): Promise<ReviewDecisionResult> => {
@@ -151,7 +153,7 @@ const reviewDecisionProcedure = publicProcedure.input(reviewDecisionInputSchema)
     ...(result.error !== undefined ? { error: result.error } : {}),
     ...(result.partial !== undefined ? { partial: result.partial } : {}),
     ...(result.uncertain !== undefined ? { uncertain: result.uncertain } : {}),
-    notified: null,
+    notified: result.notified,
   };
 });
 

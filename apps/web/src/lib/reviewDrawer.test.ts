@@ -102,6 +102,7 @@ describe("describeNotified", () => {
     expect(describeNotified(null)).toBeNull();
     expect(describeNotified(undefined)).toBeNull();
     expect(describeNotified({ ok: true })).toBe("Agent notified");
+    expect(describeNotified({ ok: true, pane: "w1:p2" })).toBe("Agent notified (pane w1:p2)");
     expect(describeNotified({ ok: false, reason: "pane w1:p2 is gone" })).toBe("Agent not notified: pane w1:p2 is gone");
   });
 });

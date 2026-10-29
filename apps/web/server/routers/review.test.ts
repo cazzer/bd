@@ -16,7 +16,7 @@ import { and, eq, inArray } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { BeadsWatcher } from "../beads-watcher.js";
 import type { Context } from "../context.js";
-import { BdUncertainError, createReviewWriter, type RunBd } from "../review-writer.js";
+import { BdUncertainError, createReviewWriter, NOTIFY_NO_PANE, type RunBd, type RunHerdr } from "../review-writer.js";
 import { appRouter } from "../router.js";
 import { createCallerFactory } from "../trpc.js";
 
@@ -40,6 +40,8 @@ const EXTERNAL_IDS = [
 ];
 
 beforeAll(async () => {
+  // The writer logs every notification it could not make; keep the run quiet.
+  vi.spyOn(console, "warn").mockImplementation(() => {});
   pool = createPool(resolveDatabaseUrl());
   db = createDb(pool);
   checkout = mkdtempSync(path.join(tmpdir(), "review-router-"));
@@ -84,6 +86,7 @@ afterAll(async () => {
   await db.delete(ingestRuns).where(inArray(ingestRuns.id, [beadsRun.id, agentRun.id]));
   await pool.end();
   rmSync(checkout, { recursive: true, force: true });
+  vi.restoreAllMocks();
 });
 
 const createCaller = createCallerFactory(appRouter);
@@ -95,12 +98,19 @@ interface SetupOptions {
   show?: (id: string) => Record<string, unknown>;
   /** Called for each command before it answers; may hold it. */
   hold?: (args: readonly string[]) => Promise<void> | undefined;
+  /** Rejects the herdr call with this error. */
+  herdrFails?: Error;
   db?: Database;
   readOnly?: boolean;
 }
 
 function setup(opts: SetupOptions = {}) {
   const calls: Array<{ args: string[]; cwd: string }> = [];
+  const herdrCalls: string[][] = [];
+  const runHerdr: RunHerdr = async (args) => {
+    herdrCalls.push([...args]);
+    if (opts.herdrFails) throw opts.herdrFails;
+  };
   const runBd: RunBd = async (args, cwd) => {
     calls.push({ args: [...args], cwd });
     await opts.hold?.(args);
@@ -112,12 +122,12 @@ function setup(opts: SetupOptions = {}) {
   const wake = vi.fn((_project: string) => true);
   const ctx: Context = {
     db: opts.db ?? db,
-    reviewWriter: createReviewWriter({ runBd }),
+    reviewWriter: createReviewWriter({ runBd, runHerdr }),
     watcher: { wake } as unknown as BeadsWatcher,
     ...(opts.readOnly !== undefined ? { readOnly: opts.readOnly } : {}),
   };
   const writes = () => calls.filter((c) => c.args[0] !== "show");
-  return { caller: createCaller(ctx), calls, writes, wake };
+  return { caller: createCaller(ctx), calls, writes, wake, herdrCalls };
 }
 
 /** Throws on any property access — proves the refusal came before any database call. */
@@ -137,7 +147,8 @@ describe("reviewDecision", () => {
     const { caller, calls, wake } = setup();
     const result = await caller.reviewDecision({ project: PROJECT, item: id("r1"), decision: "accept", message: "  looks right  " });
 
-    expect(result).toEqual({ ok: true, decision: "accept", item: id("r1"), written: ["comment", "remove-changes-label", "close"], notified: null });
+    // The store's copy names pane w1:p2, but the tracker's record (the fake `bd show`) names none: no prompt.
+    expect(result).toEqual({ ok: true, decision: "accept", item: id("r1"), written: ["comment", "remove-changes-label", "close"], notified: { ok: false, reason: NOTIFY_NO_PANE } });
     expect(calls.map((c) => c.args[0])).toEqual(["show", "comments", "update", "close"]);
     expect(calls.every((c) => c.cwd === checkout)).toBe(true);
     expect(calls[1]!.args).toEqual(["comments", "add", id("r1"), "Accepted: looks right"]);
@@ -249,6 +260,25 @@ describe("reviewDecision", () => {
     const { caller, writes } = setup();
     await caller.reviewDecision({ project: PROJECT, item: id("r2"), decision: "changes", message: "one\n\ttwo" });
     expect(writes()[0]!.args[3]).toBe("Changes requested: one\n\ttwo");
+  });
+
+  it("passes the notification through: the tracker record's pane is prompted", async () => {
+    const { caller, herdrCalls } = setup({ show: () => ({ metadata: { review: { pane: "w5:p5", images: [], summary: "" } } }) });
+    const result = await caller.reviewDecision({ project: PROJECT, item: id("r2"), decision: "changes", message: "tighten the grid" });
+
+    expect(result).toEqual({ ok: true, decision: "changes", item: id("r2"), written: ["comment", "add-changes-label"], notified: { ok: true, pane: "w5:p5" } });
+    expect(herdrCalls).toEqual([["agent", "prompt", "w5:p5", `Review ${id("r2")} changes requested: tighten the grid`]]);
+  });
+
+  it("a failed notification is data: the decision still succeeds", async () => {
+    const { caller, wake } = setup({
+      show: () => ({ metadata: { review: { pane: "w9:p9" } } }),
+      herdrFails: new Error("agent target w9:p9 not found (agent_not_found)"),
+    });
+    const result = await caller.reviewDecision({ project: PROJECT, item: id("r1"), decision: "accept", message: "" });
+
+    expect(result).toMatchObject({ ok: true, written: ["comment", "remove-changes-label", "close"], notified: { ok: false, reason: "agent target w9:p9 not found (agent_not_found)" } });
+    expect(wake).toHaveBeenCalledTimes(1);
   });
 
   it("returns a failing close as a partial write, as data, and still wakes the watcher", async () => {

@@ -94,10 +94,10 @@ export function describeDecision(result: { ok: boolean; decision: ReviewDecision
   return { tone: "error", text: `Nothing was written; the tracker failed: ${error}`, keepMessage: true };
 }
 
-/** Whether the requesting agent was told (bd-ker.5); null while the server does not report it. */
-export function describeNotified(notified: { ok: boolean; reason?: string } | null | undefined): string | null {
+/** Whether the requesting agent was told (bd-ker.5); null when nobody was told because the decision did not fully land. */
+export function describeNotified(notified: { ok: boolean; pane?: string; reason?: string } | null | undefined): string | null {
   if (notified === null || notified === undefined) return null;
-  if (notified.ok) return "Agent notified";
+  if (notified.ok) return notified.pane ? `Agent notified (pane ${notified.pane})` : "Agent notified";
   return `Agent not notified: ${notified.reason ?? "no reason given"}`;
 }
 

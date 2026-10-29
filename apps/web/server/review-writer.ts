@@ -53,10 +53,36 @@
 // at a time through a per-`cwd` promise chain, so this server never runs two
 // `bd` writers against one embedded database at once.
 //
-// bd-ker.5 adds the herdr notification beside `write`, not inside it.
+// Notification (design.md decision 6): once every step has been written
+// (`ok: true`), the requesting agent's pane is told with `herdr agent prompt
+// <pane> <text>` — `Review <id> accepted: <message>` (`Review <id>
+// accepted.` with no message) or `Review <id> changes requested: <message>`.
+// The text always starts with `Review`, so it is never read as a flag. The
+// pane is `metadata.review.pane` on the tracker record `bd show` already
+// returned, never the request's or the store's; it must match
+// REVIEW_PANE_PATTERN and must not start with `-` (herdr would read it as a
+// flag). A partial, uncertain, or failed write notifies nobody (`notified:
+// null`): the comment in the tracker is the record, and an agent told
+// "accepted" about a review that is still open would act on a decision that
+// did not land. The notification runs after the checkout's write queue is
+// released (the in-flight claim is still held) and never fails or undoes the
+// decision: its outcome is `notified: { ok: true, pane }` or `{ ok: false,
+// reason }`, and every `ok: false` is logged with the project and bead id.
+//
+// `herdr` is found on PATH and runs through `execFile` with argv only and no
+// `--wait`: 10 s, then SIGTERM, then SIGKILL after a 5 s grace, settling 1 s
+// later whether or not the pipes have closed, like the bd runner. Its
+// reasons are `herdr not found on PATH`, `herdr timed out after 10 s`,
+// `herdr was killed (<signal>)`, herdr's own error (it prints
+// `{"error":{"code","message"}}` on stderr; message and code are kept,
+// nothing else), or `herdr exited <code>`. A reason should never carry the
+// prompt text: Node's `err.message` (which echoes argv) is never used, and an
+// echo of the prompt or of any line of it (8+ characters) in herdr's output
+// is cut out.
 
 import { execFile } from "node:child_process";
 import { statSync } from "node:fs";
+import { REVIEW_PANE_PATTERN } from "@breakdown/core";
 
 function isDirectory(dir: string): boolean {
   try {
@@ -76,6 +102,10 @@ const REVIEW_BD_DEADLINE_SLACK_MS = 1_000;
 const BD_MAX_BUFFER = 1024 * 1024;
 /** Longest tracker error passed back to the browser. */
 export const MAX_REVIEW_ERROR_LENGTH = 2000;
+/** `herdr agent prompt` gets this long before SIGTERM. */
+export const REVIEW_HERDR_TIMEOUT_MS = 10_000;
+/** Longest notification failure reason passed back to the browser. */
+export const MAX_NOTIFY_REASON_LENGTH = 300;
 
 export const REVIEW_ACCEPT_REASON = "Review accepted";
 
@@ -84,6 +114,15 @@ export type ReviewStep = "comment" | "close" | "remove-changes-label" | "add-cha
 
 /** Runs `bd <args>` in `cwd` and resolves with stdout; rejects with an Error whose message is safe to show, a `BdUncertainError` when the command may have run. */
 export type RunBd = (args: readonly string[], cwd: string) => Promise<string>;
+
+/** Runs `herdr <args>`; resolves on exit 0, rejects with an Error whose message is a short reason safe to show. */
+export type RunHerdr = (args: readonly string[]) => Promise<void>;
+
+/** Whether the requesting pane was told the decision. */
+export type ReviewNotified = { ok: true; pane: string } | { ok: false; reason: string };
+
+export const NOTIFY_NO_PANE = "no pane recorded on the review";
+export const NOTIFY_INVALID_PANE = "pane id is not valid";
 
 export interface ReviewWriteInput {
   /** The registered project key; with `externalId`, the in-flight key. */
@@ -109,6 +148,8 @@ export interface ReviewWriteResult {
   partial?: boolean;
   /** A step that timed out or was killed and may have been written. */
   uncertain?: ReviewStep;
+  /** The pane notification; null when the decision was not fully written, so nobody was told. */
+  notified: ReviewNotified | null;
 }
 
 export interface ReviewWriter {
@@ -118,6 +159,8 @@ export interface ReviewWriter {
 export interface ReviewWriterOptions {
   /** Replaces the `bd` invocation (tests). */
   runBd?: RunBd;
+  /** Replaces the `herdr` invocation (tests). */
+  runHerdr?: RunHerdr;
 }
 
 export class ReviewDecisionInFlightError extends Error {
@@ -162,6 +205,25 @@ export function commentText(decision: ReviewDecision, message: string): string {
   const m = message.trim();
   if (decision === "accept") return m === "" ? "Accepted." : `Accepted: ${m}`;
   return `Changes requested: ${m}`;
+}
+
+/** The prompt sent to the requesting pane. Starts with `Review`, never `-`. */
+export function notifyText(decision: ReviewDecision, id: string, message: string): string {
+  const m = message.trim();
+  if (decision === "accept") return m === "" ? `Review ${id} accepted.` : `Review ${id} accepted: ${m}`;
+  return `Review ${id} changes requested: ${m}`;
+}
+
+/** The pane on a tracker record (`metadata.review.pane`), or why there is none to prompt. */
+export function paneOf(record: { metadata?: unknown }): { pane: string } | { reason: string } {
+  const metadata = record.metadata;
+  const review = typeof metadata === "object" && metadata !== null ? (metadata as Record<string, unknown>)["review"] : undefined;
+  const raw = typeof review === "object" && review !== null ? (review as Record<string, unknown>)["pane"] : undefined;
+  if (raw === undefined || raw === null || (typeof raw === "string" && raw.trim() === "")) return { reason: NOTIFY_NO_PANE };
+  if (typeof raw !== "string") return { reason: NOTIFY_INVALID_PANE };
+  const pane = raw.trim();
+  if (!REVIEW_PANE_PATTERN.test(pane) || pane.startsWith("-")) return { reason: NOTIFY_INVALID_PANE };
+  return { pane };
 }
 
 export interface BdRunnerOptions {
@@ -235,6 +297,95 @@ export function createBdRunner(options: BdRunnerOptions = {}): RunBd {
     });
 }
 
+/** herdr's error output as one short line: `message (code)` from its JSON error, else the first non-empty line. */
+function herdrFailure(stderr: string, stdout: string): string | null {
+  const line = [stderr, stdout]
+    .flatMap((text) => text.split("\n"))
+    .map((l) => l.trim())
+    .find((l) => l !== "");
+  if (line === undefined) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return line;
+  }
+  const error = typeof parsed === "object" && parsed !== null ? (parsed as { error?: unknown }).error : undefined;
+  if (typeof error !== "object" || error === null) return line;
+  const { message, code } = error as { message?: unknown; code?: unknown };
+  const hasCode = typeof code === "string" && code !== "";
+  if (typeof message === "string" && message.trim() !== "") return hasCode ? `${message.trim()} (${code})` : message.trim();
+  return hasCode ? code : line;
+}
+
+export interface HerdrRunnerOptions {
+  /** The executable; `herdr` on PATH by default (tests point it at a stub). */
+  command?: string;
+  timeoutMs?: number;
+  killGraceMs?: number;
+}
+
+/** The default herdr runner (module header): no shell, SIGTERM then SIGKILL, reasons that never echo the prompt. */
+export function createHerdrRunner(options: HerdrRunnerOptions = {}): RunHerdr {
+  const command = options.command ?? "herdr";
+  const timeoutMs = options.timeoutMs ?? REVIEW_HERDR_TIMEOUT_MS;
+  const killGraceMs = options.killGraceMs ?? REVIEW_BD_KILL_GRACE_MS;
+  const seconds = timeoutMs % 1000 === 0 ? `${timeoutMs / 1000} s` : `${(timeoutMs / 1000).toFixed(1)} s`;
+
+  return (args) =>
+    new Promise<void>((resolve, reject) => {
+      // The last argument is the prompt; an echo of it, or of any of its lines
+      // (the reason is one line), is cut out of what herdr says.
+      const prompt = args.at(-1) ?? "";
+      const echoes = [prompt, ...prompt.split("\n").filter((l) => l.trim().length >= 8)].filter((e) => e !== "");
+      const fail = (reason: string) => {
+        const scrubbed = echoes.reduce((text, echo) => text.split(echo).join("…"), reason);
+        const trimmed = scrubbed.trim();
+        reject(new Error(trimmed.length > MAX_NOTIFY_REASON_LENGTH ? `${trimmed.slice(0, MAX_NOTIFY_REASON_LENGTH - 1)}…` : trimmed));
+      };
+      let timedOut = false;
+      let settled = false;
+      let killTimer: NodeJS.Timeout | undefined;
+      const finish = (settle: () => void) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(termTimer);
+        clearTimeout(killTimer);
+        clearTimeout(deadline);
+        settle();
+      };
+      const child = execFile(command, [...args], { maxBuffer: BD_MAX_BUFFER, encoding: "utf8" }, (err, stdout, stderr) => {
+        if (!err) {
+          finish(() => resolve());
+          return;
+        }
+        const e = err as NodeJS.ErrnoException & { code?: string | number; signal?: NodeJS.Signals | null };
+        let reason: string;
+        if (e.code === "ENOENT") reason = "herdr not found on PATH";
+        else if (timedOut) reason = `herdr timed out after ${seconds}`;
+        else if (e.signal) reason = `herdr was killed (${e.signal})`;
+        else {
+          const said = herdrFailure(typeof stderr === "string" ? stderr : "", typeof stdout === "string" ? stdout : "");
+          reason = said ?? (typeof e.code === "number" ? `herdr exited ${e.code}` : `herdr could not run (${String(e.code ?? "unknown error")})`);
+        }
+        finish(() => fail(reason));
+      });
+      const termTimer = setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGTERM");
+        killTimer = setTimeout(() => child.kill("SIGKILL"), killGraceMs);
+      }, timeoutMs);
+      const deadline = setTimeout(() => {
+        finish(() => {
+          child.kill("SIGKILL");
+          child.stdout?.destroy();
+          child.stderr?.destroy();
+          fail(`herdr timed out after ${seconds}`);
+        });
+      }, timeoutMs + killGraceMs + REVIEW_BD_DEADLINE_SLACK_MS);
+    });
+}
+
 function stepsFor(input: ReviewWriteInput): Array<{ step: ReviewStep; args: string[] }> {
   const id = input.externalId;
   const comment = { step: "comment" as const, args: ["comments", "add", id, commentText(input.decision, input.message)] };
@@ -253,7 +404,7 @@ function errorText(err: unknown): string {
 }
 
 /** `bd show --json` answers an array of one issue; a bare object is accepted too. */
-function parseShownIssue(stdout: string): { id: unknown; status: unknown; labels: unknown } | null {
+function parseShownIssue(stdout: string): ShownIssue | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(stdout);
@@ -261,11 +412,21 @@ function parseShownIssue(stdout: string): { id: unknown; status: unknown; labels
     return null;
   }
   const issue = Array.isArray(parsed) ? parsed[0] : parsed;
-  return typeof issue === "object" && issue !== null ? (issue as { id: unknown; status: unknown; labels: unknown }) : null;
+  return typeof issue === "object" && issue !== null ? (issue as ShownIssue) : null;
 }
+
+interface ShownIssue {
+  id: unknown;
+  status: unknown;
+  labels: unknown;
+  metadata?: unknown;
+}
+
+type WriteOutcome = Omit<ReviewWriteResult, "notified">;
 
 export function createReviewWriter(options: ReviewWriterOptions = {}): ReviewWriter {
   const runBd = options.runBd ?? createBdRunner();
+  const runHerdr = options.runHerdr ?? createHerdrRunner();
   const inFlight = new Set<string>();
   const checkoutChains = new Map<string, Promise<unknown>>();
 
@@ -284,16 +445,17 @@ export function createReviewWriter(options: ReviewWriterOptions = {}): ReviewWri
     return next;
   }
 
-  async function decide(input: ReviewWriteInput): Promise<ReviewWriteResult> {
+  /** Writes the decision; `record` is the tracker's record when one was read. */
+  async function decide(input: ReviewWriteInput): Promise<{ outcome: WriteOutcome; record: ShownIssue | null }> {
     const id = input.externalId;
     let shown;
     try {
       shown = parseShownIssue(await runBd(["show", id, "--json"], input.cwd));
     } catch (err) {
-      return { ok: false, written: [], attempted: false, error: errorText(err), partial: false };
+      return { outcome: { ok: false, written: [], attempted: false, error: errorText(err), partial: false }, record: null };
     }
     if (shown === null) {
-      return { ok: false, written: [], attempted: false, error: `bd show ${id} did not return an issue`, partial: false };
+      return { outcome: { ok: false, written: [], attempted: false, error: `bd show ${id} did not return an issue`, partial: false }, record: null };
     }
     if (shown.id !== id) {
       throw new ReviewRecordRefusedError("other-issue", id, `The tracker resolves "${id}" to a different issue (${String(shown.id)}); nothing was written.`);
@@ -312,13 +474,32 @@ export function createReviewWriter(options: ReviewWriterOptions = {}): ReviewWri
       } catch (err) {
         const partial = written.length > 0;
         if (err instanceof BdUncertainError) {
-          return { ok: false, written, attempted: true, uncertain: step, error: fitError(`${err.message}; it may have been written — check the tracker before deciding again`), partial };
+          const error = fitError(`${err.message}; it may have been written — check the tracker before deciding again`);
+          return { outcome: { ok: false, written, attempted: true, uncertain: step, error, partial }, record: shown };
         }
-        return { ok: false, written, attempted: true, error: errorText(err), partial };
+        return { outcome: { ok: false, written, attempted: true, error: errorText(err), partial }, record: shown };
       }
       written.push(step);
     }
-    return { ok: true, written, attempted: true };
+    return { outcome: { ok: true, written, attempted: true }, record: shown };
+  }
+
+  /** Tells the pane on the tracker's record; never throws (module header). */
+  async function notify(input: ReviewWriteInput, record: ShownIssue): Promise<ReviewNotified> {
+    const target = paneOf(record);
+    let notified: ReviewNotified;
+    if ("reason" in target) {
+      notified = { ok: false, reason: target.reason };
+    } else {
+      try {
+        await runHerdr(["agent", "prompt", target.pane, notifyText(input.decision, input.externalId, input.message)]);
+        notified = { ok: true, pane: target.pane };
+      } catch (err) {
+        notified = { ok: false, reason: err instanceof Error && err.message !== "" ? err.message : "herdr failed" };
+      }
+    }
+    if (!notified.ok) console.warn(`[breakdown-web] review ${input.project}/${input.externalId}: agent not notified: ${notified.reason}`);
+    return notified;
   }
 
   return {
@@ -327,7 +508,9 @@ export function createReviewWriter(options: ReviewWriterOptions = {}): ReviewWri
       if (inFlight.has(key)) throw new ReviewDecisionInFlightError(input.project, input.externalId);
       inFlight.add(key);
       try {
-        return await serialize(input.cwd, () => decide(input));
+        const { outcome, record } = await serialize(input.cwd, () => decide(input));
+        if (!outcome.ok || record === null) return { ...outcome, notified: null };
+        return { ...outcome, notified: await notify(input, record) };
       } finally {
         inFlight.delete(key);
       }
