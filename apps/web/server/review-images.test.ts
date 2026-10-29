@@ -34,6 +34,7 @@ beforeAll(async () => {
   await symlink(path.join(outside, "secret.png"), path.join(root, "escape.png"));
   await symlink(outside, path.join(root, "linkdir"));
   await symlink(path.join(root, "notes.txt"), path.join(root, "trick.png"));
+  await symlink(path.join(root, "loop.png"), path.join(root, "loop.png"));
 });
 
 afterAll(async () => {
@@ -75,6 +76,15 @@ describe("resolveReviewImage", () => {
     expect(await resolveReviewImage(url("nope.png"), root)).toMatchObject({ ok: false, status: 404 });
     expect(await resolveReviewImage(url("d.png"), root)).toMatchObject({ ok: false, status: 404 });
     expect(await resolveReviewImage(url("a.png"), path.join(base, "no-root"))).toMatchObject({ ok: false, status: 404 });
+  });
+
+  it("refuses an encoded absolute path in one segment with 403", async () => {
+    expect(await resolveReviewImage(url("%2Fetc%2Fpasswd.png"), root)).toMatchObject({ ok: false, status: 403 });
+  });
+
+  it("answers a symlink loop with 404 and an over-long name with 400, not a server error", async () => {
+    expect(await resolveReviewImage(url("loop.png"), root)).toMatchObject({ ok: false, status: 404 });
+    expect(await resolveReviewImage(url(`${"x".repeat(300)}.png`), root)).toMatchObject({ ok: false, status: 400 });
   });
 
   it("refuses the root itself", async () => {
@@ -125,6 +135,7 @@ describe("createReviewImageHandler over HTTP", () => {
     expect(res.headers.get("content-length")).toBe(String(PNG.length));
     expect(res.headers.get("cache-control")).toBe("no-store");
     expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(res.headers.get("cross-origin-resource-policy")).toBe("same-origin");
     expect(Buffer.from(await res.arrayBuffer())).toEqual(PNG);
   });
 

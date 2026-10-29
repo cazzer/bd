@@ -65,6 +65,12 @@ describe("createRequestDispatcher", () => {
     expect(calls).toEqual([]);
   });
 
+  it("refuses an absolute-form request target naming another host, and never routes one to the image handler", async () => {
+    expect(await send(`http://evil.example:${port}/review-images/a.png`, { Host: `evil.example:${port}` })).toEqual({ status: 403, body: "Forbidden\n" });
+    expect(await send(`http://127.0.0.1:${port}/review-images/a.png`, { Host: `127.0.0.1:${port}` })).toMatchObject({ status: 200, body: "trpc" });
+    expect(calls).toEqual([`trpc http://127.0.0.1:${port}/review-images/a.png`]);
+  });
+
   it("sends a loopback request under /review-images/ to the image route and anything else to tRPC", async () => {
     expect(await send("/review-images/rv/r1/a.png", { Host: `127.0.0.1:${port}` })).toMatchObject({ status: 200, body: "image" });
     expect(await send("/trpc/board", { Host: `localhost:${port}` })).toMatchObject({ status: 200, body: "trpc" });

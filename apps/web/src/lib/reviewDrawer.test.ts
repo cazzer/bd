@@ -46,25 +46,29 @@ describe("decisionBlocked", () => {
 });
 
 describe("describeDecision", () => {
-  it("names the written steps on success and clears the message", () => {
+  it("says where the card went on success and clears the message", () => {
     expect(describeDecision({ ok: true, decision: "accept", written: ["comment", "remove-changes-label", "close"] })).toEqual({
       tone: "ok",
-      text: "Accepted: comment added, review:changes label removed, review closed.",
+      text: "Accepted and closed — card moved to Closed.",
       keepMessage: false,
     });
     expect(describeDecision({ ok: true, decision: "changes", written: ["comment", "add-changes-label"] })).toEqual({
       tone: "ok",
-      text: "Changes requested: comment added, review:changes label added.",
+      text: "Changes requested — comment posted and review:changes added; the review stays open.",
       keepMessage: false,
     });
   });
 
-  it("reports a partial write with what landed and the tracker's error, keeping the message", () => {
+  it("reports a partial write with what landed and the tracker's error, clearing the box once the comment is posted", () => {
     expect(describeDecision({ ok: false, decision: "accept", written: ["comment"], error: "bd: close refused" })).toEqual({
       tone: "partial",
-      text: "Partly written (comment added), then the tracker failed: bd: close refused",
-      keepMessage: true,
+      text: "Partly written (comment added), then the tracker failed: bd: close refused Your comment is posted; deciding again would post it again — check the tracker first.",
+      keepMessage: false,
     });
+  });
+
+  it("keeps the message for a partial write that did not post the comment", () => {
+    expect(describeDecision({ ok: false, decision: "accept", written: ["remove-changes-label"], error: "bd: close refused" })).toMatchObject({ tone: "partial", keepMessage: true });
   });
 
   it("reports a failure with nothing written, keeping the message", () => {
@@ -79,11 +83,11 @@ describe("describeDecision", () => {
 describe("describeDecision with an uncertain step", () => {
   const error = "bd timed out after 30s; it may have been written — check the tracker before deciding again";
 
-  it("names the uncertain step, passes the server's error through, and keeps the message", () => {
+  it("names the uncertain step and passes the server's error through; keeps the message only while the comment is not posted", () => {
     expect(describeDecision({ ok: false, decision: "accept", written: ["comment", "remove-changes-label"], uncertain: "close", error })).toEqual({
       tone: "partial",
-      text: `Partly written (comment added, review:changes label removed). Unsure whether the close was written: ${error}`,
-      keepMessage: true,
+      text: `Partly written (comment added, review:changes label removed). Unsure whether the close was written: ${error} Your comment is posted; deciding again would post it again — check the tracker first.`,
+      keepMessage: false,
     });
     expect(describeDecision({ ok: false, decision: "changes", written: [], uncertain: "comment", error })).toEqual({
       tone: "partial",

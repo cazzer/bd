@@ -54,28 +54,42 @@ function stepsText(written: readonly ReviewStepName[]): string {
 export interface DecisionOutcome {
   tone: "ok" | "partial" | "error";
   text: string;
-  /** A failed write keeps the message in the box so it can be retried. */
+  /**
+   * Keep the message in the box for a retry: true for a failure, unless the
+   * comment already landed — then the box is cleared, since deciding again
+   * would post the same comment twice.
+   */
   keepMessage: boolean;
 }
 
+const COMMENT_POSTED = " Your comment is posted; deciding again would post it again — check the tracker first.";
+
 /**
- * How a `reviewDecision` answer reads in the drawer. `uncertain` names a step
- * that timed out or was killed and so may still have been written; the
- * server's error already says to check the tracker, so the text names the
- * step and passes the error through, and never claims the step did not land.
+ * How a `reviewDecision` answer reads in the drawer. A success says where
+ * the card went. `uncertain` names a step that timed out or was killed and
+ * so may still have been written; the server's error already says to check
+ * the tracker, so the text names the step and passes the error through, and
+ * never claims the step did not land.
  */
 export function describeDecision(result: { ok: boolean; decision: ReviewDecisionKind; written: readonly ReviewStepName[]; error?: string; uncertain?: ReviewStepName }): DecisionOutcome {
-  const verb = result.decision === "accept" ? "Accepted" : "Changes requested";
   if (result.ok) {
-    return { tone: "ok", text: result.written.length > 0 ? `${verb}: ${stepsText(result.written)}.` : `${verb}.`, keepMessage: false };
+    const text =
+      result.decision === "accept"
+        ? result.written.includes("close")
+          ? "Accepted and closed — card moved to Closed."
+          : `Accepted: ${stepsText(result.written)}.`
+        : "Changes requested — comment posted and review:changes added; the review stays open.";
+    return { tone: "ok", text, keepMessage: false };
   }
   const error = result.error ?? "the tracker reported an error";
+  const commentPosted = result.written.includes("comment");
+  const posted = commentPosted ? COMMENT_POSTED : "";
   if (result.uncertain !== undefined) {
     const landed = result.written.length > 0 ? `Partly written (${stepsText(result.written)}). ` : "";
-    return { tone: "partial", text: `${landed}Unsure whether ${UNCERTAIN_TEXT[result.uncertain] ?? result.uncertain} was written: ${error}`, keepMessage: true };
+    return { tone: "partial", text: `${landed}Unsure whether ${UNCERTAIN_TEXT[result.uncertain] ?? result.uncertain} was written: ${error}${posted}`, keepMessage: !commentPosted };
   }
   if (result.written.length > 0) {
-    return { tone: "partial", text: `Partly written (${stepsText(result.written)}), then the tracker failed: ${error}`, keepMessage: true };
+    return { tone: "partial", text: `Partly written (${stepsText(result.written)}), then the tracker failed: ${error}${posted}`, keepMessage: !commentPosted };
   }
   return { tone: "error", text: `Nothing was written; the tracker failed: ${error}`, keepMessage: true };
 }

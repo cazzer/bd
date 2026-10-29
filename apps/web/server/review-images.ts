@@ -87,22 +87,51 @@ export async function resolveReviewImage(pathname: string, root: string = REVIEW
     realRoot = await realpath(root);
     realTarget = await realpath(requested);
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT" || (err as NodeJS.ErrnoException).code === "ENOTDIR") {
-      return { ok: false, status: 404, reason: "Not found" };
-    }
+    const refusal = fsRefusal(err);
+    if (refusal) return refusal;
     throw err;
   }
   if (!isInsideReviewRoot(realTarget, realRoot)) return { ok: false, status: 403, reason: "Outside the review image root" };
   const ext = path.extname(realTarget).toLowerCase();
   const contentType = CONTENT_TYPES[ext];
   if (contentType === undefined) return { ok: false, status: 403, reason: "Not an image" };
-  const info = await stat(realTarget);
+  let info;
+  try {
+    info = await stat(realTarget);
+  } catch (err) {
+    const refusal = fsRefusal(err);
+    if (refusal) return refusal;
+    throw err;
+  }
   if (!info.isFile()) return { ok: false, status: 404, reason: "Not found" };
   return { ok: true, file: realTarget, contentType, size: info.size };
 }
 
+/** A filesystem error that is the request's fault, as the status to refuse it with; anything else is the server's. */
+function fsRefusal(err: unknown): ResolvedReviewImage | null {
+  switch ((err as NodeJS.ErrnoException).code) {
+    case "ENOENT":
+    case "ENOTDIR":
+    case "ELOOP":
+      return { ok: false, status: 404, reason: "Not found" };
+    case "ENAMETOOLONG":
+      return { ok: false, status: 400, reason: "Malformed path" };
+    default:
+      return null;
+  }
+}
+
+/** Stream errors that mean the client stopped reading, not that serving failed. */
+const CLIENT_GONE: ReadonlySet<string> = new Set(["ERR_STREAM_PREMATURE_CLOSE", "EPIPE", "ECONNRESET"]);
+
+const COMMON_HEADERS = {
+  "Cache-Control": "no-store",
+  "X-Content-Type-Options": "nosniff",
+  "Cross-Origin-Resource-Policy": "same-origin",
+} as const;
+
 function refuse(res: ServerResponse, status: number, text: string, extraHeaders: Record<string, string> = {}): void {
-  res.writeHead(status, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", ...extraHeaders });
+  res.writeHead(status, { "Content-Type": "text/plain; charset=utf-8", ...COMMON_HEADERS, ...extraHeaders });
   res.end(`${text}\n`);
 }
 
@@ -137,8 +166,7 @@ export function createReviewImageHandler(options: ReviewImageHandlerOptions = {}
     res.writeHead(200, {
       "Content-Type": resolved.contentType,
       "Content-Length": String(resolved.size),
-      "Cache-Control": "no-store",
-      "X-Content-Type-Options": "nosniff",
+      ...COMMON_HEADERS,
     });
     if (req.method === "HEAD") {
       res.end();
@@ -147,7 +175,11 @@ export function createReviewImageHandler(options: ReviewImageHandlerOptions = {}
     try {
       await pipeline(createReadStream(resolved.file), res);
     } catch (err) {
-      console.error("[breakdown-web] review image stream failed:", err);
+      // A client that went away mid-image (a closed lightbox, a navigation) is not an error worth logging.
+      // (pipeline has destroyed `res` by now either way, so the code is what tells them apart.)
+      if (!CLIENT_GONE.has((err as NodeJS.ErrnoException).code ?? "")) {
+        console.error("[breakdown-web] review image stream failed:", err);
+      }
       res.destroy();
     }
   };

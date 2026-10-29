@@ -55,7 +55,7 @@ import { drawerProject } from "../lib/reviewDrawer.js";
 import { formatRoute, type BoardRoute, type GraphRoute } from "../lib/route.js";
 import { viewFilterOf, type ViewNode } from "../lib/viewFilter.js";
 import { trpc } from "../trpc.js";
-import { ReviewDrawer } from "./ReviewDrawer.js";
+import { ReviewDrawer, useWideDrawer } from "./ReviewDrawer.js";
 
 const READ_DEBOUNCE_MS = 150;
 /** A continuous stream of events cannot defer the read longer than this. */
@@ -111,6 +111,13 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
   const [announcement, setAnnouncement] = useState("");
   const [boardVersion, setBoardVersion] = useState(0);
   const boardRegionRef = useRef<HTMLDivElement>(null);
+  /** Unsent drawer messages by item, so closing the drawer or switching cards never drops one. */
+  const drafts = useRef(new Map<string, string>());
+  /** The project each opened item resolved to (see openProject). */
+  const pinnedProjects = useRef(new Map<string, string>());
+  const followCardUntil = useRef(0);
+  const returnFocusTo = useRef<string | null>(null);
+  const wide = useWideDrawer();
   const projectsRef = useRef(projects);
   const appliedKeyRef = useRef(projects.join("\u0000"));
   const readRef = useRef<(() => void) | null>(null);
@@ -341,13 +348,36 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
   }
 
   const route: BoardRoute = { view: "board", viewId, projects, item };
-  const openProject = item === null || !data ? null : drawerProject(item, cards, chosen);
+  const drawerOpen = view !== null && item !== null;
+
+  // The drawer's project: once known for an item it stays (so the drawer
+  // never remounts under the reader); before the first board read, the
+  // address's single project is enough to start reading the item.
+  let openProject: string | null = null;
+  if (item !== null) {
+    openProject = pinnedProjects.current.get(item) ?? drawerProject(item, cards, data ? chosen : projects);
+    if (openProject !== null) pinnedProjects.current.set(item, openProject);
+  }
+
+  // After a decision, the card is kept in view while re-reads move it.
+  useEffect(() => {
+    if (item === null || Date.now() > followCardUntil.current) return;
+    document.querySelector(`li[data-external-id="${CSS.escape(item)}"]`)?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [boardVersion, item]);
+
+  // Focus returns to the card once the drawer is gone (and, at phone width,
+  // the board is no longer inert), or to the board when the card is not shown.
+  useEffect(() => {
+    const closed = returnFocusTo.current;
+    if (item !== null || closed === null) return;
+    returnFocusTo.current = null;
+    const link = document.querySelector<HTMLAnchorElement>(`li[data-external-id="${CSS.escape(closed)}"] a`);
+    (link ?? boardRegionRef.current)?.focus();
+  }, [item]);
 
   function closeDrawer() {
-    const closing = item;
+    returnFocusTo.current = item;
     navigate({ ...route, item: null }, "push");
-    const link = closing === null ? null : document.querySelector<HTMLAnchorElement>(`li[data-external-id="${CSS.escape(closing)}"] a`);
-    (link ?? boardRegionRef.current)?.focus();
   }
 
   function toggleLane(lane: BoardLane) {
@@ -362,9 +392,9 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
   const heading = view ? view.title || "(untitled view)" : "Board";
 
   return (
-    <main className="flex h-dvh w-screen flex-col overflow-hidden">
+    <main className={`flex h-dvh w-screen flex-col overflow-hidden ${drawerOpen ? "sm:pr-[492px]" : ""}`}>
       <div aria-hidden="true" className="ambience pointer-events-none fixed inset-0 -z-10" />
-      <header className="glass m-3 mb-0 flex flex-wrap items-center gap-x-4 gap-y-2 p-3">
+      <header inert={drawerOpen && !wide} className="glass m-3 mb-0 flex flex-wrap items-center gap-x-4 gap-y-2 p-3">
         <h1 className="min-w-0 truncate text-base font-semibold text-fg">{heading}</h1>
         {view && offered.length > 0 && (
           <div role="group" aria-label="Projects" className="flex flex-wrap gap-1.5">
@@ -413,7 +443,7 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
         </div>
       </header>
 
-      <div className="flex min-h-0 flex-1 flex-col gap-3 p-3">
+      <div inert={drawerOpen && !wide} className="flex min-h-0 flex-1 flex-col gap-3 p-3">
         {viewState.kind === "not-a-view" && <Empty>The address does not name a view.</Empty>}
         {viewState.kind === "wrong-renderer" && (
           <Empty>
@@ -484,8 +514,23 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
           </>
         )}
       </div>
-      {view && item !== null && (
-        <ReviewDrawer key={`${openProject ?? ""}\u0000${item}`} project={openProject} item={item} boardLoaded={data !== null} boardVersion={boardVersion} onClose={closeDrawer} />
+      {drawerOpen && item !== null && (
+        <ReviewDrawer
+          key={item}
+          project={openProject}
+          item={item}
+          boardLoaded={data !== null}
+          boardVersion={boardVersion}
+          initialDraft={drafts.current.get(item) ?? ""}
+          onDraftChange={(draft) => {
+            if (draft.trim() === "") drafts.current.delete(item);
+            else drafts.current.set(item, draft);
+          }}
+          onDecided={() => {
+            followCardUntil.current = Date.now() + 15_000;
+          }}
+          onClose={closeDrawer}
+        />
       )}
     </main>
   );

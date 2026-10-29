@@ -1,25 +1,30 @@
 // The board's item drawer (board-visual-reviews, task 4.4; layout A + hero,
-// picked at the 4.1 checkpoint): a 480 px panel over the right of the board,
-// a full-screen sheet at phone width. Non-modal — the board stays usable
-// beside it — so it is an <aside> named by its title, not a dialog; the
-// title takes focus on mount and Escape inside the panel closes it (unless
-// the message box holds a draft, or the lightbox is open and handles Escape
-// itself).
+// picked at the 4.1 checkpoint): a 480 px panel at the right of the board
+// from `sm` up, a full-screen sheet below it. From `sm` up it is non-modal —
+// the board stays usable beside it (BoardView pads itself clear of it) — so
+// it is an <aside> named by its title. Below `sm` it covers the board, so it
+// is a modal dialog and BoardView makes the board inert. The title takes
+// focus on mount. Escape inside the panel closes it, unless a draft is in
+// the message box or a decision is being written (the state is checked,
+// not the focused element), or the lightbox is open (it handles Escape).
 //
 // It reads one item (`boardItem`) by project and external id, and re-reads
 // whenever the board re-reads (`boardVersion`) or a decision lands, keeping
 // the previous answer on screen meanwhile. `{ item: null }` is the waiting
 // state: the address can name a bead before its tracker has loaded, and the
-// next board change re-reads it.
+// next board change re-reads it. BoardView keys this on the item alone and
+// keeps the draft per item, so a project resolving late or a close-and-
+// reopen never drops what was typed.
 //
 // For a review: summary, screenshots (the first full width as a hero, the
 // rest a two-column grid; each enlarges in the lightbox), the comment
 // thread, and — while the review is open — a pinned footer taking Accept or
-// Request changes with a message (`reviewDecision`). A tracker failure
-// keeps the message; a refusal (tRPC error) shows in an alert and keeps it
-// too. A screenshot the server cannot serve shows as missing with its path,
-// never hiding the rest. For any other item: its fields, its description,
-// and a link to the graph.
+// Request changes with a message (`reviewDecision`). A success is a status
+// line; a failure is an alert box. A failure keeps the message unless the
+// comment already landed (deciding again would post it twice). Focus moves
+// to whichever line reports the outcome. A screenshot the server cannot
+// serve shows as unavailable with its path, never hiding the rest. For any
+// other item: its fields, its description, and a link to the graph.
 
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
 import { navigate } from "../lib/navigate.js";
@@ -30,6 +35,22 @@ import { Lightbox, type LightboxImage } from "./Lightbox.js";
 
 type BoardItem = NonNullable<Awaited<ReturnType<typeof trpc.boardItem.query>>["item"]>;
 
+/** Tailwind's `sm`: at and above it the drawer is a side panel beside the board. */
+const WIDE_QUERY = "(min-width: 40rem)";
+
+/** True from `sm` up (the drawer is a non-modal side panel), false below it (a modal sheet). */
+export function useWideDrawer(): boolean {
+  const [wide, setWide] = useState(() => (typeof matchMedia === "function" ? matchMedia(WIDE_QUERY).matches : true));
+  useEffect(() => {
+    const query = matchMedia(WIDE_QUERY);
+    const update = () => setWide(query.matches);
+    update();
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, []);
+  return wide;
+}
+
 export interface ReviewDrawerProps {
   /** The item's project; null while it cannot be known yet (the drawer waits). */
   project: string | null;
@@ -39,7 +60,16 @@ export interface ReviewDrawerProps {
   boardLoaded: boolean;
   /** Bumped by the board after every read; the drawer re-reads on it. */
   boardVersion: number;
+  /** The draft kept for this item from an earlier opening. */
+  initialDraft: string;
+  onDraftChange: (draft: string) => void;
+  /** A decision wrote something; the board keeps the card in view while it moves. */
+  onDecided: () => void;
   onClose: () => void;
+}
+
+interface Outcome extends DecisionOutcome {
+  notified: string | null;
 }
 
 function messageOf(err: unknown, fallback: string): string {
@@ -51,14 +81,23 @@ function formatTime(iso: string): string {
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
-export function ReviewDrawer({ project, item, boardLoaded, boardVersion, onClose }: ReviewDrawerProps) {
+export function ReviewDrawer({ project, item, boardLoaded, boardVersion, initialDraft, onDraftChange, onDecided, onClose }: ReviewDrawerProps) {
   const titleId = useId();
   const titleRef = useRef<HTMLHeadingElement>(null);
+  const wide = useWideDrawer();
   const [answer, setAnswer] = useState<BoardItem | null | undefined>(undefined);
   const [readError, setReadError] = useState<string | null>(null);
   const [refetch, setRefetch] = useState(0);
   const [lightbox, setLightbox] = useState<number | null>(null);
-  const [message, setMessage] = useState("");
+  const [message, setMessageState] = useState(initialDraft);
+  const [pending, setPending] = useState<ReviewDecisionKind | null>(null);
+  const [outcome, setOutcome] = useState<Outcome | null>(null);
+  const [refusal, setRefusal] = useState<string | null>(null);
+
+  function setMessage(next: string) {
+    setMessageState(next);
+    onDraftChange(next);
+  }
 
   useEffect(() => {
     titleRef.current?.focus();
@@ -82,22 +121,52 @@ export function ReviewDrawer({ project, item, boardLoaded, boardVersion, onClose
     };
   }, [project, item, boardVersion, refetch]);
 
+  const loaded = answer ?? null;
+
+  // A re-read can take away the screenshot the lightbox shows (re-requested
+  // with fewer images, or the item stopped being a valid review): close it.
+  const imageCount = loaded?.isReview ? loaded.reviewImages.length : 0;
+  useEffect(() => {
+    if (lightbox !== null && lightbox >= imageCount) setLightbox(null);
+  }, [lightbox, imageCount]);
+
   function onKeyDown(e: KeyboardEvent<HTMLElement>) {
     if (e.key !== "Escape" || e.defaultPrevented || lightbox !== null) return;
-    const target = e.target as HTMLElement;
-    if (target instanceof HTMLTextAreaElement && target.value.trim() !== "") return;
+    if (message.trim() !== "" || pending !== null) return;
     e.preventDefault();
     onClose();
   }
 
+  async function decide(decision: ReviewDecisionKind) {
+    if (project === null || loaded === null || decisionBlocked(decision, message, pending !== null)) return;
+    setPending(decision);
+    setOutcome(null);
+    setRefusal(null);
+    try {
+      const result = await trpc.reviewDecision.mutate({ project, item: loaded.externalId, decision, message });
+      const described = describeDecision(result);
+      setOutcome({ ...described, notified: describeNotified(result.notified) });
+      if (!described.keepMessage) setMessage("");
+      if (result.written.length > 0 || result.uncertain !== undefined) {
+        setRefetch((n) => n + 1);
+        onDecided();
+      }
+    } catch (err) {
+      setRefusal(messageOf(err, "The decision was refused."));
+    } finally {
+      setPending(null);
+    }
+  }
+
   // What the drawer can show: the item, still loading, or waiting for a tracker to bring it in.
-  const loaded = answer ?? null;
   const waiting = project === null ? boardLoaded : answer === null;
   const title = loaded ? loaded.title || "(untitled)" : waiting ? `Waiting for ${item}` : readError ? item : "Loading…";
 
   return (
     <aside
       aria-labelledby={titleId}
+      role={wide ? undefined : "dialog"}
+      aria-modal={wide ? undefined : true}
       onKeyDown={onKeyDown}
       className="glass fixed inset-0 z-40 flex flex-col overflow-hidden rounded-none border-0 bg-surface-strong sm:inset-auto sm:top-3 sm:right-3 sm:bottom-3 sm:w-[480px] sm:rounded-2xl sm:border"
     >
@@ -120,7 +189,7 @@ export function ReviewDrawer({ project, item, boardLoaded, boardVersion, onClose
             </h2>
             {loaded && (
               <div className="mt-2 flex flex-wrap gap-1.5">
-                <Chip tone={loaded.status === "closed" ? "muted" : "green"}>{loaded.status}</Chip>
+                <Chip tone={statusTone(loaded.status)}>{loaded.status}</Chip>
                 {loaded.isReview && <Chip tone="accent">review</Chip>}
                 {loaded.labels.includes("review:changes") && <Chip tone="amber">review:changes</Chip>}
                 <Chip>{loaded.project}</Chip>
@@ -149,14 +218,30 @@ export function ReviewDrawer({ project, item, boardLoaded, boardVersion, onClose
         {loaded && (loaded.isReview ? <ReviewBody item={loaded} lightbox={lightbox} setLightbox={setLightbox} /> : <PlainBody item={loaded} />)}
       </div>
 
-      {loaded && project !== null && loaded.isReview && (
-        <DecisionFooter item={loaded} project={project} message={message} setMessage={setMessage} onWritten={() => setRefetch((n) => n + 1)} />
+      {loaded && loaded.isReview && (canDecide(loaded) || outcome !== null || refusal !== null) && (
+        <DecisionFooter open={canDecide(loaded)} message={message} setMessage={setMessage} pending={pending} outcome={outcome} refusal={refusal} decide={(d) => void decide(d)} />
       )}
     </aside>
   );
 }
 
-function Chip({ children, tone = "muted" }: { children: ReactNode; tone?: "muted" | "accent" | "green" | "amber" }) {
+function statusTone(status: string): ChipTone {
+  switch (status) {
+    case "closed":
+    case "deferred":
+      return "muted";
+    case "blocked":
+      return "red";
+    case "in_progress":
+      return "amber";
+    default:
+      return "green";
+  }
+}
+
+type ChipTone = "muted" | "accent" | "green" | "amber" | "red";
+
+function Chip({ children, tone = "muted" }: { children: ReactNode; tone?: ChipTone }) {
   const cls =
     tone === "accent"
       ? "border-accent/60 bg-accent/15 text-fg"
@@ -164,7 +249,9 @@ function Chip({ children, tone = "muted" }: { children: ReactNode; tone?: "muted
         ? "border-emerald-400/40 bg-emerald-400/10 text-emerald-300"
         : tone === "amber"
           ? "border-amber-400/50 bg-amber-400/10 text-amber-200"
-          : "border-hairline text-fg-muted";
+          : tone === "red"
+            ? "border-red-500/40 bg-red-500/10 text-red-300"
+            : "border-hairline text-fg-muted";
   return <span className={`rounded-full border px-2 py-0.5 text-[11px] ${cls}`}>{children}</span>;
 }
 
@@ -197,9 +284,8 @@ function ReviewBody({ item, lightbox, setLightbox }: { item: BoardItem; lightbox
     return { name: img.name, path: img.path, src: src !== null && failed.has(src) ? null : src };
   });
 
-  // Focus returns to the thumbnail of the screenshot last shown, after the
-  // lightbox has unmounted and lifted `inert` from the app root (an inert
-  // element cannot take focus).
+  // Focus returns to the thumbnail of the screenshot last shown, once the
+  // lightbox has closed and the page is no longer inert.
   const returnFocusTo = useRef<number | null>(null);
   useEffect(() => {
     if (lightbox !== null || returnFocusTo.current === null) return;
@@ -252,7 +338,7 @@ function ReviewBody({ item, lightbox, setLightbox }: { item: BoardItem; lightbox
           Closed{item.closedReason ? <>: {item.closedReason}</> : "."}
         </p>
       )}
-      {lightbox !== null && <Lightbox images={images} index={lightbox} onIndexChange={setLightbox} onClose={closeLightbox} />}
+      {lightbox !== null && lightbox < images.length && <Lightbox images={images} index={lightbox} onIndexChange={setLightbox} onClose={closeLightbox} />}
     </>
   );
 }
@@ -272,11 +358,6 @@ function Thumb({
   onOpen: () => void;
   onError: (src: string) => void;
 }) {
-  const caption = (
-    <span className="block truncate border-t border-hairline px-2 py-1 font-mono text-[10px] text-fg-muted">
-      {index + 1}. {image.name}
-    </span>
-  );
   return (
     <button
       ref={buttonRef}
@@ -288,18 +369,22 @@ function Thumb({
       {image.src === null ? (
         <span className={`flex items-center justify-center p-3 text-center text-xs text-fg-muted ${hero ? "min-h-32" : "aspect-[16/10]"}`}>
           <span>
-            Missing: <span className="break-all font-mono">{image.path}</span>
+            Can't show: <span className="break-all font-mono">{image.path}</span>
           </span>
         </span>
       ) : (
         <img
           src={image.src}
           alt=""
+          loading={hero ? "eager" : "lazy"}
+          decoding="async"
           onError={() => onError(image.src!)}
-          className={`w-full transition-transform group-hover:scale-[1.02] ${hero ? "h-auto" : "aspect-[16/10] object-cover object-top"}`}
+          className={`w-full transition-transform group-hover:scale-[1.02] ${hero ? "h-auto max-h-[60vh] object-contain" : "aspect-[16/10] object-cover object-top"}`}
         />
       )}
-      {caption}
+      <span className="block truncate border-t border-hairline px-2 py-1 font-mono text-[10px] text-fg-muted">
+        {index + 1}. {image.name}
+      </span>
     </button>
   );
 }
@@ -359,103 +444,87 @@ function PlainBody({ item }: { item: BoardItem }) {
 }
 
 function DecisionFooter({
-  item,
-  project,
+  open,
   message,
   setMessage,
-  onWritten,
+  pending,
+  outcome,
+  refusal,
+  decide,
 }: {
-  item: BoardItem;
-  project: string;
+  open: boolean;
   message: string;
   setMessage: (m: string) => void;
-  onWritten: () => void;
+  pending: ReviewDecisionKind | null;
+  outcome: Outcome | null;
+  refusal: string | null;
+  decide: (decision: ReviewDecisionKind) => void;
 }) {
   const messageId = useId();
-  const hintId = useId();
-  const [pending, setPending] = useState<ReviewDecisionKind | null>(null);
-  const [outcome, setOutcome] = useState<(DecisionOutcome & { notified: string | null }) | null>(null);
-  const [refusal, setRefusal] = useState<string | null>(null);
-  const open = canDecide(item);
+  const labelId = useId();
+  const reportRef = useRef<HTMLDivElement>(null);
+  const busy = pending !== null;
 
-  async function decide(decision: ReviewDecisionKind) {
-    if (decisionBlocked(decision, message, pending !== null)) return;
-    setPending(decision);
-    setOutcome(null);
-    setRefusal(null);
-    try {
-      const result = await trpc.reviewDecision.mutate({ project, item: item.externalId, decision, message });
-      const described = describeDecision(result);
-      setOutcome({ ...described, notified: describeNotified(result.notified) });
-      if (!described.keepMessage) setMessage("");
-      if (result.written.length > 0) onWritten();
-    } catch (err) {
-      setRefusal(messageOf(err, "The decision was refused."));
-    } finally {
-      setPending(null);
-    }
-  }
+  // Focus follows the outcome, so a keyboard or screen-reader user lands on what happened.
+  useEffect(() => {
+    if (outcome !== null || refusal !== null) reportRef.current?.focus();
+  }, [outcome, refusal]);
 
-  // Mounted for every review so an outcome survives the item closing under it; draws nothing until there is something to show.
-  if (!open && outcome === null && refusal === null) return null;
-  const changesNeedMessage = message.trim() === "";
-  const toneClass = outcome?.tone === "ok" ? "text-emerald-300" : outcome?.tone === "partial" ? "text-amber-200" : "text-red-300";
+  const failure = refusal ?? (outcome !== null && outcome.tone !== "ok" ? outcome.text : null);
 
   return (
     <div className="space-y-2 border-t border-hairline bg-surface-strong p-4">
       {open && (
         <>
-          <label htmlFor={messageId} className="sr-only">
-            Message to the agent
+          <label id={labelId} htmlFor={messageId} className="block text-xs text-fg-muted">
+            Message to the agent — sent with either decision, required for Request changes
           </label>
           <textarea
             id={messageId}
             rows={2}
             value={message}
             onChange={(e) => setMessage(e.target.value)}
-            disabled={pending !== null}
-            placeholder="Message to the agent (required to request changes)"
-            className="block w-full resize-none rounded-lg border border-hairline bg-ground/60 px-3 py-2 text-sm text-fg placeholder:text-fg-muted/70 focus:outline-none focus:ring-2 focus:ring-accent disabled:opacity-60"
+            disabled={busy}
+            className="block w-full resize-none rounded-lg border border-hairline bg-ground/60 px-3 py-2 text-base text-fg focus:outline-none focus:ring-2 focus:ring-accent disabled:opacity-60 sm:text-sm"
           />
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
-              onClick={() => void decide("accept")}
-              disabled={decisionBlocked("accept", message, pending !== null)}
+              onClick={() => decide("accept")}
+              disabled={decisionBlocked("accept", message, busy)}
               className="min-h-11 rounded-lg bg-accent px-4 text-sm font-semibold text-ground hover:bg-accent/90 focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-ground disabled:opacity-60 sm:min-h-10"
             >
               {pending === "accept" ? "Accepting…" : "Accept"}
             </button>
             <button
               type="button"
-              onClick={() => void decide("changes")}
-              disabled={decisionBlocked("changes", message, pending !== null)}
-              aria-describedby={changesNeedMessage ? hintId : undefined}
+              onClick={() => decide("changes")}
+              disabled={decisionBlocked("changes", message, busy)}
+              aria-describedby={message.trim() === "" ? labelId : undefined}
               className="min-h-11 rounded-lg border border-amber-400/50 bg-amber-400/10 px-4 text-sm font-medium text-amber-200 hover:bg-amber-400/20 focus:outline-none focus:ring-2 focus:ring-amber-400 disabled:cursor-not-allowed disabled:opacity-50 sm:min-h-10"
             >
               {pending === "changes" ? "Sending…" : "Request changes"}
             </button>
-            {changesNeedMessage && (
-              <span id={hintId} className="text-xs text-fg-muted">
-                A message is required to request changes
-              </span>
-            )}
           </div>
         </>
       )}
-      <p role="status" className={`text-xs ${toneClass}`}>
-        {outcome && (
-          <>
-            {outcome.text}
-            {outcome.notified && <span className="block text-fg-muted">{outcome.notified}</span>}
-          </>
+      <div ref={reportRef} tabIndex={-1} className="focus:outline-none">
+        {failure !== null ? (
+          <div role="alert" className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300">
+            {failure}
+            {refusal === null && outcome?.notified && <span className="mt-1 block text-fg-muted">{outcome.notified}</span>}
+          </div>
+        ) : (
+          <p role="status" className="text-xs text-emerald-300">
+            {outcome && (
+              <>
+                {outcome.text}
+                {outcome.notified && <span className="block text-fg-muted">{outcome.notified}</span>}
+              </>
+            )}
+          </p>
         )}
-      </p>
-      {refusal && (
-        <p role="alert" className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300">
-          {refusal}
-        </p>
-      )}
+      </div>
     </div>
   );
 }

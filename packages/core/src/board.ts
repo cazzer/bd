@@ -584,7 +584,8 @@ export async function getBoardItem(db: Database, options: BoardItemOptions): Pro
         JOIN nodes d ON d.id = e.dst_id
         JOIN resolved_nodes p ON p.id = COALESCE(d.merged_into, d.id)
         WHERE e.edge_type = ${CHILD_OF_EDGE_TYPE}
-          AND (e.src_id = item.id OR e.src_id IN (SELECT a.id FROM nodes a WHERE a.merged_into = item.id))
+          -- An array probe, not an OR: it keeps the edges_src_id_edge_type_idx index scan.
+          AND e.src_id = ANY (ARRAY(SELECT item.id UNION ALL SELECT a.id FROM nodes a WHERE a.merged_into = item.id))
           AND p.id <> item.id
           AND p.node_type = ${WORK_ITEM_NODE_TYPE}
           AND p.metadata @> ${JSON.stringify({ project })}::jsonb
