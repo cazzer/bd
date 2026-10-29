@@ -543,10 +543,11 @@ describe("getBoardItem", () => {
     expect(item?.updatedAt).toBeInstanceOf(Date);
   });
 
-  it("answers review null for a plain item, null for another project or a merged-away id, and invalid for a malformed review", async () => {
+  it("answers review null for a plain item, null for another project, the survivor for a merged-away id, and invalid for a malformed review", async () => {
     const { a, b, tag } = scope();
     const ids = await rawItems([
-      { ext: `${tag}-plain`, project: a, metadata: { labels: ["ui"], review: { summary: "ignored on a non-review" } } },
+      { ext: `${tag}-plain`, project: a, metadata: { labels: ["ui"], review: { summary: "ignored on a non-review" }, review_comments: comments } },
+      { ext: `${tag}-nullreview`, project: a, metadata: { labels: ["review"], review: null } },
       { ext: `${tag}-bad`, project: a, metadata: { labels: ["review"], review: { images: "a.png" } } },
       { ext: `${tag}-stored-invalid`, project: a, metadata: { labels: ["review"], review: { invalid: true } } },
       { ext: `${tag}-nometa`, project: a, metadata: { labels: ["review"] } },
@@ -563,8 +564,10 @@ describe("getBoardItem", () => {
 
     expect(await getBoardItem(db, { project: a, externalId: `${tag}-plain` })).toMatchObject({ isReview: false, review: null, comments: [], labels: ["ui"] });
     expect(await getBoardItem(db, { project: b, externalId: `${tag}-plain` })).toBeNull();
-    expect(await getBoardItem(db, { project: a, externalId: `${tag}-loser` })).toBeNull();
+    expect(await getBoardItem(db, { project: a, externalId: `${tag}-loser` })).toMatchObject({ id: ids.get(`${tag}-survivor`), externalId: `${tag}-survivor` });
+    expect(await getBoardItem(db, { project: b, externalId: `${tag}-loser` })).toBeNull();
     expect(await getBoardItem(db, { project: a, externalId: `${tag}-survivor` })).toMatchObject({ id: ids.get(`${tag}-survivor`) });
+    expect(await getBoardItem(db, { project: a, externalId: `${tag}-nullreview` })).toMatchObject({ isReview: true, review: null });
     expect((await getBoardItem(db, { project: a, externalId: `${tag}-bad` }))?.review).toEqual({ invalid: true });
     expect((await getBoardItem(db, { project: a, externalId: `${tag}-stored-invalid` }))?.review).toEqual({ invalid: true });
     expect(await getBoardItem(db, { project: a, externalId: `${tag}-nometa` })).toMatchObject({ isReview: true, review: null, comments: [] });

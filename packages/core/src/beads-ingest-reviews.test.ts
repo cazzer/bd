@@ -99,11 +99,16 @@ describe("ingestBeadsCheckout reviews", () => {
     expect((await rowOf(`${PREFIX}-2`))?.metadata).not.toHaveProperty("review_comments");
     expect((await rowOf(`${PREFIX}-3`))?.metadata).not.toHaveProperty("review");
 
-    const same = await load(project, issues(3), { [reviewId]: three });
+    expect(row?.metadata).toMatchObject({ review_comment_count: 3 });
+
+    // Same comment_count: the stored thread is carried forward, no bd comments call, nothing changes.
+    const same = await load(project, issues(3), {});
+    expect(same.calls.filter((c) => c[0] === "comments")).toEqual([]);
     expect(same.nodes).toEqual({ created: 0, updated: 0, unchanged: 5 });
     expect(same.changed).toBe(false);
 
     const fourth = await load(project, issues(4), { [reviewId]: [...three, comment(reviewId, 4, "Accepted: looks right")] });
+    expect(fourth.calls.filter((c) => c[0] === "comments")).toEqual([["comments", reviewId, "--json"]]);
     expect(fourth.changedNodeIds).toEqual([row?.id]);
     expect(fourth.changed).toBe(true);
     expect(fourth.nodes).toEqual({ created: 0, updated: 1, unchanged: 4 });
@@ -117,6 +122,28 @@ describe("ingestBeadsCheckout reviews", () => {
     await expect(ingestBeadsCheckout(db, { dir: DIR, project, runBd })).rejects.toThrow(`bd comments ${reviewId} --json did not return an array`);
     expect(await rowOf(reviewId)).toBeUndefined();
     expect(await rowOf(`project:${project}`)).toBeUndefined();
+  });
+
+  it("carries forward a thread whose comments were escaped, cut, and NUL-replaced, still reporting unchanged", async () => {
+    const project = keyOf("carry");
+    const reviewId = `${PREFIX}-40`;
+    const thread = [
+      { id: 1, author: "a\u0000", text: "\u0001".repeat(MAX_REVIEW_COMMENT_LENGTH), created_at: "2026-10-28T10:00:00Z" },
+      { id: 2, author: null, text: "\u0001".repeat(MAX_REVIEW_COMMENT_LENGTH), created_at: "not a time" },
+    ];
+    const bead = [issue(40, { labels: ["review"], comment_count: 2, metadata: { review: { summary: "x\u0000" } } })];
+    await load(project, bead, { [reviewId]: thread });
+    const again = await load(project, bead, {});
+    expect(again.calls.filter((c) => c[0] === "comments")).toEqual([]);
+    expect(again.nodes).toEqual({ created: 0, updated: 0, unchanged: 2 });
+  });
+
+  it("fails the load when bd comments returns invalid JSON", async () => {
+    const project = keyOf("json");
+    const reviewId = `${PREFIX}-50`;
+    const runBd = async (args: readonly string[]) => (args[0] === "list" ? JSON.stringify([issue(50, { labels: ["review"], comment_count: 1 })]) : "{not json");
+    await expect(ingestBeadsCheckout(db, { dir: DIR, project, runBd })).rejects.toThrow(`bd comments ${reviewId} --json returned invalid JSON`);
+    expect(await rowOf(reviewId)).toBeUndefined();
   });
 
   it("propagates a failing comments call", async () => {

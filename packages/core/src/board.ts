@@ -80,13 +80,16 @@
 // Reviews (board-visual-reviews, design.md decision 2): a card carries only
 // `review` (labelled `review` exactly), so the board stays light. The drawer
 // reads one item through `getBoardItem` — content, labels, the review
-// object, and the comment thread — from the canonical row (`resolved_nodes`,
-// so a merged-away duplicate's external id is not found) of that project
-// with that external id; when two source systems hold the same external id
-// in one project, the `beads` row wins, then the lesser id. The stored
-// review and comments are re-normalized on read (reviews.ts; both are
-// idempotent), so a raw-written or pre-contract value is answered in the
-// contract's shape, a malformed review as `{ invalid: true }`.
+// object, and the comment thread. It finds the `nodes` row of that project
+// with that external id and answers its canonical row, folded through
+// `merged_into` the way lookup.ts folds (so the drawer opened on a bead id
+// that was merged away shows the survivor rather than waiting forever); a
+// row that is itself canonical wins over a merged-away one, then the
+// `beads` row, then the lesser id. The stored review and comments are
+// re-normalized on read (reviews.ts; both are idempotent), so a raw-written
+// or pre-contract value is answered in the contract's shape, a malformed
+// review as `{ invalid: true }`; neither is read off an item that is not a
+// review.
 
 import { sql, type SQL } from "drizzle-orm";
 import type { Database } from "@breakdown/db";
@@ -493,12 +496,14 @@ export async function getBoardItem(db: Database, options: BoardItemOptions): Pro
   let result: { rows: RawItemRow[] };
   try {
     result = await db.execute<RawItemRow>(sql`
-      SELECT id, external_id, source_system, title, content, metadata, updated_at
-      FROM resolved_nodes
-      WHERE node_type = ${WORK_ITEM_NODE_TYPE}
-        AND metadata @> ${JSON.stringify({ project })}::jsonb
-        AND external_id = ${externalId}
-      ORDER BY (source_system = 'beads') DESC, id
+      SELECT r.id, r.external_id, r.source_system, r.title, r.content, r.metadata, r.updated_at
+      FROM nodes n
+      JOIN resolved_nodes r ON r.id = COALESCE(n.merged_into, n.id)
+      WHERE n.node_type = ${WORK_ITEM_NODE_TYPE}
+        AND n.metadata @> ${JSON.stringify({ project })}::jsonb
+        AND n.external_id = ${externalId}
+        AND r.node_type = ${WORK_ITEM_NODE_TYPE}
+      ORDER BY (n.merged_into IS NULL) DESC, (n.source_system = 'beads') DESC, n.id
       LIMIT 1
     `);
   } catch (err) {
@@ -526,7 +531,7 @@ export async function getBoardItem(db: Database, options: BoardItemOptions): Pro
     closedReason: fields.closedReason,
     updatedAt: new Date(row.updated_at),
     isReview,
-    review: isReview && REVIEW_METADATA_KEY in metadata ? normalizeReviewMetadata(metadata[REVIEW_METADATA_KEY]) : null,
-    comments: normalizeReviewComments(metadata[REVIEW_COMMENTS_KEY]),
+    review: isReview && metadata[REVIEW_METADATA_KEY] !== undefined && metadata[REVIEW_METADATA_KEY] !== null ? normalizeReviewMetadata(metadata[REVIEW_METADATA_KEY]) : null,
+    comments: isReview ? normalizeReviewComments(metadata[REVIEW_COMMENTS_KEY]) : [],
   };
 }

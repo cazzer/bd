@@ -14,9 +14,11 @@
 // silently truncate the export the moment the tracker outgrows that).
 // For each issue labelled `review` with `comment_count > 0`, it then runs
 // `bd comments <id> --json` through the same runner, serially, so the
-// thread lands on the review's work item (board-visual-reviews); a tracker
-// with no reviews costs no extra process, and a failed or malformed comments
-// call fails the load before anything is written.
+// thread lands on the review's work item (board-visual-reviews) — unless
+// the stored row's `review_comment_count` still matches, in which case the
+// stored thread is carried forward (one read for all of them), so a reload
+// spawns a process only for reviews whose comments changed. A failed or
+// malformed comments call fails the load before anything is written.
 //
 // With a `project` key, every item is stamped `project` and a registry
 // node `{ beads_project, external_id 'project:<key>', metadata { project,
@@ -152,12 +154,47 @@ async function fetchIssues(runBd: RunBd, cwd: string, signal?: AbortSignal): Pro
   return parsed as BeadsIssue[];
 }
 
-/** `bd comments <id> --json` for every review issue with comments, one at a time; keyed by issue id. */
-async function fetchReviewComments(runBd: RunBd, cwd: string, issues: readonly BeadsIssue[], signal?: AbortSignal): Promise<Map<string, unknown[]>> {
+/**
+ * The comment thread of every review issue with comments, keyed by issue id.
+ * One read first: a stored row of this project whose `review_comment_count`
+ * equals the issue's `comment_count` has its stored thread carried forward
+ * (normalization is idempotent, so the reload is `unchanged`); the rest are
+ * fetched with `bd comments <id> --json`, one at a time.
+ */
+async function fetchReviewComments(
+  db: Database,
+  runBd: RunBd,
+  cwd: string,
+  project: string | undefined,
+  issues: readonly BeadsIssue[],
+  signal?: AbortSignal,
+): Promise<Map<string, unknown[]>> {
   const byIssue = new Map<string, unknown[]>();
-  for (const issue of issues) {
-    if (!isReviewIssue(issue) || typeof issue.comment_count !== "number" || issue.comment_count <= 0) continue;
-    const parsed: unknown = JSON.parse(await runBd(["comments", issue.id, "--json"], cwd, signal));
+  const wanted = issues.filter((i) => isReviewIssue(i) && typeof i.comment_count === "number" && i.comment_count > 0);
+  if (wanted.length === 0) return byIssue;
+  const stored = await db
+    .select({
+      externalId: nodes.externalId,
+      project: sql<string | null>`${nodes.metadata}->>'project'`,
+      count: sql<unknown>`${nodes.metadata}->'review_comment_count'`,
+      comments: sql<unknown>`${nodes.metadata}->'review_comments'`,
+    })
+    .from(nodes)
+    .where(and(eq(nodes.sourceSystem, BEADS_SOURCE_SYSTEM), inArray(nodes.externalId, wanted.map((i) => i.id))));
+  const storedById = new Map(stored.map((row) => [row.externalId, row]));
+  for (const issue of wanted) {
+    const prior = storedById.get(issue.id);
+    if (prior && prior.project === (project ?? null) && prior.count === issue.comment_count) {
+      byIssue.set(issue.id, Array.isArray(prior.comments) ? prior.comments : []);
+      continue;
+    }
+    const stdout = await runBd(["comments", issue.id, "--json"], cwd, signal);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(stdout);
+    } catch (err) {
+      throw new Error(`bd comments ${issue.id} --json returned invalid JSON`, { cause: err });
+    }
     if (!Array.isArray(parsed)) {
       throw new Error(`bd comments ${issue.id} --json did not return an array`);
     }
@@ -229,7 +266,7 @@ export async function ingestBeadsCheckout(db: Database, options: IngestBeadsChec
   if (issues.length === 0) {
     throw new Error("no issues to ingest");
   }
-  const comments = await fetchReviewComments(runBd, checkoutPath, issues, options.signal);
+  const comments = await fetchReviewComments(db, runBd, checkoutPath, project, issues, options.signal);
 
   const nodeInputs: NodeInput[] = issues.map((issue, index) =>
     mapBeadsIssueToNode(issue, index, { ...(project === undefined ? {} : { project }), comments: comments.get(issue.id) ?? [] }),

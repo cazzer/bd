@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { deriveBeadsEdges, fitText, mapBeadsIssueToNode, resolveBeadsEdges, type BeadsIssue } from "./beads.js";
 import { InvalidEventTimeError, InvalidWorkItemError } from "./errors.js";
-import { DEFAULT_MAX_TITLE_LENGTH } from "./nodes.js";
+import { DEFAULT_MAX_METADATA_LENGTH, DEFAULT_MAX_TITLE_LENGTH } from "./nodes.js";
+import { MAX_REVIEW_COMMENT_LENGTH } from "./reviews.js";
 import { MAX_ASSIGNEE_LENGTH, MAX_CLOSED_REASON_LENGTH, MAX_SPEC_ID_LENGTH } from "./work-items.js";
 
 const base: BeadsIssue = {
@@ -151,6 +152,36 @@ describe("mapBeadsIssueToNode reviews", () => {
     ]);
     expect(node.metadata).not.toHaveProperty("other");
     expect(node.metadata).toMatchObject({ labels: ["review"], project: "bd", status: "open" });
+  });
+
+  it("records bd's comment_count as review_comment_count on a review bead", () => {
+    expect(mapBeadsIssueToNode(reviewBead, 0, { comments: threeComments }).metadata).toMatchObject({ review_comment_count: 3 });
+    expect(mapBeadsIssueToNode({ ...reviewBead, comment_count: null }).metadata).not.toHaveProperty("review_comment_count");
+  });
+
+  it("treats an explicit metadata.review null like an absent one", () => {
+    expect(mapBeadsIssueToNode({ ...reviewBead, metadata: { review: null } }).metadata).not.toHaveProperty("review");
+  });
+
+  it("drops review_comments, then marks the review invalid, rather than exceed the metadata cap", () => {
+    const thread = Array.from({ length: 10 }, (_, i) => ({ id: i, author: "a", text: "c".repeat(MAX_REVIEW_COMMENT_LENGTH), created_at: `2026-10-28T10:0${i}:00Z` }));
+    const fullReview = { images: Array.from({ length: 20 }, (_, i) => `/r/${i}/${"p".repeat(500)}`), summary: "s".repeat(1000) };
+
+    const noComments = mapBeadsIssueToNode({ ...reviewBead, labels: ["review", "l".repeat(25_000)], metadata: { review: fullReview } }, 0, { comments: thread });
+    expect(noComments.metadata).not.toHaveProperty("review_comments");
+    expect(noComments.metadata?.["review"]).toMatchObject({ summary: fullReview.summary });
+    expect(JSON.stringify(noComments.metadata).length).toBeLessThanOrEqual(DEFAULT_MAX_METADATA_LENGTH);
+
+    const invalid = mapBeadsIssueToNode({ ...reviewBead, labels: ["review", "l".repeat(40_000)], metadata: { review: fullReview } }, 0, { comments: thread });
+    expect(invalid.metadata).not.toHaveProperty("review_comments");
+    expect(invalid.metadata?.["review"]).toEqual({ invalid: true });
+    expect(JSON.stringify(invalid.metadata).length).toBeLessThanOrEqual(DEFAULT_MAX_METADATA_LENGTH);
+  });
+
+  it("keeps a review with a 2,000 control-character summary under the metadata cap", () => {
+    const node = mapBeadsIssueToNode({ ...reviewBead, metadata: { review: { summary: "\u0001".repeat(2000) } } }, 0, { comments: threeComments });
+    expect(node.metadata?.["review"]).toMatchObject({ summary: "\u0001".repeat(2000) });
+    expect(JSON.stringify(node.metadata).length).toBeLessThanOrEqual(DEFAULT_MAX_METADATA_LENGTH);
   });
 
   it("stores malformed review metadata as invalid rather than refusing", () => {

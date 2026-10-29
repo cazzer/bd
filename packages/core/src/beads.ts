@@ -33,8 +33,8 @@
 import type { EdgeInput } from "./edges.js";
 import { normalizeOccurredAt, OCCURRED_AT_KEY } from "./event-time.js";
 import { fitText } from "./fit-text.js";
-import { DEFAULT_MAX_TITLE_LENGTH, type NodeInput } from "./nodes.js";
-import { normalizeReviewComments, normalizeReviewMetadata, REVIEW_COMMENTS_KEY, REVIEW_LABEL, REVIEW_METADATA_KEY } from "./reviews.js";
+import { DEFAULT_MAX_METADATA_LENGTH, DEFAULT_MAX_TITLE_LENGTH, type NodeInput } from "./nodes.js";
+import { normalizeReviewComments, normalizeReviewMetadata, REVIEW_COMMENT_COUNT_KEY, REVIEW_COMMENTS_KEY, REVIEW_LABEL, REVIEW_METADATA_KEY } from "./reviews.js";
 import {
   BLOCKS_EDGE_TYPE,
   CHILD_OF_EDGE_TYPE,
@@ -114,16 +114,21 @@ function section(heading: string, body: string | null | undefined): string {
  * each naming `index`. `options.project`, when given, is written as the
  * item's `project` key (validated by the contract, so a bad key is an
  * `InvalidWorkItemError` naming `project`). For a review issue
- * (`isReviewIssue`) only: `metadata.review`, when present, is written as
- * `review` under the review contract (malformed → `{ invalid: true }`,
- * never a refusal), and `options.comments`, normalized, as
- * `review_comments` when any survive. Every other issue's metadata is
- * exactly what it was before reviews existed.
+ * (`isReviewIssue`) only: `metadata.review`, when present and not null, is
+ * written as `review` under the review contract (malformed →
+ * `{ invalid: true }`, never a refusal); `options.comments`, normalized, as
+ * `review_comments` when any survive; and `comment_count`, when an integer,
+ * as `review_comment_count` (what the loader compares to carry a thread
+ * forward without re-fetching it). If the assembled metadata would still
+ * exceed the write path's cap, `review_comments` is dropped, then `review`
+ * marked invalid, so a review never fails the load. Every other issue's
+ * metadata is exactly what it was before reviews existed.
  */
 export function mapBeadsIssueToNode(issue: BeadsIssue, index?: number, options: { project?: string; comments?: readonly unknown[] } = {}): NodeInput {
   const review = isReviewIssue(issue);
   const rawReview = review && issue.metadata !== null && typeof issue.metadata === "object" ? issue.metadata[REVIEW_METADATA_KEY] : undefined;
   const comments = review ? normalizeReviewComments(options.comments) : [];
+  const commentCount = review && Number.isInteger(issue.comment_count) && (issue.comment_count as number) >= 0 ? issue.comment_count : undefined;
   const metadata: Record<string, unknown> = {
     status: issue.status,
     priority: issue.priority,
@@ -138,18 +143,26 @@ export function mapBeadsIssueToNode(issue: BeadsIssue, index?: number, options: 
     [OCCURRED_AT_KEY]: issue.created_at ?? null,
     ...(options.project === undefined ? {} : { project: options.project }),
     ...(issue.labels && issue.labels.length > 0 ? { labels: issue.labels } : {}),
-    ...(rawReview === undefined ? {} : { [REVIEW_METADATA_KEY]: normalizeReviewMetadata(rawReview) }),
+    ...(rawReview === undefined || rawReview === null ? {} : { [REVIEW_METADATA_KEY]: normalizeReviewMetadata(rawReview) }),
     ...(comments.length > 0 ? { [REVIEW_COMMENTS_KEY]: comments } : {}),
+    ...(commentCount === undefined ? {} : { [REVIEW_COMMENT_COUNT_KEY]: commentCount }),
   };
   // Event time first, so an unparseable created_at is named as occurred_at
   // rather than surfacing through the work-item contract.
+  const normalized = normalizeWorkItemMetadata(normalizeOccurredAt(metadata, { index }), { index });
+  if (JSON.stringify(normalized).length > DEFAULT_MAX_METADATA_LENGTH) {
+    delete normalized[REVIEW_COMMENTS_KEY];
+    if (REVIEW_METADATA_KEY in normalized && JSON.stringify(normalized).length > DEFAULT_MAX_METADATA_LENGTH) {
+      normalized[REVIEW_METADATA_KEY] = { invalid: true };
+    }
+  }
   return {
     nodeType: WORK_ITEM_NODE_TYPE,
     sourceSystem: BEADS_SOURCE_SYSTEM,
     externalId: issue.id,
     title: fitText(issue.title, DEFAULT_MAX_TITLE_LENGTH) ?? issue.title,
     content: `${issue.description?.trim() ?? ""}${section("Acceptance criteria", issue.acceptance_criteria)}${section("Design", issue.design)}${section("Notes", issue.notes)}`,
-    metadata: normalizeWorkItemMetadata(normalizeOccurredAt(metadata, { index }), { index }),
+    metadata: normalized,
   };
 }
 

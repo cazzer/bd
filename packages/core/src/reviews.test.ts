@@ -10,6 +10,7 @@ import {
   MAX_REVIEW_COMMENTS_CHARS,
   MAX_REVIEW_IMAGE_PATH_LENGTH,
   MAX_REVIEW_IMAGES,
+  MAX_REVIEW_METADATA_CHARS,
   MAX_REVIEW_SUMMARY_LENGTH,
   normalizeReviewComments,
   normalizeReviewMetadata,
@@ -62,6 +63,26 @@ describe("normalizeReviewMetadata", () => {
     expect(normalizeReviewMetadata({ images: [longest] })).toMatchObject({ images: [longest] });
   });
 
+  it("refuses control characters in image paths, so twenty escaped paths cannot blow the metadata cap", () => {
+    const probe = Array.from({ length: MAX_REVIEW_IMAGES }, () => `/${"\u0001".repeat(MAX_REVIEW_IMAGE_PATH_LENGTH - 1)}`);
+    expect(JSON.stringify(probe).length).toBeGreaterThan(60_000);
+    expect(normalizeReviewMetadata({ images: probe })).toEqual({ invalid: true });
+    expect(normalizeReviewMetadata({ images: ["/tmp/a\nb.png"] })).toEqual({ invalid: true });
+  });
+
+  it("marks a review whose JSON exceeds MAX_REVIEW_METADATA_CHARS invalid, and keeps a control-character summary under it", () => {
+    const summary = "\u0001".repeat(MAX_REVIEW_SUMMARY_LENGTH);
+    const alone = normalizeReviewMetadata({ summary });
+    expect(alone).toEqual({ images: [], pane: null, summary });
+    expect(JSON.stringify(alone).length).toBeLessThanOrEqual(MAX_REVIEW_METADATA_CHARS);
+    const images = Array.from({ length: MAX_REVIEW_IMAGES }, (_, i) => `/${String(i).padStart(2, "0")}${"a".repeat(MAX_REVIEW_IMAGE_PATH_LENGTH - 3)}`);
+    expect(normalizeReviewMetadata({ images, summary })).toEqual({ invalid: true });
+  });
+
+  it("replaces NUL in the summary with U+FFFD", () => {
+    expect(normalizeReviewMetadata({ summary: "a\u0000b" })).toEqual({ images: [], pane: null, summary: "a�b" });
+  });
+
   it("is idempotent, including on a stored invalid marker", () => {
     const valid = normalizeReviewMetadata({ images: [img(1)], pane: "p1", summary: "s" });
     expect(normalizeReviewMetadata(valid)).toEqual(valid);
@@ -111,9 +132,25 @@ describe("normalizeReviewComments", () => {
     expect(JSON.stringify(normalizeReviewComments(raw.slice(-(kept.length + 1)))).length).toBe(JSON.stringify(kept).length);
     expect(kept.at(-1)?.id).toBe(String(MAX_REVIEW_COMMENTS - 1));
 
-    // One comment whose JSON alone exceeds the budget (control characters escape six-fold) is still kept.
-    const huge = normalizeReviewComments([{ id: 1, text: "\u0001".repeat(MAX_REVIEW_COMMENT_LENGTH) }, { id: 2, text: "\u0001".repeat(MAX_REVIEW_COMMENT_LENGTH) }]);
+    // A newest comment whose JSON alone exceeds the budget (control characters escape six-fold) is kept, its text cut to fit.
+    const author = "\u0001".repeat(MAX_REVIEW_COMMENT_AUTHOR_LENGTH);
+    const huge = normalizeReviewComments([
+      { id: 1, author, text: "\u0001".repeat(MAX_REVIEW_COMMENT_LENGTH) },
+      { id: 2, author, text: "\u0001".repeat(MAX_REVIEW_COMMENT_LENGTH) },
+    ]);
     expect(huge.map((c) => c.id)).toEqual(["2"]);
+    expect(JSON.stringify(huge).length).toBeLessThanOrEqual(MAX_REVIEW_COMMENTS_CHARS);
+    expect(huge[0]!.text.length).toBeGreaterThan(MAX_REVIEW_COMMENT_LENGTH - 500);
+    expect(normalizeReviewComments(huge)).toEqual(huge);
+  });
+
+  it("replaces NUL in text, author, and id with U+FFFD and is idempotent", () => {
+    const once = normalizeReviewComments([{ id: "a\u0000", author: "x\u0000y", text: "t\u0000", created_at: "2026-10-01T00:00:00Z" }, { id: 7, text: "plain" }]);
+    expect(once).toEqual([
+      { id: "7", author: null, text: "plain", created_at: null },
+      { id: "a�", author: "x�y", text: "t�", created_at: "2026-10-01T00:00:00.000Z" },
+    ]);
+    expect(normalizeReviewComments(once)).toEqual(once);
   });
 });
 
