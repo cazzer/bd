@@ -17,7 +17,7 @@
     "ingest:beads": "INGEST_BEADS_CWD=\"$INIT_CWD\" pnpm --filter @breakdown/core ingest:beads",
     "ingest:repo": "INGEST_REPO_CWD=\"$INIT_CWD\" pnpm --filter @breakdown/core ingest:repo",
     "typecheck": "pnpm -r run typecheck",
-    "test": "vitest run",
+    "test": "vitest run && node --test bin/*.test.mjs",
     "check": "pnpm typecheck && pnpm test"
   },
   "devDependencies": {
