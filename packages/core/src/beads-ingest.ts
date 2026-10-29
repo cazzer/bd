@@ -121,11 +121,15 @@ export interface IngestBeadsCheckoutResult {
   skippedUnknownType: number;
 }
 
-/** The default runner: `bd`'s own stderr is attached to the failure. */
+/** The default runner: `bd`'s own stderr is attached to the failure. BEADS_DIR / BEADS_DB are dropped from its environment: either would point `bd` at another database than the checkout's, whatever `cwd` says. */
 export const defaultRunBd: RunBd = async (args, cwd, signal) => {
+  const env = { ...process.env };
+  delete env["BEADS_DIR"];
+  delete env["BEADS_DB"];
   try {
     const { stdout } = await execFileAsync("bd", [...args], {
       cwd,
+      env,
       maxBuffer: 64 * 1024 * 1024,
       timeout: BD_TIMEOUT_MS,
       killSignal: "SIGKILL",

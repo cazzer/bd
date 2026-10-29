@@ -330,6 +330,7 @@ export {
 export {
   getWorkBoard,
   getBoardItem,
+  getRegisteredBeadsProject,
   listBeadsProjects,
   buildWorkBoardQuery,
   BOARD_COLUMNS,
