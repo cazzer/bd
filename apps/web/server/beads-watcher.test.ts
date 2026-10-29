@@ -579,3 +579,93 @@ describe("beads watcher", () => {
     expect(ingest).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("beads watcher wake(project)", () => {
+  function setup(load: () => Promise<LoadResult>) {
+    const fps = new Map<string, string | null>([["/x/a", "fp1"]]);
+    const ingest = vi.fn(load);
+    const watcher = createBeadsWatcher({
+      db: {} as never,
+      ingest: () => ingest(),
+      readRegistry: async () => [{ project: "a", dir: "/x/a" }],
+      watchDir: () => ({ close: () => {} }),
+      fingerprint: (dir) => fps.get(dir) ?? null,
+      log: () => {},
+    });
+    return { watcher, ingest, fps };
+  }
+
+  async function started(load: () => Promise<LoadResult>) {
+    const s = setup(load);
+    await s.watcher.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(s.ingest).toHaveBeenCalledTimes(1);
+    return s;
+  }
+
+  it("loads at once, without the debounce, when the fingerprint moved", async () => {
+    const { watcher, ingest, fps } = await started(async () => RESULT());
+    fps.set("/x/a", "fp2");
+    expect(watcher.wake("a")).toBe(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ingest).toHaveBeenCalledTimes(2);
+    await watcher.stop();
+  });
+
+  it("loads on a null fingerprint", async () => {
+    const { watcher, ingest, fps } = await started(async () => RESULT());
+    fps.set("/x/a", null);
+    expect(watcher.wake("a")).toBe(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ingest).toHaveBeenCalledTimes(2);
+    await watcher.stop();
+  });
+
+  it("skips when the fingerprint is unchanged since a successful load", async () => {
+    const { watcher, ingest } = await started(async () => RESULT());
+    expect(watcher.wake("a")).toBe(true);
+    await vi.advanceTimersByTimeAsync(DEBOUNCE_MS + 10);
+    expect(ingest).toHaveBeenCalledTimes(1);
+    await watcher.stop();
+  });
+
+  it("retries after a failed load even when the fingerprint is unchanged", async () => {
+    const { watcher, ingest } = await started(async () => {
+      throw new Error("bd failed");
+    });
+    expect(watcher.wake("a")).toBe(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ingest).toHaveBeenCalledTimes(2);
+    await watcher.stop();
+  });
+
+  it("a wake during a load yields exactly one follow-up", async () => {
+    const { load, calls } = deferredLoad();
+    const { watcher, ingest, fps } = setup(load);
+    await watcher.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ingest).toHaveBeenCalledTimes(1);
+
+    fps.set("/x/a", "fp2");
+    watcher.wake("a");
+    watcher.wake("a");
+    watcher.wake("a");
+    calls[0]!.resolve(RESULT());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ingest).toHaveBeenCalledTimes(2);
+    calls[1]!.resolve(RESULT());
+    await vi.advanceTimersByTimeAsync(DEBOUNCE_MS + 10);
+    expect(ingest).toHaveBeenCalledTimes(2);
+    await watcher.stop();
+  });
+
+  it("is false for a project it does not track, and after stop()", async () => {
+    const { watcher, ingest, fps } = await started(async () => RESULT());
+    expect(watcher.wake("nope")).toBe(false);
+    await watcher.stop();
+    fps.set("/x/a", "fp2");
+    expect(watcher.wake("a")).toBe(false);
+    await vi.advanceTimersByTimeAsync(SAFETY_TICK_MS);
+    expect(ingest).toHaveBeenCalledTimes(1);
+  });
+});

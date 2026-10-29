@@ -19,6 +19,15 @@
 // export, DB error) is retried only by the safety tick or by a real change,
 // never by its own `bd` noise.
 //
+// A third kind of wake comes from inside the server: `wake(project)`, which
+// the review decision calls after its own `bd` write so the board moves now
+// rather than on the next fs event or the 30 s tick. It is the tick for one
+// project, with no debounce: it loads at once (or, during a load, sets the
+// one follow-up), loads on a null fingerprint, retries after a failed
+// attempt, and skips only when the fingerprint is unchanged since a
+// SUCCESSFUL attempt — a write that has landed has moved it, so the skip is
+// only ever a write that changed nothing.
+//
 // A missing manifest (a beads layout change) yields a null fingerprint:
 // fs wakes are ignored and only the tick (and start-up/refresh) loads —
 // noisier than a fingerprint, never wrong. It is logged once per project.
@@ -310,6 +319,8 @@ export interface BeadsWatcher {
   reload(): Promise<ProjectOutcome[]>;
   /** The last load outcome per project, in memory only. */
   outcomes(): ProjectOutcome[];
+  /** Ask one project to load now, as its safety tick would (module header). False for a project not tracked, or once `stop()` has begun. */
+  wake(project: string): boolean;
   /** Close watchers and the tick, then await in-flight loads. Idempotent. */
   stop(): Promise<void>;
 }
@@ -515,6 +526,13 @@ export function createBeadsWatcher(options: BeadsWatcherOptions): BeadsWatcher {
     },
     outcomes() {
       return [...lastOutcomes.values()];
+    },
+    wake(project) {
+      if (stopped) return false;
+      const t = tracked.get(project);
+      if (t === undefined) return false;
+      t.scheduler.tick();
+      return true;
     },
     async stop() {
       stopped = true;

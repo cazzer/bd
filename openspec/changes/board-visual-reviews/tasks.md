@@ -18,10 +18,10 @@ One task group, one bead. Group 1 is bd-ker.2 (the store learns reviews); group 
 
 ## 3. Review decision write-back (bd-ker.4)
 
-- [ ] 3.1 New `apps/web/server/review-writer.ts`: injectable `runBd`/`runHerdr` (`execFile`, argv only, timeouts, `cwd`), `writeReviewDecision` per design decision 5 returning `{ written, partial?, error? }`.
-- [ ] 3.2 New `routers/review.ts`: `reviewDecision` mutation with the refusals in the local-web-api delta, then the writer, then `watcher.wake(project)` (new on the watcher; schedules a load like an fs event). Merged in `router.ts`.
-- [ ] 3.3 Tests: accept runs comment then close with `cwd` = checkout; changes runs comment then add-label; empty message refused for changes; unregistered project and non-review item refused with no command run; shell characters reach argv verbatim; a failing close reports a partial write; read-only refuses.
-- [ ] 3.4 `pnpm check` green.
+- [x] 3.1 New `apps/web/server/review-writer.ts`: injectable `runBd`/`runHerdr` (`execFile`, argv only, timeouts, `cwd`), `writeReviewDecision` per design decision 5 returning `{ written, partial?, error? }`.
+- [x] 3.2 New `routers/review.ts`: `reviewDecision` mutation with the refusals in the local-web-api delta, then the writer, then `watcher.wake(project)` (new on the watcher; schedules a load like an fs event). Merged in `router.ts`.
+- [x] 3.3 Tests: accept runs comment then close with `cwd` = checkout; changes runs comment then add-label; empty message refused for changes; unregistered project and non-review item refused with no command run; shell characters reach argv verbatim; a failing close reports a partial write; read-only refuses.
+- [x] 3.4 `pnpm check` green.
 
 ## 4. Board deep link and review drawer (bd-ker.3)
 

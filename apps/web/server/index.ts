@@ -15,7 +15,9 @@
 import { createDb, createPool, DatabaseUrlNotSetError, resolveDatabaseUrl } from "@breakdown/db";
 import { createHTTPServer } from "@trpc/server/adapters/standalone";
 import { createBeadsWatcher } from "./beads-watcher.js";
+import { parseReadOnly } from "./config.js";
 import { createContextFactory } from "./context.js";
+import { createReviewWriter } from "./review-writer.js";
 import { appRouter } from "./router.js";
 import { describeConnectionError, describeConnectionTarget, verifyDatabaseConnection } from "./startup.js";
 
@@ -63,15 +65,20 @@ async function main(): Promise<void> {
   const shutdown = new AbortController();
   await watcher.start();
 
+  // BRAIN_READ_ONLY refuses the review decision (the server's one tracker
+  // write) the way apps/mcp refuses its write tools.
+  const readOnly = parseReadOnly(process.env["BRAIN_READ_ONLY"]);
+  const reviewWriter = createReviewWriter();
+
   const port = Number(process.env["WEB_SERVER_PORT"] ?? DEFAULT_PORT);
   const server = createHTTPServer({
     router: appRouter,
-    createContext: createContextFactory(db, { watcher, shutdownSignal: shutdown.signal }),
+    createContext: createContextFactory(db, { watcher, shutdownSignal: shutdown.signal, readOnly, reviewWriter }),
     basePath: "/trpc/",
   });
 
   server.listen(port, HOST, () => {
-    console.error(`[breakdown-web] ready on http://${HOST}:${port} — database ${describeConnectionTarget(databaseUrl)}`);
+    console.error(`[breakdown-web] ready on http://${HOST}:${port} — database ${describeConnectionTarget(databaseUrl)}${readOnly ? " (read-only)" : ""}`);
   });
 
   // One shared guard: a second signal while shutting down exits at once
