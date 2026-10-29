@@ -1,15 +1,26 @@
 // The board view (live-beads-board, design.md decisions 6-7): work items of
 // the chosen projects as columns (Ready ... Closed) crossed with epic lanes,
 // kept current as the trackers change. Mounted by the shell (App.tsx) under
-// `/board`, addressed by `?view=<id>&project=<key>...` (lib/route.ts), and
-// read-only: it writes nothing and never asks for a node's content.
+// `/board`, addressed by `?view=<id>&project=<key>...&item=<bead id>`
+// (lib/route.ts). The board itself writes nothing; its one write is a review
+// decision, taken in the item drawer (ReviewDrawer.tsx).
 //
 // The view node loads like the feed's does (`getNodes`, `viewFilterOf`) and
-// its renderer must be `board`; no view, an unknown view, and a view of
-// another renderer are empty states at this address, never redirects. The
-// chips are the view filter's `project` predicate, or every registered
-// project when it names none (lib/boardRow.ts); the chosen set lives in the
-// address, so a toggle is a history push and a reload reproduces the board.
+// its renderer must be `board`; an unknown view and a view of another
+// renderer are empty states at this address, never redirects. No view at
+// all is a board of every registered project (board-visual-reviews, design.md
+// decision 3), so the review CLI's link needs no view id. The chips are the
+// view filter's `project` predicate, or every registered project when it
+// names none or there is no view (lib/boardRow.ts); the chosen set lives in
+// the address, so a toggle is a history push and a reload reproduces the
+// board.
+//
+// The drawer (board-visual-reviews, task 4.4): activating a card pushes its
+// external id as `item`; closing pushes the address without it and returns
+// focus to the card. The drawer's project is the card's, or the one chosen
+// project before the item is on the board (lib/reviewDrawer.ts); it re-reads
+// the item after every board read (`boardVersion`), which is how a waiting
+// drawer opens without a reload.
 //
 // Live: one effect owns the subscription and the reads. It subscribes to
 // `boardEvents` FIRST and reads in `onStarted` — which the tRPC SSE link
@@ -40,9 +51,11 @@ import {
   type BoardLane,
   type Highlights,
 } from "../lib/boardRow.js";
-import { formatRoute, type GraphRoute } from "../lib/route.js";
+import { drawerProject } from "../lib/reviewDrawer.js";
+import { formatRoute, type BoardRoute, type GraphRoute } from "../lib/route.js";
 import { viewFilterOf, type ViewNode } from "../lib/viewFilter.js";
 import { trpc } from "../trpc.js";
+import { ReviewDrawer, useWideDrawer } from "./ReviewDrawer.js";
 
 const READ_DEBOUNCE_MS = 150;
 /** A continuous stream of events cannot defer the read longer than this. */
@@ -51,11 +64,13 @@ const GRAPH_HOME: GraphRoute = { view: "graph", q: null, types: [], node: null }
 
 type ViewState =
   | { kind: "loading" }
-  | { kind: "no-view" }
   | { kind: "not-a-view" }
   | { kind: "wrong-renderer"; title: string; renderer: string }
   | { kind: "error"; message: string }
-  | { kind: "ready"; forViewId: string; title: string; viewProjects: string[] | null };
+  | { kind: "ready"; forViewId: string | null; title: string; viewProjects: string[] | null };
+
+/** The board with no `view` in its address: every registered project. */
+const ALL_PROJECTS: ViewState = { kind: "ready", forViewId: null, title: "All projects", viewProjects: null };
 
 type BeadsProjectsAnswer = Awaited<ReturnType<typeof trpc.beadsProjects.query>>["projects"];
 type BoardAnswer = Awaited<ReturnType<typeof trpc.board.query>>;
@@ -78,10 +93,12 @@ function isBadRequest(err: unknown): boolean {
 export interface BoardViewProps {
   viewId: string | null;
   projects: string[];
+  /** The external id whose drawer is open; null when none is. */
+  item: string | null;
 }
 
-export function BoardView({ viewId, projects }: BoardViewProps) {
-  const [viewState, setViewState] = useState<ViewState>(viewId === null ? { kind: "no-view" } : { kind: "loading" });
+export function BoardView({ viewId, projects, item }: BoardViewProps) {
+  const [viewState, setViewState] = useState<ViewState>(viewId === null ? ALL_PROJECTS : { kind: "loading" });
   const [data, setData] = useState<BoardData | null>(null);
   const [readError, setReadError] = useState<string | null>(null);
   const [eventErrors, setEventErrors] = useState<ReadonlyMap<string, string>>(new Map());
@@ -92,6 +109,15 @@ export function BoardView({ viewId, projects }: BoardViewProps) {
   const [toggledLanes, setToggledLanes] = useState<ReadonlySet<string>>(new Set());
   const [reading, setReading] = useState(false);
   const [announcement, setAnnouncement] = useState("");
+  const [boardVersion, setBoardVersion] = useState(0);
+  const boardRegionRef = useRef<HTMLDivElement>(null);
+  /** Unsent drawer messages by item, so closing the drawer or switching cards never drops one. */
+  const drafts = useRef(new Map<string, string>());
+  /** The project each opened item resolved to (see openProject). */
+  const pinnedProjects = useRef(new Map<string, string>());
+  const followCardUntil = useRef(0);
+  const returnFocusTo = useRef<string | null>(null);
+  const wide = useWideDrawer();
   const projectsRef = useRef(projects);
   const appliedKeyRef = useRef(projects.join("\u0000"));
   const readRef = useRef<(() => void) | null>(null);
@@ -104,7 +130,7 @@ export function BoardView({ viewId, projects }: BoardViewProps) {
     setToggledLanes(new Set());
     setAnnouncement("");
     if (viewId === null) {
-      setViewState({ kind: "no-view" });
+      setViewState(ALL_PROJECTS);
       return;
     }
     let cancelled = false;
@@ -171,6 +197,7 @@ export function BoardView({ viewId, projects }: BoardViewProps) {
         if (disposed) return;
         for (const id of ids) pending.delete(id);
         setData({ registry, board });
+        setBoardVersion((v) => v + 1);
         setReadError(null);
         setEventErrors(new Map());
         const shown = new Set(board.cards.map((c) => c.id));
@@ -299,9 +326,9 @@ export function BoardView({ viewId, projects }: BoardViewProps) {
   const canonicalProjects = chosen.length === offered.length ? [] : chosen;
   const canonicalKey = canonicalProjects.join("\u0000");
   useEffect(() => {
-    if (viewId === null || offered.length === 0 || canonicalKey === projectsKey) return;
-    navigate({ view: "board", viewId, projects: canonicalProjects }, "replace");
-  }, [viewId, offered.length, canonicalKey, projectsKey]);
+    if (offered.length === 0 || canonicalKey === projectsKey) return;
+    navigate({ view: "board", viewId, projects: canonicalProjects, item }, "replace");
+  }, [viewId, offered.length, canonicalKey, projectsKey, item]);
 
   const errors = new Map<string, string>();
   if (data) {
@@ -316,8 +343,44 @@ export function BoardView({ viewId, projects }: BoardViewProps) {
   const omitted = data ? Object.entries(data.board.omittedClosed).filter(([project]) => chosen.includes(project)) : [];
 
   function toggleProject(key: string) {
-    if (viewId === null || (chosen.length === 1 && chosen[0] === key)) return;
-    navigate({ view: "board", viewId, projects: toggleChip(offered, projects, key) }, "push");
+    if (chosen.length === 1 && chosen[0] === key) return;
+    navigate({ view: "board", viewId, projects: toggleChip(offered, projects, key), item }, "push");
+  }
+
+  const route: BoardRoute = { view: "board", viewId, projects, item };
+  const drawerOpen = view !== null && item !== null;
+
+  // The drawer's project. A project is pinned for an item only once it is
+  // confirmed — a card of that project shows the item, or `boardItem` found
+  // it there — so it stays put after that; until then it is a guess (the
+  // card's, else the address's or the board's single project, enough to
+  // start reading before the first board read), and a card that later shows
+  // the item elsewhere wins. Pinned in effects and callbacks, never in render.
+  const cardProject = item === null ? undefined : cards.find((c) => c.externalId === item)?.project;
+  const openProject = item === null ? null : (pinnedProjects.current.get(item) ?? drawerProject(item, cards, data ? chosen : projects));
+  useEffect(() => {
+    if (item !== null && cardProject !== undefined && !pinnedProjects.current.has(item)) pinnedProjects.current.set(item, cardProject);
+  }, [item, cardProject]);
+
+  // After a decision, the card is kept in view while re-reads move it.
+  useEffect(() => {
+    if (item === null || Date.now() > followCardUntil.current) return;
+    document.querySelector(`li[data-external-id="${CSS.escape(item)}"]`)?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [boardVersion, item]);
+
+  // Focus returns to the card once the drawer is gone (and, at phone width,
+  // the board is no longer inert), or to the board when the card is not shown.
+  useEffect(() => {
+    const closed = returnFocusTo.current;
+    if (item !== null || closed === null) return;
+    returnFocusTo.current = null;
+    const link = document.querySelector<HTMLAnchorElement>(`li[data-external-id="${CSS.escape(closed)}"] a`);
+    (link ?? boardRegionRef.current)?.focus();
+  }, [item]);
+
+  function closeDrawer() {
+    returnFocusTo.current = item;
+    navigate({ ...route, item: null }, "push");
   }
 
   function toggleLane(lane: BoardLane) {
@@ -332,9 +395,9 @@ export function BoardView({ viewId, projects }: BoardViewProps) {
   const heading = view ? view.title || "(untitled view)" : "Board";
 
   return (
-    <main className="flex h-dvh w-screen flex-col overflow-hidden">
+    <main className={`flex h-dvh w-screen flex-col overflow-hidden ${drawerOpen ? "sm:pr-[492px]" : ""}`}>
       <div aria-hidden="true" className="ambience pointer-events-none fixed inset-0 -z-10" />
-      <header className="glass m-3 mb-0 flex flex-wrap items-center gap-x-4 gap-y-2 p-3">
+      <header inert={drawerOpen && !wide} className="glass m-3 mb-0 flex flex-wrap items-center gap-x-4 gap-y-2 p-3">
         <h1 className="min-w-0 truncate text-base font-semibold text-fg">{heading}</h1>
         {view && offered.length > 0 && (
           <div role="group" aria-label="Projects" className="flex flex-wrap gap-1.5">
@@ -383,8 +446,7 @@ export function BoardView({ viewId, projects }: BoardViewProps) {
         </div>
       </header>
 
-      <div className="flex min-h-0 flex-1 flex-col gap-3 p-3">
-        {viewState.kind === "no-view" && <Empty>No view is named in the address.</Empty>}
+      <div inert={drawerOpen && !wide} className="flex min-h-0 flex-1 flex-col gap-3 p-3">
         {viewState.kind === "not-a-view" && <Empty>The address does not name a view.</Empty>}
         {viewState.kind === "wrong-renderer" && (
           <Empty>
@@ -424,7 +486,7 @@ export function BoardView({ viewId, projects }: BoardViewProps) {
             {!data && !readError && <Empty>Loading…</Empty>}
             {data && offered.length === 0 && <Empty>No beads project is registered. Load one with pnpm ingest:beads.</Empty>}
             {data && offered.length > 0 && (
-              <div className="glass relative min-h-0 flex-1 overflow-auto" aria-label="Board" role="region" tabIndex={0} aria-busy={reading}>
+              <div ref={boardRegionRef} className="glass relative min-h-0 flex-1 overflow-auto" aria-label="Board" role="region" tabIndex={0} aria-busy={reading}>
                 {reading && <div aria-hidden="true" className="sticky top-0 z-20 h-0.5 w-full animate-pulse bg-accent" />}
                 <p className="sr-only" role="status" aria-live="polite">
                   {announcement}
@@ -439,7 +501,15 @@ export function BoardView({ viewId, projects }: BoardViewProps) {
                   </div>
                   {lanes.length === 0 && <p className="py-6 text-sm text-fg-muted">No items on this board.</p>}
                   {lanes.map((lane) => (
-                    <LaneSection key={lane.epicId ?? "no-epic"} lane={lane} open={lane.collapsedByDefault === toggledLanes.has(lane.epicId ?? "")} onToggle={() => toggleLane(lane)} highlights={highlights} />
+                    <LaneSection
+                      key={lane.epicId ?? "no-epic"}
+                      lane={lane}
+                      open={lane.collapsedByDefault === toggledLanes.has(lane.epicId ?? "")}
+                      onToggle={() => toggleLane(lane)}
+                      highlights={highlights}
+                      route={route}
+                      selected={item === null ? null : { externalId: item, project: openProject }}
+                    />
                   ))}
                 </div>
               </div>
@@ -447,6 +517,27 @@ export function BoardView({ viewId, projects }: BoardViewProps) {
           </>
         )}
       </div>
+      {drawerOpen && item !== null && (
+        <ReviewDrawer
+          key={item}
+          project={openProject}
+          item={item}
+          boardLoaded={data !== null}
+          boardVersion={boardVersion}
+          initialDraft={drafts.current.get(item) ?? ""}
+          onDraftChange={(draft) => {
+            if (draft.trim() === "") drafts.current.delete(item);
+            else drafts.current.set(item, draft);
+          }}
+          onDecided={() => {
+            followCardUntil.current = Date.now() + 15_000;
+          }}
+          onProjectConfirmed={(project) => {
+            if (!pinnedProjects.current.has(item)) pinnedProjects.current.set(item, project);
+          }}
+          onClose={closeDrawer}
+        />
+      )}
     </main>
   );
 }
@@ -461,7 +552,30 @@ function Empty({ children }: { children: ReactNode }) {
   return <p className="glass p-4 text-sm text-fg-muted">{children}</p>;
 }
 
-function LaneSection({ lane, open, onToggle, highlights }: { lane: BoardLane; open: boolean; onToggle: () => void; highlights: Highlights }) {
+interface SelectedCard {
+  externalId: string;
+  project: string | null;
+}
+
+function isSelected(card: BoardCardRow, selected: SelectedCard | null): boolean {
+  return selected !== null && card.externalId === selected.externalId && (selected.project === null || card.project === selected.project);
+}
+
+function LaneSection({
+  lane,
+  open,
+  onToggle,
+  highlights,
+  route,
+  selected,
+}: {
+  lane: BoardLane;
+  open: boolean;
+  onToggle: () => void;
+  highlights: Highlights;
+  route: BoardRoute;
+  selected: SelectedCard | null;
+}) {
   return (
     <section aria-label={lane.title} className="border-t border-hairline py-2">
       <h3 className="mb-2">
@@ -487,7 +601,7 @@ function LaneSection({ lane, open, onToggle, highlights }: { lane: BoardLane; op
             ) : (
               <ul key={col.id} role="list" aria-label={`${lane.title}: ${col.label}`} className="space-y-2">
                 {lane.columns[col.id].map((card) => (
-                  <CardItem key={card.id} card={card} highlighted={highlights.has(card.id)} />
+                  <CardItem key={card.id} card={card} highlighted={highlights.has(card.id)} route={route} selected={isSelected(card, selected)} />
                 ))}
               </ul>
             ),
@@ -498,24 +612,26 @@ function LaneSection({ lane, open, onToggle, highlights }: { lane: BoardLane; op
   );
 }
 
-function CardItem({ card, highlighted }: { card: BoardCardRow; highlighted: boolean }) {
-  const href = formatRoute({ view: "graph", q: null, types: [], node: card.id });
+function CardItem({ card, highlighted, route, selected }: { card: BoardCardRow; highlighted: boolean; route: BoardRoute; selected: boolean }) {
+  const target: BoardRoute = { ...route, item: card.externalId };
   function open(e: MouseEvent<HTMLAnchorElement>) {
     if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
     e.preventDefault();
-    navigate({ view: "graph", q: null, types: [], node: card.id }, "push");
+    navigate(target, "push");
   }
   return (
-    <li data-node-id={card.id} data-highlighted={highlighted ? "true" : undefined}>
+    <li data-node-id={card.id} data-external-id={card.externalId} data-highlighted={highlighted ? "true" : undefined}>
       <a
-        href={href}
+        href={formatRoute(target)}
         onClick={open}
+        aria-current={selected ? "true" : undefined}
         className={`block rounded-lg border bg-surface-strong p-2.5 text-left transition-shadow focus:outline-none focus:ring-2 focus:ring-accent ${
-          highlighted ? "border-accent ring-2 ring-accent/60" : "border-hairline hover:border-accent/50"
+          selected ? "border-accent ring-2 ring-accent" : highlighted ? "border-accent ring-2 ring-accent/60" : "border-hairline hover:border-accent/50"
         }`}
       >
         <span className="flex items-center justify-between gap-2 text-[11px] text-fg-muted">
           <span className="truncate font-mono">{card.externalId}</span>
+          {card.review && <span className="shrink-0 rounded-full border border-accent/60 bg-accent/15 px-1.5 py-0.5 text-fg">review</span>}
           {highlighted && <span className="shrink-0 rounded-full bg-accent/20 px-1.5 py-0.5 text-accent">updated</span>}
           {card.blockedFlag &&<span className="shrink-0 rounded-full border border-red-500/40 bg-red-500/10 px-1.5 py-0.5 text-red-300">blocked</span>}
         </span>

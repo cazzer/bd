@@ -38,6 +38,8 @@ export interface BoardCardRow {
   epicId: string | null;
   blockedFlag: boolean;
   updatedAt: string;
+  /** Labelled `review`: the card is marked, and its drawer shows the review. */
+  review: boolean;
 }
 
 export interface BoardEpicRow {

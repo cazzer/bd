@@ -12,6 +12,13 @@
 // shells out to `bd list --status=all --limit=0 --json` in `dir`
 // (`--limit=0` is "unlimited": `bd list` defaults to 50 rows, which would
 // silently truncate the export the moment the tracker outgrows that).
+// For each issue labelled `review` with `comment_count > 0`, it then runs
+// `bd comments <id> --json` through the same runner, serially, so the
+// thread lands on the review's work item (board-visual-reviews) — unless
+// the stored row's `review_comment_count` still matches, in which case the
+// stored thread is carried forward (one read for all of them), so a reload
+// spawns a process only for reviews whose comments changed. A failed or
+// malformed comments call fails the load before anything is written.
 //
 // With a `project` key, every item is stamped `project` and a registry
 // node `{ beads_project, external_id 'project:<key>', metadata { project,
@@ -64,6 +71,7 @@ import { and, eq, inArray, sql } from "drizzle-orm";
 import {
   BEADS_SOURCE_SYSTEM,
   deriveBeadsEdges,
+  isReviewIssue,
   mapBeadsIssueToNode,
   resolveBeadsEdges,
   type BeadsIssue,
@@ -114,11 +122,15 @@ export interface IngestBeadsCheckoutResult {
   skippedUnknownType: number;
 }
 
-/** The default runner: `bd`'s own stderr is attached to the failure. */
+/** The default runner: `bd`'s own stderr is attached to the failure. BEADS_DIR / BEADS_DB are dropped from its environment: either would point `bd` at another database than the checkout's, whatever `cwd` says. */
 export const defaultRunBd: RunBd = async (args, cwd, signal) => {
+  const env = { ...process.env };
+  delete env["BEADS_DIR"];
+  delete env["BEADS_DB"];
   try {
     const { stdout } = await execFileAsync("bd", [...args], {
       cwd,
+      env,
       maxBuffer: 64 * 1024 * 1024,
       timeout: BD_TIMEOUT_MS,
       killSignal: "SIGKILL",
@@ -145,6 +157,55 @@ async function fetchIssues(runBd: RunBd, cwd: string, signal?: AbortSignal): Pro
     }
   }
   return parsed as BeadsIssue[];
+}
+
+/**
+ * The comment thread of every review issue with comments, keyed by issue id.
+ * One read first: a stored row of this project whose `review_comment_count`
+ * equals the issue's `comment_count` has its stored thread carried forward
+ * (normalization is idempotent, so the reload is `unchanged`); the rest are
+ * fetched with `bd comments <id> --json`, one at a time.
+ */
+async function fetchReviewComments(
+  db: Database,
+  runBd: RunBd,
+  cwd: string,
+  project: string | undefined,
+  issues: readonly BeadsIssue[],
+  signal?: AbortSignal,
+): Promise<Map<string, unknown[]>> {
+  const byIssue = new Map<string, unknown[]>();
+  const wanted = issues.filter((i) => isReviewIssue(i) && typeof i.comment_count === "number" && i.comment_count > 0);
+  if (wanted.length === 0) return byIssue;
+  const stored = await db
+    .select({
+      externalId: nodes.externalId,
+      project: sql<string | null>`${nodes.metadata}->>'project'`,
+      count: sql<unknown>`${nodes.metadata}->'review_comment_count'`,
+      comments: sql<unknown>`${nodes.metadata}->'review_comments'`,
+    })
+    .from(nodes)
+    .where(and(eq(nodes.sourceSystem, BEADS_SOURCE_SYSTEM), inArray(nodes.externalId, wanted.map((i) => i.id))));
+  const storedById = new Map(stored.map((row) => [row.externalId, row]));
+  for (const issue of wanted) {
+    const prior = storedById.get(issue.id);
+    if (prior && prior.project === (project ?? null) && prior.count === issue.comment_count) {
+      byIssue.set(issue.id, Array.isArray(prior.comments) ? prior.comments : []);
+      continue;
+    }
+    const stdout = await runBd(["comments", issue.id, "--json"], cwd, signal);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(stdout);
+    } catch (err) {
+      throw new Error(`bd comments ${issue.id} --json returned invalid JSON`, { cause: err });
+    }
+    if (!Array.isArray(parsed)) {
+      throw new Error(`bd comments ${issue.id} --json did not return an array`);
+    }
+    byIssue.set(issue.id, parsed);
+  }
+  return byIssue;
 }
 
 /** Canonical key: trimmed and valid, else `InvalidWorkItemError` naming `project` (an explicit empty key included). */
@@ -205,12 +266,16 @@ async function assertNoProjectConflict(db: Database, project: string | undefined
 export async function ingestBeadsCheckout(db: Database, options: IngestBeadsCheckoutOptions): Promise<IngestBeadsCheckoutResult> {
   const project = canonicalProject(options.project);
   const checkoutPath = await resolveCheckoutPath(options.dir);
-  const issues = await fetchIssues(options.runBd ?? defaultRunBd, checkoutPath, options.signal);
+  const runBd = options.runBd ?? defaultRunBd;
+  const issues = await fetchIssues(runBd, checkoutPath, options.signal);
   if (issues.length === 0) {
     throw new Error("no issues to ingest");
   }
+  const comments = await fetchReviewComments(db, runBd, checkoutPath, project, issues, options.signal);
 
-  const nodeInputs: NodeInput[] = issues.map((issue, index) => mapBeadsIssueToNode(issue, index, project === undefined ? {} : { project }));
+  const nodeInputs: NodeInput[] = issues.map((issue, index) =>
+    mapBeadsIssueToNode(issue, index, { ...(project === undefined ? {} : { project }), comments: comments.get(issue.id) ?? [] }),
+  );
   if (project !== undefined) {
     nodeInputs.push({
       nodeType: BEADS_PROJECT_NODE_TYPE,

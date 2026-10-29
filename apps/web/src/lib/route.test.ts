@@ -27,8 +27,8 @@ function timeline(viewId: string | null = null, node: string | null = null, type
   return { view: "timeline", viewId, node, types };
 }
 
-function board(viewId: string | null = null, projects: string[] = []): BoardRoute {
-  return { view: "board", viewId, projects };
+function board(viewId: string | null = null, projects: string[] = [], item: string | null = null): BoardRoute {
+  return { view: "board", viewId, projects, item };
 }
 
 /** `formatRoute` output split back into the two strings `parseRoute` takes — what `location.pathname`/`location.search` would hold after a `pushState` of that URL. */
@@ -404,5 +404,27 @@ describe("board route", () => {
   it("ignores graph and unknown parameters, and /board/x is unknown", () => {
     expect(parseRoute("/board", "?q=x&node=n&type=t&view=v1&project=a&zoom=1")).toEqual(board("v1", ["a"]));
     expect(parseRoute("/board/x", "")).toBeNull();
+  });
+
+  it("parses item trimmed, empty or whitespace-only as null", () => {
+    expect(parseRoute("/board", "?item=%20bd-ker.3%20")).toEqual(board(null, [], "bd-ker.3"));
+    expect(parseRoute("/board", "?item=")).toEqual(board());
+    expect(parseRoute("/board", "?item=%20%20")).toEqual(board());
+  });
+
+  it("reads the CLI's deep link with no view as every project's board with the drawer open", () => {
+    expect(parseRoute("/board", "?project=tides&item=tides-r1")).toEqual({ view: "board", viewId: null, projects: ["tides"], item: "tides-r1" });
+  });
+
+  it("formats item last, after view and every project, and omits it when null", () => {
+    expect(formatRoute(board("v1", ["b", "a"], "bd-1"))).toBe("/board?view=v1&project=b&project=a&item=bd-1");
+    expect(formatRoute(board(null, [], "bd-1"))).toBe("/board?item=bd-1");
+    expect(formatRoute(board("v1", ["a"], null))).toBe("/board?view=v1&project=a");
+  });
+
+  it("round-trips with an item, including characters that need escaping", () => {
+    for (const r of [board(null, [], "bd-1"), board("v1", ["tides"], "tides-r1"), board(null, ["a"], "x y&z=#?")]) {
+      expect(roundTrip(r)).toEqual(r);
+    }
   });
 });

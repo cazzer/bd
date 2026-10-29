@@ -76,10 +76,44 @@
 // board. `cycle_members` is a subset of `blocked_by` (a cycle member has an
 // open blocker), so the `OR` on cycle membership below is redundant; it is
 // kept so the column rule reads as the spec states it.
+//
+// Reviews (board-visual-reviews, design.md decision 2): a card carries only
+// `review` (labelled `review` exactly), so the board stays light. The drawer
+// reads one item through `getBoardItem` — content, labels, the review
+// object, and the comment thread. It finds the `nodes` row of that project
+// with that external id and answers its canonical row, folded through
+// `merged_into` the way lookup.ts folds (so the drawer opened on a bead id
+// that was merged away shows the survivor rather than waiting forever). The
+// survivor must belong to the same project too: a merge into another
+// project's node, or a project-less one, answers null rather than a node
+// labelled with a project it is not in. A
+// row that is itself canonical wins over a merged-away one, then the
+// `beads` row, then the lesser id. The stored review and comments are
+// re-normalized on read (reviews.ts; both are idempotent), so a raw-written
+// or pre-contract value is answered in the contract's shape, a malformed
+// review as `{ invalid: true }`; neither is read off an item that is not a
+// review.
+//
+// The drawer's header names the item's parent: one `child_of` hop from the
+// item (or any id merged into it), the target folded through `merged_into`,
+// kept only when it is a work item of the same project and not the item
+// itself (a merge can make a self-loop). Several parents (two systems each
+// asserted one) resolve to the heavier edge, then `beads`, then the lesser
+// id, so the answer is stable.
 
 import { sql, type SQL } from "drizzle-orm";
 import type { Database } from "@breakdown/db";
 import { InvalidLookupOptionError, LookupFailedError } from "./errors.js";
+import {
+  normalizeReviewComments,
+  normalizeReviewMetadata,
+  REVIEW_COMMENTS_KEY,
+  REVIEW_LABEL,
+  REVIEW_METADATA_KEY,
+  type InvalidReview,
+  type ReviewComment,
+  type ReviewMetadata,
+} from "./reviews.js";
 import { asPgError, formatPgInfo, sqlArray } from "./sql-helpers.js";
 import { MAX_RESOLVE_DEPTH } from "./views.js";
 import {
@@ -87,6 +121,7 @@ import {
   CHILD_OF_EDGE_TYPE,
   DEFAULT_WORK_ITEM_PRIORITY,
   PROJECT_KEY_PATTERN,
+  readWorkItemFields,
   WORK_ITEM_NODE_TYPE,
 } from "./work-items.js";
 
@@ -126,6 +161,8 @@ export interface BoardCard {
   blockedFlag: boolean;
   updatedAt: Date;
   closedAt: string | null;
+  /** Labelled `review` exactly (reviews.ts): the card opens a review in the drawer. */
+  review: boolean;
 }
 
 export interface BoardEpic {
@@ -199,7 +236,9 @@ filtered AS (
          metadata->>'project' AS project,
          metadata->>'issue_type' AS issue_type,
          metadata->>'assignee' AS assignee,
-         metadata->>'closed_at' AS closed_at
+         metadata->>'closed_at' AS closed_at,
+         -- Label 'review' exactly (reviews.ts); non-array labels read as not a review.
+         (jsonb_typeof(metadata->'labels') = 'array' AND metadata->'labels' @> '["review"]'::jsonb) IS TRUE AS review
   FROM resolved_nodes
   WHERE node_type = ${WORK_ITEM_NODE_TYPE}
     AND metadata @> ANY (${projectKeys})
@@ -213,7 +252,7 @@ filtered_ranked AS (
   FROM filtered f
 ),
 items_raw AS (
-  SELECT id, title, external_id, updated_at, status, priority, project, issue_type, assignee, closed_at, closed_card
+  SELECT id, title, external_id, updated_at, status, priority, project, issue_type, assignee, closed_at, review, closed_card
   FROM filtered_ranked
   WHERE NOT closed_card OR closed_rank <= ${CLOSED_PER_PROJECT}::int
   ORDER BY closed_card, updated_at DESC, id
@@ -294,7 +333,7 @@ SELECT jsonb_build_object(
       'open_blocker_ids', to_jsonb(CASE WHEN k.board_column = 'closed' THEN ARRAY[]::uuid[] ELSE k.open_blocker_ids END),
       'blocked_flag', (k.board_column = 'blocked'
                        OR (k.board_column = 'in_progress' AND k.obstructed)),
-      'updated_at', k.updated_at, 'closed_at', k.closed_at
+      'updated_at', k.updated_at, 'closed_at', k.closed_at, 'review', k.review
     ) ORDER BY k.priority ASC, k.updated_at DESC, k.id DESC)
     FROM classified k
   ), '[]'::jsonb),
@@ -332,6 +371,7 @@ type RawCard = {
   blocked_flag: boolean;
   updated_at: string;
   closed_at: string | null;
+  review: boolean;
 };
 type RawBoard = {
   cards: RawCard[];
@@ -382,6 +422,7 @@ export async function getWorkBoard(db: Database, options: WorkBoardOptions = {})
       blockedFlag: c.blocked_flag,
       updatedAt: new Date(c.updated_at),
       closedAt: c.closed_at,
+      review: c.review,
     })),
     epics: raw.epics,
     omittedClosed: raw.omitted_closed,
@@ -395,15 +436,26 @@ type RawProjectRow = { id: string; project: string | null; path: string | null; 
  * Every registered beads project (the `beads_project` registry nodes
  * beads-ingest.ts writes), by key. A registry node missing its key or path
  * (hand-written) is skipped rather than guessed at.
+ *
+ * With `registeredByBeads`, only rows a beads ingest wrote count — the same
+ * provenance rule as `getRegisteredBeadsProject`: external id
+ * `project:<key>` and a last writer (`ingest_run_id`) whose run is a `beads`
+ * run. Anything that runs `bd` in a listed path (the beads watcher) asks
+ * for this; the board's project listing does not.
  */
-export async function listBeadsProjects(db: Database): Promise<BeadsProject[]> {
+export async function listBeadsProjects(db: Database, options: { registeredByBeads?: boolean } = {}): Promise<BeadsProject[]> {
+  const provenance = options.registeredByBeads
+    ? sql`AND r.external_id = 'project:' || (r.metadata->>'project')
+          AND EXISTS (SELECT 1 FROM ingest_runs ir WHERE ir.id = r.ingest_run_id AND ir.source_system = 'beads')`
+    : sql``;
   let result: { rows: RawProjectRow[] };
   try {
     result = await db.execute<RawProjectRow>(sql`
-      SELECT id, metadata->>'project' AS project, metadata->>'path' AS path, updated_at
-      FROM resolved_nodes
-      WHERE node_type = ${BEADS_PROJECT_NODE_TYPE} AND source_system = 'beads'
-      ORDER BY metadata->>'project', id
+      SELECT r.id, r.metadata->>'project' AS project, r.metadata->>'path' AS path, r.updated_at
+      FROM resolved_nodes r
+      WHERE r.node_type = ${BEADS_PROJECT_NODE_TYPE} AND r.source_system = 'beads'
+      ${provenance}
+      ORDER BY r.metadata->>'project', r.id
     `);
   } catch (err) {
     throw new LookupFailedError(`listBeadsProjects query failed${formatPgInfo(asPgError(err))}`, "listBeadsProjects", { cause: err });
@@ -411,4 +463,163 @@ export async function listBeadsProjects(db: Database): Promise<BeadsProject[]> {
   return result.rows
     .filter((r): r is RawProjectRow & { project: string; path: string } => r.project !== null && r.path !== null)
     .map((r) => ({ key: r.project, path: r.path, nodeId: r.id, updatedAt: new Date(r.updated_at) }));
+}
+
+/**
+ * The registered checkout for `key`, trusted to run a command in: the
+ * canonical `beads_project` row a beads ingest writes (`beads` source,
+ * external id `project:<key>`, the key in its metadata) whose last writer —
+ * its `ingest_run_id` — was itself a `beads` ingest run. A registry-shaped
+ * node written or last touched by any other run (an agent's `brain_write`,
+ * a merge under an agent run) is not a registration and answers null, as
+ * does a missing key or path. Throws `InvalidLookupOptionError` for a
+ * malformed key and `LookupFailedError` for a database failure.
+ */
+export async function getRegisteredBeadsProject(db: Database, key: string): Promise<BeadsProject | null> {
+  if (typeof key !== "string" || !PROJECT_KEY_PATTERN.test(key)) {
+    throw new InvalidLookupOptionError("project", key, `must match ${PROJECT_KEY_PATTERN}`);
+  }
+  let result: { rows: RawProjectRow[] };
+  try {
+    result = await db.execute<RawProjectRow>(sql`
+      SELECT r.id, r.metadata->>'project' AS project, r.metadata->>'path' AS path, r.updated_at
+      FROM resolved_nodes r
+      JOIN ingest_runs ir ON ir.id = r.ingest_run_id
+      WHERE r.node_type = ${BEADS_PROJECT_NODE_TYPE}
+        AND r.source_system = 'beads'
+        AND r.external_id = ${`project:${key}`}
+        AND r.metadata->>'project' = ${key}
+        AND ir.source_system = 'beads'
+      LIMIT 1
+    `);
+  } catch (err) {
+    throw new LookupFailedError(`getRegisteredBeadsProject query failed${formatPgInfo(asPgError(err))}`, "getRegisteredBeadsProject", { cause: err });
+  }
+  const r = result.rows[0];
+  if (!r || r.project === null || r.path === null || r.path === "") return null;
+  return { key: r.project, path: r.path, nodeId: r.id, updatedAt: new Date(r.updated_at) };
+}
+
+/** Longest external id `getBoardItem` accepts (the board address carries it). */
+export const MAX_BOARD_ITEM_ID_LENGTH = 200;
+
+export interface BoardItemOptions {
+  project: string;
+  /** The item's external id (a bead id). */
+  externalId: string;
+}
+
+/** One work item as the board's drawer shows it (module header). */
+export interface BoardItem {
+  id: string;
+  externalId: string;
+  /** The row's source system; `beads` for an item a tracker loaded. */
+  sourceSystem: string;
+  project: string;
+  title: string;
+  content: string;
+  status: string;
+  priority: number;
+  issueType: string | null;
+  assignee: string | null;
+  labels: string[];
+  closedAt: string | null;
+  closedReason: string | null;
+  updatedAt: Date;
+  isReview: boolean;
+  /** A review item's review; null when the item is not a review or carries no review metadata. */
+  review: ReviewMetadata | InvalidReview | null;
+  /** Oldest first; empty when there are none. */
+  comments: ReviewComment[];
+  /** The item's `child_of` parent in the same project (module header); null when it has none. */
+  parent: { externalId: string; title: string } | null;
+}
+
+type RawItemRow = {
+  id: string;
+  external_id: string;
+  source_system: string;
+  title: string;
+  content: string;
+  metadata: Record<string, unknown> | null;
+  updated_at: string | Date;
+  parent_external_id: string | null;
+  parent_title: string | null;
+};
+
+/**
+ * The canonical work item of `project` whose external id is `externalId`, or
+ * null when there is none (module header). Throws `InvalidLookupOptionError`
+ * for a malformed project key or id and `LookupFailedError` for a database
+ * failure.
+ */
+export async function getBoardItem(db: Database, options: BoardItemOptions): Promise<BoardItem | null> {
+  const { project, externalId } = options;
+  if (typeof project !== "string" || !PROJECT_KEY_PATTERN.test(project)) {
+    throw new InvalidLookupOptionError("project", project, `must match ${PROJECT_KEY_PATTERN}`);
+  }
+  if (typeof externalId !== "string" || externalId.length === 0 || externalId.length > MAX_BOARD_ITEM_ID_LENGTH) {
+    throw new InvalidLookupOptionError("externalId", externalId, `must be a non-empty string of at most ${MAX_BOARD_ITEM_ID_LENGTH} characters`);
+  }
+  let result: { rows: RawItemRow[] };
+  try {
+    result = await db.execute<RawItemRow>(sql`
+      WITH item AS (
+        SELECT r.id, r.external_id, r.source_system, r.title, r.content, r.metadata, r.updated_at
+        FROM nodes n
+        JOIN resolved_nodes r ON r.id = COALESCE(n.merged_into, n.id)
+        WHERE n.node_type = ${WORK_ITEM_NODE_TYPE}
+          AND n.metadata @> ${JSON.stringify({ project })}::jsonb
+          AND n.external_id = ${externalId}
+          AND r.node_type = ${WORK_ITEM_NODE_TYPE}
+          AND r.metadata @> ${JSON.stringify({ project })}::jsonb
+        ORDER BY (n.merged_into IS NULL) DESC, (n.source_system = 'beads') DESC, n.id
+        LIMIT 1
+      )
+      SELECT item.*, parent.external_id AS parent_external_id, parent.title AS parent_title
+      FROM item
+      LEFT JOIN LATERAL (
+        SELECT p.external_id, p.title
+        FROM edges e
+        JOIN nodes d ON d.id = e.dst_id
+        JOIN resolved_nodes p ON p.id = COALESCE(d.merged_into, d.id)
+        WHERE e.edge_type = ${CHILD_OF_EDGE_TYPE}
+          -- An array probe, not an OR: it keeps the edges_src_id_edge_type_idx index scan.
+          AND e.src_id = ANY (ARRAY(SELECT item.id UNION ALL SELECT a.id FROM nodes a WHERE a.merged_into = item.id))
+          AND p.id <> item.id
+          AND p.node_type = ${WORK_ITEM_NODE_TYPE}
+          AND p.metadata @> ${JSON.stringify({ project })}::jsonb
+        ORDER BY e.weight DESC, (e.source_system = 'beads') DESC, p.id
+        LIMIT 1
+      ) parent ON true
+    `);
+  } catch (err) {
+    throw new LookupFailedError(`getBoardItem query failed${formatPgInfo(asPgError(err))}`, "getBoardItem", { cause: err });
+  }
+  const row = result.rows[0];
+  if (!row) return null;
+  const metadata = row.metadata ?? {};
+  const fields = readWorkItemFields(metadata);
+  const labels = Array.isArray(metadata["labels"]) ? metadata["labels"].filter((l): l is string => typeof l === "string") : [];
+  const isReview = labels.includes(REVIEW_LABEL);
+  return {
+    id: row.id,
+    externalId: row.external_id,
+    sourceSystem: row.source_system,
+    project,
+    title: row.title,
+    content: row.content,
+    status: fields.status,
+    priority: fields.priority,
+    issueType: typeof metadata["issue_type"] === "string" ? metadata["issue_type"] : null,
+    assignee: fields.assignee,
+    labels,
+    closedAt: fields.closedAt,
+    closedReason: fields.closedReason,
+    updatedAt: new Date(row.updated_at),
+    isReview,
+    review: isReview && metadata[REVIEW_METADATA_KEY] !== undefined && metadata[REVIEW_METADATA_KEY] !== null ? normalizeReviewMetadata(metadata[REVIEW_METADATA_KEY]) : null,
+    comments: isReview ? normalizeReviewComments(metadata[REVIEW_COMMENTS_KEY]) : [],
+    parent: row.parent_external_id === null || row.parent_title === null ? null : { externalId: row.parent_external_id, title: row.parent_title },
+  };
 }

@@ -22,10 +22,19 @@
 // (`fitText`, never mid-surrogate) before the contract sees it, so the
 // contract's own limits stay as strict as every other writer's. The tracker
 // remains authoritative for the full text; the store holds the fitted prefix.
+//
+// Reviews (board-visual-reviews, design.md decision 1): an issue labelled
+// exactly `review` also carries its beads `metadata.review` and its comment
+// thread, under the contract in reviews.ts, as `review` and
+// `review_comments`. Comments come from the caller (the loader fetches them
+// with `bd comments`), since `bd list` reports only `comment_count`. No
+// other issue gains a key, so a tracker with no reviews loads unchanged.
 
 import type { EdgeInput } from "./edges.js";
 import { normalizeOccurredAt, OCCURRED_AT_KEY } from "./event-time.js";
-import { DEFAULT_MAX_TITLE_LENGTH, type NodeInput } from "./nodes.js";
+import { fitText } from "./fit-text.js";
+import { DEFAULT_MAX_METADATA_LENGTH, DEFAULT_MAX_TITLE_LENGTH, type NodeInput } from "./nodes.js";
+import { normalizeReviewComments, normalizeReviewMetadata, REVIEW_COMMENT_COUNT_KEY, REVIEW_COMMENTS_KEY, REVIEW_LABEL, REVIEW_METADATA_KEY } from "./reviews.js";
 import {
   BLOCKS_EDGE_TYPE,
   CHILD_OF_EDGE_TYPE,
@@ -59,6 +68,19 @@ export interface BeadsIssue {
   notes?: string | null;
   labels?: string[] | null;
   dependencies?: BeadsDependency[] | null;
+  /** The issue's free-form beads metadata; only its `review` key is read, and only on a review issue. */
+  metadata?: Record<string, unknown> | null;
+  /** How many comments the issue has; the loader fetches them only for a review issue with a positive count. */
+  comment_count?: number | null;
+}
+
+/** One row of `bd comments <id> --json`. Normalized by `normalizeReviewComments` before it is stored. */
+export interface BeadsComment {
+  id: string | number;
+  issue_id?: string;
+  author?: string | null;
+  text: string;
+  created_at?: string | null;
 }
 
 /** One row of an issue's `dependencies`: `issue_id` depends on `depends_on_id`. */
@@ -71,11 +93,11 @@ export interface BeadsDependency {
 /** Beads dependency types this importer understands; anything else is skipped and counted. */
 export const BEADS_DEPENDENCY_TYPES = { blocks: "blocks", parentChild: "parent-child" } as const;
 
-/** `value` cut to at most `max` UTF-16 units without splitting a surrogate pair; shorter values, null, and undefined pass through untouched. */
-export function fitText(value: string | null | undefined, max: number): string | null | undefined {
-  if (typeof value !== "string" || value.length <= max) return value;
-  const last = value.charCodeAt(max - 1);
-  return value.slice(0, last >= 0xd800 && last <= 0xdbff ? max - 1 : max);
+export { fitText };
+
+/** True when the issue carries the label `review` exactly (`review:changes` alone is not a review). */
+export function isReviewIssue(issue: Pick<BeadsIssue, "labels">): boolean {
+  return Array.isArray(issue.labels) && issue.labels.includes(REVIEW_LABEL);
 }
 
 function section(heading: string, body: string | null | undefined): string {
@@ -91,9 +113,22 @@ function section(heading: string, body: string | null | undefined): string {
  * `InvalidWorkItemError` when the row violates the work-item contract,
  * each naming `index`. `options.project`, when given, is written as the
  * item's `project` key (validated by the contract, so a bad key is an
- * `InvalidWorkItemError` naming `project`).
+ * `InvalidWorkItemError` naming `project`). For a review issue
+ * (`isReviewIssue`) only: `metadata.review`, when present and not null, is
+ * written as `review` under the review contract (malformed →
+ * `{ invalid: true }`, never a refusal); `options.comments`, normalized, as
+ * `review_comments` when any survive; and `comment_count`, when an integer,
+ * as `review_comment_count` (what the loader compares to carry a thread
+ * forward without re-fetching it). If the assembled metadata would still
+ * exceed the write path's cap, `review_comments` is dropped, then `review`
+ * marked invalid, so a review never fails the load. Every other issue's
+ * metadata is exactly what it was before reviews existed.
  */
-export function mapBeadsIssueToNode(issue: BeadsIssue, index?: number, options: { project?: string } = {}): NodeInput {
+export function mapBeadsIssueToNode(issue: BeadsIssue, index?: number, options: { project?: string; comments?: readonly unknown[] } = {}): NodeInput {
+  const review = isReviewIssue(issue);
+  const rawReview = review && issue.metadata !== null && typeof issue.metadata === "object" ? issue.metadata[REVIEW_METADATA_KEY] : undefined;
+  const comments = review ? normalizeReviewComments(options.comments) : [];
+  const commentCount = review && Number.isInteger(issue.comment_count) && (issue.comment_count as number) >= 0 ? issue.comment_count : undefined;
   const metadata: Record<string, unknown> = {
     status: issue.status,
     priority: issue.priority,
@@ -108,16 +143,26 @@ export function mapBeadsIssueToNode(issue: BeadsIssue, index?: number, options: 
     [OCCURRED_AT_KEY]: issue.created_at ?? null,
     ...(options.project === undefined ? {} : { project: options.project }),
     ...(issue.labels && issue.labels.length > 0 ? { labels: issue.labels } : {}),
+    ...(rawReview === undefined || rawReview === null ? {} : { [REVIEW_METADATA_KEY]: normalizeReviewMetadata(rawReview) }),
+    ...(comments.length > 0 ? { [REVIEW_COMMENTS_KEY]: comments } : {}),
+    ...(commentCount === undefined ? {} : { [REVIEW_COMMENT_COUNT_KEY]: commentCount }),
   };
   // Event time first, so an unparseable created_at is named as occurred_at
   // rather than surfacing through the work-item contract.
+  const normalized = normalizeWorkItemMetadata(normalizeOccurredAt(metadata, { index }), { index });
+  if (JSON.stringify(normalized).length > DEFAULT_MAX_METADATA_LENGTH) {
+    delete normalized[REVIEW_COMMENTS_KEY];
+    if (REVIEW_METADATA_KEY in normalized && JSON.stringify(normalized).length > DEFAULT_MAX_METADATA_LENGTH) {
+      normalized[REVIEW_METADATA_KEY] = { invalid: true };
+    }
+  }
   return {
     nodeType: WORK_ITEM_NODE_TYPE,
     sourceSystem: BEADS_SOURCE_SYSTEM,
     externalId: issue.id,
     title: fitText(issue.title, DEFAULT_MAX_TITLE_LENGTH) ?? issue.title,
     content: `${issue.description?.trim() ?? ""}${section("Acceptance criteria", issue.acceptance_criteria)}${section("Design", issue.design)}${section("Notes", issue.notes)}`,
-    metadata: normalizeWorkItemMetadata(normalizeOccurredAt(metadata, { index }), { index }),
+    metadata: normalized,
   };
 }
 

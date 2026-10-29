@@ -5,6 +5,7 @@
 
 import type { Database } from "@breakdown/db";
 import type { BeadsWatcher } from "./beads-watcher.js";
+import type { ReviewWriter } from "./review-writer.js";
 
 export interface Context {
   db: Database;
@@ -20,9 +21,13 @@ export interface Context {
   watcher?: BeadsWatcher;
   /** Aborted at shutdown; subscriptions end on it so shutdown never waits on a connected browser. */
   shutdownSignal?: AbortSignal;
+  /** BRAIN_READ_ONLY (config.ts): the review decision is refused when set. Unset means writable, matching every other write procedure's callers. */
+  readOnly?: boolean;
+  /** Runs review decisions through `bd` (review-writer.ts). Optional so callers that never decide a review need not build one; the decision is refused without it. */
+  reviewWriter?: ReviewWriter;
 }
 
 /** Builds the per-request context factory tRPC's HTTP adapter calls. `db` is created once, at startup, and shared across every request. */
-export function createContextFactory(db: Database, live: Pick<Context, "watcher" | "shutdownSignal"> = {}) {
+export function createContextFactory(db: Database, live: Pick<Context, "watcher" | "shutdownSignal" | "readOnly" | "reviewWriter"> = {}) {
   return async (): Promise<Context> => ({ db, ...live });
 }

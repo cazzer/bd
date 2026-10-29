@@ -6,7 +6,7 @@ Lets an agent ask a person to accept its visual work, lets the person look at th
 
 ### Requirement: A review is an ordinary bead that follows one convention
 
-A review request SHALL be a beads issue of type `task`, labelled `review`, whose parent is the item under review, and whose beads metadata key `review` holds `images` (absolute paths of the screenshots, each under the review image root `~/.local/share/breakdown/reviews/<project>/<bead-id>/`), `pane` (the requester's herdr pane id, or absent), and `summary` (what to look at). When the item under review is not an epic, it SHALL also depend on the review bead with a `blocks` dependency; an epic SHALL be gated by the parent link alone, because the tracker refuses to close an epic with an open child. A decision to accept SHALL add a comment and close the bead; a decision to request changes SHALL add a comment and the label `review:changes`, leaving the bead open.
+A review request SHALL be a beads issue of type `task`, labelled `review`, whose parent is the item under review, and whose beads metadata key `review` holds `images` (absolute paths of the screenshots, each under the review image root `~/.local/share/breakdown/reviews/<project>/<bead-id>/`), `pane` (the requester's herdr pane id, or absent), `socket` (the herdr server socket that pane id belongs to, or absent), and `summary` (what to look at). When the item under review is not an epic, it SHALL also depend on the review bead with a `blocks` dependency; an epic SHALL be gated by the parent link alone, because the tracker refuses to close an epic with an open child. A decision to accept SHALL add a comment and close the bead; a decision to request changes SHALL add a comment and the label `review:changes`, leaving the bead open.
 
 #### Scenario: Epic under review
 
@@ -20,7 +20,7 @@ A review request SHALL be a beads issue of type `task`, labelled `review`, whose
 
 ### Requirement: An agent requests a review with one command
 
-`review-request <item-id> --summary <text> <image>...` run inside a registered checkout, or inside a git worktree of one, SHALL copy every image into the review image root under that project and bead, file the review bead per the convention with the caller's herdr pane, open Chrome on the board's drawer for that bead, show a herdr notification, print the bead id, and tell the caller to end its turn and wait for a prompt. When the item already has an open review bead, the command SHALL reuse it: replace its images and summary, record the caller's pane, remove `review:changes`, and add a comment saying the review was updated. The command SHALL refuse, changing nothing, when the checkout is not registered with breakdown, when the breakdown server cannot be reached to check, when the item does not exist, or when any image path is missing or not an image.
+`review-request <item-id> --summary <text> <image>...` run inside a registered checkout, or inside a git worktree of one, SHALL copy every image into the review image root under that project and bead, file the review bead per the convention with the caller's herdr pane and herdr socket, open Chrome on the board's drawer for that bead, show a herdr notification, print the bead id, and tell the caller to end its turn and wait for a prompt. When the item already has an open review bead, the command SHALL reuse it: replace its images and summary, record the caller's pane, remove `review:changes`, and add a comment saying the review was updated. The command SHALL refuse, changing nothing, when the checkout is not registered with breakdown, when the breakdown server cannot be reached to check, when the item does not exist, or when any image path is missing or not an image.
 
 #### Scenario: First request
 
@@ -82,7 +82,7 @@ On the board, a review item's drawer SHALL show its summary, every screenshot as
 
 ### Requirement: The requesting agent is told the decision
 
-After a decision is written, the agent pane recorded on the review SHALL receive the prompt `Review <bead-id> accepted: <message>` or `Review <bead-id> changes requested: <message>`. A review with no pane, or a pane that is gone or refuses the prompt, SHALL be logged and SHALL NOT fail or undo the decision; the comment in the tracker remains the record. The drawer SHALL say whether the agent was notified, and why not when it was not.
+After a decision is fully written, the agent pane recorded on the tracker's record of the review SHALL receive, through the herdr server socket recorded with it, the prompt `Review <bead-id> accepted: <message>` (`Review <bead-id> accepted.` when an accept carries no message) or `Review <bead-id> changes requested: <message>`. When the review has no pane or no recorded socket, or the decision was not fully written, no pane SHALL be prompted. Each of these, and a pane that is gone or refuses the prompt, SHALL be logged and SHALL NOT fail or undo the decision; the comment in the tracker remains the record. The drawer SHALL say, before deciding, which pane the decision will reach, and after, whether the agent was notified and why not when it was not.
 
 #### Scenario: Agent is waiting
 
@@ -93,3 +93,13 @@ After a decision is written, the agent pane recorded on the review SHALL receive
 
 - **WHEN** a person accepts a review whose pane no longer exists
 - **THEN** the review is still closed with its comment, and the drawer says the agent could not be notified and why
+
+#### Scenario: Accept with no message
+
+- **WHEN** a person accepts a review whose pane is live without typing a message
+- **THEN** that pane receives `Review <bead-id> accepted.`
+
+#### Scenario: Session unknown
+
+- **WHEN** a person decides a review that records a pane but no herdr socket
+- **THEN** no pane is prompted, the decision is still written, and the drawer says the pane's herdr session is unknown

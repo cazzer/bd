@@ -19,6 +19,15 @@
 // export, DB error) is retried only by the safety tick or by a real change,
 // never by its own `bd` noise.
 //
+// A third kind of wake comes from inside the server: `wake(project)`, which
+// the review decision calls after its own `bd` write so the board moves now
+// rather than on the next fs event or the 30 s tick. It is the tick for one
+// project, with no debounce: it loads at once (or, during a load, sets the
+// one follow-up), loads on a null fingerprint, retries after a failed
+// attempt, and skips only when the fingerprint is unchanged since a
+// SUCCESSFUL attempt — a write that has landed has moved it, so the skip is
+// only ever a write that changed nothing.
+//
 // A missing manifest (a beads layout change) yields a null fingerprint:
 // fs wakes are ignored and only the tick (and start-up/refresh) loads —
 // noisier than a fingerprint, never wrong. It is logged once per project.
@@ -51,7 +60,7 @@ import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { readFileSync, statSync, readdirSync, watch as fsWatch, type FSWatcher } from "node:fs";
 import path from "node:path";
-import { BEADS_PROJECT_NODE_TYPE, BEADS_SOURCE_SYSTEM, ingestBeadsCheckout, listNodes, type IngestBeadsCheckoutResult } from "@breakdown/core";
+import { ingestBeadsCheckout, listBeadsProjects, type IngestBeadsCheckoutResult } from "@breakdown/core";
 import type { Database } from "@breakdown/db";
 
 export const BEADS_WATCHER_EVENT = "event";
@@ -310,28 +319,21 @@ export interface BeadsWatcher {
   reload(): Promise<ProjectOutcome[]>;
   /** The last load outcome per project, in memory only. */
   outcomes(): ProjectOutcome[];
+  /** Ask one project to load now, as its safety tick would (module header). False for a project not tracked, or once `stop()` has begun. */
+  wake(project: string): boolean;
   /** Close watchers and the tick, then await in-flight loads. Idempotent. */
   stop(): Promise<void>;
 }
 
-/** Reads the registry nodes `ingestBeadsCheckout` writes; rows whose metadata lacks a usable project or path are skipped. */
+/**
+ * Reads the registry nodes `ingestBeadsCheckout` writes — only those a beads
+ * ingest last wrote (`listBeadsProjects`' `registeredByBeads`), because the
+ * watcher runs `bd` in every listed path and a registry-shaped node an agent
+ * wrote must not choose where. Rows lacking a usable project or path are skipped.
+ */
 async function readRegistryFromStore(db: Database): Promise<BeadsRegistration[]> {
-  const out: BeadsRegistration[] = [];
-  let cursor = null;
-  for (;;) {
-    const page: Awaited<ReturnType<typeof listNodes>> = await listNodes(db, {
-      nodeTypes: [BEADS_PROJECT_NODE_TYPE],
-      sourceSystems: [BEADS_SOURCE_SYSTEM],
-      limit: 500,
-      ...(cursor ? { cursor } : {}),
-    });
-    for (const node of page.nodes) {
-      const { project, path: dir } = node.metadata;
-      if (typeof project === "string" && project !== "" && typeof dir === "string" && dir !== "") out.push({ project, dir });
-    }
-    if (!page.hasMore || !page.nextCursor) return out;
-    cursor = page.nextCursor;
-  }
+  const projects = await listBeadsProjects(db, { registeredByBeads: true });
+  return projects.filter((p) => p.key !== "" && p.path !== "").map((p) => ({ project: p.key, dir: p.path }));
 }
 
 function defaultWatchDir(dir: string, onWake: () => void, onError: () => void): WatchHandle {
@@ -515,6 +517,13 @@ export function createBeadsWatcher(options: BeadsWatcherOptions): BeadsWatcher {
     },
     outcomes() {
       return [...lastOutcomes.values()];
+    },
+    wake(project) {
+      if (stopped) return false;
+      const t = tracked.get(project);
+      if (t === undefined) return false;
+      t.scheduler.tick();
+      return true;
     },
     async stop() {
       stopped = true;

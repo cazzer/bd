@@ -1,6 +1,13 @@
 // Entrypoint (bd-hmd.3): fail-fast startup checks, then serve the tRPC
 // router over Node's http server, bound to loopback only.
 //
+// One server, one dispatcher (dispatch.ts; board-visual-reviews, design.md
+// decision 4): the request guard refuses a foreign Host or a foreign-Origin
+// write with 403, then a request under REVIEW_IMAGES_PREFIX goes to the
+// review image handler (review-images.ts) and everything else to tRPC's
+// standalone handler — the same `createHTTPHandler` that `createHTTPServer`
+// wraps, so tRPC sees exactly what it saw before.
+//
 // Nothing above main() reads the environment or opens a connection —
 // module scope only imports and defines main(); every side effect
 // happens inside the function, at process startup (mirrors
@@ -13,9 +20,14 @@
 // that it isn't advertised.
 
 import { createDb, createPool, DatabaseUrlNotSetError, resolveDatabaseUrl } from "@breakdown/db";
-import { createHTTPServer } from "@trpc/server/adapters/standalone";
+import { createServer } from "node:http";
+import { createHTTPHandler } from "@trpc/server/adapters/standalone";
 import { createBeadsWatcher } from "./beads-watcher.js";
+import { parseReadOnly } from "./config.js";
 import { createContextFactory } from "./context.js";
+import { createRequestDispatcher } from "./dispatch.js";
+import { createReviewImageHandler } from "./review-images.js";
+import { createReviewWriter } from "./review-writer.js";
 import { appRouter } from "./router.js";
 import { describeConnectionError, describeConnectionTarget, verifyDatabaseConnection } from "./startup.js";
 
@@ -63,15 +75,21 @@ async function main(): Promise<void> {
   const shutdown = new AbortController();
   await watcher.start();
 
+  // BRAIN_READ_ONLY refuses the review decision (the server's one tracker
+  // write) the way apps/mcp refuses its write tools.
+  const readOnly = parseReadOnly(process.env["BRAIN_READ_ONLY"]);
+  const reviewWriter = createReviewWriter();
+
   const port = Number(process.env["WEB_SERVER_PORT"] ?? DEFAULT_PORT);
-  const server = createHTTPServer({
+  const trpcHandler = createHTTPHandler({
     router: appRouter,
-    createContext: createContextFactory(db, { watcher, shutdownSignal: shutdown.signal }),
+    createContext: createContextFactory(db, { watcher, shutdownSignal: shutdown.signal, readOnly, reviewWriter }),
     basePath: "/trpc/",
   });
+  const server = createServer(createRequestDispatcher({ port, reviewImages: createReviewImageHandler(), trpc: trpcHandler }));
 
   server.listen(port, HOST, () => {
-    console.error(`[breakdown-web] ready on http://${HOST}:${port} — database ${describeConnectionTarget(databaseUrl)}`);
+    console.error(`[breakdown-web] ready on http://${HOST}:${port} — database ${describeConnectionTarget(databaseUrl)}${readOnly ? " (read-only)" : ""}`);
   });
 
   // One shared guard: a second signal while shutting down exits at once
