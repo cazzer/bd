@@ -1,12 +1,16 @@
 // Fail-fast startup coverage (brain-mcp spec, "Fail fast on
-// misconfiguration"). Two layers: unit tests of the pure/DB-facing
-// helpers, and one process-level test that actually spawns the real
+// misconfiguration"). Three layers: unit tests of the pure/DB-facing
+// helpers, one process-level test that actually spawns the real
 // entrypoint (src/index.ts) against a dead port and asserts on its exit
 // code and stderr — the spec explicitly asks for this ("Test this by
 // pointing at a dead port and asserting on the exit and the message"),
-// so a unit test of verifyDatabaseConnection alone would not satisfy it.
+// so a unit test of verifyDatabaseConnection alone would not satisfy it —
+// and a stdout-purity guard, below, covering a failure that no unit test
+// can see: one stray line on stdout makes the transport unparseable and
+// every brain_* tool unreachable, while the server itself looks healthy.
 
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -160,4 +164,73 @@ describe("server process: fails fast on an unreachable database", () => {
   // for) and by index.ts's explicit catch around resolveDatabaseUrl(),
   // which reads and reports err.message the same way the dead-port path
   // does below.
+});
+
+// stdout is the MCP transport, not a log. dotenv's "injected env" banner
+// and `pnpm run`'s "> pkg@version start" preamble both went there and broke
+// it: the client read `>`, failed to parse, and closed the connection
+// (CONNECTION_CLOSED) before the server had answered anything. Nothing
+// about the server looked wrong, which is what made it expensive to find.
+describe("server process: stdout carries only the JSON-RPC transport", () => {
+  const mcpRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const tsxBin = path.join(mcpRoot, "node_modules", ".bin", "tsx");
+  const entry = path.join(mcpRoot, "src", "index.ts");
+  const workspaceRoot = path.resolve(mcpRoot, "..", "..");
+
+  it("replies to initialize with a line a stdio client can parse from its first byte", async () => {
+    const child = spawn(tsxBin, [entry], { stdio: ["pipe", "pipe", "pipe"], env: process.env });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+
+    const firstLine = new Promise<string>((resolve, reject) => {
+      child.stdout.on("data", (chunk: string) => {
+        stdout += chunk;
+        const newline = stdout.indexOf("\n");
+        if (newline !== -1) resolve(stdout.slice(0, newline));
+      });
+      child.on("error", reject);
+      child.on("exit", (code) =>
+        reject(new Error(`exited ${code} before replying — stdout=${JSON.stringify(stdout)} stderr=${stderr}`)),
+      );
+    });
+    const expired = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`no line on stdout within 20 s — stdout=${JSON.stringify(stdout)} stderr=${stderr}`)), 20_000).unref(),
+    );
+
+    child.stdin.write(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "stdout-guard", version: "0" } },
+      })}\n`,
+    );
+
+    try {
+      const line = await Promise.race([firstLine, expired]);
+      // The assertion that matters: the very first byte, not "contains JSON
+      // somewhere". A banner ahead of the frame is exactly what broke this.
+      expect(line.startsWith("{")).toBe(true);
+      expect(JSON.parse(line)).toMatchObject({ jsonrpc: "2.0", id: 1 });
+      // Startup diagnostics are still expected — on stderr, where they belong.
+      expect(stderr).toContain("[breakdown-brain] ready on stdio");
+    } finally {
+      child.kill("SIGKILL");
+    }
+  }, 30_000);
+
+  it("is launched by .mcp.json with pnpm's run preamble suppressed", () => {
+    const config = JSON.parse(readFileSync(path.join(workspaceRoot, ".mcp.json"), "utf8")) as {
+      mcpServers: Record<string, { command: string; args: string[] }>;
+    };
+    const brain = config.mcpServers["brain"];
+    expect(brain).toBeDefined();
+    // `pnpm run` prints "> @breakdown/mcp@0.0.0 start" to stdout. The server
+    // cannot defend against its own launcher, so the config carries the fix;
+    // drop --silent and the transport breaks again with the server untouched.
+    if (brain!.command === "pnpm") expect(brain!.args).toContain("--silent");
+  });
 });

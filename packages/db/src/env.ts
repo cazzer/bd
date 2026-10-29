@@ -41,7 +41,12 @@ export function resolveDatabaseUrl(): string {
   const here = path.dirname(fileURLToPath(import.meta.url));
   const workspaceRoot = findWorkspaceRoot(here);
   const envPath = path.join(workspaceRoot, ".env");
-  dotenv.config({ path: envPath });
+  // `quiet` keeps dotenv's "injected env" banner off stdout. The MCP server
+  // frames JSON-RPC on stdout, so a single stray line there is not cosmetic:
+  // the client fails to parse it and drops the transport before the server
+  // has said anything (CONNECTION_CLOSED). Every entrypoint loads env
+  // through here, so this is the one place that has to stay quiet.
+  dotenv.config({ path: envPath, quiet: true });
 
   const databaseUrl = process.env["DATABASE_URL"];
   if (!databaseUrl) {

@@ -2,7 +2,7 @@
   "mcpServers": {
     "brain": {
       "command": "pnpm",
-      "args": ["--filter", "@breakdown/mcp", "run", "start"]
+      "args": ["--silent", "--filter", "@breakdown/mcp", "run", "start"]
     }
   }
 }
