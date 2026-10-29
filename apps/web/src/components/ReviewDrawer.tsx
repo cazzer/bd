@@ -65,6 +65,8 @@ export interface ReviewDrawerProps {
   onDraftChange: (draft: string) => void;
   /** A decision wrote something; the board keeps the card in view while it moves. */
   onDecided: () => void;
+  /** `boardItem` found the item in `project`, so the board may stop guessing it. */
+  onProjectConfirmed: (project: string) => void;
   onClose: () => void;
 }
 
@@ -81,7 +83,7 @@ function formatTime(iso: string): string {
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
-export function ReviewDrawer({ project, item, boardLoaded, boardVersion, initialDraft, onDraftChange, onDecided, onClose }: ReviewDrawerProps) {
+export function ReviewDrawer({ project, item, boardLoaded, boardVersion, initialDraft, onDraftChange, onDecided, onProjectConfirmed, onClose }: ReviewDrawerProps) {
   const titleId = useId();
   const titleRef = useRef<HTMLHeadingElement>(null);
   const wide = useWideDrawer();
@@ -112,6 +114,7 @@ export function ReviewDrawer({ project, item, boardLoaded, boardVersion, initial
         if (cancelled) return;
         setAnswer(res.item);
         setReadError(null);
+        if (res.item !== null) onProjectConfirmed(project);
       })
       .catch((err: unknown) => {
         if (!cancelled) setReadError(messageOf(err, "Failed to read this item."));
@@ -123,12 +126,15 @@ export function ReviewDrawer({ project, item, boardLoaded, boardVersion, initial
 
   const loaded = answer ?? null;
 
-  // A re-read can take away the screenshot the lightbox shows (re-requested
-  // with fewer images, or the item stopped being a valid review): close it.
-  const imageCount = loaded?.isReview ? loaded.reviewImages.length : 0;
+  // A re-read can take away the screenshots altogether (the item is no longer
+  // a review, or is gone): close the lightbox and put focus on the title.
+  // ReviewBody handles a screenshot list that merely got shorter.
+  const reviewShown = loaded?.isReview === true;
   useEffect(() => {
-    if (lightbox !== null && lightbox >= imageCount) setLightbox(null);
-  }, [lightbox, imageCount]);
+    if (lightbox === null || reviewShown) return;
+    setLightbox(null);
+    titleRef.current?.focus();
+  }, [lightbox, reviewShown]);
 
   function onKeyDown(e: KeyboardEvent<HTMLElement>) {
     if (e.key !== "Escape" || e.defaultPrevented || lightbox !== null) return;
@@ -162,8 +168,12 @@ export function ReviewDrawer({ project, item, boardLoaded, boardVersion, initial
   const waiting = project === null ? boardLoaded : answer === null;
   const title = loaded ? loaded.title || "(untitled)" : waiting ? `Waiting for ${item}` : readError ? item : "Loading…";
 
+  // A complementary <aside> beside the board from `sm` up; a modal dialog
+  // (a <div>: `dialog` is not an allowed role on <aside>) below it.
+  const Shell = wide ? "aside" : "div";
+
   return (
-    <aside
+    <Shell
       aria-labelledby={titleId}
       role={wide ? undefined : "dialog"}
       aria-modal={wide ? undefined : true}
@@ -215,13 +225,18 @@ export function ReviewDrawer({ project, item, boardLoaded, boardVersion, initial
           </p>
         )}
         {!loaded && waiting && <p className="text-sm text-fg-muted">Waiting for {item}; it opens when its tracker loads.</p>}
-        {loaded && (loaded.isReview ? <ReviewBody item={loaded} lightbox={lightbox} setLightbox={setLightbox} /> : <PlainBody item={loaded} />)}
+        {loaded &&
+          (loaded.isReview ? (
+            <ReviewBody item={loaded} lightbox={lightbox} setLightbox={setLightbox} focusTitle={() => titleRef.current?.focus()} />
+          ) : (
+            <PlainBody item={loaded} />
+          ))}
       </div>
 
       {loaded && loaded.isReview && (canDecide(loaded) || outcome !== null || refusal !== null) && (
         <DecisionFooter open={canDecide(loaded)} message={message} setMessage={setMessage} pending={pending} outcome={outcome} refusal={refusal} decide={(d) => void decide(d)} />
       )}
-    </aside>
+    </Shell>
   );
 }
 
@@ -273,7 +288,17 @@ function SectionTitle({ children }: { children: ReactNode }) {
   return <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-fg-muted">{children}</h3>;
 }
 
-function ReviewBody({ item, lightbox, setLightbox }: { item: BoardItem; lightbox: number | null; setLightbox: (i: number | null) => void }) {
+function ReviewBody({
+  item,
+  lightbox,
+  setLightbox,
+  focusTitle,
+}: {
+  item: BoardItem;
+  lightbox: number | null;
+  setLightbox: (i: number | null) => void;
+  focusTitle: () => void;
+}) {
   const [failed, setFailed] = useState<ReadonlySet<string>>(new Set());
   const thumbRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const review = item.review;
@@ -285,12 +310,20 @@ function ReviewBody({ item, lightbox, setLightbox }: { item: BoardItem; lightbox
   });
 
   // Focus returns to the thumbnail of the screenshot last shown, once the
-  // lightbox has closed and the page is no longer inert.
+  // lightbox has closed and the page is no longer inert — or, when a re-read
+  // took that screenshot away, to the last one left, or the title if none is.
   const returnFocusTo = useRef<number | null>(null);
   useEffect(() => {
+    if (lightbox === null || lightbox < images.length) return;
+    returnFocusTo.current = images.length - 1;
+    setLightbox(null);
+  }, [lightbox, images.length]);
+  useEffect(() => {
     if (lightbox !== null || returnFocusTo.current === null) return;
-    thumbRefs.current[returnFocusTo.current]?.focus();
+    const thumb = returnFocusTo.current >= 0 ? thumbRefs.current[returnFocusTo.current] : null;
     returnFocusTo.current = null;
+    if (thumb) thumb.focus();
+    else focusTitle();
   }, [lightbox]);
 
   function closeLightbox() {

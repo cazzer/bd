@@ -350,14 +350,17 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
   const route: BoardRoute = { view: "board", viewId, projects, item };
   const drawerOpen = view !== null && item !== null;
 
-  // The drawer's project: once known for an item it stays (so the drawer
-  // never remounts under the reader); before the first board read, the
-  // address's single project is enough to start reading the item.
-  let openProject: string | null = null;
-  if (item !== null) {
-    openProject = pinnedProjects.current.get(item) ?? drawerProject(item, cards, data ? chosen : projects);
-    if (openProject !== null) pinnedProjects.current.set(item, openProject);
-  }
+  // The drawer's project. A project is pinned for an item only once it is
+  // confirmed — a card of that project shows the item, or `boardItem` found
+  // it there — so it stays put after that; until then it is a guess (the
+  // card's, else the address's or the board's single project, enough to
+  // start reading before the first board read), and a card that later shows
+  // the item elsewhere wins. Pinned in effects and callbacks, never in render.
+  const cardProject = item === null ? undefined : cards.find((c) => c.externalId === item)?.project;
+  const openProject = item === null ? null : (pinnedProjects.current.get(item) ?? drawerProject(item, cards, data ? chosen : projects));
+  useEffect(() => {
+    if (item !== null && cardProject !== undefined && !pinnedProjects.current.has(item)) pinnedProjects.current.set(item, cardProject);
+  }, [item, cardProject]);
 
   // After a decision, the card is kept in view while re-reads move it.
   useEffect(() => {
@@ -528,6 +531,9 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
           }}
           onDecided={() => {
             followCardUntil.current = Date.now() + 15_000;
+          }}
+          onProjectConfirmed={(project) => {
+            if (!pinnedProjects.current.has(item)) pinnedProjects.current.set(item, project);
           }}
           onClose={closeDrawer}
         />

@@ -69,6 +69,8 @@ export function Lightbox({ images, index, onIndexChange, onClose }: LightboxProp
   return (
     <dialog
       ref={dialogRef}
+      // Focusable itself, so a click on the image or backdrop leaves focus here and the arrow keys keep working.
+      tabIndex={-1}
       aria-label={label}
       onCancel={onCancel}
       onKeyDown={onKeyDown}
