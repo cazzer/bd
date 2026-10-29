@@ -436,15 +436,26 @@ type RawProjectRow = { id: string; project: string | null; path: string | null; 
  * Every registered beads project (the `beads_project` registry nodes
  * beads-ingest.ts writes), by key. A registry node missing its key or path
  * (hand-written) is skipped rather than guessed at.
+ *
+ * With `registeredByBeads`, only rows a beads ingest wrote count — the same
+ * provenance rule as `getRegisteredBeadsProject`: external id
+ * `project:<key>` and a last writer (`ingest_run_id`) whose run is a `beads`
+ * run. Anything that runs `bd` in a listed path (the beads watcher) asks
+ * for this; the board's project listing does not.
  */
-export async function listBeadsProjects(db: Database): Promise<BeadsProject[]> {
+export async function listBeadsProjects(db: Database, options: { registeredByBeads?: boolean } = {}): Promise<BeadsProject[]> {
+  const provenance = options.registeredByBeads
+    ? sql`AND r.external_id = 'project:' || (r.metadata->>'project')
+          AND EXISTS (SELECT 1 FROM ingest_runs ir WHERE ir.id = r.ingest_run_id AND ir.source_system = 'beads')`
+    : sql``;
   let result: { rows: RawProjectRow[] };
   try {
     result = await db.execute<RawProjectRow>(sql`
-      SELECT id, metadata->>'project' AS project, metadata->>'path' AS path, updated_at
-      FROM resolved_nodes
-      WHERE node_type = ${BEADS_PROJECT_NODE_TYPE} AND source_system = 'beads'
-      ORDER BY metadata->>'project', id
+      SELECT r.id, r.metadata->>'project' AS project, r.metadata->>'path' AS path, r.updated_at
+      FROM resolved_nodes r
+      WHERE r.node_type = ${BEADS_PROJECT_NODE_TYPE} AND r.source_system = 'beads'
+      ${provenance}
+      ORDER BY r.metadata->>'project', r.id
     `);
   } catch (err) {
     throw new LookupFailedError(`listBeadsProjects query failed${formatPgInfo(asPgError(err))}`, "listBeadsProjects", { cause: err });

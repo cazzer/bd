@@ -52,7 +52,7 @@ export const MAX_REVIEW_MESSAGE_LENGTH = MAX_REVIEW_COMMENT_LENGTH - 32;
 export const REVIEW_ITEM_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
 /** C0 controls but newline and tab, DEL, and the bidi embedding/override/isolate characters. */
 // eslint-disable-next-line no-control-regex
-const REFUSED_MESSAGE_CHARS = /[\u0000-\u0008\u000b-\u001f\u007f‪-‮⁦-⁩]/;
+const REFUSED_MESSAGE_CHARS = /[\u0000-\u0008\u000b-\u001f\u007f\u202a-\u202e\u2066-\u2069]/;
 
 export const reviewDecisionInputSchema = z
   .object({

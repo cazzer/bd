@@ -8,15 +8,17 @@
 // registered checkout, with BEADS_DIR and BEADS_DB removed from its
 // environment (either would send `bd` to another database than the
 // checkout's). Each command gets 30 s; then SIGTERM, then SIGKILL after a
-// 5 s grace. There is no abort signal: a decision that has started is
-// never cancelled from here. The comment text always starts with a fixed
+// 5 s grace, and 1 s after that the runner settles whether or not the
+// output pipes have closed (a grandchild may hold them). There is no abort
+// signal: a decision that has started is never cancelled from here. The comment text always starts with a fixed
 // prefix (`Accepted` / `Changes requested`), so the argv element carrying a
 // person's message can never be read by `bd` as a flag; the router also
 // requires the item id to start with a letter or digit.
 //
 // The default runner's errors never include Node's `err.message`, which
 // echoes the whole command line — the person's message included. They are
-// `bd not found on PATH`, `bd <verb> timed out after 30 s`,
+// `bd not found on PATH`, `could not start bd in <cwd>` (the checkout is
+// gone), `bd <verb> timed out after 30 s`,
 // `bd <verb> was killed (<signal>)`, `bd <verb> failed: <stderr>`, or
 // `bd <verb> exited <code>`. A command that timed out or was killed may
 // have done its work before it died: the runner throws `BdUncertainError`
@@ -54,11 +56,22 @@
 // bd-ker.5 adds the herdr notification beside `write`, not inside it.
 
 import { execFile } from "node:child_process";
+import { statSync } from "node:fs";
+
+function isDirectory(dir: string): boolean {
+  try {
+    return statSync(dir).isDirectory();
+  } catch {
+    return false;
+  }
+}
 
 /** Each `bd` command gets this long before SIGTERM. */
 export const REVIEW_BD_TIMEOUT_MS = 30_000;
 /** After SIGTERM, how long before SIGKILL. */
 export const REVIEW_BD_KILL_GRACE_MS = 5_000;
+/** After SIGKILL, how long before the runner gives up waiting for the output pipes to close. */
+const REVIEW_BD_DEADLINE_SLACK_MS = 1_000;
 /** `bd`'s output for these commands is small; this bounds what is buffered. */
 const BD_MAX_BUFFER = 1024 * 1024;
 /** Longest tracker error passed back to the browser. */
@@ -172,26 +185,35 @@ export function createBdRunner(options: BdRunnerOptions = {}): RunBd {
       delete env["BEADS_DIR"];
       delete env["BEADS_DB"];
       let timedOut = false;
+      let settled = false;
       let killTimer: NodeJS.Timeout | undefined;
-      const child = execFile(command, [...args], { cwd, env, maxBuffer: BD_MAX_BUFFER, encoding: "utf8" }, (err, stdout, stderr) => {
+      const finish = (settle: () => void) => {
+        if (settled) return;
+        settled = true;
         clearTimeout(termTimer);
         clearTimeout(killTimer);
+        clearTimeout(deadline);
+        settle();
+      };
+      const child = execFile(command, [...args], { cwd, env, maxBuffer: BD_MAX_BUFFER, encoding: "utf8" }, (err, stdout, stderr) => {
         if (!err) {
-          resolve(stdout);
+          finish(() => resolve(stdout));
           return;
         }
         const e = err as NodeJS.ErrnoException & { code?: string | number; signal?: NodeJS.Signals | null };
         if (e.code === "ENOENT") {
-          reject(new Error("bd not found on PATH"));
+          // spawn reports a missing cwd as ENOENT too; say which it was.
+          finish(() => reject(new Error(isDirectory(cwd) ? "bd not found on PATH" : `could not start bd in ${cwd}`)));
         } else if (timedOut) {
-          reject(new BdUncertainError(`${verb} timed out after ${seconds}`));
+          finish(() => reject(new BdUncertainError(`${verb} timed out after ${seconds}`)));
         } else if (e.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
-          reject(new BdUncertainError(`${verb} was stopped: too much output`));
+          finish(() => reject(new BdUncertainError(`${verb} was stopped: too much output`)));
         } else if (e.signal) {
-          reject(new BdUncertainError(`${verb} was killed (${e.signal})`));
+          finish(() => reject(new BdUncertainError(`${verb} was killed (${e.signal})`)));
         } else {
           const text = typeof stderr === "string" ? stderr.trim() : "";
-          reject(new Error(fitError(text !== "" ? `${verb} failed: ${text}` : typeof e.code === "number" ? `${verb} exited ${e.code}` : `${verb} could not run (${String(e.code ?? "unknown error")})`)));
+          const message = text !== "" ? `${verb} failed: ${text}` : typeof e.code === "number" ? `${verb} exited ${e.code}` : `${verb} could not run (${String(e.code ?? "unknown error")})`;
+          finish(() => reject(new Error(fitError(message))));
         }
       });
       const termTimer = setTimeout(() => {
@@ -199,6 +221,17 @@ export function createBdRunner(options: BdRunnerOptions = {}): RunBd {
         child.kill("SIGTERM");
         killTimer = setTimeout(() => child.kill("SIGKILL"), killGraceMs);
       }, timeoutMs);
+      // `execFile` reports only once stdout/stderr close; a grandchild that
+      // inherited them can hold them open after `bd` itself is dead. The
+      // deadline settles regardless, so the per-checkout queue never wedges.
+      const deadline = setTimeout(() => {
+        finish(() => {
+          child.kill("SIGKILL");
+          child.stdout?.destroy();
+          child.stderr?.destroy();
+          reject(new BdUncertainError(`${verb} timed out after ${seconds}`));
+        });
+      }, timeoutMs + killGraceMs + REVIEW_BD_DEADLINE_SLACK_MS);
     });
 }
 

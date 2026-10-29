@@ -46,7 +46,8 @@ beforeAll(async () => {
   const notADir = path.join(checkout, "not-a-dir");
   writeFileSync(notADir, "");
   beadsRun = await openIngestRun(db, "beads", { actor: "review-router-suite" });
-  agentRun = await openIngestRun(db, "agent", { actor: "review-router-suite" });
+  // Any non-beads run stands in for brain_write's `agent` run; not `agent` itself, which apps/mcp's suite deletes when empty.
+  agentRun = await openIngestRun(db, `agent-review-test-${TAG}`, { actor: "review-router-suite" });
   const review = { images: [], pane: "w1:p2", summary: "header and grid" };
   const item = (ext: string, project: string, metadata: Record<string, unknown> = {}) => ({
     nodeType: "work_item",
@@ -235,8 +236,8 @@ describe("reviewDecision", () => {
     ["a message with ESC (terminal escape)", { message: "a\u001b[2Jb" }],
     ["a message with a carriage return", { message: "a\rb" }],
     ["a message with DEL", { message: "a\u007fb" }],
-    ["a message with a right-to-left override", { message: "a‮b" }],
-    ["a message with a bidi isolate", { message: "a⁧b" }],
+    ["a message with a right-to-left override", { message: "a\u202eb" }],
+    ["a message with a bidi isolate", { message: "a\u2067b" }],
     ["an over-long message", { message: "x".repeat(5000) }],
   ])("refuses %s at validation", async (_name, over) => {
     const { caller, calls } = setup({ db: poisonedDb() });

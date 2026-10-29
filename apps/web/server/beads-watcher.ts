@@ -60,7 +60,7 @@ import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { readFileSync, statSync, readdirSync, watch as fsWatch, type FSWatcher } from "node:fs";
 import path from "node:path";
-import { BEADS_PROJECT_NODE_TYPE, BEADS_SOURCE_SYSTEM, ingestBeadsCheckout, listNodes, type IngestBeadsCheckoutResult } from "@breakdown/core";
+import { ingestBeadsCheckout, listBeadsProjects, type IngestBeadsCheckoutResult } from "@breakdown/core";
 import type { Database } from "@breakdown/db";
 
 export const BEADS_WATCHER_EVENT = "event";
@@ -325,24 +325,15 @@ export interface BeadsWatcher {
   stop(): Promise<void>;
 }
 
-/** Reads the registry nodes `ingestBeadsCheckout` writes; rows whose metadata lacks a usable project or path are skipped. */
+/**
+ * Reads the registry nodes `ingestBeadsCheckout` writes — only those a beads
+ * ingest last wrote (`listBeadsProjects`' `registeredByBeads`), because the
+ * watcher runs `bd` in every listed path and a registry-shaped node an agent
+ * wrote must not choose where. Rows lacking a usable project or path are skipped.
+ */
 async function readRegistryFromStore(db: Database): Promise<BeadsRegistration[]> {
-  const out: BeadsRegistration[] = [];
-  let cursor = null;
-  for (;;) {
-    const page: Awaited<ReturnType<typeof listNodes>> = await listNodes(db, {
-      nodeTypes: [BEADS_PROJECT_NODE_TYPE],
-      sourceSystems: [BEADS_SOURCE_SYSTEM],
-      limit: 500,
-      ...(cursor ? { cursor } : {}),
-    });
-    for (const node of page.nodes) {
-      const { project, path: dir } = node.metadata;
-      if (typeof project === "string" && project !== "" && typeof dir === "string" && dir !== "") out.push({ project, dir });
-    }
-    if (!page.hasMore || !page.nextCursor) return out;
-    cursor = page.nextCursor;
-  }
+  const projects = await listBeadsProjects(db, { registeredByBeads: true });
+  return projects.filter((p) => p.key !== "" && p.path !== "").map((p) => ({ project: p.key, dir: p.path }));
 }
 
 function defaultWatchDir(dir: string, onWake: () => void, onError: () => void): WatchHandle {
