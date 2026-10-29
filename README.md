@@ -119,7 +119,7 @@ The top two hits are exact full-text matches on `design.md` and `architecture-ha
 An agent asks a person to accept screenshots with one command, run from a registered checkout or any git worktree of one:
 
 ```bash
-review-request <item-id> --summary 'what to look at' shot-1.png shot-2.png [--board-url http://localhost:5173]
+review-request <item-id> --summary 'what to look at' shot-1.png shot-2.png [--board-url http://localhost:5310]
 ```
 
 It files (or refreshes) a `review` child bead of the item, copies the images under `~/.local/share/breakdown/reviews/<project>/<bead-id>/`, opens Chrome on the board's drawer for it, and shows a herdr notification. It needs `pnpm dev` running here (it reads registered projects from the API server) and the checkout registered with `pnpm ingest:beads <path> --project <key>`. Put it on `PATH` once, from this repo:

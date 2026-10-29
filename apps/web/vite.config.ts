@@ -16,6 +16,11 @@ const serverPort = Number(process.env["WEB_SERVER_PORT"] ?? DEFAULT_SERVER_PORT)
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: {
+    // Pinned off Vite's 5173, which other projects' dev servers take first;
+    // bin/review-request links to this port. strictPort fails loudly rather
+    // than drifting. A second client passes `--port <n> --strictPort` to override.
+    port: 5310,
+    strictPort: true,
     proxy: {
       "/trpc": {
         target: `http://127.0.0.1:${serverPort}`,

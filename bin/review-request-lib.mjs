@@ -16,10 +16,12 @@ const PREFIX = "review-request: ";
 // server serves review images only from under this directory.
 export const REVIEW_ROOT_PARTS = [".local", "share", "breakdown", "reviews"];
 
-export const DEFAULT_BOARD_URL = "http://localhost:5173";
+export const DEFAULT_BOARD_URL = "http://localhost:5310";
 const DEFAULT_SERVER_PORT = "4310";
 const FETCH_TIMEOUT_MS = 5_000;
-const ITEM_ID = /^[A-Za-z0-9._-]{1,200}$/;
+// The first character is never `-`, so an id cannot be read by bd as an option.
+const ITEM_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
+const PORT = /^\d{1,5}$/;
 const SAFE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const PANE_ID = /^[A-Za-z0-9:_.-]{1,64}$/;
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
@@ -73,7 +75,8 @@ function isHttpUrl(value) {
 }
 
 export function apiBase(env) {
-  return `http://127.0.0.1:${env.WEB_SERVER_PORT || DEFAULT_SERVER_PORT}`;
+  const port = PORT.test(env.WEB_SERVER_PORT ?? "") ? env.WEB_SERVER_PORT : DEFAULT_SERVER_PORT;
+  return `http://127.0.0.1:${port}`;
 }
 
 export function boardLink(boardUrl, project, itemId) {
@@ -115,23 +118,17 @@ export function findProject(projects, realMain, realpathFn = realpathSync) {
 /** The newest open review child is reused; older duplicates are left alone. */
 export function chooseReview(children) {
   if (children.length === 0) return null;
-  const newest = [...children].sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0];
+  const time = (child) => {
+    const parsed = Date.parse(child.created_at);
+    return Number.isNaN(parsed) ? -Infinity : parsed;
+  };
+  const newest = [...children].sort((a, b) => time(b) - time(a))[0];
   return { review: newest, count: children.length };
 }
 
-/** bd metadata is read, merged, and written back whole, so keys other than `review` survive. */
-export function reviewMetadata(existing, { images, pane, summary }) {
-  let value = existing;
-  if (typeof value === "string") {
-    try {
-      value = JSON.parse(value);
-    } catch {
-      value = null;
-    }
-  }
-  const base = value !== null && typeof value === "object" && !Array.isArray(value) ? value : {};
-  const review = pane === null ? { images, summary } : { images, pane, summary };
-  return { ...base, review };
+/** `bd update --metadata` merges top-level keys and replaces each one whole, so sending `review` alone keeps the rest. */
+export function reviewMetadata({ images, pane, summary }) {
+  return { review: pane === null ? { images, summary } : { images, pane, summary } };
 }
 
 export function paneFrom(env) {
@@ -193,10 +190,14 @@ async function statOrNull(p) {
   }
 }
 
+function reviewDir(homedir, key) {
+  return path.join(homedir, ...REVIEW_ROOT_PARTS, key);
+}
+
 /**
  * @param deps {{ argv: string[], cwd: string, env: Record<string, string|undefined>, homedir: string,
  *   run: (cmd: string, args: string[], opts: { cwd: string }) => Promise<{ code: number, stdout: string, stderr: string }>,
- *   fetch: typeof fetch, out: (line: string) => void, warn: (line: string) => void, breakdownRoot: string, pid?: number }}
+ *   fetch: typeof fetch, out: (line: string) => void, warn: (line: string) => void, breakdownRoot: string }}
  * @returns {Promise<{ exitCode: number }>}
  */
 export async function requestReview(deps) {
@@ -210,13 +211,18 @@ export async function requestReview(deps) {
     deps.warn(USAGE);
     return { exitCode: 2 };
   }
+  let staged = null;
   try {
     const plan = await check(deps, parsed.args);
-    return await write(deps, parsed.args, plan);
+    staged = await stageImages(deps, plan.project.key, parsed.args.images);
+    return await write(deps, parsed.args, plan, staged);
   } catch (err) {
-    if (!(err instanceof Refusal)) throw err;
-    for (const line of err.message.split("\n")) deps.warn(PREFIX + line);
+    const message = err instanceof Refusal ? err.message : `unexpected error: ${err?.message ?? String(err)}`;
+    for (const line of message.split("\n")) deps.warn(PREFIX + line);
     return { exitCode: 1 };
+  } finally {
+    // Already gone once the images were moved into place; on any other path nothing may be left behind.
+    if (staged) await fs.rm(staged.dir, { recursive: true, force: true });
   }
 }
 
@@ -257,7 +263,8 @@ async function check(deps, args) {
   if (!SAFE_SEGMENT.test(project.key)) {
     throw new Refusal(`project key ${JSON.stringify(project.key)} is not usable as a directory name. Nothing was filed.`);
   }
-  const bdCwd = { cwd: project.path };
+  // The directory we resolved ourselves, not the server's string for it; findProject proved they are the same.
+  const bdCwd = { cwd: realMain };
 
   const shown = await deps.run("bd", ["show", args.itemId, "--json"], bdCwd);
   let item = null;
@@ -291,7 +298,56 @@ async function check(deps, args) {
   return { project, item, existing: chooseReview(children), bdCwd };
 }
 
-async function write(deps, args, { project, item, existing, bdCwd }) {
+/** Copies the images before any bead is filed, so a copy failure refuses with nothing filed. */
+async function stageImages(deps, key, images) {
+  const projectDir = reviewDir(deps.homedir, key);
+  let dir = null;
+  try {
+    await fs.mkdir(projectDir, { recursive: true });
+    dir = await fs.mkdtemp(path.join(projectDir, `.staging-${process.pid}-`));
+    const names = [];
+    for (const [index, given] of images.entries()) {
+      const name = copiedName(index, given);
+      await fs.copyFile(path.resolve(deps.cwd, given), path.join(dir, name));
+      names.push(name);
+    }
+    return { dir, names };
+  } catch (err) {
+    if (dir) await fs.rm(dir, { recursive: true, force: true });
+    throw new Refusal(`could not copy the images under ${projectDir}: ${err.message}. Nothing was filed.`);
+  }
+}
+
+/** Swaps the staged images in as the bead's directory; the previous images stay until the new ones are in place. */
+async function placeImages(deps, key, id, staged) {
+  const projectDir = reviewDir(deps.homedir, key);
+  const finalDir = path.join(projectDir, id);
+  const oldDir = path.join(projectDir, `.old-${id}-${process.pid}`);
+  await fs.rm(oldDir, { recursive: true, force: true });
+  let hadOld = false;
+  try {
+    await fs.rename(finalDir, oldDir);
+    hadOld = true;
+  } catch (err) {
+    if (err.code !== "ENOENT") throw err;
+  }
+  try {
+    await fs.rename(staged.dir, finalDir);
+  } catch (err) {
+    if (hadOld) await fs.rename(oldDir, finalDir);
+    throw err;
+  }
+  if (hadOld) await fs.rm(oldDir, { recursive: true, force: true });
+  return staged.names.map((name) => path.join(finalDir, name));
+}
+
+/** A reused bead with images on record finished a request before; one without is a retry of a failed first request. */
+function hadImages(review) {
+  const images = review.metadata?.review?.images;
+  return Array.isArray(images) && images.length > 0;
+}
+
+async function write(deps, args, { project, item, existing, bdCwd }, staged) {
   const pane = paneFrom(deps.env);
   let review;
   if (existing) {
@@ -317,18 +373,16 @@ async function write(deps, args, { project, item, existing, bdCwd }) {
       bdCwd,
     );
     if (created.code !== 0) {
-      deps.warn(`${PREFIX}bd create failed in ${project.path}: ${firstLine(created)}. Nothing was filed.`);
-      return { exitCode: 1 };
+      throw new Refusal(`bd create failed in ${project.path}: ${firstLine(created)}. Nothing was filed.`);
     }
     try {
       const parsedCreate = parseJsonOutput(created.stdout);
       review = Array.isArray(parsedCreate) ? parsedCreate[0] : parsedCreate;
       if (typeof review?.id !== "string") throw new Error("no id");
     } catch {
-      deps.warn(
-        `${PREFIX}bd create ran but printed no issue id; check \`bd list --parent ${args.itemId} --label review\` in ${project.path} before retrying.`,
+      throw new Refusal(
+        `bd create ran but printed no issue id; check \`bd list --parent ${args.itemId} --label review\` in ${project.path} before retrying.`,
       );
-      return { exitCode: 1 };
     }
   }
   const id = review.id;
@@ -339,21 +393,24 @@ async function write(deps, args, { project, item, existing, bdCwd }) {
     return { exitCode: 1 };
   };
 
-  if (!SAFE_SEGMENT.test(id)) return partial("copying images", `issue id ${JSON.stringify(id)} is not a directory name`);
+  if (!SAFE_SEGMENT.test(id)) {
+    return partial("moving images into place", `issue id ${JSON.stringify(id)} is not a directory name`);
+  }
   let stored;
   try {
-    stored = await copyImages(deps, project.key, id, args.images);
+    stored = await placeImages(deps, project.key, id, staged);
   } catch (err) {
-    return partial("copying images", err.message);
+    return partial("moving images into place", err.message);
   }
 
-  const metadata = reviewMetadata(review.metadata, { images: stored, pane, summary: args.summary });
+  const metadata = reviewMetadata({ images: stored, pane, summary: args.summary });
   const updateArgs = ["update", id, "--metadata", JSON.stringify(metadata)];
+  if (existing) updateArgs.push("--description", args.summary);
   if (existing && (review.labels ?? []).includes(CHANGES_LABEL)) updateArgs.push("--remove-label", CHANGES_LABEL);
   const updated = await deps.run("bd", updateArgs, bdCwd);
   if (updated.code !== 0) return partial("bd update", firstLine(updated));
 
-  if (existing) {
+  if (existing && hadImages(review)) {
     const commented = await deps.run("bd", ["comments", "add", id, `Review updated: ${args.summary}`], bdCwd);
     if (commented.code !== 0) return partial("bd comments add", firstLine(commented));
   }
@@ -372,7 +429,7 @@ async function write(deps, args, { project, item, existing, bdCwd }) {
     "herdr",
     [
       "notification", "show", `Review requested: ${project.key} ${args.itemId}`,
-      "--body", args.summary.slice(0, MAX_NOTIFICATION_BODY),
+      `--body=${args.summary.slice(0, MAX_NOTIFICATION_BODY)}`,
       "--sound", "request",
     ],
     { cwd: deps.cwd },
@@ -385,35 +442,11 @@ async function write(deps, args, { project, item, existing, bdCwd }) {
     );
   }
 
-  deps.out(
-    `Review ${id} ${existing ? "updated" : "filed"} for ${args.itemId} in ${project.key} (${stored.length} images).`,
-  );
+  const count = `${stored.length} image${stored.length === 1 ? "" : "s"}`;
+  deps.out(`Review ${id} ${existing ? "updated" : "filed"} for ${args.itemId} in ${project.key} (${count}).`);
   deps.out(`Board: ${link}`);
   deps.out(
     `End your turn now and wait for a prompt in this pane with the decision (Review ${id} accepted|changes requested: …). If none arrives, read \`bd comments ${id}\`.`,
   );
   return { exitCode: 0 };
-}
-
-/** Copies into a staging dir, then swaps it over the bead's dir so a re-request leaves only the new images. */
-async function copyImages(deps, key, id, images) {
-  const projectDir = path.join(deps.homedir, ...REVIEW_ROOT_PARTS, key);
-  const finalDir = path.join(projectDir, id);
-  const stagingDir = `${finalDir}.staging-${deps.pid ?? process.pid}`;
-  await fs.rm(stagingDir, { recursive: true, force: true });
-  try {
-    await fs.mkdir(stagingDir, { recursive: true });
-    const names = [];
-    for (const [index, given] of images.entries()) {
-      const name = copiedName(index, given);
-      await fs.copyFile(path.resolve(deps.cwd, given), path.join(stagingDir, name));
-      names.push(name);
-    }
-    await fs.rm(finalDir, { recursive: true, force: true });
-    await fs.rename(stagingDir, finalDir);
-    return names.map((name) => path.join(finalDir, name));
-  } catch (err) {
-    await fs.rm(stagingDir, { recursive: true, force: true });
-    throw err;
-  }
 }

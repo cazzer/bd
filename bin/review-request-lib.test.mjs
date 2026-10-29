@@ -3,9 +3,10 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { realpathSync } from "node:fs";
-import { describe, it } from "node:test";
+import { after, describe, it } from "node:test";
 import {
   USAGE,
+  apiBase,
   boardLink,
   chooseReview,
   copiedName,
@@ -20,11 +21,22 @@ import {
 const BREAKDOWN_ROOT = "/opt/breakdown";
 const ITEM = "scr-1";
 const REVIEW = "scr-1.1";
+const BOARD = "http://localhost:5310";
+
+const tempDirs = [];
+after(async () => {
+  await Promise.all(tempDirs.map((dir) => fs.rm(dir, { recursive: true, force: true })));
+});
+async function tempDir(prefix) {
+  const dir = realpathSync(await fs.mkdtemp(path.join(os.tmpdir(), prefix)));
+  tempDirs.push(dir);
+  return dir;
+}
 
 describe("parseArgs", () => {
   it("accepts an item, a summary, and images", () => {
     assert.deepEqual(parseArgs(["scr-1", "--summary", "header", "a.png", "b.png"]), {
-      args: { itemId: "scr-1", summary: "header", boardUrl: "http://localhost:5173", images: ["a.png", "b.png"] },
+      args: { itemId: "scr-1", summary: "header", boardUrl: BOARD, images: ["a.png", "b.png"] },
     });
   });
   it("accepts --summary=x and --board-url", () => {
@@ -47,9 +59,10 @@ describe("parseArgs", () => {
     const many = Array.from({ length: 21 }, (_, i) => `${i}.png`);
     assert.match(parseArgs(["scr-1", "--summary", "s", ...many]).error, /at most 20 images, got 21/);
   });
-  it("refuses a bad item id and a missing one", () => {
+  it("refuses a bad item id, one starting with -, and a missing one", () => {
     assert.match(parseArgs(["scr 1", "--summary", "s", "a.png"]).error, /not an issue id/);
     assert.match(parseArgs(["scr;rm", "--summary", "s", "a.png"]).error, /not an issue id/);
+    assert.match(parseArgs(["--summary", "s", "--", "-x", "a.png"]).error, /not an issue id: -x/);
     assert.match(parseArgs(["--summary", "s"]).error, /missing <item-id>/);
   });
   it("refuses a non-http board url and unknown options", () => {
@@ -65,13 +78,16 @@ describe("helpers", () => {
     assert.equal(copiedName(11, "/x/my shot (1).PNG"), "12-my_shot__1_.PNG");
   });
   it("boardLink encodes and tolerates a trailing slash", () => {
-    assert.equal(
-      boardLink("http://localhost:5173/", "my proj", "a&b"),
-      "http://localhost:5173/board?project=my%20proj&item=a%26b",
-    );
+    assert.equal(boardLink(`${BOARD}/`, "my proj", "a&b"), `${BOARD}/board?project=my%20proj&item=a%26b`);
+  });
+  it("apiBase takes a numeric WEB_SERVER_PORT only", () => {
+    assert.equal(apiBase({}), "http://127.0.0.1:4310");
+    assert.equal(apiBase({ WEB_SERVER_PORT: "4313" }), "http://127.0.0.1:4313");
+    assert.equal(apiBase({ WEB_SERVER_PORT: "4313@evil.test" }), "http://127.0.0.1:4310");
+    assert.equal(apiBase({ WEB_SERVER_PORT: "" }), "http://127.0.0.1:4310");
   });
   it("findProject matches through a symlink", async () => {
-    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "rr-find-"));
+    const tmp = await tempDir("rr-find-");
     const real = path.join(tmp, "real");
     await fs.mkdir(real);
     await fs.symlink(real, path.join(tmp, "link"));
@@ -79,31 +95,25 @@ describe("helpers", () => {
       { key: "other", path: path.join(tmp, "missing") },
       { key: "scratch", path: path.join(tmp, "link") },
     ];
-    assert.equal(findProject(projects, realpathSync(real))?.key, "scratch");
+    assert.equal(findProject(projects, real)?.key, "scratch");
     assert.equal(findProject(projects, path.join(tmp, "elsewhere")), null);
   });
-  it("chooseReview picks the newest and counts", () => {
+  it("chooseReview picks the newest by time, not by text, and counts", () => {
     assert.equal(chooseReview([]), null);
     const chosen = chooseReview([
-      { id: "a", created_at: "2026-10-01T00:00:00Z" },
-      { id: "b", created_at: "2026-10-03T00:00:00Z" },
-      { id: "c", created_at: "2026-10-02T00:00:00Z" },
+      { id: "a", created_at: "2026-10-28T23:30:00-04:00" },
+      { id: "b", created_at: "2026-10-29T03:00:00Z" },
+      { id: "c", created_at: "not a date" },
     ]);
-    assert.equal(chosen.review.id, "b");
+    assert.equal(chosen.review.id, "a");
     assert.equal(chosen.count, 3);
   });
-  it("reviewMetadata keeps other keys, replaces review, omits a null pane", () => {
-    const existing = { team: "x", review: { images: ["old"], pane: "p0", summary: "old" } };
-    assert.deepEqual(reviewMetadata(existing, { images: ["n"], pane: null, summary: "s" }), {
-      team: "x",
+  it("reviewMetadata holds only the review key and omits a null pane", () => {
+    assert.deepEqual(reviewMetadata({ images: ["n"], pane: null, summary: "s" }), {
       review: { images: ["n"], summary: "s" },
     });
-    assert.deepEqual(reviewMetadata(undefined, { images: ["n"], pane: "p1", summary: "s" }), {
+    assert.deepEqual(reviewMetadata({ images: ["n"], pane: "p1", summary: "s" }), {
       review: { images: ["n"], pane: "p1", summary: "s" },
-    });
-    assert.deepEqual(reviewMetadata('{"team":"y"}', { images: [], pane: null, summary: "s" }), {
-      team: "y",
-      review: { images: [], summary: "s" },
     });
   });
   it("paneFrom accepts pane ids only", () => {
@@ -119,7 +129,7 @@ describe("helpers", () => {
 
 /** A registered checkout, a separate caller worktree holding images, and an empty home. */
 async function fixture() {
-  const tmp = realpathSync(await fs.mkdtemp(path.join(os.tmpdir(), "rr-")));
+  const tmp = await tempDir("rr-");
   const repo = path.join(tmp, "repo");
   const worktree = path.join(tmp, "worktree");
   const home = path.join(tmp, "home");
@@ -127,7 +137,8 @@ async function fixture() {
   await fs.writeFile(path.join(worktree, "a.png"), "A1");
   await fs.writeFile(path.join(worktree, "b.png"), "B1");
   await fs.writeFile(path.join(worktree, "notes.txt"), "T");
-  return { tmp, repo, worktree, home, reviewRoot: path.join(home, ".local", "share", "breakdown", "reviews") };
+  const reviewRoot = path.join(home, ".local", "share", "breakdown", "reviews");
+  return { tmp, repo, worktree, home, reviewRoot, projectDir: path.join(reviewRoot, "scratch") };
 }
 
 const ok = (stdout = "") => ({ code: 0, stdout, stderr: "" });
@@ -168,7 +179,6 @@ async function harness(fx, { item, children = [], handlers = {}, env = { HERDR_P
     out: (l) => out.push(l),
     warn: (l) => warn.push(l),
     breakdownRoot: BREAKDOWN_ROOT,
-    pid: 4242,
   });
   return { result, calls, out, warn };
 }
@@ -176,12 +186,23 @@ async function harness(fx, { item, children = [], handlers = {}, env = { HERDR_P
 const WRITES = new Set(["create", "update", "comments", "dep"]);
 const writeCalls = (calls) => calls.filter((c) => c.cmd === "bd" && WRITES.has(c.args[0]));
 const order = (calls) => calls.map((c) => [c.cmd, c.args[0]].join(" "));
+const callTo = (h, sub) => h.calls.find((c) => c.cmd === "bd" && c.args[0] === sub);
+
+/** Every entry under the review root except the bare project directory staging may create. */
+async function reviewEntries(fx) {
+  try {
+    return (await fs.readdir(fx.reviewRoot, { recursive: true })).filter((e) => e !== "scratch");
+  } catch (err) {
+    if (err.code === "ENOENT") return [];
+    throw err;
+  }
+}
 
 async function assertNothingFiled(fx, h) {
   assert.equal(h.result.exitCode, 1);
   assert.deepEqual(writeCalls(h.calls), []);
   assert.equal(h.calls.some((c) => c.cmd === "open" || c.cmd === "herdr"), false);
-  await assert.rejects(fs.access(fx.reviewRoot));
+  assert.deepEqual(await reviewEntries(fx), []);
 }
 
 describe("requestReview refusals", () => {
@@ -227,6 +248,24 @@ describe("requestReview refusals", () => {
     await assertNothingFiled(fx, h);
   });
 
+  it("refuses when bd list fails", async () => {
+    const fx = await fixture();
+    const h = await harness(fx, { handlers: { "bd list --parent": fail("Error: database locked") } });
+    assert.deepEqual(h.warn, [
+      `review-request: cannot list open reviews of ${ITEM} in scratch: Error: database locked. Nothing was filed.`,
+    ]);
+    await assertNothingFiled(fx, h);
+  });
+
+  it("refuses when bd list does not print an array", async () => {
+    const fx = await fixture();
+    const h = await harness(fx, { handlers: { "bd list --parent": ok('{"id":"x"}') } });
+    assert.deepEqual(h.warn, [
+      `review-request: cannot list open reviews of ${ITEM} in scratch: unreadable output from bd list. Nothing was filed.`,
+    ]);
+    await assertNothingFiled(fx, h);
+  });
+
   it("refuses when outside a git checkout", async () => {
     const fx = await fixture();
     const h = await harness(fx, { handlers: { "git rev-parse --path-format=absolute": fail("fatal: not a git repository", 128) } });
@@ -245,6 +284,47 @@ describe("requestReview refusals", () => {
       "review-request: Nothing was filed.",
     ]);
     assert.deepEqual(h.calls, []);
+    await assertNothingFiled(fx, h);
+  });
+
+  it("refuses with nothing filed when an image vanishes before it is copied", async () => {
+    const fx = await fixture();
+    const vanish = async () => {
+      await fs.rm(path.join(fx.worktree, "b.png"));
+      return ok(`${fx.repo}/.git\n`);
+    };
+    const h = await harness(fx, { handlers: { "git rev-parse --path-format=absolute": vanish } });
+    assert.equal(h.warn.length, 1);
+    assert.match(h.warn[0], new RegExp(`^review-request: could not copy the images under ${fx.projectDir}: ENOENT.*b\\.png.*\\. Nothing was filed\\.$`));
+    await assertNothingFiled(fx, h);
+  });
+
+  it("refuses with nothing filed when bd create fails", async () => {
+    const fx = await fixture();
+    const h = await harness(fx, { handlers: { "bd create --title": fail("Error: parent not found") } });
+    assert.deepEqual(h.warn, [`review-request: bd create failed in ${fx.repo}: Error: parent not found. Nothing was filed.`]);
+    assert.equal(h.result.exitCode, 1);
+    assert.deepEqual(await reviewEntries(fx), []);
+  });
+
+  it("refuses when bd create exits 0 without an id", async () => {
+    const fx = await fixture();
+    const h = await harness(fx, { handlers: { "bd create --title": ok("Created.\n") } });
+    assert.deepEqual(h.warn, [
+      `review-request: bd create ran but printed no issue id; check \`bd list --parent ${ITEM} --label review\` in ${fx.repo} before retrying.`,
+    ]);
+    assert.equal(h.result.exitCode, 1);
+    assert.equal(h.calls.some((c) => c.args[0] === "update" || c.cmd === "open"), false);
+    assert.deepEqual(await reviewEntries(fx), []);
+  });
+
+  it("reports an unexpected error as one line", async () => {
+    const fx = await fixture();
+    const boom = () => {
+      throw new Error("boom");
+    };
+    const h = await harness(fx, { handlers: { [`bd show ${ITEM}`]: boom } });
+    assert.deepEqual(h.warn, ["review-request: unexpected error: boom"]);
     await assertNothingFiled(fx, h);
   });
 
@@ -272,17 +352,17 @@ describe("requestReview writes", () => {
       "open -a",
       "herdr notification",
     ]);
-    const list = h.calls.find((c) => c.args[0] === "list");
-    assert.deepEqual(list.args, ["list", "--parent", ITEM, "--label", "review", "--status", "open,in_progress,blocked,deferred", "--limit", "0", "--json"]);
-    const create = h.calls.find((c) => c.args[0] === "create");
-    assert.deepEqual(create.args, [
+    assert.deepEqual(callTo(h, "list").args, [
+      "list", "--parent", ITEM, "--label", "review", "--status", "open,in_progress,blocked,deferred", "--limit", "0", "--json",
+    ]);
+    assert.deepEqual(callTo(h, "create").args, [
       "create", "--title", "Review: Board header", "--type", "task", "--labels", "review", "--no-inherit-labels",
       "--parent", ITEM, "-d", "check the header", "--acceptance", "Accepted from the breakdown board", "--json",
     ]);
     for (const call of h.calls.filter((c) => c.cmd === "bd")) assert.equal(call.cwd, fx.repo);
 
-    const dir = path.join(fx.reviewRoot, "scratch", REVIEW);
-    const update = h.calls.find((c) => c.args[0] === "update");
+    const dir = path.join(fx.projectDir, REVIEW);
+    const update = callTo(h, "update");
     assert.deepEqual(update.args.slice(0, 3), ["update", REVIEW, "--metadata"]);
     assert.equal(update.args.length, 4);
     assert.deepEqual(JSON.parse(update.args[3]), {
@@ -290,13 +370,13 @@ describe("requestReview writes", () => {
     });
     assert.deepEqual((await fs.readdir(dir)).sort(), ["01-a.png", "02-b.png"]);
     assert.equal(await fs.readFile(path.join(dir, "01-a.png"), "utf8"), "A1");
-    assert.deepEqual(await fs.readdir(path.join(fx.reviewRoot, "scratch")), [REVIEW]);
+    assert.deepEqual(await fs.readdir(fx.projectDir), [REVIEW]);
 
-    assert.deepEqual(h.calls.find((c) => c.args[0] === "dep").args, ["dep", "add", ITEM, REVIEW, "--type", "blocks"]);
-    const link = `http://localhost:5173/board?project=scratch&item=${REVIEW}`;
+    assert.deepEqual(callTo(h, "dep").args, ["dep", "add", ITEM, REVIEW, "--type", "blocks"]);
+    const link = `${BOARD}/board?project=scratch&item=${REVIEW}`;
     assert.deepEqual(h.calls.find((c) => c.cmd === "open").args, ["-a", "Google Chrome", link]);
     assert.deepEqual(h.calls.find((c) => c.cmd === "herdr").args, [
-      "notification", "show", `Review requested: scratch ${ITEM}`, "--body", "check the header", "--sound", "request",
+      "notification", "show", `Review requested: scratch ${ITEM}`, "--body=check the header", "--sound", "request",
     ]);
     assert.deepEqual(h.warn, []);
     assert.deepEqual(h.out, [
@@ -319,12 +399,12 @@ describe("requestReview writes", () => {
       handlers: { "bd create --title": ok(`Warning: auto-flush pending\n[{"id":"${REVIEW}"}]\n`) },
     });
     assert.equal(h.result.exitCode, 0, h.warn.join("\n"));
-    assert.equal(h.calls.find((c) => c.args[0] === "update").args[1], REVIEW);
+    assert.equal(callTo(h, "update").args[1], REVIEW);
   });
 
   it("reuses an open review on re-request", async () => {
     const fx = await fixture();
-    const dir = path.join(fx.reviewRoot, "scratch", REVIEW);
+    const dir = path.join(fx.projectDir, REVIEW);
     await fs.mkdir(dir, { recursive: true });
     await fs.writeFile(path.join(dir, "01-old.png"), "old");
     const existing = {
@@ -343,16 +423,16 @@ describe("requestReview writes", () => {
     assert.equal(h.result.exitCode, 0, h.warn.join("\n"));
     assert.equal(h.calls.some((c) => c.args[0] === "create"), false);
     assert.equal(h.calls.some((c) => c.args[0] === "dep"), false);
-    const update = h.calls.find((c) => c.args[0] === "update");
+    const update = callTo(h, "update");
     assert.deepEqual(update.args.slice(0, 3), ["update", REVIEW, "--metadata"]);
-    assert.deepEqual(update.args.slice(4), ["--remove-label", "review:changes"]);
+    assert.deepEqual(update.args.slice(4), ["--description", "second look", "--remove-label", "review:changes"]);
     assert.deepEqual(JSON.parse(update.args[3]), {
-      team: "x",
       review: { images: [path.join(dir, "01-b.png")], pane: "w1:p2", summary: "second look" },
     });
-    assert.deepEqual(h.calls.find((c) => c.args[0] === "comments").args, ["comments", "add", REVIEW, "Review updated: second look"]);
+    assert.deepEqual(callTo(h, "comments").args, ["comments", "add", REVIEW, "Review updated: second look"]);
     assert.deepEqual(await fs.readdir(dir), ["01-b.png"]);
-    assert.equal(h.out[0], `Review ${REVIEW} updated for ${ITEM} in scratch (1 images).`);
+    assert.deepEqual(await fs.readdir(fx.projectDir), [REVIEW]);
+    assert.equal(h.out[0], `Review ${REVIEW} updated for ${ITEM} in scratch (1 image).`);
   });
 
   it("warns when several reviews are open and adds the dependency on reuse", async () => {
@@ -364,12 +444,11 @@ describe("requestReview writes", () => {
     const h = await harness(fx, { children });
     assert.equal(h.result.exitCode, 0);
     assert.deepEqual(h.warn, [`review-request: 2 open reviews for ${ITEM}; reusing the newest, scr-1.2.`]);
-    const update = h.calls.find((c) => c.args[0] === "update");
-    assert.equal(update.args.length, 4);
-    assert.deepEqual(h.calls.find((c) => c.args[0] === "dep").args, ["dep", "add", ITEM, "scr-1.2", "--type", "blocks"]);
+    assert.deepEqual(callTo(h, "update").args.slice(4), ["--description", "check the header"]);
+    assert.deepEqual(callTo(h, "dep").args, ["dep", "add", ITEM, "scr-1.2", "--type", "blocks"]);
   });
 
-  it("names the bead when a step after create fails, and a re-run reuses it", async () => {
+  it("names the bead when a step after create fails, and a re-run reuses it without an update comment", async () => {
     const fx = await fixture();
     const first = await harness(fx, { handlers: { "bd update scr-1.1": fail("Error: database is locked") } });
     assert.equal(first.result.exitCode, 1);
@@ -383,15 +462,19 @@ describe("requestReview writes", () => {
     });
     assert.equal(second.result.exitCode, 0, second.warn.join("\n"));
     assert.equal(second.calls.some((c) => c.args[0] === "create"), false);
-    assert.equal(second.calls.find((c) => c.args[0] === "update").args[1], REVIEW);
+    assert.equal(callTo(second, "update").args[1], REVIEW);
+    assert.equal(callTo(second, "comments"), undefined);
+    assert.deepEqual(await fs.readdir(fx.projectDir), [REVIEW]);
   });
 
-  it("refuses with nothing filed when bd create fails", async () => {
+  it("names the bead when bd dep add fails", async () => {
     const fx = await fixture();
-    const h = await harness(fx, { handlers: { "bd create --title": fail("Error: parent not found") } });
-    assert.deepEqual(h.warn, [`review-request: bd create failed in ${fx.repo}: Error: parent not found. Nothing was filed.`]);
+    const h = await harness(fx, { handlers: { [`bd dep add`]: fail("Error: cycle") } });
     assert.equal(h.result.exitCode, 1);
-    await assert.rejects(fs.access(fx.reviewRoot));
+    assert.deepEqual(h.warn, [
+      `review-request: review ${REVIEW} was filed but bd dep add failed: Error: cycle. Re-run the same command to retry; it reuses ${REVIEW}.`,
+    ]);
+    assert.equal(h.calls.some((c) => c.cmd === "open" || c.cmd === "herdr"), false);
   });
 
   it("treats Chrome and herdr failures as warnings", async () => {
@@ -404,7 +487,7 @@ describe("requestReview writes", () => {
     });
     assert.equal(h.result.exitCode, 0);
     assert.deepEqual(h.warn, [
-      `review-request: could not open Chrome (spawn open ENOENT); open http://localhost:5173/board?project=scratch&item=${REVIEW} yourself.`,
+      `review-request: could not open Chrome (spawn open ENOENT); open ${BOARD}/board?project=scratch&item=${REVIEW} yourself.`,
       "review-request: herdr notification failed (spawn herdr ENOENT).",
     ]);
     assert.equal(h.out.length, 3);
@@ -417,7 +500,7 @@ describe("requestReview writes", () => {
     assert.deepEqual(h.warn, [
       `review-request: HERDR_PANE_ID is not set to a pane id, so the decision cannot be pushed to this pane; read \`bd comments ${REVIEW}\` for it.`,
     ]);
-    const metadata = JSON.parse(h.calls.find((c) => c.args[0] === "update").args[3]);
+    const metadata = JSON.parse(callTo(h, "update").args[3]);
     assert.equal("pane" in metadata.review, false);
   });
 });
