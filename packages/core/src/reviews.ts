@@ -63,7 +63,7 @@ const CONTROL_CHAR = /[\u0000-\u001f\u007f]/;
 
 /** NUL (refused by Postgres jsonb) replaced by U+FFFD. */
 function withoutNul(value: string): string {
-  return value.includes("\u0000") ? value.replaceAll("\u0000", "�") : value;
+  return value.includes("\u0000") ? value.replaceAll("\u0000", "\uFFFD") : value;
 }
 
 export interface ReviewMetadata {

@@ -83,7 +83,10 @@
 // object, and the comment thread. It finds the `nodes` row of that project
 // with that external id and answers its canonical row, folded through
 // `merged_into` the way lookup.ts folds (so the drawer opened on a bead id
-// that was merged away shows the survivor rather than waiting forever); a
+// that was merged away shows the survivor rather than waiting forever). The
+// survivor must belong to the same project too: a merge into another
+// project's node, or a project-less one, answers null rather than a node
+// labelled with a project it is not in. A
 // row that is itself canonical wins over a merged-away one, then the
 // `beads` row, then the lesser id. The stored review and comments are
 // re-normalized on read (reviews.ts; both are idempotent), so a raw-written
@@ -503,6 +506,7 @@ export async function getBoardItem(db: Database, options: BoardItemOptions): Pro
         AND n.metadata @> ${JSON.stringify({ project })}::jsonb
         AND n.external_id = ${externalId}
         AND r.node_type = ${WORK_ITEM_NODE_TYPE}
+        AND r.metadata @> ${JSON.stringify({ project })}::jsonb
       ORDER BY (n.merged_into IS NULL) DESC, (n.source_system = 'beads') DESC, n.id
       LIMIT 1
     `);

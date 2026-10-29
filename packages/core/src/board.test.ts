@@ -573,6 +573,28 @@ describe("getBoardItem", () => {
     expect(await getBoardItem(db, { project: a, externalId: `${tag}-nometa` })).toMatchObject({ isReview: true, review: null, comments: [] });
   });
 
+  it("answers null for a bead merged into another project's node or a project-less one", async () => {
+    const { a, b, tag } = scope();
+    const ids = await rawItems([
+      { ext: `${tag}-crossloser`, project: a, metadata: { labels: ["review"] } },
+      { ext: `${tag}-crosssurvivor`, project: b },
+      { ext: `${tag}-orphanloser`, project: a },
+    ]);
+    const bare = await upsertNodes(db, run, [{ nodeType: "work_item", sourceSystem: SRC, externalId: `${tag}-bare`, title: "bare", content: "", metadata: { status: "open", priority: 2 } }]);
+    const mergeRun = await openIngestRun(db, SRC, { actor: "board-test-merge" });
+    try {
+      await mergeNodes(db, ids.get(`${tag}-crossloser`)!, ids.get(`${tag}-crosssurvivor`)!, mergeRun);
+      await mergeNodes(db, ids.get(`${tag}-orphanloser`)!, bare.rows[0]!.id, mergeRun);
+    } finally {
+      await closeIngestRun(db, mergeRun);
+      extraRunIds.push(mergeRun.id);
+    }
+
+    expect(await getBoardItem(db, { project: a, externalId: `${tag}-crossloser` })).toBeNull();
+    expect(await getBoardItem(db, { project: a, externalId: `${tag}-orphanloser` })).toBeNull();
+    expect(await getBoardItem(db, { project: b, externalId: `${tag}-crosssurvivor` })).toMatchObject({ id: ids.get(`${tag}-crosssurvivor`), project: b });
+  });
+
   it("refuses a malformed project key or item id", async () => {
     await expect(getBoardItem(db, { project: "Not A Key", externalId: "x" })).rejects.toBeInstanceOf(InvalidLookupOptionError);
     await expect(getBoardItem(db, { project: "ok", externalId: "" })).rejects.toBeInstanceOf(InvalidLookupOptionError);

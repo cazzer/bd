@@ -80,7 +80,7 @@ describe("normalizeReviewMetadata", () => {
   });
 
   it("replaces NUL in the summary with U+FFFD", () => {
-    expect(normalizeReviewMetadata({ summary: "a\u0000b" })).toEqual({ images: [], pane: null, summary: "a�b" });
+    expect(normalizeReviewMetadata({ summary: "a\u0000b" })).toEqual({ images: [], pane: null, summary: "a\uFFFDb" });
   });
 
   it("is idempotent, including on a stored invalid marker", () => {
@@ -148,7 +148,7 @@ describe("normalizeReviewComments", () => {
     const once = normalizeReviewComments([{ id: "a\u0000", author: "x\u0000y", text: "t\u0000", created_at: "2026-10-01T00:00:00Z" }, { id: 7, text: "plain" }]);
     expect(once).toEqual([
       { id: "7", author: null, text: "plain", created_at: null },
-      { id: "a�", author: "x�y", text: "t�", created_at: "2026-10-01T00:00:00.000Z" },
+      { id: "a\uFFFD", author: "x\uFFFDy", text: "t\uFFFD", created_at: "2026-10-01T00:00:00.000Z" },
     ]);
     expect(normalizeReviewComments(once)).toEqual(once);
   });
