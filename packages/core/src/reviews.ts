@@ -6,9 +6,13 @@
 // A review is a beads issue labelled exactly `review` (REVIEW_LABEL);
 // `review:changes` is a separate label marking a review sent back, and does
 // not by itself make an item a review. Its beads metadata key `review`
-// holds `{ images, pane, summary }`: absolute screenshot paths (at most
-// MAX_REVIEW_IMAGES, each under MAX_REVIEW_IMAGE_PATH_LENGTH, no control
-// characters), the requester's herdr pane id or null, and a summary fitted
+// holds `{ images, pane, socket?, summary }`: absolute screenshot paths (at
+// most MAX_REVIEW_IMAGES, each under MAX_REVIEW_IMAGE_PATH_LENGTH, no
+// control characters), the requester's herdr pane id or null (a letter or
+// digit, then letters, digits, `:`, `_`, `.`, `-`; never a flag), the herdr
+// server socket that pane id belongs to (pane ids are scoped to one herdr
+// server; absolute, at most MAX_REVIEW_SOCKET_PATH_LENGTH, no control
+// characters; the key is present only when recorded), and a summary fitted
 // to MAX_REVIEW_SUMMARY_LENGTH. `normalizeReviewMetadata` never refuses: a
 // value that breaks the contract becomes `{ invalid: true }`, so one bad
 // review cannot fail a tracker's load. It is idempotent — a stored
@@ -47,7 +51,8 @@ export const REVIEW_IMAGE_ROOT = path.join(os.homedir(), ".local", "share", "bre
 
 export const MAX_REVIEW_IMAGES = 20;
 export const MAX_REVIEW_IMAGE_PATH_LENGTH = 512;
-export const REVIEW_PANE_PATTERN = /^[A-Za-z0-9:_.-]{1,64}$/;
+export const REVIEW_PANE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9:_.-]{0,63}$/;
+export const MAX_REVIEW_SOCKET_PATH_LENGTH = 512;
 export const MAX_REVIEW_SUMMARY_LENGTH = 2000;
 export const MAX_REVIEW_COMMENTS = 100;
 export const MAX_REVIEW_COMMENT_LENGTH = 4000;
@@ -69,7 +74,14 @@ function withoutNul(value: string): string {
 export interface ReviewMetadata {
   images: string[];
   pane: string | null;
+  /** The herdr server socket the pane id belongs to; present only when recorded. */
+  socket?: string;
   summary: string;
+}
+
+/** A herdr socket path as the review contract accepts it: absolute, bounded, no control characters. Says nothing about whether it exists. */
+export function isReviewSocketPath(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= MAX_REVIEW_SOCKET_PATH_LENGTH && !CONTROL_CHAR.test(value) && path.isAbsolute(value);
 }
 
 export interface InvalidReview {
@@ -122,6 +134,13 @@ export function normalizeReviewMetadata(raw: unknown): ReviewMetadata | InvalidR
     pane = trimmed;
   }
 
+  const rawSocket = raw["socket"];
+  let socket: string | undefined;
+  if (rawSocket !== undefined && rawSocket !== null && rawSocket !== "") {
+    if (!isReviewSocketPath(rawSocket)) return { ...INVALID };
+    socket = rawSocket;
+  }
+
   const rawSummary = raw["summary"];
   let summary: string;
   if (rawSummary === undefined || rawSummary === null) {
@@ -131,7 +150,7 @@ export function normalizeReviewMetadata(raw: unknown): ReviewMetadata | InvalidR
     summary = withoutNul(fitText(rawSummary.trim(), MAX_REVIEW_SUMMARY_LENGTH) ?? "");
   }
 
-  const review: ReviewMetadata = { images, pane, summary };
+  const review: ReviewMetadata = socket === undefined ? { images, pane, summary } : { images, pane, socket, summary };
   return JSON.stringify(review).length > MAX_REVIEW_METADATA_CHARS ? { ...INVALID } : review;
 }
 

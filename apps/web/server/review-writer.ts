@@ -57,32 +57,47 @@
 // (`ok: true`), the requesting agent's pane is told with `herdr agent prompt
 // <pane> <text>` — `Review <id> accepted: <message>` (`Review <id>
 // accepted.` with no message) or `Review <id> changes requested: <message>`.
-// The text always starts with `Review`, so it is never read as a flag. The
-// pane is `metadata.review.pane` on the tracker record `bd show` already
-// returned, never the request's or the store's; it must match
-// REVIEW_PANE_PATTERN and must not start with `-` (herdr would read it as a
-// flag). A partial, uncertain, or failed write notifies nobody (`notified:
-// null`): the comment in the tracker is the record, and an agent told
-// "accepted" about a review that is still open would act on a decision that
-// did not land. The notification runs after the checkout's write queue is
-// released (the in-flight claim is still held) and never fails or undoes the
-// decision: its outcome is `notified: { ok: true, pane }` or `{ ok: false,
-// reason }`, and every `ok: false` is logged with the project and bead id.
+// The text always starts with `Review`, so it is never read as a flag.
+// herdr 0.9.1 does not accept `--` before positionals (it answers "unknown
+// option"), so none is passed; the pane pattern is what keeps the pane from
+// being read as a flag.
+//
+// The recipient is `metadata.review.pane` and `metadata.review.socket` on
+// the tracker record the pre-write `bd show` returned — never the request's
+// and never the store's, because any agent can write a store node through
+// `brain_write`. The pane must match REVIEW_PANE_PATTERN (a letter or digit
+// first). Pane ids are scoped to one herdr server, so herdr runs with
+// HERDR_SOCKET_PATH set to the recorded socket (the rest of the environment
+// inherited); a socket that is missing, not absolute, over-long, carries a
+// control character, or is not a socket on disk means no call, with "the
+// pane's herdr session is unknown" — prompting through this server's own
+// herdr could reach another session's pane of the same id.
+//
+// A partial, uncertain, or failed write notifies nobody: `notified` is
+// `{ ok: false, reason: "the decision was not fully written" }`. The comment
+// in the tracker is the record, and an agent told "accepted" about a review
+// that is still open would act on a decision that did not land. After the
+// bd steps the checkout's write queue is released, then `onWritten` runs
+// (the router wakes the watcher there, so the board does not wait on
+// herdr), then the notification; the in-flight claim is held throughout.
+// The notification never fails or undoes the decision: its outcome is
+// `{ ok: true, pane }` or `{ ok: false, reason }`, and every `ok: false` is
+// logged with the project and bead id.
 //
 // `herdr` is found on PATH and runs through `execFile` with argv only and no
 // `--wait`: 10 s, then SIGTERM, then SIGKILL after a 5 s grace, settling 1 s
 // later whether or not the pipes have closed, like the bd runner. Its
-// reasons are `herdr not found on PATH`, `herdr timed out after 10 s`,
-// `herdr was killed (<signal>)`, herdr's own error (it prints
-// `{"error":{"code","message"}}` on stderr; message and code are kept,
-// nothing else), or `herdr exited <code>`. A reason should never carry the
-// prompt text: Node's `err.message` (which echoes argv) is never used, and an
-// echo of the prompt or of any line of it (8+ characters) in herdr's output
-// is cut out.
+// reasons are `herdr not found on PATH`, `herdr timed out after 10 s; the
+// agent may have been notified`, `herdr was killed (<signal>)`, herdr's own
+// error (it prints `{"error":{"code","message"}}` on stderr; message and
+// code are kept, nothing else), or `herdr exited <code>`. Node's
+// `err.message` (which echoes argv) is never used. herdr's own output is the
+// only text that could carry the prompt back, so it alone is scrubbed: the
+// trimmed prompt, and each trimmed prompt line of 8+ characters, is cut out.
 
 import { execFile } from "node:child_process";
 import { statSync } from "node:fs";
-import { REVIEW_PANE_PATTERN } from "@breakdown/core";
+import { isReviewSocketPath, REVIEW_PANE_PATTERN } from "@breakdown/core";
 
 function isDirectory(dir: string): boolean {
   try {
@@ -115,14 +130,16 @@ export type ReviewStep = "comment" | "close" | "remove-changes-label" | "add-cha
 /** Runs `bd <args>` in `cwd` and resolves with stdout; rejects with an Error whose message is safe to show, a `BdUncertainError` when the command may have run. */
 export type RunBd = (args: readonly string[], cwd: string) => Promise<string>;
 
-/** Runs `herdr <args>`; resolves on exit 0, rejects with an Error whose message is a short reason safe to show. */
-export type RunHerdr = (args: readonly string[]) => Promise<void>;
+/** Runs `herdr <args>` against the herdr server at `socket` (HERDR_SOCKET_PATH); resolves on exit 0, rejects with an Error whose message is a short reason safe to show. */
+export type RunHerdr = (args: readonly string[], socket: string) => Promise<void>;
 
 /** Whether the requesting pane was told the decision. */
 export type ReviewNotified = { ok: true; pane: string } | { ok: false; reason: string };
 
 export const NOTIFY_NO_PANE = "no pane recorded on the review";
 export const NOTIFY_INVALID_PANE = "pane id is not valid";
+export const NOTIFY_UNKNOWN_SESSION = "the pane's herdr session is unknown";
+export const NOTIFY_NOT_WRITTEN = "the decision was not fully written";
 
 export interface ReviewWriteInput {
   /** The registered project key; with `externalId`, the in-flight key. */
@@ -134,6 +151,8 @@ export interface ReviewWriteInput {
   decision: ReviewDecision;
   /** Already trimmed; may be empty for `accept`. */
   message: string;
+  /** Called once the bd steps are over and the checkout's queue is released, before the notification (module header). */
+  onWritten?: (outcome: { ok: boolean; attempted: boolean }) => void;
 }
 
 export interface ReviewWriteResult {
@@ -148,8 +167,8 @@ export interface ReviewWriteResult {
   partial?: boolean;
   /** A step that timed out or was killed and may have been written. */
   uncertain?: ReviewStep;
-  /** The pane notification; null when the decision was not fully written, so nobody was told. */
-  notified: ReviewNotified | null;
+  /** The pane notification; `{ ok: false, reason: NOTIFY_NOT_WRITTEN }` when the decision was not fully written, so nobody was told. */
+  notified: ReviewNotified;
 }
 
 export interface ReviewWriter {
@@ -214,16 +233,27 @@ export function notifyText(decision: ReviewDecision, id: string, message: string
   return `Review ${id} changes requested: ${m}`;
 }
 
-/** The pane on a tracker record (`metadata.review.pane`), or why there is none to prompt. */
-export function paneOf(record: { metadata?: unknown }): { pane: string } | { reason: string } {
+function isSocketOnDisk(file: string): boolean {
+  try {
+    return statSync(file).isSocket();
+  } catch {
+    return false;
+  }
+}
+
+/** The recipient on a tracker record (`metadata.review.pane` and `.socket`), or why there is none to prompt (module header). */
+export function recipientOf(record: { metadata?: unknown }): { pane: string; socket: string } | { reason: string } {
   const metadata = record.metadata;
   const review = typeof metadata === "object" && metadata !== null ? (metadata as Record<string, unknown>)["review"] : undefined;
-  const raw = typeof review === "object" && review !== null ? (review as Record<string, unknown>)["pane"] : undefined;
+  const fields = typeof review === "object" && review !== null ? (review as Record<string, unknown>) : {};
+  const raw = fields["pane"];
   if (raw === undefined || raw === null || (typeof raw === "string" && raw.trim() === "")) return { reason: NOTIFY_NO_PANE };
   if (typeof raw !== "string") return { reason: NOTIFY_INVALID_PANE };
   const pane = raw.trim();
-  if (!REVIEW_PANE_PATTERN.test(pane) || pane.startsWith("-")) return { reason: NOTIFY_INVALID_PANE };
-  return { pane };
+  if (!REVIEW_PANE_PATTERN.test(pane)) return { reason: NOTIFY_INVALID_PANE };
+  const socket = fields["socket"];
+  if (!isReviewSocketPath(socket) || !isSocketOnDisk(socket)) return { reason: NOTIFY_UNKNOWN_SESSION };
+  return { pane, socket };
 }
 
 export interface BdRunnerOptions {
@@ -332,15 +362,18 @@ export function createHerdrRunner(options: HerdrRunnerOptions = {}): RunHerdr {
   const killGraceMs = options.killGraceMs ?? REVIEW_BD_KILL_GRACE_MS;
   const seconds = timeoutMs % 1000 === 0 ? `${timeoutMs / 1000} s` : `${(timeoutMs / 1000).toFixed(1)} s`;
 
-  return (args) =>
+  const timedOutReason = `herdr timed out after ${seconds}; the agent may have been notified`;
+
+  return (args, socket) =>
     new Promise<void>((resolve, reject) => {
-      // The last argument is the prompt; an echo of it, or of any of its lines
-      // (the reason is one line), is cut out of what herdr says.
+      // The last argument is the prompt. herdr's output is the only text that
+      // could echo it back: the trimmed prompt, and each trimmed line of it
+      // long enough not to match by accident, is cut out of that text alone.
       const prompt = args.at(-1) ?? "";
-      const echoes = [prompt, ...prompt.split("\n").filter((l) => l.trim().length >= 8)].filter((e) => e !== "");
+      const echoes = [prompt.trim(), ...prompt.split("\n").map((l) => l.trim()).filter((l) => l.length >= 8)].filter((e) => e !== "");
+      const scrub = (said: string) => echoes.reduce((text, echo) => text.split(echo).join("…"), said);
       const fail = (reason: string) => {
-        const scrubbed = echoes.reduce((text, echo) => text.split(echo).join("…"), reason);
-        const trimmed = scrubbed.trim();
+        const trimmed = reason.trim();
         reject(new Error(trimmed.length > MAX_NOTIFY_REASON_LENGTH ? `${trimmed.slice(0, MAX_NOTIFY_REASON_LENGTH - 1)}…` : trimmed));
       };
       let timedOut = false;
@@ -354,7 +387,8 @@ export function createHerdrRunner(options: HerdrRunnerOptions = {}): RunHerdr {
         clearTimeout(deadline);
         settle();
       };
-      const child = execFile(command, [...args], { maxBuffer: BD_MAX_BUFFER, encoding: "utf8" }, (err, stdout, stderr) => {
+      const env = { ...process.env, HERDR_SOCKET_PATH: socket };
+      const child = execFile(command, [...args], { env, maxBuffer: BD_MAX_BUFFER, encoding: "utf8" }, (err, stdout, stderr) => {
         if (!err) {
           finish(() => resolve());
           return;
@@ -362,11 +396,11 @@ export function createHerdrRunner(options: HerdrRunnerOptions = {}): RunHerdr {
         const e = err as NodeJS.ErrnoException & { code?: string | number; signal?: NodeJS.Signals | null };
         let reason: string;
         if (e.code === "ENOENT") reason = "herdr not found on PATH";
-        else if (timedOut) reason = `herdr timed out after ${seconds}`;
+        else if (timedOut) reason = timedOutReason;
         else if (e.signal) reason = `herdr was killed (${e.signal})`;
         else {
           const said = herdrFailure(typeof stderr === "string" ? stderr : "", typeof stdout === "string" ? stdout : "");
-          reason = said ?? (typeof e.code === "number" ? `herdr exited ${e.code}` : `herdr could not run (${String(e.code ?? "unknown error")})`);
+          reason = said !== null ? scrub(said) : typeof e.code === "number" ? `herdr exited ${e.code}` : `herdr could not run (${String(e.code ?? "unknown error")})`;
         }
         finish(() => fail(reason));
       });
@@ -380,7 +414,7 @@ export function createHerdrRunner(options: HerdrRunnerOptions = {}): RunHerdr {
           child.kill("SIGKILL");
           child.stdout?.destroy();
           child.stderr?.destroy();
-          fail(`herdr timed out after ${seconds}`);
+          fail(timedOutReason);
         });
       }, timeoutMs + killGraceMs + REVIEW_BD_DEADLINE_SLACK_MS);
     });
@@ -484,15 +518,15 @@ export function createReviewWriter(options: ReviewWriterOptions = {}): ReviewWri
     return { outcome: { ok: true, written, attempted: true }, record: shown };
   }
 
-  /** Tells the pane on the tracker's record; never throws (module header). */
-  async function notify(input: ReviewWriteInput, record: ShownIssue): Promise<ReviewNotified> {
-    const target = paneOf(record);
+  /** Tells the recipient on the tracker's record once the decision fully landed; never throws (module header). */
+  async function notify(input: ReviewWriteInput, outcome: WriteOutcome, record: ShownIssue | null): Promise<ReviewNotified> {
+    const target = outcome.ok && record !== null ? recipientOf(record) : { reason: NOTIFY_NOT_WRITTEN };
     let notified: ReviewNotified;
     if ("reason" in target) {
       notified = { ok: false, reason: target.reason };
     } else {
       try {
-        await runHerdr(["agent", "prompt", target.pane, notifyText(input.decision, input.externalId, input.message)]);
+        await runHerdr(["agent", "prompt", target.pane, notifyText(input.decision, input.externalId, input.message)], target.socket);
         notified = { ok: true, pane: target.pane };
       } catch (err) {
         notified = { ok: false, reason: err instanceof Error && err.message !== "" ? err.message : "herdr failed" };
@@ -509,8 +543,12 @@ export function createReviewWriter(options: ReviewWriterOptions = {}): ReviewWri
       inFlight.add(key);
       try {
         const { outcome, record } = await serialize(input.cwd, () => decide(input));
-        if (!outcome.ok || record === null) return { ...outcome, notified: null };
-        return { ...outcome, notified: await notify(input, record) };
+        try {
+          input.onWritten?.({ ok: outcome.ok, attempted: outcome.attempted });
+        } catch (err) {
+          console.error(`[breakdown-web] review ${input.project}/${input.externalId}: onWritten failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        return { ...outcome, notified: await notify(input, outcome, record) };
       } finally {
         inFlight.delete(key);
       }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canDecide, decisionBlocked, describeDecision, describeNotified, drawerProject, stepIndex } from "./reviewDrawer.js";
+import { canDecide, decisionBlocked, describeDecision, describeNotified, describeRecipient, drawerProject, stepIndex } from "./reviewDrawer.js";
 
 describe("drawerProject", () => {
   const cards = [
@@ -94,6 +94,16 @@ describe("describeDecision with an uncertain step", () => {
       text: `Unsure whether the comment was written: ${error}`,
       keepMessage: true,
     });
+  });
+});
+
+describe("describeRecipient", () => {
+  it("names the pane a decision will reach, or says the comment is the record", () => {
+    expect(describeRecipient({ pane: "w1:p2", socket: "/s/herdr.sock" })).toBe("Will notify pane w1:p2");
+    expect(describeRecipient({ pane: "w1:p2" })).toBe("Pane w1:p2 has no herdr session recorded — the comment is the record");
+    expect(describeRecipient({ pane: null })).toBe("No agent pane recorded — the comment is the record");
+    expect(describeRecipient({ invalid: true })).toBe("No agent pane recorded — the comment is the record");
+    expect(describeRecipient(null)).toBe("No agent pane recorded — the comment is the record");
   });
 });
 

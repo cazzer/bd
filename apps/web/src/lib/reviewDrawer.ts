@@ -94,7 +94,18 @@ export function describeDecision(result: { ok: boolean; decision: ReviewDecision
   return { tone: "error", text: `Nothing was written; the tracker failed: ${error}`, keepMessage: true };
 }
 
-/** Whether the requesting agent was told (bd-ker.5); null when nobody was told because the decision did not fully land. */
+/**
+ * Who a decision will be pushed to, from the stored review (bd-ker.5), shown
+ * before deciding. The server prompts the pane on the tracker's own record,
+ * which the store mirrors; this is the preview, not the guarantee.
+ */
+export function describeRecipient(review: { pane: string | null; socket?: string } | { invalid: true } | null | undefined): string {
+  if (review === null || review === undefined || "invalid" in review || review.pane === null) return "No agent pane recorded — the comment is the record";
+  if (review.socket === undefined) return `Pane ${review.pane} has no herdr session recorded — the comment is the record`;
+  return `Will notify pane ${review.pane}`;
+}
+
+/** Whether the requesting agent was told (bd-ker.5); null while the server does not report it. */
 export function describeNotified(notified: { ok: boolean; pane?: string; reason?: string } | null | undefined): string | null {
   if (notified === null || notified === undefined) return null;
   if (notified.ok) return notified.pane ? `Agent notified (pane ${notified.pane})` : "Agent notified";

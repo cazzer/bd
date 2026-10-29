@@ -28,7 +28,7 @@
 
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
 import { navigate } from "../lib/navigate.js";
-import { canDecide, decisionBlocked, describeDecision, describeNotified, type DecisionOutcome, type ReviewDecisionKind } from "../lib/reviewDrawer.js";
+import { canDecide, decisionBlocked, describeDecision, describeNotified, describeRecipient, type DecisionOutcome, type ReviewDecisionKind } from "../lib/reviewDrawer.js";
 import { formatRoute, type GraphRoute } from "../lib/route.js";
 import { trpc } from "../trpc.js";
 import { Lightbox, type LightboxImage } from "./Lightbox.js";
@@ -234,7 +234,7 @@ export function ReviewDrawer({ project, item, boardLoaded, boardVersion, initial
       </div>
 
       {loaded && loaded.isReview && (canDecide(loaded) || outcome !== null || refusal !== null) && (
-        <DecisionFooter open={canDecide(loaded)} message={message} setMessage={setMessage} pending={pending} outcome={outcome} refusal={refusal} decide={(d) => void decide(d)} />
+        <DecisionFooter open={canDecide(loaded)} recipient={describeRecipient(loaded.review)} message={message} setMessage={setMessage} pending={pending} outcome={outcome} refusal={refusal} decide={(d) => void decide(d)} />
       )}
     </Shell>
   );
@@ -478,6 +478,7 @@ function PlainBody({ item }: { item: BoardItem }) {
 
 function DecisionFooter({
   open,
+  recipient,
   message,
   setMessage,
   pending,
@@ -486,6 +487,8 @@ function DecisionFooter({
   decide,
 }: {
   open: boolean;
+  /** Who the decision will be pushed to (describeRecipient). */
+  recipient: string;
   message: string;
   setMessage: (m: string) => void;
   pending: ReviewDecisionKind | null;
@@ -538,6 +541,7 @@ function DecisionFooter({
             >
               {pending === "changes" ? "Sending…" : "Request changes"}
             </button>
+            <span className="text-xs text-fg-muted">{recipient}</span>
           </div>
         </>
       )}

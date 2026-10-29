@@ -12,6 +12,7 @@ import {
   copiedName,
   findProject,
   paneFrom,
+  socketFrom,
   parseArgs,
   parseJsonOutput,
   requestReview,
@@ -22,6 +23,7 @@ const BREAKDOWN_ROOT = "/opt/breakdown";
 const ITEM = "scr-1";
 const REVIEW = "scr-1.1";
 const BOARD = "http://localhost:5310";
+const SOCKET = "/tmp/herdr-test/herdr.sock";
 
 const tempDirs = [];
 after(async () => {
@@ -115,11 +117,27 @@ describe("helpers", () => {
     assert.deepEqual(reviewMetadata({ images: ["n"], pane: "p1", summary: "s" }), {
       review: { images: ["n"], pane: "p1", summary: "s" },
     });
+    assert.deepEqual(reviewMetadata({ images: ["n"], pane: "p1", socket: "/s.sock", summary: "s" }), {
+      review: { images: ["n"], pane: "p1", socket: "/s.sock", summary: "s" },
+    });
   });
   it("paneFrom accepts pane ids only", () => {
     assert.equal(paneFrom({ HERDR_PANE_ID: "w1:p2" }), "w1:p2");
     assert.equal(paneFrom({}), null);
     assert.equal(paneFrom({ HERDR_PANE_ID: "bad pane;x" }), null);
+    assert.equal(paneFrom({ HERDR_PANE_ID: "-rf" }), null);
+    assert.equal(paneFrom({ HERDR_PANE_ID: ":p2" }), null);
+    assert.equal(paneFrom({ HERDR_PANE_ID: "w".repeat(64) }), "w".repeat(64));
+    assert.equal(paneFrom({ HERDR_PANE_ID: "w".repeat(65) }), null);
+  });
+  it("socketFrom accepts absolute, bounded paths without control characters only", () => {
+    assert.equal(socketFrom({ HERDR_SOCKET_PATH: "/Users/x/.config/herdr/herdr.sock" }), "/Users/x/.config/herdr/herdr.sock");
+    assert.equal(socketFrom({}), null);
+    assert.equal(socketFrom({ HERDR_SOCKET_PATH: "" }), null);
+    assert.equal(socketFrom({ HERDR_SOCKET_PATH: "herdr.sock" }), null);
+    assert.equal(socketFrom({ HERDR_SOCKET_PATH: "/tmp/a\nb.sock" }), null);
+    assert.equal(socketFrom({ HERDR_SOCKET_PATH: `/${"s".repeat(511)}` }), `/${"s".repeat(511)}`);
+    assert.equal(socketFrom({ HERDR_SOCKET_PATH: `/${"s".repeat(512)}` }), null);
   });
   it("parseJsonOutput skips leading warning text", () => {
     assert.deepEqual(parseJsonOutput('Warning: x\n{"id":"a"}'), { id: "a" });
@@ -149,7 +167,7 @@ function fakeFetch(projects) {
 }
 
 /** Runs requestReview against fakes; `handlers` keys are `cmd arg0 arg1`, values a result or (args, n) => result. */
-async function harness(fx, { item, children = [], handlers = {}, env = { HERDR_PANE_ID: "w1:p2" }, fetch, argv } = {}) {
+async function harness(fx, { item, children = [], handlers = {}, env = { HERDR_PANE_ID: "w1:p2", HERDR_SOCKET_PATH: SOCKET }, fetch, argv } = {}) {
   const calls = [];
   const counts = {};
   const defaults = {
@@ -366,7 +384,7 @@ describe("requestReview writes", () => {
     assert.deepEqual(update.args.slice(0, 3), ["update", REVIEW, "--metadata"]);
     assert.equal(update.args.length, 4);
     assert.deepEqual(JSON.parse(update.args[3]), {
-      review: { images: [path.join(dir, "01-a.png"), path.join(dir, "02-b.png")], pane: "w1:p2", summary: "check the header" },
+      review: { images: [path.join(dir, "01-a.png"), path.join(dir, "02-b.png")], pane: "w1:p2", socket: SOCKET, summary: "check the header" },
     });
     assert.deepEqual((await fs.readdir(dir)).sort(), ["01-a.png", "02-b.png"]);
     assert.equal(await fs.readFile(path.join(dir, "01-a.png"), "utf8"), "A1");
@@ -427,7 +445,7 @@ describe("requestReview writes", () => {
     assert.deepEqual(update.args.slice(0, 3), ["update", REVIEW, "--metadata"]);
     assert.deepEqual(update.args.slice(4), ["--description", "second look", "--remove-label", "review:changes"]);
     assert.deepEqual(JSON.parse(update.args[3]), {
-      review: { images: [path.join(dir, "01-b.png")], pane: "w1:p2", summary: "second look" },
+      review: { images: [path.join(dir, "01-b.png")], pane: "w1:p2", socket: SOCKET, summary: "second look" },
     });
     assert.deepEqual(callTo(h, "comments").args, ["comments", "add", REVIEW, "Review updated: second look"]);
     assert.deepEqual(await fs.readdir(dir), ["01-b.png"]);
@@ -502,5 +520,19 @@ describe("requestReview writes", () => {
     ]);
     const metadata = JSON.parse(callTo(h, "update").args[3]);
     assert.equal("pane" in metadata.review, false);
+  });
+
+  it("warns when HERDR_SOCKET_PATH is missing or not absolute and leaves socket out of the metadata", async () => {
+    for (const env of [{ HERDR_PANE_ID: "w1:p2" }, { HERDR_PANE_ID: "w1:p2", HERDR_SOCKET_PATH: "rel/herdr.sock" }]) {
+      const fx = await fixture();
+      const h = await harness(fx, { env });
+      assert.equal(h.result.exitCode, 0);
+      assert.deepEqual(h.warn, [
+        `review-request: HERDR_SOCKET_PATH is not set to an absolute socket path, so the decision cannot be pushed to this pane; read \`bd comments ${REVIEW}\` for it.`,
+      ]);
+      const metadata = JSON.parse(callTo(h, "update").args[3]);
+      assert.equal(metadata.review.pane, "w1:p2");
+      assert.equal("socket" in metadata.review, false);
+    }
   });
 });

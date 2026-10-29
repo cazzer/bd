@@ -8,6 +8,7 @@
 
 import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { closeIngestRun, mergeNodes, openIngestRun, upsertNodes, type IngestRunHandle } from "@breakdown/core";
@@ -16,7 +17,7 @@ import { and, eq, inArray } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { BeadsWatcher } from "../beads-watcher.js";
 import type { Context } from "../context.js";
-import { BdUncertainError, createReviewWriter, NOTIFY_NO_PANE, type RunBd, type RunHerdr } from "../review-writer.js";
+import { BdUncertainError, createReviewWriter, NOTIFY_NO_PANE, NOTIFY_NOT_WRITTEN, type RunBd, type RunHerdr } from "../review-writer.js";
 import { appRouter } from "../router.js";
 import { createCallerFactory } from "../trpc.js";
 
@@ -25,6 +26,10 @@ let db: Database;
 let beadsRun: IngestRunHandle;
 let agentRun: IngestRunHandle;
 let checkout: string;
+let sockDir: string;
+let socketServer: Server;
+/** A real unix socket: the writer prompts only through a recorded socket that exists. */
+let SOCKET: string;
 
 const TAG = randomUUID().replace(/-/g, "").slice(0, 10);
 const PROJECT = `rv-${TAG}`;
@@ -42,6 +47,10 @@ const EXTERNAL_IDS = [
 beforeAll(async () => {
   // The writer logs every notification it could not make; keep the run quiet.
   vi.spyOn(console, "warn").mockImplementation(() => {});
+  sockDir = mkdtempSync(path.join(tmpdir(), "rr-sock-"));
+  SOCKET = path.join(sockDir, "h.sock");
+  socketServer = createServer();
+  await new Promise<void>((resolve) => socketServer.listen(SOCKET, resolve));
   pool = createPool(resolveDatabaseUrl());
   db = createDb(pool);
   checkout = mkdtempSync(path.join(tmpdir(), "review-router-"));
@@ -86,6 +95,8 @@ afterAll(async () => {
   await db.delete(ingestRuns).where(inArray(ingestRuns.id, [beadsRun.id, agentRun.id]));
   await pool.end();
   rmSync(checkout, { recursive: true, force: true });
+  await new Promise<void>((resolve) => socketServer.close(() => resolve()));
+  rmSync(sockDir, { recursive: true, force: true });
   vi.restoreAllMocks();
 });
 
@@ -107,8 +118,10 @@ interface SetupOptions {
 function setup(opts: SetupOptions = {}) {
   const calls: Array<{ args: string[]; cwd: string }> = [];
   const herdrCalls: string[][] = [];
-  const runHerdr: RunHerdr = async (args) => {
-    herdrCalls.push([...args]);
+  const order: string[] = [];
+  const runHerdr: RunHerdr = async (args, socket) => {
+    order.push("herdr");
+    herdrCalls.push([...args, `socket=${socket}`]);
     if (opts.herdrFails) throw opts.herdrFails;
   };
   const runBd: RunBd = async (args, cwd) => {
@@ -119,7 +132,10 @@ function setup(opts: SetupOptions = {}) {
     if (args[0] === "show") return JSON.stringify([{ id: args[1], status: "open", labels: ["review"], ...opts.show?.(args[1]!) }]);
     return "";
   };
-  const wake = vi.fn((_project: string) => true);
+  const wake = vi.fn((_project: string) => {
+    order.push("wake");
+    return true;
+  });
   const ctx: Context = {
     db: opts.db ?? db,
     reviewWriter: createReviewWriter({ runBd, runHerdr }),
@@ -127,7 +143,7 @@ function setup(opts: SetupOptions = {}) {
     ...(opts.readOnly !== undefined ? { readOnly: opts.readOnly } : {}),
   };
   const writes = () => calls.filter((c) => c.args[0] !== "show");
-  return { caller: createCaller(ctx), calls, writes, wake, herdrCalls };
+  return { caller: createCaller(ctx), calls, writes, wake, herdrCalls, order };
 }
 
 /** Throws on any property access — proves the refusal came before any database call. */
@@ -249,6 +265,9 @@ describe("reviewDecision", () => {
     ["a message with DEL", { message: "a\u007fb" }],
     ["a message with a right-to-left override", { message: "a\u202eb" }],
     ["a message with a bidi isolate", { message: "a\u2067b" }],
+    ["a message with a C1 control (U+0085)", { message: "a\u0085b" }],
+    ["a message with a C1 control (U+009B, CSI)", { message: "a\u009b31mb" }],
+    ["a message with a C1 control (U+0080)", { message: "a\u0080b" }],
     ["an over-long message", { message: "x".repeat(5000) }],
   ])("refuses %s at validation", async (_name, over) => {
     const { caller, calls } = setup({ db: poisonedDb() });
@@ -263,16 +282,18 @@ describe("reviewDecision", () => {
   });
 
   it("passes the notification through: the tracker record's pane is prompted", async () => {
-    const { caller, herdrCalls } = setup({ show: () => ({ metadata: { review: { pane: "w5:p5", images: [], summary: "" } } }) });
+    const { caller, herdrCalls, order } = setup({ show: () => ({ metadata: { review: { pane: "w5:p5", socket: SOCKET, images: [], summary: "" } } }) });
     const result = await caller.reviewDecision({ project: PROJECT, item: id("r2"), decision: "changes", message: "tighten the grid" });
 
     expect(result).toEqual({ ok: true, decision: "changes", item: id("r2"), written: ["comment", "add-changes-label"], notified: { ok: true, pane: "w5:p5" } });
-    expect(herdrCalls).toEqual([["agent", "prompt", "w5:p5", `Review ${id("r2")} changes requested: tighten the grid`]]);
+    expect(herdrCalls).toEqual([["agent", "prompt", "w5:p5", `Review ${id("r2")} changes requested: tighten the grid`, `socket=${SOCKET}`]]);
+    // The board is woken before herdr runs, so it never waits on the notification.
+    expect(order).toEqual(["wake", "herdr"]);
   });
 
   it("a failed notification is data: the decision still succeeds", async () => {
     const { caller, wake } = setup({
-      show: () => ({ metadata: { review: { pane: "w9:p9" } } }),
+      show: () => ({ metadata: { review: { pane: "w9:p9", socket: SOCKET } } }),
       herdrFails: new Error("agent target w9:p9 not found (agent_not_found)"),
     });
     const result = await caller.reviewDecision({ project: PROJECT, item: id("r1"), decision: "accept", message: "" });
@@ -292,7 +313,7 @@ describe("reviewDecision", () => {
       written: ["comment", "remove-changes-label"],
       error: "bd close failed: database is locked",
       partial: true,
-      notified: null,
+      notified: { ok: false, reason: NOTIFY_NOT_WRITTEN },
     });
     expect(wake).toHaveBeenCalledTimes(1);
   });

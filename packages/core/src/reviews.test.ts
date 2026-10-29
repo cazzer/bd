@@ -11,6 +11,7 @@ import {
   MAX_REVIEW_IMAGE_PATH_LENGTH,
   MAX_REVIEW_IMAGES,
   MAX_REVIEW_METADATA_CHARS,
+  MAX_REVIEW_SOCKET_PATH_LENGTH,
   MAX_REVIEW_SUMMARY_LENGTH,
   normalizeReviewComments,
   normalizeReviewMetadata,
@@ -26,6 +27,18 @@ describe("normalizeReviewMetadata", () => {
       pane: "w1:p2",
       summary: "look at the header",
     });
+  });
+
+  it("keeps a valid socket, and leaves the key out when none is recorded", () => {
+    expect(normalizeReviewMetadata({ pane: "w1:p2", socket: "/Users/x/.config/herdr/herdr.sock" })).toEqual({
+      images: [],
+      pane: "w1:p2",
+      socket: "/Users/x/.config/herdr/herdr.sock",
+      summary: "",
+    });
+    expect(normalizeReviewMetadata({ pane: "w1:p2", socket: null })).toEqual({ images: [], pane: "w1:p2", summary: "" });
+    expect(normalizeReviewMetadata({ pane: "w1:p2", socket: "" })).toEqual({ images: [], pane: "w1:p2", summary: "" });
+    expect(normalizeReviewMetadata({ pane: "w".repeat(64) })).toMatchObject({ pane: "w".repeat(64) });
   });
 
   it("defaults absent, null, and blank fields", () => {
@@ -50,7 +63,14 @@ describe("normalizeReviewMetadata", () => {
     ["a NUL in an image path", { images: ["/tmp/a\u0000.png"] }],
     ["a non-string image", { images: [42] }],
     ["a bad pane", { pane: "pane; rm -rf ~" }],
+    ["a pane that starts with '-'", { pane: "-rf" }],
+    ["a pane that starts with ':'", { pane: ":p2" }],
+    ["an over-long pane", { pane: "w".repeat(65) }],
     ["a non-string pane", { pane: 7 }],
+    ["a relative socket", { socket: "herdr.sock" }],
+    ["a socket with a control character", { socket: "/tmp/a\nb.sock" }],
+    ["an over-long socket", { socket: `/${"s".repeat(MAX_REVIEW_SOCKET_PATH_LENGTH)}` }],
+    ["a non-string socket", { socket: 7 }],
     ["a non-string summary", { summary: { text: "x" } }],
   ])("marks %s invalid", (_label, raw) => {
     expect(normalizeReviewMetadata(raw)).toEqual({ invalid: true });

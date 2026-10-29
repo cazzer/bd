@@ -26,7 +26,7 @@
 // is only a first filter: the writer re-reads the record from the tracker
 // (10) before writing. The input schema bounds the message so the comment,
 // prefix included, fits the review contract's comment cap; refuses C0
-// controls other than newline and tab, DEL, and the bidirectional
+// controls other than newline and tab, DEL, C1 controls (U+0080–009F), and the bidirectional
 // embedding/override/isolate characters (U+202A–202E, U+2066–2069), which
 // could make the thread read differently from what was written; and
 // requires the item id to start with a letter or digit (never a flag).
@@ -36,10 +36,12 @@
 // a step that timed out and may have landed, so the drawer can show the
 // tracker's message and what is already there. Whenever a write command ran
 // at all, the watcher is woken for the project so the board shows whatever
-// landed without waiting for an fs event. `notified` is the writer's push to
-// the requesting pane (review-writer.ts header): `{ ok: true, pane }`,
-// `{ ok: false, reason }`, or null when the decision was not fully written
-// and nobody was told. A failed notification never fails the request.
+// landed without waiting for an fs event; the wake runs from the writer's
+// `onWritten`, after the bd steps and before the pane notification, so the
+// board never waits on herdr. `notified` is the writer's push to the
+// requesting pane (review-writer.ts header): `{ ok: true, pane }` or
+// `{ ok: false, reason }` — "the decision was not fully written" when the
+// tracker failed. A failed notification never fails the request.
 
 import { stat } from "node:fs/promises";
 import { getBoardItem, getRegisteredBeadsProject, MAX_REVIEW_COMMENT_LENGTH, PROJECT_KEY_PATTERN } from "@breakdown/core";
@@ -52,9 +54,9 @@ import { publicProcedure, router } from "../trpc.js";
 /** Room left in a comment for the `Changes requested: ` prefix. */
 export const MAX_REVIEW_MESSAGE_LENGTH = MAX_REVIEW_COMMENT_LENGTH - 32;
 export const REVIEW_ITEM_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
-/** C0 controls but newline and tab, DEL, and the bidi embedding/override/isolate characters. */
+/** C0 controls but newline and tab, DEL, C1 controls, and the bidi embedding/override/isolate characters. */
 // eslint-disable-next-line no-control-regex
-const REFUSED_MESSAGE_CHARS = /[\u0000-\u0008\u000b-\u001f\u007f\u202a-\u202e\u2066-\u2069]/;
+const REFUSED_MESSAGE_CHARS = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/;
 
 export const reviewDecisionInputSchema = z
   .object({
@@ -82,8 +84,8 @@ export interface ReviewDecisionResult {
   partial?: boolean;
   /** A step that timed out or was killed and may have been written. */
   uncertain?: ReviewStep;
-  /** Whether the requesting pane was told; null when the decision was not fully written. */
-  notified: ReviewNotified | null;
+  /** Whether the requesting pane was told, and why not. */
+  notified: ReviewNotified;
 }
 
 const reviewDecisionProcedure = publicProcedure.input(reviewDecisionInputSchema).mutation(async ({ ctx, input }): Promise<ReviewDecisionResult> => {
@@ -133,7 +135,16 @@ const reviewDecisionProcedure = publicProcedure.input(reviewDecisionInputSchema)
 
   let result;
   try {
-    result = await writer.write({ project: input.project, cwd: project.path, externalId: item.externalId, decision: input.decision, message: input.message });
+    result = await writer.write({
+      project: input.project,
+      cwd: project.path,
+      externalId: item.externalId,
+      decision: input.decision,
+      message: input.message,
+      onWritten: ({ attempted }) => {
+        if (attempted) ctx.watcher?.wake(input.project);
+      },
+    });
   } catch (err) {
     if (err instanceof ReviewDecisionInFlightError) throw new TRPCError({ code: "CONFLICT", message: err.message });
     if (err instanceof ReviewRecordRefusedError) throw new TRPCError({ code: err.reason === "closed" ? "CONFLICT" : "PRECONDITION_FAILED", message: err.message });
@@ -143,7 +154,6 @@ const reviewDecisionProcedure = publicProcedure.input(reviewDecisionInputSchema)
     const uncertain = result.uncertain ? ` (uncertain: ${result.uncertain})` : "";
     console.error(`[breakdown-web] review decision on ${input.project}/${input.item} failed after [${result.written.join(", ")}]${uncertain}: ${result.error}`);
   }
-  if (result.attempted) ctx.watcher?.wake(input.project);
 
   return {
     ok: result.ok,

@@ -6,6 +6,7 @@
 // and the default herdr runner against stubs.
 
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
@@ -17,6 +18,8 @@ import {
   createReviewWriter,
   NOTIFY_INVALID_PANE,
   NOTIFY_NO_PANE,
+  NOTIFY_NOT_WRITTEN,
+  NOTIFY_UNKNOWN_SESSION,
   notifyText,
   ReviewDecisionInFlightError,
   REVIEW_HERDR_TIMEOUT_MS,
@@ -120,7 +123,7 @@ describe("review writer", () => {
       attempted: false,
       error: "bd show failed: no issue found",
       partial: false,
-      notified: null,
+      notified: { ok: false, reason: NOTIFY_NOT_WRITTEN },
     });
     const garbled = recordingRunner({ show: () => "not json" });
     await expect(createReviewWriter({ runBd: garbled.runBd }).write({ ...BASE, decision: "accept", message: "" })).resolves.toMatchObject({ ok: false, attempted: false });
@@ -132,7 +135,7 @@ describe("review writer", () => {
     const { runBd, writes } = recordingRunner({ fail: (args) => (args[0] === "close" ? new Error("bd close failed: database is locked") : undefined) });
     const result = await createReviewWriter({ runBd }).write({ ...BASE, decision: "accept", message: "ok" });
 
-    expect(result).toEqual({ ok: false, written: ["comment", "remove-changes-label"], attempted: true, error: "bd close failed: database is locked", partial: true, notified: null });
+    expect(result).toEqual({ ok: false, written: ["comment", "remove-changes-label"], attempted: true, error: "bd close failed: database is locked", partial: true, notified: { ok: false, reason: NOTIFY_NOT_WRITTEN } });
     expect(writes()).toHaveLength(3);
   });
 
@@ -140,7 +143,7 @@ describe("review writer", () => {
     const { runBd, writes } = recordingRunner({ fail: (args) => (args[0] === "comments" ? new Error("bd comments failed: no issue found") : undefined) });
     const result = await createReviewWriter({ runBd }).write({ ...BASE, decision: "changes", message: "fix it" });
 
-    expect(result).toEqual({ ok: false, written: [], attempted: true, error: "bd comments failed: no issue found", partial: false, notified: null });
+    expect(result).toEqual({ ok: false, written: [], attempted: true, error: "bd comments failed: no issue found", partial: false, notified: { ok: false, reason: NOTIFY_NOT_WRITTEN } });
     expect(writes()).toHaveLength(1);
   });
 
@@ -215,6 +218,20 @@ describe("review writer", () => {
 
 describe("pane notification", () => {
   let warn: MockInstance;
+  let sockDir: string;
+  let SOCKET: string;
+  let server: Server;
+  beforeAll(async () => {
+    // A real unix socket: the writer requires the recorded path to be one on disk.
+    sockDir = mkdtempSync(path.join(tmpdir(), "rw-sock-"));
+    SOCKET = path.join(sockDir, "h.sock");
+    server = createServer();
+    await new Promise<void>((resolve) => server.listen(SOCKET, resolve));
+  });
+  afterAll(async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    rmSync(sockDir, { recursive: true, force: true });
+  });
   beforeEach(() => {
     warn = vi.spyOn(console, "warn").mockImplementation(() => {});
   });
@@ -222,13 +239,14 @@ describe("pane notification", () => {
     warn.mockRestore();
   });
 
-  const withPane = (pane: unknown) => (id: string) => shown({ id, metadata: { review: { pane, images: [], summary: "s" } } });
+  const withReview = (review: Record<string, unknown>) => (id: string) => shown({ id, metadata: { review: { images: [], summary: "s", ...review } } });
+  const withPane = (pane: unknown) => withReview({ pane, socket: SOCKET });
 
-  /** Records every herdr argv; `fail` may reject it. */
+  /** Records every herdr argv and socket; `fail` may reject it. */
   function recordingHerdr(fail?: () => Error) {
-    const calls: string[][] = [];
-    const runHerdr: RunHerdr = async (args) => {
-      calls.push([...args]);
+    const calls: Array<{ args: string[]; socket: string }> = [];
+    const runHerdr: RunHerdr = async (args, socket) => {
+      calls.push({ args: [...args], socket });
       if (fail) throw fail();
     };
     return { runHerdr, calls };
@@ -240,22 +258,24 @@ describe("pane notification", () => {
     expect(notifyText("changes", "x-1", "--force")).toBe("Review x-1 changes requested: --force");
   });
 
-  it("accept: prompts the tracker record's pane after every bd step, with the exact argv", async () => {
+  it("accept: prompts the tracker record's pane through its socket, after the bd steps and onWritten, with the exact argv", async () => {
     const order: string[] = [];
     const runBd: RunBd = async (args) => {
       order.push(`bd ${args[0]}`);
       return args[0] === "show" ? withPane("w1:p2")(args[1]!) : "";
     };
     const herdr = recordingHerdr();
-    const runHerdr: RunHerdr = async (args) => {
+    const runHerdr: RunHerdr = async (args, socket) => {
       order.push("herdr");
-      await herdr.runHerdr(args);
+      await herdr.runHerdr(args, socket);
     };
-    const result = await createReviewWriter({ runBd, runHerdr }).write({ ...BASE, decision: "accept", message: "looks right" });
+    const onWritten = vi.fn((outcome: { ok: boolean; attempted: boolean }) => order.push(`onWritten ${outcome.ok} ${outcome.attempted}`));
+    const result = await createReviewWriter({ runBd, runHerdr }).write({ ...BASE, decision: "accept", message: "looks right", onWritten });
 
     expect(result).toEqual({ ok: true, written: ["comment", "remove-changes-label", "close"], attempted: true, notified: { ok: true, pane: "w1:p2" } });
-    expect(herdr.calls).toEqual([["agent", "prompt", "w1:p2", "Review tides-r1 accepted: looks right"]]);
-    expect(order).toEqual(["bd show", "bd comments", "bd update", "bd close", "herdr"]);
+    expect(herdr.calls).toEqual([{ args: ["agent", "prompt", "w1:p2", "Review tides-r1 accepted: looks right"], socket: SOCKET }]);
+    expect(order).toEqual(["bd show", "bd comments", "bd update", "bd close", "onWritten true true", "herdr"]);
+    expect(onWritten).toHaveBeenCalledOnce();
     expect(warn).not.toHaveBeenCalled();
   });
 
@@ -263,22 +283,22 @@ describe("pane notification", () => {
     const { runBd } = recordingRunner({ show: withPane("w1:p2") });
     const herdr = recordingHerdr();
     await createReviewWriter({ runBd, runHerdr: herdr.runHerdr }).write({ ...BASE, decision: "accept", message: "" });
-    expect(herdr.calls).toEqual([["agent", "prompt", "w1:p2", "Review tides-r1 accepted."]]);
+    expect(herdr.calls.map((c) => c.args)).toEqual([["agent", "prompt", "w1:p2", "Review tides-r1 accepted."]]);
   });
 
   it("changes: sends 'Review <id> changes requested: <message>' to the trimmed pane", async () => {
     const { runBd } = recordingRunner({ show: withPane("  w3:p1 ") });
     const herdr = recordingHerdr();
     const result = await createReviewWriter({ runBd, runHerdr: herdr.runHerdr }).write({ ...BASE, decision: "changes", message: "header overlaps" });
-    expect(herdr.calls).toEqual([["agent", "prompt", "w3:p1", "Review tides-r1 changes requested: header overlaps"]]);
+    expect(herdr.calls.map((c) => c.args)).toEqual([["agent", "prompt", "w3:p1", "Review tides-r1 changes requested: header overlaps"]]);
     expect(result.notified).toEqual({ ok: true, pane: "w3:p1" });
   });
 
   it.each([
     ["no metadata", (id: string) => shown({ id })],
     ["no review metadata", (id: string) => shown({ id, metadata: { other: 1 } })],
-    ["a null pane", withPane(null)],
-    ["a blank pane", withPane("   ")],
+    ["a null pane", (id: string) => withPane(null)(id)],
+    ["a blank pane", (id: string) => withPane("   ")(id)],
   ])("%s: no herdr call, the decision stands, and it is logged", async (_name, show) => {
     const { runBd } = recordingRunner({ show });
     const herdr = recordingHerdr();
@@ -288,8 +308,8 @@ describe("pane notification", () => {
     expect(warn).toHaveBeenCalledWith(`[breakdown-web] review tides/tides-r1: agent not notified: ${NOTIFY_NO_PANE}`);
   });
 
-  it.each([["w1 p2"], ["-rf"], ["--help"], ["w1;p2"], ["x".repeat(65)], [42], [["w1:p2"]]])("refuses pane %j without calling herdr", async (pane) => {
-    const { runBd } = recordingRunner({ show: withPane(pane) });
+  it.each([["w1 p2"], ["-rf"], ["--help"], [":p2"], ["w1;p2"], ["x".repeat(65)], [42], [["w1:p2"]]])("refuses pane %j without calling herdr", async (pane) => {
+    const { runBd } = recordingRunner({ show: (id) => withPane(pane)(id) });
     const herdr = recordingHerdr();
     const result = await createReviewWriter({ runBd, runHerdr: herdr.runHerdr }).write({ ...BASE, decision: "changes", message: "fix" });
     expect(result).toMatchObject({ ok: true, written: ["comment", "add-changes-label"], notified: { ok: false, reason: NOTIFY_INVALID_PANE } });
@@ -297,10 +317,27 @@ describe("pane notification", () => {
     expect(warn).toHaveBeenCalledOnce();
   });
 
-  it.each([["agent target w1:p2 not found (agent_not_found)"], ["herdr timed out after 10 s"], ["herdr not found on PATH"]])(
+  it.each([
+    ["no socket", () => ({})],
+    ["a null socket", () => ({ socket: null })],
+    ["a relative socket", () => ({ socket: "h.sock" })],
+    ["a socket with a control character", () => ({ socket: `${SOCKET}\n` })],
+    ["an over-long socket", () => ({ socket: `/${"s".repeat(600)}` })],
+    ["a socket path that does not exist", () => ({ socket: path.join(sockDir, "gone.sock") })],
+    ["a socket path that is a directory", () => ({ socket: sockDir })],
+  ])("%s: the pane's session is unknown, so no herdr call", async (_name, socket) => {
+    const { runBd } = recordingRunner({ show: (id) => withReview({ pane: "w1:p2", ...socket() })(id) });
+    const herdr = recordingHerdr();
+    const result = await createReviewWriter({ runBd, runHerdr: herdr.runHerdr }).write({ ...BASE, decision: "accept", message: "" });
+    expect(result).toMatchObject({ ok: true, notified: { ok: false, reason: NOTIFY_UNKNOWN_SESSION } });
+    expect(herdr.calls).toEqual([]);
+    expect(warn).toHaveBeenCalledWith(`[breakdown-web] review tides/tides-r1: agent not notified: ${NOTIFY_UNKNOWN_SESSION}`);
+  });
+
+  it.each([["agent target w1:p2 not found (agent_not_found)"], ["herdr timed out after 10 s; the agent may have been notified"], ["herdr not found on PATH"]])(
     "a failing herdr (%s) leaves the decision written and reports why",
     async (reason) => {
-      const { runBd, writes } = recordingRunner({ show: withPane("w1:p2") });
+      const { runBd, writes } = recordingRunner({ show: (id) => withPane("w1:p2")(id) });
       const herdr = recordingHerdr(() => new Error(reason));
       const result = await createReviewWriter({ runBd, runHerdr: herdr.runHerdr }).write({ ...BASE, decision: "accept", message: "secret words" });
       expect(result).toEqual({ ok: true, written: ["comment", "remove-changes-label", "close"], attempted: true, notified: { ok: false, reason } });
@@ -314,23 +351,59 @@ describe("pane notification", () => {
   it.each([
     ["a partial write", new Error("bd close failed: database is locked")],
     ["an uncertain step", new BdUncertainError("bd close timed out after 30 s")],
-  ])("%s notifies nobody", async (_name, error) => {
-    const { runBd } = recordingRunner({ show: withPane("w1:p2"), fail: (args) => (args[0] === "close" ? error : undefined) });
+  ])("%s notifies nobody and says why", async (_name, error) => {
+    const { runBd } = recordingRunner({ show: (id) => withPane("w1:p2")(id), fail: (args) => (args[0] === "close" ? error : undefined) });
     const herdr = recordingHerdr();
-    const result = await createReviewWriter({ runBd, runHerdr: herdr.runHerdr }).write({ ...BASE, decision: "accept", message: "" });
-    expect(result).toMatchObject({ ok: false, partial: true, notified: null });
+    const onWritten = vi.fn();
+    const result = await createReviewWriter({ runBd, runHerdr: herdr.runHerdr }).write({ ...BASE, decision: "accept", message: "", onWritten });
+    expect(result).toMatchObject({ ok: false, partial: true, notified: { ok: false, reason: NOTIFY_NOT_WRITTEN } });
     expect(herdr.calls).toEqual([]);
+    expect(onWritten).toHaveBeenCalledWith({ ok: false, attempted: true });
+    expect(warn).toHaveBeenCalledWith(`[breakdown-web] review tides/tides-r1: agent not notified: ${NOTIFY_NOT_WRITTEN}`);
   });
 
   it("a failed bd show or a failed first step notifies nobody", async () => {
     const herdr = recordingHerdr();
     const failingShow = recordingRunner({ fail: (args) => (args[0] === "show" ? new Error("bd show failed") : undefined) });
-    await expect(createReviewWriter({ runBd: failingShow.runBd, runHerdr: herdr.runHerdr }).write({ ...BASE, decision: "accept", message: "" })).resolves.toMatchObject({ notified: null });
-    const failingComment = recordingRunner({ show: withPane("w1:p2"), fail: (args) => (args[0] === "comments" ? new Error("bd comments failed") : undefined) });
+    const onWritten = vi.fn();
+    await expect(createReviewWriter({ runBd: failingShow.runBd, runHerdr: herdr.runHerdr }).write({ ...BASE, decision: "accept", message: "", onWritten })).resolves.toMatchObject({
+      notified: { ok: false, reason: NOTIFY_NOT_WRITTEN },
+    });
+    expect(onWritten).toHaveBeenCalledWith({ ok: false, attempted: false });
+    const failingComment = recordingRunner({ show: (id) => withPane("w1:p2")(id), fail: (args) => (args[0] === "comments" ? new Error("bd comments failed") : undefined) });
     await expect(createReviewWriter({ runBd: failingComment.runBd, runHerdr: herdr.runHerdr }).write({ ...BASE, decision: "changes", message: "x" })).resolves.toMatchObject({
-      notified: null,
+      notified: { ok: false, reason: NOTIFY_NOT_WRITTEN },
     });
     expect(herdr.calls).toEqual([]);
+  });
+
+  it("a refused record calls neither onWritten nor herdr", async () => {
+    const { runBd } = recordingRunner({ show: () => shown({ status: "closed" }) });
+    const herdr = recordingHerdr();
+    const onWritten = vi.fn();
+    await expect(createReviewWriter({ runBd, runHerdr: herdr.runHerdr }).write({ ...BASE, decision: "accept", message: "", onWritten })).rejects.toBeInstanceOf(ReviewRecordRefusedError);
+    expect(onWritten).not.toHaveBeenCalled();
+    expect(herdr.calls).toEqual([]);
+  });
+
+  it("an onWritten that throws is logged and does not stop the notification", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { runBd } = recordingRunner({ show: (id) => withPane("w1:p2")(id) });
+      const herdr = recordingHerdr();
+      const result = await createReviewWriter({ runBd, runHerdr: herdr.runHerdr }).write({
+        ...BASE,
+        decision: "accept",
+        message: "",
+        onWritten: () => {
+          throw new Error("wake failed");
+        },
+      });
+      expect(result).toMatchObject({ ok: true, notified: { ok: true, pane: "w1:p2" } });
+      expect(error).toHaveBeenCalledWith("[breakdown-web] review tides/tides-r1: onWritten failed: wake failed");
+    } finally {
+      error.mockRestore();
+    }
   });
 
   it("does not hold the checkout's write queue while herdr runs", async () => {
@@ -451,6 +524,7 @@ describe("default herdr runner", () => {
   };
   const PROMPT = `Review x-1 changes requested: "; rm -rf ~ # secret-message\n$(x)`;
   const ARGS = ["agent", "prompt", "w1:p2", PROMPT];
+  const SOCK = "/tmp/herdr-test/h.sock";
 
   beforeAll(() => {
     dir = mkdtempSync(path.join(tmpdir(), "review-herdr-"));
@@ -459,49 +533,58 @@ describe("default herdr runner", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it("passes argv verbatim with no shell and resolves on exit 0", async () => {
+  it("passes argv verbatim with no shell, sets HERDR_SOCKET_PATH, inherits the rest, and resolves on exit 0", async () => {
     const log = path.join(dir, "argv.log");
-    const echo = stub("echo-herdr", `printf '%s|' "$@" > '${log}'; echo '{"ok":true}'`);
-    await expect(createHerdrRunner({ command: echo })(ARGS)).resolves.toBeUndefined();
+    const echo = stub("echo-herdr", `printf '%s|' "$@" > '${log}'; echo "socket=$HERDR_SOCKET_PATH home=$HOME" >> '${log}'; echo '{"ok":true}'`);
+    await expect(createHerdrRunner({ command: echo })(ARGS, SOCK)).resolves.toBeUndefined();
     const { readFileSync } = await import("node:fs");
-    expect(readFileSync(log, "utf8")).toBe(`agent|prompt|w1:p2|${PROMPT}|`);
+    expect(readFileSync(log, "utf8")).toBe(`agent|prompt|w1:p2|${PROMPT}|socket=${SOCK} home=${process.env["HOME"]}\n`);
   });
 
   it("reduces herdr's JSON error to its message and code", async () => {
     const gone = stub("gone-herdr", `echo '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"},"id":"cli:agent:prompt"}' >&2; exit 1`);
-    await expect(createHerdrRunner({ command: gone })(ARGS)).rejects.toThrow(/^agent target w1:p2 not found \(agent_not_found\)$/);
+    await expect(createHerdrRunner({ command: gone })(ARGS, SOCK)).rejects.toThrow(/^agent target w1:p2 not found \(agent_not_found\)$/);
   });
 
   it("never echoes the prompt back, even when herdr does", async () => {
     const echoing = stub("echoing-herdr", `printf 'refused: %s\\n' "$4" >&2; exit 2`);
-    const err = (await createHerdrRunner({ command: echoing })(["agent", "prompt", "w1:p2", "Review x-1 accepted: secret-message"]).catch((e: unknown) => e)) as Error;
+    const err = (await createHerdrRunner({ command: echoing })(["agent", "prompt", "w1:p2", "Review x-1 accepted: secret-message"], SOCK).catch((e: unknown) => e)) as Error;
     expect(err.message).toBe("refused: …");
     expect(err.message).not.toContain("secret-message");
     // A multi-line prompt: herdr's first line carries only the prompt's first line.
-    const multi = (await createHerdrRunner({ command: echoing })(["agent", "prompt", "w1:p2", "Review x-1 changes requested: first secret line\nsecond line"]).catch((e: unknown) => e)) as Error;
+    const multi = (await createHerdrRunner({ command: echoing })(["agent", "prompt", "w1:p2", "Review x-1 changes requested: first secret line\nsecond line"], SOCK).catch((e: unknown) => e)) as Error;
     expect(multi.message).toBe("refused: …");
+    // Lines are matched trimmed: herdr printing the second line without its indentation is still cut.
+    const lineTwo = stub("line-two-herdr", `echo 'refused: second secret line' >&2; exit 2`);
+    const indented = (await createHerdrRunner({ command: lineTwo })(["agent", "prompt", "w1:p2", "Review x-1 changes requested: a\n   second secret line   "], SOCK).catch((e: unknown) => e)) as Error;
+    expect(indented.message).toBe("refused: …");
+  });
+
+  it("scrubs only herdr's own text, never the runner's fixed reasons", async () => {
+    const quiet = stub("quiet-herdr-2", "exit 3");
+    await expect(createHerdrRunner({ command: quiet })(["agent", "prompt", "w1:p2", "herdr exited 3"], SOCK)).rejects.toThrow(/^herdr exited 3$/);
   });
 
   it("names the exit code when herdr says nothing", async () => {
     const quiet = stub("quiet-herdr", "exit 3");
-    await expect(createHerdrRunner({ command: quiet })(ARGS)).rejects.toThrow(/^herdr exited 3$/);
+    await expect(createHerdrRunner({ command: quiet })(ARGS, SOCK)).rejects.toThrow(/^herdr exited 3$/);
   });
 
   it("says herdr is not on PATH when the executable is missing", async () => {
-    await expect(createHerdrRunner({ command: path.join(dir, "missing-herdr") })(ARGS)).rejects.toThrow(/^herdr not found on PATH$/);
+    await expect(createHerdrRunner({ command: path.join(dir, "missing-herdr") })(ARGS, SOCK)).rejects.toThrow(/^herdr not found on PATH$/);
   });
 
   it("times out with SIGTERM", async () => {
     const sleeper = stub("sleep-herdr", "exec sleep 10");
     const started = Date.now();
-    await expect(createHerdrRunner({ command: sleeper, timeoutMs: 200, killGraceMs: 5_000 })(ARGS)).rejects.toThrow(/^herdr timed out after 0\.2 s$/);
+    await expect(createHerdrRunner({ command: sleeper, timeoutMs: 200, killGraceMs: 5_000 })(ARGS, SOCK)).rejects.toThrow(/^herdr timed out after 0\.2 s; the agent may have been notified$/);
     expect(Date.now() - started).toBeLessThan(3_000);
   });
 
   it("SIGKILLs a herdr that ignores SIGTERM after the grace period", async () => {
     const stubborn = stub("stubborn-herdr", "trap '' TERM\nexec sleep 10");
     const started = Date.now();
-    await expect(createHerdrRunner({ command: stubborn, timeoutMs: 200, killGraceMs: 300 })(ARGS)).rejects.toThrow(/^herdr timed out after 0\.2 s$/);
+    await expect(createHerdrRunner({ command: stubborn, timeoutMs: 200, killGraceMs: 300 })(ARGS, SOCK)).rejects.toThrow(/^herdr timed out after 0\.2 s; the agent may have been notified$/);
     expect(Date.now() - started).toBeGreaterThanOrEqual(450);
     expect(Date.now() - started).toBeLessThan(3_000);
   });

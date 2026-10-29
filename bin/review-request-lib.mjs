@@ -23,7 +23,12 @@ const FETCH_TIMEOUT_MS = 5_000;
 const ITEM_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
 const PORT = /^\d{1,5}$/;
 const SAFE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
-const PANE_ID = /^[A-Za-z0-9:_.-]{1,64}$/;
+// Must agree with REVIEW_PANE_PATTERN in packages/core/src/reviews.ts; never starts with `-`.
+const PANE_ID = /^[A-Za-z0-9][A-Za-z0-9:_.-]{0,63}$/;
+// Must agree with isReviewSocketPath in packages/core/src/reviews.ts.
+const MAX_SOCKET_PATH = 512;
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHAR = /[\u0000-\u001f\u007f]/;
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
 const MAX_SUMMARY = 2000;
 const MAX_IMAGES = 20;
@@ -127,13 +132,27 @@ export function chooseReview(children) {
 }
 
 /** `bd update --metadata` merges top-level keys and replaces each one whole, so sending `review` alone keeps the rest. */
-export function reviewMetadata({ images, pane, summary }) {
-  return { review: pane === null ? { images, summary } : { images, pane, summary } };
+export function reviewMetadata({ images, pane, socket = null, summary }) {
+  return {
+    review: { images, ...(pane === null ? {} : { pane }), ...(socket === null ? {} : { socket }), summary },
+  };
 }
 
 export function paneFrom(env) {
   const pane = env.HERDR_PANE_ID;
   return typeof pane === "string" && PANE_ID.test(pane) ? pane : null;
+}
+
+/** The herdr server socket the pane id belongs to: pane ids are scoped to one herdr server, so the board prompts through this socket. */
+export function socketFrom(env) {
+  const socket = env.HERDR_SOCKET_PATH;
+  return typeof socket === "string" &&
+    socket.length > 0 &&
+    socket.length <= MAX_SOCKET_PATH &&
+    !CONTROL_CHAR.test(socket) &&
+    path.isAbsolute(socket)
+    ? socket
+    : null;
 }
 
 /** bd sometimes prints warnings before its JSON; parse from the first bracket. */
@@ -349,6 +368,7 @@ function hadImages(review) {
 
 async function write(deps, args, { project, item, existing, bdCwd }, staged) {
   const pane = paneFrom(deps.env);
+  const socket = socketFrom(deps.env);
   let review;
   if (existing) {
     review = existing.review;
@@ -403,7 +423,7 @@ async function write(deps, args, { project, item, existing, bdCwd }, staged) {
     return partial("moving images into place", err.message);
   }
 
-  const metadata = reviewMetadata({ images: stored, pane, summary: args.summary });
+  const metadata = reviewMetadata({ images: stored, pane, socket, summary: args.summary });
   const updateArgs = ["update", id, "--metadata", JSON.stringify(metadata)];
   if (existing) updateArgs.push("--description", args.summary);
   if (existing && (review.labels ?? []).includes(CHANGES_LABEL)) updateArgs.push("--remove-label", CHANGES_LABEL);
@@ -439,6 +459,10 @@ async function write(deps, args, { project, item, existing, bdCwd }, staged) {
   if (pane === null) {
     deps.warn(
       `${PREFIX}HERDR_PANE_ID is not set to a pane id, so the decision cannot be pushed to this pane; read \`bd comments ${id}\` for it.`,
+    );
+  } else if (socket === null) {
+    deps.warn(
+      `${PREFIX}HERDR_SOCKET_PATH is not set to an absolute socket path, so the decision cannot be pushed to this pane; read \`bd comments ${id}\` for it.`,
     );
   }
 
