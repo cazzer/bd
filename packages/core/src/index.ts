@@ -302,10 +302,12 @@ export {
   mapBeadsIssueToNode,
   deriveBeadsEdges,
   resolveBeadsEdges,
+  isReviewIssue,
   BEADS_SOURCE_SYSTEM,
   BEADS_EDGE_WEIGHT,
   BEADS_DEPENDENCY_TYPES,
   type BeadsIssue,
+  type BeadsComment,
   type BeadsDependency,
   type BeadsEdgeCandidate,
   type DeriveBeadsEdgesResult,
@@ -327,19 +329,48 @@ export {
 // Work board read (live-beads-board change). See board.ts.
 export {
   getWorkBoard,
+  getBoardItem,
   listBeadsProjects,
   buildWorkBoardQuery,
   BOARD_COLUMNS,
   MAX_BOARD_ITEMS,
+  MAX_BOARD_ITEM_ID_LENGTH,
   CLOSED_PER_PROJECT,
   MAX_BOARD_PROJECTS,
   type BoardColumn,
   type BoardCard,
   type BoardEpic,
+  type BoardItem,
+  type BoardItemOptions,
   type WorkBoard,
   type WorkBoardOptions,
   type BeadsProject,
 } from "./board.js";
+
+// The review contract (board-visual-reviews): review metadata and comment
+// normalization, the review image root, and lexical containment. Pure.
+// See reviews.ts.
+export {
+  REVIEW_LABEL,
+  REVIEW_CHANGES_LABEL,
+  REVIEW_METADATA_KEY,
+  REVIEW_COMMENTS_KEY,
+  REVIEW_IMAGE_ROOT,
+  MAX_REVIEW_IMAGES,
+  MAX_REVIEW_IMAGE_PATH_LENGTH,
+  REVIEW_PANE_PATTERN,
+  MAX_REVIEW_SUMMARY_LENGTH,
+  MAX_REVIEW_COMMENTS,
+  MAX_REVIEW_COMMENT_LENGTH,
+  MAX_REVIEW_COMMENT_AUTHOR_LENGTH,
+  MAX_REVIEW_COMMENTS_CHARS,
+  normalizeReviewMetadata,
+  normalizeReviewComments,
+  isInsideReviewRoot,
+  type ReviewMetadata,
+  type InvalidReview,
+  type ReviewComment,
+} from "./reviews.js";
 
 // Node views (node-views change): the view contract, the default_view edge
 // convention, and batched default-view resolution along child_of. See

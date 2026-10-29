@@ -126,6 +126,70 @@ describe("mapBeadsIssueToNode", () => {
   });
 });
 
+describe("mapBeadsIssueToNode reviews", () => {
+  const images = ["/home/u/.local/share/breakdown/reviews/bd/bd-r1/01-a.png", "/home/u/.local/share/breakdown/reviews/bd/bd-r1/02-b.png"];
+  const reviewBead: BeadsIssue = {
+    ...base,
+    id: "bd-r1",
+    labels: ["review"],
+    comment_count: 3,
+    metadata: { review: { images, pane: "w3:p1", summary: "Board header" }, other: "ignored" },
+  };
+  const threeComments = [
+    { id: 12, issue_id: "bd-r1", author: "agent", text: "updated", created_at: "2026-10-28T12:00:00Z" },
+    { id: 10, issue_id: "bd-r1", author: "agent", text: "requested", created_at: "2026-10-28T10:00:00Z" },
+    { id: 11, issue_id: "bd-r1", author: "caleb", text: "Changes requested: header overlaps", created_at: "2026-10-28T11:00:00Z" },
+  ];
+
+  it("writes a review bead's images, pane, summary, and comments oldest first", () => {
+    const node = mapBeadsIssueToNode(reviewBead, 0, { project: "bd", comments: threeComments });
+    expect(node.metadata?.["review"]).toEqual({ images, pane: "w3:p1", summary: "Board header" });
+    expect(node.metadata?.["review_comments"]).toEqual([
+      { id: "10", author: "agent", text: "requested", created_at: "2026-10-28T10:00:00.000Z" },
+      { id: "11", author: "caleb", text: "Changes requested: header overlaps", created_at: "2026-10-28T11:00:00.000Z" },
+      { id: "12", author: "agent", text: "updated", created_at: "2026-10-28T12:00:00.000Z" },
+    ]);
+    expect(node.metadata).not.toHaveProperty("other");
+    expect(node.metadata).toMatchObject({ labels: ["review"], project: "bd", status: "open" });
+  });
+
+  it("stores malformed review metadata as invalid rather than refusing", () => {
+    const node = mapBeadsIssueToNode({ ...reviewBead, metadata: { review: { images: "a.png" } } });
+    expect(node.metadata?.["review"]).toEqual({ invalid: true });
+  });
+
+  it("writes no review key for a review bead without metadata.review, and no comments key when none survive", () => {
+    const node = mapBeadsIssueToNode({ ...reviewBead, metadata: null }, 0, { comments: [{ id: 1, text: 5 }] });
+    expect(node.metadata).not.toHaveProperty("review");
+    expect(node.metadata).not.toHaveProperty("review_comments");
+  });
+
+  it("ignores metadata.review and comments on a bead not labelled review", () => {
+    for (const labels of [["ui"], ["review:changes"], null]) {
+      const node = mapBeadsIssueToNode({ ...reviewBead, labels }, 0, { comments: threeComments });
+      expect(node.metadata).not.toHaveProperty("review");
+      expect(node.metadata).not.toHaveProperty("review_comments");
+    }
+  });
+
+  it("maps a plain bead's metadata exactly as before reviews existed", () => {
+    const node = mapBeadsIssueToNode({ ...base, labels: ["ui"], comment_count: 2, metadata: { team: "x" } }, 0, { project: "bd", comments: [] });
+    expect(node.metadata).toEqual({
+      status: "open",
+      priority: 1,
+      assignee: "caleb@example.com",
+      spec_id: "work-items",
+      issue_type: "task",
+      created_by: "Caleb",
+      source_created_at: "2026-09-01T10:00:00Z",
+      source_updated_at: "2026-09-02T10:00:00Z",
+      occurred_at: "2026-09-01T10:00:00.000Z",
+      project: "bd",
+      labels: ["ui"],
+    });
+  });
+});
+
 describe("deriveBeadsEdges", () => {
   const issues: BeadsIssue[] = [
     { ...base, id: "a", dependencies: [] },

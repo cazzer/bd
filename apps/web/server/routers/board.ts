@@ -17,11 +17,19 @@
 // honest flag. Epics are unbounded here: at most one row per item, a title
 // and three short fields each, and dropping a lane header would orphan its
 // cards.
+//
+// `boardItem` (board-visual-reviews, design.md decision 2) is the drawer's
+// read: one item of one project by its external id, with content, labels,
+// review, and comments (core's `getBoardItem`), as `{ item }` — null when the
+// project holds no such item. It is not passed through `boundResponse`: it
+// is one row, and core already bounds every part of it (content and metadata
+// by the write path's caps, the comment thread by the review contract's
+// character budget).
 
-import { getWorkBoard, listBeadsProjects, MAX_BOARD_PROJECTS, PROJECT_KEY_PATTERN } from "@breakdown/core";
+import { getBoardItem, getWorkBoard, listBeadsProjects, MAX_BOARD_ITEM_ID_LENGTH, MAX_BOARD_PROJECTS, PROJECT_KEY_PATTERN } from "@breakdown/core";
 import { z } from "zod";
 import { boundResponse } from "../budget.js";
-import { toBeadsProjectDto, toBoardCardDto } from "../dto.js";
+import { toBeadsProjectDto, toBoardCardDto, toBoardItemDto } from "../dto.js";
 import { mapCoreError } from "../errors.js";
 import { publicProcedure, router } from "../trpc.js";
 
@@ -80,7 +88,23 @@ const beadsProjectsProcedure = publicProcedure.query(async ({ ctx }) => {
   }
 });
 
+export const boardItemInputSchema = z.object({
+  project: z.string().regex(PROJECT_KEY_PATTERN, `must match ${PROJECT_KEY_PATTERN}`),
+  /** The item's external id (a bead id). */
+  item: z.string().min(1).max(MAX_BOARD_ITEM_ID_LENGTH),
+});
+
+const boardItemProcedure = publicProcedure.input(boardItemInputSchema).query(async ({ ctx, input }) => {
+  try {
+    const item = await getBoardItem(ctx.db, { project: input.project, externalId: input.item });
+    return { item: item === null ? null : toBoardItemDto(item) };
+  } catch (err) {
+    throw mapCoreError("boardItem", err);
+  }
+});
+
 export const boardRouter = router({
   board: boardProcedure,
+  boardItem: boardItemProcedure,
   beadsProjects: beadsProjectsProcedure,
 });

@@ -395,7 +395,7 @@ export class InvalidLookupIdError extends KnowledgeStoreError {
 export class LookupFailedError extends KnowledgeStoreError {
   constructor(
     message: string,
-    readonly operation: "getNodes" | "getNeighbors" | "getNodeHistory" | "listNodes" | "getWorkItemReadiness" | "patchWorkItem" | "resolveDefaultViews" | "getSubtree" | "getTimeline" | "getNodesByExternalId" | "getWorkBoard" | "listBeadsProjects",
+    readonly operation: "getNodes" | "getNeighbors" | "getNodeHistory" | "listNodes" | "getWorkItemReadiness" | "patchWorkItem" | "resolveDefaultViews" | "getSubtree" | "getTimeline" | "getNodesByExternalId" | "getWorkBoard" | "listBeadsProjects" | "getBoardItem",
     options?: ErrorOptions,
   ) {
     super(message, options);

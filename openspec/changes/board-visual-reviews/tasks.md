@@ -2,12 +2,12 @@ One task group, one bead. Group 1 is bd-ker.2 (the store learns reviews); group 
 
 ## 1. Review data on work items and the board item read (bd-ker.2)
 
-- [ ] 1.1 New `packages/core/src/reviews.ts`: review image root, `normalizeReviewMetadata` per design decision 1 (malformed → `{ invalid: true }`), comment shape and caps, `isInsideReviewRoot(path)` (pure, used by the server in group 4).
-- [ ] 1.2 `beads.ts`: `BeadsIssue` gains `metadata` and `comment_count`; `mapBeadsIssueToNode(issue, index, { project?, comments? })` writes `review` and `review_comments` for review items only. `beads.test.ts`: review bead with images and comments, malformed review, plain bead metadata byte-identical to before.
-- [ ] 1.3 `beads-ingest.ts`: after `bd list`, fetch `bd comments <id> --json` through the injectable runner for `review`-labelled issues with `comment_count > 0`. Keep the edit local to the fetch/map step (another change is editing the edge step of this file). DB-backed tests with a fixture runner: comments land; a new comment reports the item updated; no runner call for non-review items.
-- [ ] 1.4 `board.ts`: `BoardCard.review`; new `getBoardItem(db, { project, externalId })` (canonical row, project-scoped, not found → null). Tests in `board.test.ts`. Export from `index.ts`.
-- [ ] 1.5 `routers/board.ts`: `boardItem` query (zod: project key form, item ≤ 200 chars), DTO in `dto.ts`; caller tests.
-- [ ] 1.6 `pnpm check` green; reload the bd tracker on the dev store and confirm only review items are updated.
+- [x] 1.1 New `packages/core/src/reviews.ts`: review image root, `normalizeReviewMetadata` per design decision 1 (malformed → `{ invalid: true }`), comment shape and caps, `isInsideReviewRoot(path)` (pure, used by the server in group 4).
+- [x] 1.2 `beads.ts`: `BeadsIssue` gains `metadata` and `comment_count`; `mapBeadsIssueToNode(issue, index, { project?, comments? })` writes `review` and `review_comments` for review items only. `beads.test.ts`: review bead with images and comments, malformed review, plain bead metadata byte-identical to before.
+- [x] 1.3 `beads-ingest.ts`: after `bd list`, fetch `bd comments <id> --json` through the injectable runner for `review`-labelled issues with `comment_count > 0`. Keep the edit local to the fetch/map step (another change is editing the edge step of this file). DB-backed tests with a fixture runner: comments land; a new comment reports the item updated; no runner call for non-review items.
+- [x] 1.4 `board.ts`: `BoardCard.review`; new `getBoardItem(db, { project, externalId })` (canonical row, project-scoped, not found → null). Tests in `board.test.ts`. Export from `index.ts`.
+- [x] 1.5 `routers/board.ts`: `boardItem` query (zod: project key form, item ≤ 200 chars), DTO in `dto.ts`; caller tests.
+- [x] 1.6 `pnpm check` green; reload the bd tracker on the dev store and confirm only review items are updated.
 
 ## 2. review-request CLI (bd-ker.1)
 

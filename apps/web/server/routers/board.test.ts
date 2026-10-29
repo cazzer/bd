@@ -139,6 +139,76 @@ describe("board", () => {
   });
 });
 
+describe("boardItem", () => {
+  const images = [`/home/u/.local/share/breakdown/reviews/${PROJECT}/${TAG}-r/01-a.png`];
+
+  async function writeReview(ext: string): Promise<string> {
+    const result = await upsertNodes(db, run, [
+      {
+        nodeType: "work_item",
+        sourceSystem: SRC,
+        externalId: ext,
+        title: "Review: header",
+        content: "Details.",
+        metadata: {
+          project: PROJECT,
+          status: "open",
+          priority: 1,
+          labels: ["review"],
+          review: { images, pane: "w1:p1", summary: "Header" },
+          review_comments: [{ id: "1", author: "agent", text: "please look", created_at: "2026-10-28T10:00:00.000Z" }],
+        },
+      },
+    ]);
+    return result.rows[0]!.id;
+  }
+
+  it("returns one item's details, review, and comments as wire-safe JSON with an ISO updatedAt", async () => {
+    const id = await writeReview(`${TAG}-r`);
+
+    const { item } = await caller().boardItem({ project: PROJECT, item: `${TAG}-r` });
+
+    expect(item).toMatchObject({
+      id,
+      externalId: `${TAG}-r`,
+      sourceSystem: SRC,
+      project: PROJECT,
+      content: "Details.",
+      priority: 1,
+      labels: ["review"],
+      isReview: true,
+      review: { images, pane: "w1:p1", summary: "Header" },
+      comments: [{ id: "1", author: "agent", text: "please look", created_at: "2026-10-28T10:00:00.000Z" }],
+    });
+    expect(typeof item?.updatedAt).toBe("string");
+    expect(new Date(item!.updatedAt).toISOString()).toBe(item!.updatedAt);
+    expect(JSON.parse(JSON.stringify(item))).toEqual(item);
+  });
+
+  it("answers { item: null } for an item not in that project", async () => {
+    await writeReview(`${TAG}-r2`);
+    expect(await caller().boardItem({ project: OTHER, item: `${TAG}-r2` })).toEqual({ item: null });
+    expect(await caller().boardItem({ project: PROJECT, item: `${TAG}-nope` })).toEqual({ item: null });
+  });
+
+  it("rejects a malformed project, an empty item, or an over-long item before touching the database", async () => {
+    const poisoned = caller({ db: poisonedDb() });
+    await expect(poisoned.boardItem({ project: "Not A Key", item: "x" })).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    await expect(poisoned.boardItem({ project: PROJECT, item: "" })).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    await expect(poisoned.boardItem({ project: PROJECT, item: "x".repeat(201) })).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
+
+  it("marks review cards on the board", async () => {
+    const id = await writeReview(`${TAG}-r3`);
+    const plain = await writeItems([{ ext: `${TAG}-plain-card`, project: PROJECT }]);
+
+    const board = await caller().board({ projects: [PROJECT] });
+
+    expect(board.cards.find((c) => c.id === id)?.review).toBe(true);
+    expect(board.cards.find((c) => c.id === plain.get(`${TAG}-plain-card`))?.review).toBe(false);
+  });
+});
+
 describe("beadsProjects", () => {
   it("lists registered projects with ISO timestamps", async () => {
     await upsertNodes(db, beadsRun, [

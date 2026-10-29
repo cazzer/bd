@@ -76,10 +76,31 @@
 // board. `cycle_members` is a subset of `blocked_by` (a cycle member has an
 // open blocker), so the `OR` on cycle membership below is redundant; it is
 // kept so the column rule reads as the spec states it.
+//
+// Reviews (board-visual-reviews, design.md decision 2): a card carries only
+// `review` (labelled `review` exactly), so the board stays light. The drawer
+// reads one item through `getBoardItem` — content, labels, the review
+// object, and the comment thread — from the canonical row (`resolved_nodes`,
+// so a merged-away duplicate's external id is not found) of that project
+// with that external id; when two source systems hold the same external id
+// in one project, the `beads` row wins, then the lesser id. The stored
+// review and comments are re-normalized on read (reviews.ts; both are
+// idempotent), so a raw-written or pre-contract value is answered in the
+// contract's shape, a malformed review as `{ invalid: true }`.
 
 import { sql, type SQL } from "drizzle-orm";
 import type { Database } from "@breakdown/db";
 import { InvalidLookupOptionError, LookupFailedError } from "./errors.js";
+import {
+  normalizeReviewComments,
+  normalizeReviewMetadata,
+  REVIEW_COMMENTS_KEY,
+  REVIEW_LABEL,
+  REVIEW_METADATA_KEY,
+  type InvalidReview,
+  type ReviewComment,
+  type ReviewMetadata,
+} from "./reviews.js";
 import { asPgError, formatPgInfo, sqlArray } from "./sql-helpers.js";
 import { MAX_RESOLVE_DEPTH } from "./views.js";
 import {
@@ -87,6 +108,7 @@ import {
   CHILD_OF_EDGE_TYPE,
   DEFAULT_WORK_ITEM_PRIORITY,
   PROJECT_KEY_PATTERN,
+  readWorkItemFields,
   WORK_ITEM_NODE_TYPE,
 } from "./work-items.js";
 
@@ -126,6 +148,8 @@ export interface BoardCard {
   blockedFlag: boolean;
   updatedAt: Date;
   closedAt: string | null;
+  /** Labelled `review` exactly (reviews.ts): the card opens a review in the drawer. */
+  review: boolean;
 }
 
 export interface BoardEpic {
@@ -199,7 +223,9 @@ filtered AS (
          metadata->>'project' AS project,
          metadata->>'issue_type' AS issue_type,
          metadata->>'assignee' AS assignee,
-         metadata->>'closed_at' AS closed_at
+         metadata->>'closed_at' AS closed_at,
+         -- Label 'review' exactly (reviews.ts); non-array labels read as not a review.
+         (jsonb_typeof(metadata->'labels') = 'array' AND metadata->'labels' @> '["review"]'::jsonb) IS TRUE AS review
   FROM resolved_nodes
   WHERE node_type = ${WORK_ITEM_NODE_TYPE}
     AND metadata @> ANY (${projectKeys})
@@ -213,7 +239,7 @@ filtered_ranked AS (
   FROM filtered f
 ),
 items_raw AS (
-  SELECT id, title, external_id, updated_at, status, priority, project, issue_type, assignee, closed_at, closed_card
+  SELECT id, title, external_id, updated_at, status, priority, project, issue_type, assignee, closed_at, review, closed_card
   FROM filtered_ranked
   WHERE NOT closed_card OR closed_rank <= ${CLOSED_PER_PROJECT}::int
   ORDER BY closed_card, updated_at DESC, id
@@ -294,7 +320,7 @@ SELECT jsonb_build_object(
       'open_blocker_ids', to_jsonb(CASE WHEN k.board_column = 'closed' THEN ARRAY[]::uuid[] ELSE k.open_blocker_ids END),
       'blocked_flag', (k.board_column = 'blocked'
                        OR (k.board_column = 'in_progress' AND k.obstructed)),
-      'updated_at', k.updated_at, 'closed_at', k.closed_at
+      'updated_at', k.updated_at, 'closed_at', k.closed_at, 'review', k.review
     ) ORDER BY k.priority ASC, k.updated_at DESC, k.id DESC)
     FROM classified k
   ), '[]'::jsonb),
@@ -332,6 +358,7 @@ type RawCard = {
   blocked_flag: boolean;
   updated_at: string;
   closed_at: string | null;
+  review: boolean;
 };
 type RawBoard = {
   cards: RawCard[];
@@ -382,6 +409,7 @@ export async function getWorkBoard(db: Database, options: WorkBoardOptions = {})
       blockedFlag: c.blocked_flag,
       updatedAt: new Date(c.updated_at),
       closedAt: c.closed_at,
+      review: c.review,
     })),
     epics: raw.epics,
     omittedClosed: raw.omitted_closed,
@@ -411,4 +439,94 @@ export async function listBeadsProjects(db: Database): Promise<BeadsProject[]> {
   return result.rows
     .filter((r): r is RawProjectRow & { project: string; path: string } => r.project !== null && r.path !== null)
     .map((r) => ({ key: r.project, path: r.path, nodeId: r.id, updatedAt: new Date(r.updated_at) }));
+}
+
+/** Longest external id `getBoardItem` accepts (the board address carries it). */
+export const MAX_BOARD_ITEM_ID_LENGTH = 200;
+
+export interface BoardItemOptions {
+  project: string;
+  /** The item's external id (a bead id). */
+  externalId: string;
+}
+
+/** One work item as the board's drawer shows it (module header). */
+export interface BoardItem {
+  id: string;
+  externalId: string;
+  /** The row's source system; `beads` for an item a tracker loaded. */
+  sourceSystem: string;
+  project: string;
+  title: string;
+  content: string;
+  status: string;
+  priority: number;
+  issueType: string | null;
+  assignee: string | null;
+  labels: string[];
+  closedAt: string | null;
+  closedReason: string | null;
+  updatedAt: Date;
+  isReview: boolean;
+  /** A review item's review; null when the item is not a review or carries no review metadata. */
+  review: ReviewMetadata | InvalidReview | null;
+  /** Oldest first; empty when there are none. */
+  comments: ReviewComment[];
+}
+
+type RawItemRow = { id: string; external_id: string; source_system: string; title: string; content: string; metadata: Record<string, unknown> | null; updated_at: string | Date };
+
+/**
+ * The canonical work item of `project` whose external id is `externalId`, or
+ * null when there is none (module header). Throws `InvalidLookupOptionError`
+ * for a malformed project key or id and `LookupFailedError` for a database
+ * failure.
+ */
+export async function getBoardItem(db: Database, options: BoardItemOptions): Promise<BoardItem | null> {
+  const { project, externalId } = options;
+  if (typeof project !== "string" || !PROJECT_KEY_PATTERN.test(project)) {
+    throw new InvalidLookupOptionError("project", project, `must match ${PROJECT_KEY_PATTERN}`);
+  }
+  if (typeof externalId !== "string" || externalId.length === 0 || externalId.length > MAX_BOARD_ITEM_ID_LENGTH) {
+    throw new InvalidLookupOptionError("externalId", externalId, `must be a non-empty string of at most ${MAX_BOARD_ITEM_ID_LENGTH} characters`);
+  }
+  let result: { rows: RawItemRow[] };
+  try {
+    result = await db.execute<RawItemRow>(sql`
+      SELECT id, external_id, source_system, title, content, metadata, updated_at
+      FROM resolved_nodes
+      WHERE node_type = ${WORK_ITEM_NODE_TYPE}
+        AND metadata @> ${JSON.stringify({ project })}::jsonb
+        AND external_id = ${externalId}
+      ORDER BY (source_system = 'beads') DESC, id
+      LIMIT 1
+    `);
+  } catch (err) {
+    throw new LookupFailedError(`getBoardItem query failed${formatPgInfo(asPgError(err))}`, "getBoardItem", { cause: err });
+  }
+  const row = result.rows[0];
+  if (!row) return null;
+  const metadata = row.metadata ?? {};
+  const fields = readWorkItemFields(metadata);
+  const labels = Array.isArray(metadata["labels"]) ? metadata["labels"].filter((l): l is string => typeof l === "string") : [];
+  const isReview = labels.includes(REVIEW_LABEL);
+  return {
+    id: row.id,
+    externalId: row.external_id,
+    sourceSystem: row.source_system,
+    project,
+    title: row.title,
+    content: row.content,
+    status: fields.status,
+    priority: fields.priority,
+    issueType: typeof metadata["issue_type"] === "string" ? metadata["issue_type"] : null,
+    assignee: fields.assignee,
+    labels,
+    closedAt: fields.closedAt,
+    closedReason: fields.closedReason,
+    updatedAt: new Date(row.updated_at),
+    isReview,
+    review: isReview && REVIEW_METADATA_KEY in metadata ? normalizeReviewMetadata(metadata[REVIEW_METADATA_KEY]) : null,
+    comments: normalizeReviewComments(metadata[REVIEW_COMMENTS_KEY]),
+  };
 }

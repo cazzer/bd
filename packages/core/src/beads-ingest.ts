@@ -12,6 +12,11 @@
 // shells out to `bd list --status=all --limit=0 --json` in `dir`
 // (`--limit=0` is "unlimited": `bd list` defaults to 50 rows, which would
 // silently truncate the export the moment the tracker outgrows that).
+// For each issue labelled `review` with `comment_count > 0`, it then runs
+// `bd comments <id> --json` through the same runner, serially, so the
+// thread lands on the review's work item (board-visual-reviews); a tracker
+// with no reviews costs no extra process, and a failed or malformed comments
+// call fails the load before anything is written.
 //
 // With a `project` key, every item is stamped `project` and a registry
 // node `{ beads_project, external_id 'project:<key>', metadata { project,
@@ -64,6 +69,7 @@ import { and, eq, inArray, sql } from "drizzle-orm";
 import {
   BEADS_SOURCE_SYSTEM,
   deriveBeadsEdges,
+  isReviewIssue,
   mapBeadsIssueToNode,
   resolveBeadsEdges,
   type BeadsIssue,
@@ -146,6 +152,20 @@ async function fetchIssues(runBd: RunBd, cwd: string, signal?: AbortSignal): Pro
   return parsed as BeadsIssue[];
 }
 
+/** `bd comments <id> --json` for every review issue with comments, one at a time; keyed by issue id. */
+async function fetchReviewComments(runBd: RunBd, cwd: string, issues: readonly BeadsIssue[], signal?: AbortSignal): Promise<Map<string, unknown[]>> {
+  const byIssue = new Map<string, unknown[]>();
+  for (const issue of issues) {
+    if (!isReviewIssue(issue) || typeof issue.comment_count !== "number" || issue.comment_count <= 0) continue;
+    const parsed: unknown = JSON.parse(await runBd(["comments", issue.id, "--json"], cwd, signal));
+    if (!Array.isArray(parsed)) {
+      throw new Error(`bd comments ${issue.id} --json did not return an array`);
+    }
+    byIssue.set(issue.id, parsed);
+  }
+  return byIssue;
+}
+
 /** Canonical key: trimmed and valid, else `InvalidWorkItemError` naming `project` (an explicit empty key included). */
 function canonicalProject(project: string | undefined): string | undefined {
   if (project === undefined) return undefined;
@@ -204,12 +224,16 @@ async function assertNoProjectConflict(db: Database, project: string | undefined
 export async function ingestBeadsCheckout(db: Database, options: IngestBeadsCheckoutOptions): Promise<IngestBeadsCheckoutResult> {
   const project = canonicalProject(options.project);
   const checkoutPath = await resolveCheckoutPath(options.dir);
-  const issues = await fetchIssues(options.runBd ?? defaultRunBd, checkoutPath, options.signal);
+  const runBd = options.runBd ?? defaultRunBd;
+  const issues = await fetchIssues(runBd, checkoutPath, options.signal);
   if (issues.length === 0) {
     throw new Error("no issues to ingest");
   }
+  const comments = await fetchReviewComments(runBd, checkoutPath, issues, options.signal);
 
-  const nodeInputs: NodeInput[] = issues.map((issue, index) => mapBeadsIssueToNode(issue, index, project === undefined ? {} : { project }));
+  const nodeInputs: NodeInput[] = issues.map((issue, index) =>
+    mapBeadsIssueToNode(issue, index, { ...(project === undefined ? {} : { project }), comments: comments.get(issue.id) ?? [] }),
+  );
   if (project !== undefined) {
     nodeInputs.push({
       nodeType: BEADS_PROJECT_NODE_TYPE,

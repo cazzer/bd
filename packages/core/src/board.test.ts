@@ -10,7 +10,7 @@ import { and, eq, inArray } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Database } from "@breakdown/db";
 import { edges, ingestRuns, nodes } from "@breakdown/db";
-import { getWorkBoard, listBeadsProjects, CLOSED_PER_PROJECT, type BoardCard, type WorkBoard } from "./board.js";
+import { getBoardItem, getWorkBoard, listBeadsProjects, CLOSED_PER_PROJECT, type BoardCard, type WorkBoard } from "./board.js";
 import { mergeNodes } from "./merge.js";
 import { getWorkItemReadiness } from "./work-items.js";
 import { upsertEdges } from "./edges.js";
@@ -455,5 +455,124 @@ describe("listBeadsProjects", () => {
     expect(mine).toHaveLength(1);
     expect(mine[0]).toMatchObject({ key: REGISTRY_KEY, path: `/tmp/${REGISTRY_KEY}` });
     expect(mine[0]!.updatedAt).toBeInstanceOf(Date);
+  });
+});
+
+/** Writes work items with arbitrary metadata (on top of project/status/priority) in one batch; returns external id -> node id. */
+async function rawItems(specs: Array<{ ext: string; project: string; title?: string; content?: string; metadata?: Record<string, unknown> }>): Promise<Map<string, string>> {
+  const result = await upsertNodes(
+    db,
+    run,
+    specs.map((s) => ({
+      nodeType: "work_item",
+      sourceSystem: SRC,
+      externalId: s.ext,
+      title: s.title ?? s.ext,
+      content: s.content ?? "",
+      metadata: { project: s.project, status: "open", priority: 2, ...s.metadata },
+    })),
+  );
+  return new Map(result.rows.map((r) => [r.externalId, r.id]));
+}
+
+describe("getWorkBoard review flag", () => {
+  it("marks a card a review only for the exact label 'review' in a labels array", async () => {
+    const { a, tag } = scope();
+    const ids = await rawItems([
+      { ext: `${tag}-review`, project: a, metadata: { labels: ["ui", "review"] } },
+      { ext: `${tag}-changes`, project: a, metadata: { labels: ["review:changes"] } },
+      { ext: `${tag}-string`, project: a, metadata: { labels: "review" } },
+      { ext: `${tag}-plain`, project: a },
+    ]);
+    const id = (n: string) => ids.get(`${tag}-${n}`)!;
+
+    const board = await getWorkBoard(db, { projects: [a] });
+
+    expect(card(board, id("review")).review).toBe(true);
+    expect(card(board, id("changes")).review).toBe(false);
+    expect(card(board, id("string")).review).toBe(false);
+    expect(card(board, id("plain")).review).toBe(false);
+  });
+});
+
+describe("getBoardItem", () => {
+  const images = ["/home/u/.local/share/breakdown/reviews/p/r1/01-a.png", "/home/u/.local/share/breakdown/reviews/p/r1/02-b.png"];
+  const comments = [
+    { id: "1", author: "agent", text: "requested", created_at: "2026-10-28T10:00:00.000Z" },
+    { id: "2", author: "caleb", text: "Changes requested: overlap", created_at: "2026-10-28T11:00:00.000Z" },
+  ];
+
+  it("reads a review item's details, source system, review, and comments", async () => {
+    const { a, tag } = scope();
+    const ids = await rawItems([
+      {
+        ext: `${tag}-r1`,
+        project: a,
+        title: "Review: board header",
+        content: "Look at it.",
+        metadata: {
+          issue_type: "task",
+          assignee: "caleb",
+          labels: ["review", "review:changes"],
+          review: { images, pane: "w1:p2", summary: "Board header" },
+          review_comments: comments,
+        },
+      },
+    ]);
+
+    const item = await getBoardItem(db, { project: a, externalId: `${tag}-r1` });
+
+    expect(item).toMatchObject({
+      id: ids.get(`${tag}-r1`),
+      externalId: `${tag}-r1`,
+      sourceSystem: SRC,
+      project: a,
+      title: "Review: board header",
+      content: "Look at it.",
+      status: "open",
+      priority: 2,
+      issueType: "task",
+      assignee: "caleb",
+      labels: ["review", "review:changes"],
+      closedAt: null,
+      closedReason: null,
+      isReview: true,
+      review: { images, pane: "w1:p2", summary: "Board header" },
+      comments,
+    });
+    expect(item?.updatedAt).toBeInstanceOf(Date);
+  });
+
+  it("answers review null for a plain item, null for another project or a merged-away id, and invalid for a malformed review", async () => {
+    const { a, b, tag } = scope();
+    const ids = await rawItems([
+      { ext: `${tag}-plain`, project: a, metadata: { labels: ["ui"], review: { summary: "ignored on a non-review" } } },
+      { ext: `${tag}-bad`, project: a, metadata: { labels: ["review"], review: { images: "a.png" } } },
+      { ext: `${tag}-stored-invalid`, project: a, metadata: { labels: ["review"], review: { invalid: true } } },
+      { ext: `${tag}-nometa`, project: a, metadata: { labels: ["review"] } },
+      { ext: `${tag}-survivor`, project: a },
+      { ext: `${tag}-loser`, project: a },
+    ]);
+    const mergeRun = await openIngestRun(db, SRC, { actor: "board-test-merge" });
+    try {
+      await mergeNodes(db, ids.get(`${tag}-loser`)!, ids.get(`${tag}-survivor`)!, mergeRun);
+    } finally {
+      await closeIngestRun(db, mergeRun);
+      extraRunIds.push(mergeRun.id);
+    }
+
+    expect(await getBoardItem(db, { project: a, externalId: `${tag}-plain` })).toMatchObject({ isReview: false, review: null, comments: [], labels: ["ui"] });
+    expect(await getBoardItem(db, { project: b, externalId: `${tag}-plain` })).toBeNull();
+    expect(await getBoardItem(db, { project: a, externalId: `${tag}-loser` })).toBeNull();
+    expect(await getBoardItem(db, { project: a, externalId: `${tag}-survivor` })).toMatchObject({ id: ids.get(`${tag}-survivor`) });
+    expect((await getBoardItem(db, { project: a, externalId: `${tag}-bad` }))?.review).toEqual({ invalid: true });
+    expect((await getBoardItem(db, { project: a, externalId: `${tag}-stored-invalid` }))?.review).toEqual({ invalid: true });
+    expect(await getBoardItem(db, { project: a, externalId: `${tag}-nometa` })).toMatchObject({ isReview: true, review: null, comments: [] });
+  });
+
+  it("refuses a malformed project key or item id", async () => {
+    await expect(getBoardItem(db, { project: "Not A Key", externalId: "x" })).rejects.toBeInstanceOf(InvalidLookupOptionError);
+    await expect(getBoardItem(db, { project: "ok", externalId: "" })).rejects.toBeInstanceOf(InvalidLookupOptionError);
+    await expect(getBoardItem(db, { project: "ok", externalId: "x".repeat(201) })).rejects.toBeInstanceOf(InvalidLookupOptionError);
   });
 });
