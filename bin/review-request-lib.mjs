@@ -449,7 +449,7 @@ async function write(deps, args, { project, item, existing, bdCwd }, staged) {
     "herdr",
     [
       "notification", "show", `Review requested: ${project.key} ${args.itemId}`,
-      `--body=${args.summary.slice(0, MAX_NOTIFICATION_BODY)}`,
+      "--body", args.summary.slice(0, MAX_NOTIFICATION_BODY),
       "--sound", "request",
     ],
     { cwd: deps.cwd },

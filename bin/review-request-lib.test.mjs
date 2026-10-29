@@ -394,7 +394,7 @@ describe("requestReview writes", () => {
     const link = `${BOARD}/board?project=scratch&item=${REVIEW}`;
     assert.deepEqual(h.calls.find((c) => c.cmd === "open").args, ["-a", "Google Chrome", link]);
     assert.deepEqual(h.calls.find((c) => c.cmd === "herdr").args, [
-      "notification", "show", `Review requested: scratch ${ITEM}`, "--body=check the header", "--sound", "request",
+      "notification", "show", `Review requested: scratch ${ITEM}`, "--body", "check the header", "--sound", "request",
     ]);
     assert.deepEqual(h.warn, []);
     assert.deepEqual(h.out, [
