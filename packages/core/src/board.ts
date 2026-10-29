@@ -447,6 +447,41 @@ export async function listBeadsProjects(db: Database): Promise<BeadsProject[]> {
     .map((r) => ({ key: r.project, path: r.path, nodeId: r.id, updatedAt: new Date(r.updated_at) }));
 }
 
+/**
+ * The registered checkout for `key`, trusted to run a command in: the
+ * canonical `beads_project` row a beads ingest writes (`beads` source,
+ * external id `project:<key>`, the key in its metadata) whose last writer —
+ * its `ingest_run_id` — was itself a `beads` ingest run. A registry-shaped
+ * node written or last touched by any other run (an agent's `brain_write`,
+ * a merge under an agent run) is not a registration and answers null, as
+ * does a missing key or path. Throws `InvalidLookupOptionError` for a
+ * malformed key and `LookupFailedError` for a database failure.
+ */
+export async function getRegisteredBeadsProject(db: Database, key: string): Promise<BeadsProject | null> {
+  if (typeof key !== "string" || !PROJECT_KEY_PATTERN.test(key)) {
+    throw new InvalidLookupOptionError("project", key, `must match ${PROJECT_KEY_PATTERN}`);
+  }
+  let result: { rows: RawProjectRow[] };
+  try {
+    result = await db.execute<RawProjectRow>(sql`
+      SELECT r.id, r.metadata->>'project' AS project, r.metadata->>'path' AS path, r.updated_at
+      FROM resolved_nodes r
+      JOIN ingest_runs ir ON ir.id = r.ingest_run_id
+      WHERE r.node_type = ${BEADS_PROJECT_NODE_TYPE}
+        AND r.source_system = 'beads'
+        AND r.external_id = ${`project:${key}`}
+        AND r.metadata->>'project' = ${key}
+        AND ir.source_system = 'beads'
+      LIMIT 1
+    `);
+  } catch (err) {
+    throw new LookupFailedError(`getRegisteredBeadsProject query failed${formatPgInfo(asPgError(err))}`, "getRegisteredBeadsProject", { cause: err });
+  }
+  const r = result.rows[0];
+  if (!r || r.project === null || r.path === null || r.path === "") return null;
+  return { key: r.project, path: r.path, nodeId: r.id, updatedAt: new Date(r.updated_at) };
+}
+
 /** Longest external id `getBoardItem` accepts (the board address carries it). */
 export const MAX_BOARD_ITEM_ID_LENGTH = 200;
 

@@ -10,7 +10,7 @@ import { and, eq, inArray } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Database } from "@breakdown/db";
 import { edges, ingestRuns, nodes } from "@breakdown/db";
-import { getBoardItem, getWorkBoard, listBeadsProjects, CLOSED_PER_PROJECT, type BoardCard, type WorkBoard } from "./board.js";
+import { getBoardItem, getRegisteredBeadsProject, getWorkBoard, listBeadsProjects, CLOSED_PER_PROJECT, type BoardCard, type WorkBoard } from "./board.js";
 import { mergeNodes } from "./merge.js";
 import { getWorkItemReadiness } from "./work-items.js";
 import { upsertEdges } from "./edges.js";
@@ -455,6 +455,44 @@ describe("listBeadsProjects", () => {
     expect(mine).toHaveLength(1);
     expect(mine[0]).toMatchObject({ key: REGISTRY_KEY, path: `/tmp/${REGISTRY_KEY}` });
     expect(mine[0]!.updatedAt).toBeInstanceOf(Date);
+  });
+});
+
+describe("getRegisteredBeadsProject", () => {
+  const registryNode = (key: string, path = `/tmp/${key}`) => ({
+    nodeType: "beads_project",
+    sourceSystem: "beads",
+    externalId: `project:${key}`,
+    title: key,
+    content: "",
+    metadata: { project: key, path },
+  });
+
+  it("answers a registry node a beads ingest wrote", async () => {
+    const key = `rgb-${SUFFIX}`;
+    await register(key);
+    await expect(getRegisteredBeadsProject(db, key)).resolves.toMatchObject({ key, path: `/tmp/${key}` });
+  });
+
+  it("refuses a registry-shaped node written, or last rewritten, under a non-beads run", async () => {
+    const agentRun = await openIngestRun(db, "agent", { actor: "board-test" });
+    extraRunIds.push(agentRun.id);
+    const forged = `rga-${SUFFIX}`;
+    const hijacked = `rgh-${SUFFIX}`;
+    registered.push(forged);
+    await register(hijacked);
+    await upsertNodes(db, agentRun, [registryNode(forged, "/"), registryNode(hijacked, "/somewhere/else")]);
+    await closeIngestRun(db, agentRun);
+
+    await expect(getRegisteredBeadsProject(db, forged)).resolves.toBeNull();
+    await expect(getRegisteredBeadsProject(db, hijacked)).resolves.toBeNull();
+    // listBeadsProjects (the board's registry listing) is unchanged: it still lists both.
+    expect((await listBeadsProjects(db)).map((p) => p.key)).toEqual(expect.arrayContaining([forged, hijacked]));
+  });
+
+  it("answers null for an unknown key and throws for a malformed one", async () => {
+    await expect(getRegisteredBeadsProject(db, `rgn-${SUFFIX}`)).resolves.toBeNull();
+    await expect(getRegisteredBeadsProject(db, "Not A Key")).rejects.toBeInstanceOf(InvalidLookupOptionError);
   });
 });
 

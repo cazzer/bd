@@ -10,27 +10,34 @@ import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { closeIngestRun, openIngestRun, upsertNodes, type IngestRunHandle } from "@breakdown/core";
+import { closeIngestRun, mergeNodes, openIngestRun, upsertNodes, type IngestRunHandle } from "@breakdown/core";
 import { createDb, createPool, ingestRuns, nodes, resolveDatabaseUrl, type Database } from "@breakdown/db";
 import { and, eq, inArray } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { BeadsWatcher } from "../beads-watcher.js";
 import type { Context } from "../context.js";
-import { createReviewWriter, type RunBd } from "../review-writer.js";
+import { BdUncertainError, createReviewWriter, type RunBd } from "../review-writer.js";
 import { appRouter } from "../router.js";
 import { createCallerFactory } from "../trpc.js";
 
 let pool: ReturnType<typeof createPool>;
 let db: Database;
 let beadsRun: IngestRunHandle;
+let agentRun: IngestRunHandle;
 let checkout: string;
 
 const TAG = randomUUID().replace(/-/g, "").slice(0, 10);
 const PROJECT = `rv-${TAG}`;
 const UNREGISTERED = `rvu-${TAG}`;
 const MISSING_DIR = `rvm-${TAG}`;
+const FORGED = `rvf-${TAG}`;
 const id = (n: string) => `rv${TAG}-${n}`;
-const EXTERNAL_IDS = [`project:${PROJECT}`, `project:${MISSING_DIR}`, id("r1"), id("r2"), id("plain"), id("closed"), id("orphan"), id("missing")];
+const EXTERNAL_IDS = [
+  `project:${PROJECT}`,
+  `project:${MISSING_DIR}`,
+  `project:${FORGED}`,
+  ...["r1", "r2", "plain", "closed", "orphan", "missing", "forged", "fx", "fy"].map(id),
+];
 
 beforeAll(async () => {
   pool = createPool(resolveDatabaseUrl());
@@ -39,43 +46,66 @@ beforeAll(async () => {
   const notADir = path.join(checkout, "not-a-dir");
   writeFileSync(notADir, "");
   beadsRun = await openIngestRun(db, "beads", { actor: "review-router-suite" });
+  agentRun = await openIngestRun(db, "agent", { actor: "review-router-suite" });
   const review = { images: [], pane: "w1:p2", summary: "header and grid" };
-  const item = (ext: string, project: string, metadata: Record<string, unknown>) => ({
+  const item = (ext: string, project: string, metadata: Record<string, unknown> = {}) => ({
     nodeType: "work_item",
     sourceSystem: "beads",
     externalId: ext,
     title: ext,
     content: "",
-    metadata: { project, status: "open", priority: 2, issue_type: "task", ...metadata },
+    metadata: { project, status: "open", priority: 2, issue_type: "task", labels: ["review"], review, ...metadata },
   });
-  await upsertNodes(db, beadsRun, [
-    { nodeType: "beads_project", sourceSystem: "beads", externalId: `project:${PROJECT}`, title: PROJECT, content: "", metadata: { project: PROJECT, path: checkout } },
-    { nodeType: "beads_project", sourceSystem: "beads", externalId: `project:${MISSING_DIR}`, title: MISSING_DIR, content: "", metadata: { project: MISSING_DIR, path: notADir } },
-    item(id("r1"), PROJECT, { labels: ["review"], review }),
-    item(id("r2"), PROJECT, { labels: ["review", "review:changes"], review }),
+  const registry = (key: string, dir: string) => ({ nodeType: "beads_project", sourceSystem: "beads", externalId: `project:${key}`, title: key, content: "", metadata: { project: key, path: dir } });
+  const written = await upsertNodes(db, beadsRun, [
+    registry(PROJECT, checkout),
+    registry(MISSING_DIR, notADir),
+    item(id("r1"), PROJECT),
+    item(id("r2"), PROJECT, { labels: ["review", "review:changes"] }),
     item(id("plain"), PROJECT, { labels: ["frontend"] }),
-    item(id("closed"), PROJECT, { labels: ["review"], review, status: "closed" }),
-    item(id("orphan"), UNREGISTERED, { labels: ["review"], review }),
-    item(id("missing"), MISSING_DIR, { labels: ["review"], review }),
+    item(id("closed"), PROJECT, { status: "closed" }),
+    item(id("orphan"), UNREGISTERED),
+    item(id("missing"), MISSING_DIR),
+    item(id("forged"), FORGED),
+    item(id("fx"), PROJECT),
+    item(id("fy"), PROJECT),
   ]);
+  // A registry-shaped node an agent wrote (brain_write's run), pointing at a real directory.
+  await upsertNodes(db, agentRun, [registry(FORGED, checkout)]);
+  const nodeId = new Map(written.rows.map((r) => [r.externalId, r.id]));
+  await mergeNodes(db, nodeId.get(id("fx"))!, nodeId.get(id("fy"))!, beadsRun);
 });
 
 afterAll(async () => {
   await closeIngestRun(db, beadsRun);
+  await closeIngestRun(db, agentRun);
   await db.delete(nodes).where(and(eq(nodes.sourceSystem, "beads"), inArray(nodes.externalId, EXTERNAL_IDS)));
-  await db.delete(ingestRuns).where(eq(ingestRuns.id, beadsRun.id));
+  await db.delete(ingestRuns).where(inArray(ingestRuns.id, [beadsRun.id, agentRun.id]));
   await pool.end();
   rmSync(checkout, { recursive: true, force: true });
 });
 
 const createCaller = createCallerFactory(appRouter);
 
-function setup(opts: { fail?: (args: readonly string[]) => string | undefined; db?: Database; readOnly?: boolean } = {}) {
+interface SetupOptions {
+  /** Throws for a command (show included). */
+  fail?: (args: readonly string[]) => Error | undefined;
+  /** The tracker's record for `bd show`; an open review of the asked id by default. */
+  show?: (id: string) => Record<string, unknown>;
+  /** Called for each command before it answers; may hold it. */
+  hold?: (args: readonly string[]) => Promise<void> | undefined;
+  db?: Database;
+  readOnly?: boolean;
+}
+
+function setup(opts: SetupOptions = {}) {
   const calls: Array<{ args: string[]; cwd: string }> = [];
   const runBd: RunBd = async (args, cwd) => {
     calls.push({ args: [...args], cwd });
-    const message = opts.fail?.(args);
-    if (message !== undefined) throw new Error(message);
+    await opts.hold?.(args);
+    const err = opts.fail?.(args);
+    if (err) throw err;
+    if (args[0] === "show") return JSON.stringify([{ id: args[1], status: "open", labels: ["review"], ...opts.show?.(args[1]!) }]);
     return "";
   };
   const wake = vi.fn((_project: string) => true);
@@ -85,7 +115,8 @@ function setup(opts: { fail?: (args: readonly string[]) => string | undefined; d
     watcher: { wake } as unknown as BeadsWatcher,
     ...(opts.readOnly !== undefined ? { readOnly: opts.readOnly } : {}),
   };
-  return { caller: createCaller(ctx), calls, wake };
+  const writes = () => calls.filter((c) => c.args[0] !== "show");
+  return { caller: createCaller(ctx), calls, writes, wake };
 }
 
 /** Throws on any property access — proves the refusal came before any database call. */
@@ -101,24 +132,24 @@ function poisonedDb(): Database {
 }
 
 describe("reviewDecision", () => {
-  it("accept runs bd in the registered checkout and wakes the watcher once", async () => {
+  it("accept reads the record, then writes in the registered checkout, and wakes the watcher once", async () => {
     const { caller, calls, wake } = setup();
     const result = await caller.reviewDecision({ project: PROJECT, item: id("r1"), decision: "accept", message: "  looks right  " });
 
-    expect(result).toEqual({ ok: true, decision: "accept", item: id("r1"), written: ["comment", "close", "remove-changes-label"], notified: null });
-    expect(calls.map((c) => c.cwd)).toEqual([checkout, checkout, checkout]);
-    expect(calls[0]!.args).toEqual(["comments", "add", id("r1"), "Accepted: looks right"]);
-    expect(calls[1]!.args[0]).toBe("close");
+    expect(result).toEqual({ ok: true, decision: "accept", item: id("r1"), written: ["comment", "remove-changes-label", "close"], notified: null });
+    expect(calls.map((c) => c.args[0])).toEqual(["show", "comments", "update", "close"]);
+    expect(calls.every((c) => c.cwd === checkout)).toBe(true);
+    expect(calls[1]!.args).toEqual(["comments", "add", id("r1"), "Accepted: looks right"]);
     expect(wake).toHaveBeenCalledTimes(1);
     expect(wake).toHaveBeenCalledWith(PROJECT);
   });
 
   it("changes comments and adds review:changes in the checkout, and wakes the watcher once", async () => {
-    const { caller, calls, wake } = setup();
+    const { caller, writes, wake } = setup();
     const result = await caller.reviewDecision({ project: PROJECT, item: id("r2"), decision: "changes", message: `"; rm -rf ~ #` });
 
     expect(result).toMatchObject({ ok: true, written: ["comment", "add-changes-label"] });
-    expect(calls).toEqual([
+    expect(writes()).toEqual([
       { args: ["comments", "add", id("r2"), `Changes requested: "; rm -rf ~ #`], cwd: checkout },
       { args: ["update", id("r2"), "--add-label", "review:changes"], cwd: checkout },
     ]);
@@ -127,16 +158,30 @@ describe("reviewDecision", () => {
 
   it.each([
     ["an unregistered project", { project: UNREGISTERED, item: id("orphan") }, "NOT_FOUND", UNREGISTERED],
+    ["a registry node an agent wrote", { project: FORGED, item: id("forged") }, "NOT_FOUND", FORGED],
     ["an item not in the project", { project: PROJECT, item: id("nope") }, "NOT_FOUND", id("nope")],
+    ["an item merged into another bead", { project: PROJECT, item: id("fx") }, "PRECONDITION_FAILED", id("fy")],
     ["an item that is not a review", { project: PROJECT, item: id("plain") }, "PRECONDITION_FAILED", "not a review"],
     ["a closed review", { project: PROJECT, item: id("closed") }, "CONFLICT", "already closed"],
     ["a checkout path that is not a directory", { project: MISSING_DIR, item: id("missing") }, "PRECONDITION_FAILED", "not-a-dir"],
-  ])("refuses %s before running anything", async (_name, target, code, mentions) => {
+  ])("refuses %s before running any command", async (_name, target, code, mentions) => {
     const { caller, calls, wake } = setup();
     const err = await caller.reviewDecision({ ...target, decision: "accept", message: "" }).catch((e: unknown) => e);
     expect(err).toMatchObject({ code });
     expect((err as Error).message).toContain(mentions);
     expect(calls).toEqual([]);
+    expect(wake).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["is closed", { status: "closed" }, "CONFLICT"],
+    ["is not labelled review", { labels: ["frontend"] }, "PRECONDITION_FAILED"],
+    ["is another issue", { id: "zz-1" }, "PRECONDITION_FAILED"],
+  ])("refuses when the tracker's own record %s, writing nothing", async (_name, record, code) => {
+    const { caller, calls, writes, wake } = setup({ show: () => record });
+    await expect(caller.reviewDecision({ project: PROJECT, item: id("r1"), decision: "accept", message: "" })).rejects.toMatchObject({ code });
+    expect(calls.map((c) => c.args[0])).toEqual(["show"]);
+    expect(writes()).toEqual([]);
     expect(wake).not.toHaveBeenCalled();
   });
 
@@ -154,6 +199,28 @@ describe("reviewDecision", () => {
     await expect(caller.reviewDecision({ project: PROJECT, item: id("r1"), decision: "accept", message: "" })).rejects.toMatchObject({ code: "PRECONDITION_FAILED" });
   });
 
+  it("refuses a decision on an item whose previous decision is still being written", async () => {
+    let release!: () => void;
+    let entered!: () => void;
+    const reached = new Promise<void>((r) => (entered = r));
+    const { caller, wake } = setup({
+      hold: (args) => {
+        if (args[0] !== "comments") return undefined;
+        entered();
+        return new Promise<void>((r) => (release = r));
+      },
+    });
+    const first = caller.reviewDecision({ project: PROJECT, item: id("r2"), decision: "changes", message: "first" });
+    await reached;
+    await expect(caller.reviewDecision({ project: PROJECT, item: id("r2"), decision: "changes", message: "second" })).rejects.toMatchObject({
+      code: "CONFLICT",
+      message: expect.stringContaining("already being written"),
+    });
+    release();
+    await expect(first).resolves.toMatchObject({ ok: true });
+    expect(wake).toHaveBeenCalledTimes(1);
+  });
+
   it.each(["", "   \n "])("refuses changes with message %j", async (message) => {
     const { caller, calls } = setup({ db: poisonedDb() });
     const err = await caller.reviewDecision({ project: PROJECT, item: id("r1"), decision: "changes", message }).catch((e: unknown) => e);
@@ -165,6 +232,11 @@ describe("reviewDecision", () => {
   it.each([
     ["an item id that starts with '-'", { item: "-rf" }],
     ["a message with NUL", { message: "a\u0000b" }],
+    ["a message with ESC (terminal escape)", { message: "a\u001b[2Jb" }],
+    ["a message with a carriage return", { message: "a\rb" }],
+    ["a message with DEL", { message: "a\u007fb" }],
+    ["a message with a right-to-left override", { message: "a‮b" }],
+    ["a message with a bidi isolate", { message: "a⁧b" }],
     ["an over-long message", { message: "x".repeat(5000) }],
   ])("refuses %s at validation", async (_name, over) => {
     const { caller, calls } = setup({ db: poisonedDb() });
@@ -172,19 +244,52 @@ describe("reviewDecision", () => {
     expect(calls).toEqual([]);
   });
 
+  it("allows newline and tab in a message", async () => {
+    const { caller, writes } = setup();
+    await caller.reviewDecision({ project: PROJECT, item: id("r2"), decision: "changes", message: "one\n\ttwo" });
+    expect(writes()[0]!.args[3]).toBe("Changes requested: one\n\ttwo");
+  });
+
   it("returns a failing close as a partial write, as data, and still wakes the watcher", async () => {
-    const { caller, wake } = setup({ fail: (args) => (args[0] === "close" ? "bd close failed: database is locked" : undefined) });
+    const { caller, wake } = setup({ fail: (args) => (args[0] === "close" ? new Error("bd close failed: database is locked") : undefined) });
     const result = await caller.reviewDecision({ project: PROJECT, item: id("r1"), decision: "accept", message: "ok" });
 
-    expect(result).toEqual({ ok: false, decision: "accept", item: id("r1"), written: ["comment"], error: "bd close failed: database is locked", partial: true, notified: null });
+    expect(result).toEqual({
+      ok: false,
+      decision: "accept",
+      item: id("r1"),
+      written: ["comment", "remove-changes-label"],
+      error: "bd close failed: database is locked",
+      partial: true,
+      notified: null,
+    });
     expect(wake).toHaveBeenCalledTimes(1);
   });
 
-  it("does not wake the watcher when nothing was written", async () => {
-    const { caller, wake } = setup({ fail: () => "bd comments failed: no issue found" });
-    const result = await caller.reviewDecision({ project: PROJECT, item: id("r1"), decision: "changes", message: "fix" });
+  it("returns a timed-out step as uncertain and wakes the watcher", async () => {
+    const { caller, wake } = setup({ fail: (args) => (args[0] === "comments" ? new BdUncertainError("bd comments timed out after 30 s") : undefined) });
+    const result = await caller.reviewDecision({ project: PROJECT, item: id("r2"), decision: "changes", message: "fix" });
 
-    expect(result).toMatchObject({ ok: false, written: [], partial: false, error: "bd comments failed: no issue found" });
-    expect(wake).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ ok: false, written: [], uncertain: "comment", partial: false });
+    expect(result.error).toContain("may have been written");
+    expect(wake).toHaveBeenCalledTimes(1);
+  });
+
+  it("wakes the watcher when a write command failed, but not when only bd show did", async () => {
+    const commentFails = setup({ fail: (args) => (args[0] === "comments" ? new Error("bd comments failed: no issue found") : undefined) });
+    await expect(commentFails.caller.reviewDecision({ project: PROJECT, item: id("r2"), decision: "changes", message: "fix" })).resolves.toMatchObject({
+      ok: false,
+      written: [],
+      partial: false,
+    });
+    expect(commentFails.wake).toHaveBeenCalledTimes(1);
+
+    const showFails = setup({ fail: (args) => (args[0] === "show" ? new Error("bd not found on PATH") : undefined) });
+    await expect(showFails.caller.reviewDecision({ project: PROJECT, item: id("r2"), decision: "changes", message: "fix" })).resolves.toMatchObject({
+      ok: false,
+      written: [],
+      error: "bd not found on PATH",
+    });
+    expect(showFails.wake).not.toHaveBeenCalled();
   });
 });
