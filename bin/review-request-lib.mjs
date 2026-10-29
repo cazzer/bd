@@ -213,6 +213,45 @@ function reviewDir(homedir, key) {
   return path.join(homedir, ...REVIEW_ROOT_PARTS, key);
 }
 
+// Reusing a board tab, not opening another: every open board tab holds a
+// live-update stream, and Chrome allows six HTTP/1.1 connections per host,
+// so enough board tabs starve the review decision's POST. The script finds
+// the first Chrome tab under the board's base URL, points it at the link,
+// and brings it front. It never launches Chrome (a `tell` would), and the
+// URLs arrive as argv, never interpolated into the script text. It prints
+// `reused` or `none`; anything but `reused` falls back to `open`.
+export const CHROME_REUSE_TAB_SCRIPT = `on run argv
+  set boardPrefix to item 1 of argv
+  set targetUrl to item 2 of argv
+  if application "Google Chrome" is not running then return "none"
+  tell application "Google Chrome"
+    repeat with w in windows
+      set tabIndex to 0
+      repeat with t in tabs of w
+        set tabIndex to tabIndex + 1
+        if (URL of t) starts with boardPrefix then
+          set URL of t to targetUrl
+          set active tab index of w to tabIndex
+          set index of w to 1
+          activate
+          return "reused"
+        end if
+      end repeat
+    end repeat
+  end tell
+  return "none"
+end run`;
+
+async function showInChrome(deps, boardUrl, link) {
+  // The trailing slash keeps http://localhost:5310 from matching :53100.
+  const boardPrefix = `${boardUrl.replace(/\/+$/, "")}/`;
+  const reused = await deps.run("osascript", ["-e", CHROME_REUSE_TAB_SCRIPT, boardPrefix, link], { cwd: deps.cwd });
+  if (reused.code === 0 && reused.stdout.trim() === "reused") return;
+  if (reused.code !== 0) deps.warn(`${PREFIX}could not reuse a board tab (${firstLine(reused)}); opening a new one.`);
+  const opened = await deps.run("open", ["-a", "Google Chrome", link], { cwd: deps.cwd });
+  if (opened.code !== 0) deps.warn(`${PREFIX}could not open Chrome (${firstLine(opened)}); open ${link} yourself.`);
+}
+
 /**
  * @param deps {{ argv: string[], cwd: string, env: Record<string, string|undefined>, homedir: string,
  *   run: (cmd: string, args: string[], opts: { cwd: string }) => Promise<{ code: number, stdout: string, stderr: string }>,
@@ -442,8 +481,7 @@ async function write(deps, args, { project, item, existing, bdCwd }, staged) {
   }
 
   const link = boardLink(args.boardUrl, project.key, id);
-  const opened = await deps.run("open", ["-a", "Google Chrome", link], { cwd: deps.cwd });
-  if (opened.code !== 0) deps.warn(`${PREFIX}could not open Chrome (${firstLine(opened)}); open ${link} yourself.`);
+  await showInChrome(deps, args.boardUrl, link);
 
   const notified = await deps.run(
     "herdr",

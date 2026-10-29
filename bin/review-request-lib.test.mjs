@@ -5,6 +5,7 @@ import path from "node:path";
 import { realpathSync } from "node:fs";
 import { after, describe, it } from "node:test";
 import {
+  CHROME_REUSE_TAB_SCRIPT,
   USAGE,
   apiBase,
   boardLink,
@@ -204,6 +205,7 @@ async function harness(fx, { item, children = [], handlers = {}, env = { HERDR_P
 const WRITES = new Set(["create", "update", "comments", "dep"]);
 const writeCalls = (calls) => calls.filter((c) => c.cmd === "bd" && WRITES.has(c.args[0]));
 const order = (calls) => calls.map((c) => [c.cmd, c.args[0]].join(" "));
+const REUSE_KEY = `osascript -e ${CHROME_REUSE_TAB_SCRIPT}`;
 const callTo = (h, sub) => h.calls.find((c) => c.cmd === "bd" && c.args[0] === sub);
 
 /** Every entry under the review root except the bare project directory staging may create. */
@@ -219,7 +221,7 @@ async function reviewEntries(fx) {
 async function assertNothingFiled(fx, h) {
   assert.equal(h.result.exitCode, 1);
   assert.deepEqual(writeCalls(h.calls), []);
-  assert.equal(h.calls.some((c) => c.cmd === "open" || c.cmd === "herdr"), false);
+  assert.equal(h.calls.some((c) => c.cmd === "osascript" || c.cmd === "open" || c.cmd === "herdr"), false);
   assert.deepEqual(await reviewEntries(fx), []);
 }
 
@@ -367,6 +369,7 @@ describe("requestReview writes", () => {
       "bd create",
       "bd update",
       "bd dep",
+      "osascript -e",
       "open -a",
       "herdr notification",
     ]);
@@ -392,6 +395,7 @@ describe("requestReview writes", () => {
 
     assert.deepEqual(callTo(h, "dep").args, ["dep", "add", ITEM, REVIEW, "--type", "blocks"]);
     const link = `${BOARD}/board?project=scratch&item=${REVIEW}`;
+    assert.deepEqual(h.calls.find((c) => c.cmd === "osascript").args, ["-e", CHROME_REUSE_TAB_SCRIPT, `${BOARD}/`, link]);
     assert.deepEqual(h.calls.find((c) => c.cmd === "open").args, ["-a", "Google Chrome", link]);
     assert.deepEqual(h.calls.find((c) => c.cmd === "herdr").args, [
       "notification", "show", `Review requested: scratch ${ITEM}`, "--body", "check the header", "--sound", "request",
@@ -493,6 +497,37 @@ describe("requestReview writes", () => {
       `review-request: review ${REVIEW} was filed but bd dep add failed: Error: cycle. Re-run the same command to retry; it reuses ${REVIEW}.`,
     ]);
     assert.equal(h.calls.some((c) => c.cmd === "open" || c.cmd === "herdr"), false);
+  });
+
+  it("reuses a board tab instead of opening another", async () => {
+    const fx = await fixture();
+    const h = await harness(fx, {
+      argv: [ITEM, "--summary", "check the header", "--board-url", `${BOARD}//`, "a.png"],
+      handlers: { [REUSE_KEY]: ok("reused\n") },
+    });
+    assert.equal(h.result.exitCode, 0);
+    const link = `${BOARD}/board?project=scratch&item=${REVIEW}`;
+    assert.deepEqual(h.calls.find((c) => c.cmd === "osascript").args, ["-e", CHROME_REUSE_TAB_SCRIPT, `${BOARD}/`, link]);
+    assert.equal(h.calls.some((c) => c.cmd === "open"), false);
+    assert.deepEqual(h.warn, []);
+  });
+
+  it("opens a new tab when no board tab matches", async () => {
+    const fx = await fixture();
+    const h = await harness(fx, { handlers: { [REUSE_KEY]: ok("none\n") } });
+    assert.equal(h.result.exitCode, 0);
+    assert.deepEqual(order(h.calls).slice(-3), ["osascript -e", "open -a", "herdr notification"]);
+    assert.deepEqual(h.warn, []);
+  });
+
+  it("warns and opens a new tab when osascript fails", async () => {
+    const fx = await fixture();
+    const h = await harness(fx, { handlers: { [REUSE_KEY]: fail("execution error: Not authorized to send Apple events to Google Chrome. (-1743)") } });
+    assert.equal(h.result.exitCode, 0);
+    assert.deepEqual(order(h.calls).slice(-3), ["osascript -e", "open -a", "herdr notification"]);
+    assert.deepEqual(h.warn, [
+      "review-request: could not reuse a board tab (execution error: Not authorized to send Apple events to Google Chrome. (-1743)); opening a new one.",
+    ]);
   });
 
   it("treats Chrome and herdr failures as warnings", async () => {

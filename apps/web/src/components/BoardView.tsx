@@ -33,6 +33,15 @@
 // subscription is keyed on the view alone; a chip toggle re-reads on it (the
 // chosen projects live in a ref), and the previous board stays on screen,
 // filtered to the chosen chips and marked aria-busy, until the answer lands.
+//
+// Only a visible board holds the subscription. Every open board tab's stream
+// is a long-lived connection, and Chrome allows six HTTP/1.1 connections per
+// host, so enough board tabs starve every other request to the server — a
+// review decision's POST queues behind them forever. The page's visibility
+// is therefore an input to the live effect: a hidden board unsubscribes, and
+// a board shown again subscribes afresh, whose `onStarted` read catches
+// everything that changed while it was hidden. The last board stays on
+// screen meanwhile.
 
 import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { navigate } from "../lib/navigate.js";
@@ -82,6 +91,22 @@ type LiveState = "connecting" | "live" | "offline";
 
 const EMPTY_BOARD: BoardData["board"] = { cards: [], epics: [], omittedClosed: {}, truncated: false };
 
+function pageVisible(): boolean {
+  return typeof document === "undefined" || document.visibilityState !== "hidden";
+}
+
+/** Whether this tab is shown; the live effect holds its stream only while it is (see the header). */
+function usePageVisible(): boolean {
+  const [visible, setVisible] = useState(pageVisible);
+  useEffect(() => {
+    const update = () => setVisible(pageVisible());
+    update();
+    document.addEventListener("visibilitychange", update);
+    return () => document.removeEventListener("visibilitychange", update);
+  }, []);
+  return visible;
+}
+
 function messageOf(err: unknown, fallback: string): string {
   return err instanceof Error ? err.message : fallback;
 }
@@ -118,6 +143,7 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
   const followCardUntil = useRef(0);
   const returnFocusTo = useRef<string | null>(null);
   const wide = useWideDrawer();
+  const visible = usePageVisible();
   const projectsRef = useRef(projects);
   const appliedKeyRef = useRef(projects.join("\u0000"));
   const readRef = useRef<(() => void) | null>(null);
@@ -166,9 +192,9 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
   const view = viewState.kind === "ready" && viewState.forViewId === viewId ? viewState : null;
   const projectsKey = projects.join("\u0000");
 
-  // The live effect (see the header): subscribe first, read in onStarted.
+  // The live effect (see the header): subscribe first, read in onStarted; hold the stream only while visible.
   useEffect(() => {
-    if (view === null) return;
+    if (view === null || !visible) return;
     const viewProjects = view.viewProjects;
     let disposed = false;
     let inFlight = false;
@@ -284,7 +310,7 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
       subscription.unsubscribe();
       setReading(false);
     };
-  }, [view?.forViewId]);
+  }, [view?.forViewId, visible]);
 
   // A chip toggle re-reads on the live subscription instead of re-subscribing.
   useEffect(() => {
