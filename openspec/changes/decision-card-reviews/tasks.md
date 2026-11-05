@@ -56,4 +56,4 @@
 - [x] 8.2 Legacy `--summary` over 280 characters: files exactly as before, then warns on stderr naming the limit and the card form; stdout and exit code unchanged; never refuses
 - [x] 8.3 Tests: the word counter (fences of both kinds, unclosed fence, tables, inline code, CRLF); budget boundary (300 accepted, 301 refused); the legacy warning at 280/281 and that the legacy path still never imports `yaml`
 - [x] 8.4 `~/.claude/skills/context/visual-review.md`: the body is evidence for the decision only, leads with what changes for the reviewer, every table bears on the choice, no build log (commits, groups, verification counts go in the READY TO MERGE report); states both limits; README Visual reviews paragraph mentions the budget
-- [ ] 8.5 `pnpm check` passes; re-file the epic review as a tight card (new bead) and close `bd-4zn.9` as superseded
+- [x] 8.5 `pnpm check` passes; re-file the epic review as a tight card (new bead) and close `bd-4zn.9` as superseded
