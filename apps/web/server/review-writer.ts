@@ -37,13 +37,22 @@
 // 5). The record's `metadata.review`, put through `normalizeReviewMetadata`,
 // is the only source of the options on offer — never the request's and
 // never the store's, for the reason pane and socket are read from it below.
-// A review that normalizes to `{ invalid: true }` (or has no review
-// metadata at all) offers no options and is decided the legacy way. Refused
-// with `ReviewRecordRefusedError`, nothing written: an option sent with
-// `changes` (`option-with-changes`), an option on a review that offers none
-// (`no-options`), an option the record does not offer (`unknown-option`),
-// and an accept without an option on a review that offers some
-// (`option-required`). An accepted option is one of the record's ids, so it
+// A review with no review metadata, or one that normalizes to `{ invalid:
+// true }` without a raw non-empty `options` list, offers no options and is
+// decided the legacy way. An invalid review whose raw `options` is a
+// non-empty list is a card nobody can read: it fails closed — no accept,
+// with or without an option (`unreadable-card`); request changes still
+// works. Refused with `ReviewRecordRefusedError`, nothing written: an option
+// sent with `changes` (`option-with-changes`), an option on a review that
+// offers none (`no-options`), an option the record does not offer
+// (`unknown-option`), an accept without an option on a review that offers
+// some (`option-required`), and an option whose meaning moved
+// (`option-changed`). A re-request reuses the open bead and replaces its
+// review whole, so a new card can reuse ids A/B/C with new meanings; the
+// request therefore carries `seen` — the card's question (as `reviewCard`
+// reads it) and the chosen option's label, what, and risk as the person saw
+// them — and the decision is written only when the record's are equal
+// (absent ≡ absent). An accepted option is one of the record's ids, so it
 // matches REVIEW_OPTION_ID_PATTERN and can only follow a fixed prefix.
 //
 // Steps then run serially and stop at the first failure:
@@ -112,7 +121,7 @@
 
 import { execFile } from "node:child_process";
 import { statSync } from "node:fs";
-import { isReviewSocketPath, normalizeReviewMetadata, REVIEW_PANE_PATTERN } from "@breakdown/core";
+import { isReviewSocketPath, normalizeReviewMetadata, REVIEW_PANE_PATTERN, reviewCard, type ReviewOption } from "@breakdown/core";
 
 function isDirectory(dir: string): boolean {
   try {
@@ -168,8 +177,18 @@ export interface ReviewWriteInput {
   message: string;
   /** The option accepted, by id; checked against the tracker's record (module header). */
   option?: string;
+  /** What the person saw when choosing `option`; required with it (module header). */
+  seen?: ReviewOptionSeen;
   /** Called once the bd steps are over and the checkout's queue is released, before the notification (module header). */
   onWritten?: (outcome: { ok: boolean; attempted: boolean }) => void;
+}
+
+/** The card's question and the chosen option's text as the person saw them; `what`/`risk` absent when the card had none. */
+export interface ReviewOptionSeen {
+  question: string;
+  label: string;
+  what?: string;
+  risk?: string;
 }
 
 export interface ReviewWriteResult {
@@ -209,7 +228,7 @@ export class ReviewDecisionInFlightError extends Error {
   }
 }
 
-export type ReviewRecordRefusal = "other-issue" | "not-review" | "closed" | "option-with-changes" | "no-options" | "unknown-option" | "option-required";
+export type ReviewRecordRefusal = "other-issue" | "not-review" | "closed" | "option-with-changes" | "no-options" | "unknown-option" | "option-required" | "option-changed" | "unreadable-card";
 
 /** The tracker's own record does not allow the decision; nothing was written. */
 export class ReviewRecordRefusedError extends Error {
@@ -261,12 +280,24 @@ export function notifyText(decision: ReviewDecision, id: string, message: string
   return `Review ${id} changes requested: ${m}`;
 }
 
-/** The option ids the tracker's record offers; none for a record without a valid review (module header). */
-function offeredOptions(record: { metadata?: unknown }): string[] {
+/** The card on the tracker's record: none (decide the legacy way), unreadable (fail closed), or its question and options (module header). */
+type RecordCard = { kind: "none" } | { kind: "unreadable" } | { kind: "card"; question: string; options: ReviewOption[] };
+
+function recordCard(record: { metadata?: unknown }): RecordCard {
   const metadata = record.metadata;
   const raw = typeof metadata === "object" && metadata !== null ? (metadata as Record<string, unknown>)["review"] : undefined;
   const review = normalizeReviewMetadata(raw);
-  return "invalid" in review ? [] : (review.options ?? []).map((o) => o.id);
+  if ("invalid" in review) {
+    const rawOptions = typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>)["options"] : undefined;
+    return Array.isArray(rawOptions) && rawOptions.length > 0 ? { kind: "unreadable" } : { kind: "none" };
+  }
+  const card = reviewCard(review);
+  return card.options.length === 0 ? { kind: "none" } : { kind: "card", question: card.question, options: card.options };
+}
+
+/** Whether the person saw exactly the record's question and option text. */
+function sawRecord(seen: ReviewOptionSeen | undefined, question: string, option: ReviewOption): boolean {
+  return seen !== undefined && seen.question === question && seen.label === option.label && seen.what === option.what && seen.risk === option.risk;
 }
 
 /** Refuses an option the record does not allow, or a missing one it requires (module header). */
@@ -276,18 +307,30 @@ function checkOption(input: ReviewWriteInput, record: { metadata?: unknown }): v
   if (option !== undefined && input.decision !== "accept") {
     throw new ReviewRecordRefusedError("option-with-changes", id, `An option is chosen only by accepting; a request for changes on "${id}" names none. Nothing was written.`);
   }
-  const offered = offeredOptions(record);
+  if (input.decision !== "accept") return;
+  const card = recordCard(record);
+  if (card.kind === "unreadable") {
+    throw new ReviewRecordRefusedError(
+      "unreadable-card",
+      id,
+      `Review "${id}" carries options the board cannot read (its card is invalid in the tracker), so it cannot be accepted here; request changes, or fix the card. Nothing was written.`,
+    );
+  }
   if (option === undefined) {
-    if (input.decision === "accept" && offered.length > 0) {
-      throw new ReviewRecordRefusedError("option-required", id, `Review "${id}" offers options (${offered.join(", ")}); accepting it must name one. Nothing was written.`);
+    if (card.kind === "card") {
+      throw new ReviewRecordRefusedError("option-required", id, `Review "${id}" offers options (${card.options.map((o) => o.id).join(", ")}); accepting it must name one. Nothing was written.`);
     }
     return;
   }
-  if (offered.length === 0) {
+  if (card.kind === "none") {
     throw new ReviewRecordRefusedError("no-options", id, `Review "${id}" offers no options in the tracker, so none can be accepted; nothing was written.`);
   }
-  if (!offered.includes(option)) {
-    throw new ReviewRecordRefusedError("unknown-option", id, `Review "${id}" does not offer option "${option}" (it offers ${offered.join(", ")}); nothing was written.`);
+  const chosen = card.options.find((o) => o.id === option);
+  if (chosen === undefined) {
+    throw new ReviewRecordRefusedError("unknown-option", id, `Review "${id}" does not offer option "${option}" (it offers ${card.options.map((o) => o.id).join(", ")}); nothing was written.`);
+  }
+  if (!sawRecord(input.seen, card.question, chosen)) {
+    throw new ReviewRecordRefusedError("option-changed", id, `Review "${id}" changed since it was opened (option ${option} or its question differs); reopen it. Nothing was written.`);
   }
 }
 

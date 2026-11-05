@@ -72,7 +72,7 @@ The drawer and the Review all run SHALL show, in this order, the card's question
 
 ### Requirement: A decision names the option chosen
 
-For a card with options, the decision actions SHALL be "Accept <recommended label>", one "Choose <label>" for each other option, and "Request changes" (message required, as before). Accepting or choosing SHALL send the option id with the decision; the server SHALL refuse an option id the tracker's record of the review does not offer, and SHALL refuse an accept without an option for a card that has options. The tracker comment SHALL read `Accepted: <id> — <message>` (`Accepted: <id>.` with no message), the close reason `Review accepted: <id>`, and the agent's prompt `Review <bead-id> accepted: <id> — <message>` (`Review <bead-id> accepted: <id>.` with no message). A review without options SHALL be decided exactly as before.
+For a card with options, the decision actions SHALL be "Accept <recommended label>", one "Choose <label>" for each other option, and "Request changes" (message required, as before). Accepting or choosing SHALL send the option id with the decision; the server SHALL refuse an option id the tracker's record of the review does not offer, and SHALL refuse an accept without an option for a card that has options. With the option the request SHALL carry what the person saw — the card's question and the chosen option's label, what, and risk — and the server SHALL refuse the decision, writing nothing, unless the tracker's record shows exactly that. A review whose options the server cannot read SHALL NOT be accepted; changes may still be requested. The tracker comment SHALL read `Accepted: <id> — <message>` (`Accepted: <id>.` with no message), the close reason `Review accepted: <id>`, and the agent's prompt `Review <bead-id> accepted: <id> — <message>` (`Review <bead-id> accepted: <id>.` with no message). A review without options SHALL be decided exactly as before.
 
 #### Scenario: Choosing a non-recommended option
 
@@ -83,6 +83,16 @@ For a card with options, the decision actions SHALL be "Accept <recommended labe
 
 - **WHEN** a request accepts option `Z` for a card whose options are A, B, and C
 - **THEN** the server refuses and nothing is written to the tracker
+
+#### Scenario: Card changed since it was opened
+
+- **WHEN** a person opened a card whose option B read "Skip the migration", the agent re-requested the review with a new card whose option B reads "Drop the table", and the person then presses "Choose B" in the drawer they had open
+- **THEN** the server refuses, saying the review changed since it was opened, and nothing is written to the tracker
+
+#### Scenario: Card the server cannot read
+
+- **WHEN** a review's options in the tracker are malformed so the card does not normalize, and a person accepts it with or without an option
+- **THEN** the server refuses and nothing is written; a request for changes on the same review is written as before
 
 #### Scenario: Legacy review decided
 

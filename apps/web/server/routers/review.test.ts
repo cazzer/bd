@@ -41,7 +41,7 @@ const EXTERNAL_IDS = [
   `project:${PROJECT}`,
   `project:${MISSING_DIR}`,
   `project:${FORGED}`,
-  ...["r1", "r2", "plain", "closed", "orphan", "missing", "forged", "fx", "fy"].map(id),
+  ...["r1", "r2", "plain", "closed", "orphan", "missing", "forged", "fx", "fy", "card"].map(id),
 ];
 
 beforeAll(async () => {
@@ -81,6 +81,8 @@ beforeAll(async () => {
     item(id("forged"), FORGED),
     item(id("fx"), PROJECT),
     item(id("fy"), PROJECT),
+    // The store's copy carries a card offering B; the tracker's record (the fake `bd show`) decides.
+    item(id("card"), PROJECT, { review: { ...review, question: "Which migration?", options: [{ id: "A", label: "Keep" }, { id: "B", label: "Skip" }], recommend: "A" } }),
   ]);
   // A registry-shaped node an agent wrote (brain_write's run), pointing at a real directory.
   await upsertNodes(db, agentRun, [registry(FORGED, checkout)]);
@@ -275,12 +277,14 @@ describe("reviewDecision", () => {
     expect(calls).toEqual([]);
   });
 
+  const SEEN = { question: "Which migration?", label: "Skip" };
+
   it.each([
-    ["an option that starts with '-'", { option: "-rf" }],
-    ["an option with a space", { option: "A B" }],
-    ["an option over 16 characters", { option: "A".repeat(17) }],
-    ["an empty option", { option: "" }],
-    ["an option with changes", { decision: "changes" as const, message: "fix", option: "B" }],
+    ["an option that starts with '-'", { option: "-rf", seen: SEEN }],
+    ["an option with a space", { option: "A B", seen: SEEN }],
+    ["an option over 16 characters", { option: "A".repeat(17), seen: SEEN }],
+    ["an empty option", { option: "", seen: SEEN }],
+    ["an option with changes", { decision: "changes" as const, message: "fix", option: "B", seen: SEEN }],
   ])("refuses %s at validation", async (_name, over) => {
     const { caller, calls } = setup({ db: poisonedDb() });
     const err = await caller.reviewDecision({ project: PROJECT, item: id("r1"), decision: "accept", message: "", ...over }).catch((e: unknown) => e);
@@ -289,11 +293,26 @@ describe("reviewDecision", () => {
     expect(calls).toEqual([]);
   });
 
+  it.each([
+    ["an option without seen", { option: "B" }, "seen"],
+    ["seen without an option", { seen: SEEN }, "seen"],
+    ["a seen question over 140 characters", { option: "B", seen: { ...SEEN, question: "q".repeat(141) } }, "question"],
+    ["a seen label over 80 characters", { option: "B", seen: { ...SEEN, label: "l".repeat(81) } }, "label"],
+    ["a seen what over 300 characters", { option: "B", seen: { ...SEEN, what: "w".repeat(301) } }, "what"],
+    ["a seen risk over 300 characters", { option: "B", seen: { ...SEEN, risk: "r".repeat(301) } }, "risk"],
+  ])("refuses %s at validation", async (_name, over, mentions) => {
+    const { caller, calls } = setup({ db: poisonedDb() });
+    const err = await caller.reviewDecision({ project: PROJECT, item: id("r1"), decision: "accept", message: "", ...over }).catch((e: unknown) => e);
+    expect(err).toMatchObject({ code: "BAD_REQUEST" });
+    expect((err as Error).message).toContain(mentions);
+    expect(calls).toEqual([]);
+  });
+
   const card = { images: [], summary: "Which migration?", question: "Which migration?", options: [{ id: "A", label: "Keep" }, { id: "B", label: "Skip" }, { id: "C", label: "Split" }], recommend: "A" };
 
   it("passes the option through: the tracker's card offers it, and the comment and close reason name it", async () => {
     const { caller, writes } = setup({ show: () => ({ metadata: { review: card } }) });
-    const result = await caller.reviewDecision({ project: PROJECT, item: id("r1"), decision: "accept", message: "skip the tracking migration", option: "B" });
+    const result = await caller.reviewDecision({ project: PROJECT, item: id("r1"), decision: "accept", message: "skip the tracking migration", option: "B", seen: SEEN });
 
     expect(result).toMatchObject({ ok: true, written: ["comment", "remove-changes-label", "close"] });
     expect(writes().map((c) => c.args)).toEqual([
@@ -304,14 +323,25 @@ describe("reviewDecision", () => {
   });
 
   it.each([
-    ["an option the tracker's card does not offer", { metadata: { review: card } }, { option: "Z" }, 'does not offer option "Z"'],
+    ["an option the tracker's card does not offer", { metadata: { review: card } }, { option: "Z", seen: SEEN }, 'does not offer option "Z"'],
     ["an accept without an option on a card with options", { metadata: { review: card } }, {}, "accepting it must name one"],
-    ["an option on a review that offers none", {}, { option: "A" }, "offers no options"],
+    ["an option on a review that offers none", {}, { option: "A", seen: SEEN }, "offers no options"],
+    ["an option whose label changed since the drawer opened", { metadata: { review: { ...card, options: [{ id: "A", label: "Keep" }, { id: "B", label: "Skip now" }] } } }, { option: "B", seen: SEEN }, "changed since it was opened"],
+    ["an accept on a card nobody can read", { metadata: { review: { ...card, options: [{ id: "A" }] } } }, {}, "cannot read"],
   ])("refuses %s after reading the record, writing nothing", async (_name, record, over, mentions) => {
     const { caller, calls, wake } = setup({ show: () => record });
     const err = await caller.reviewDecision({ project: PROJECT, item: id("r1"), decision: "accept", message: "", ...over }).catch((e: unknown) => e);
     expect(err).toMatchObject({ code: "PRECONDITION_FAILED" });
     expect((err as Error).message).toContain(mentions);
+    expect(calls.map((c) => c.args[0])).toEqual(["show"]);
+    expect(wake).not.toHaveBeenCalled();
+  });
+
+  it("the store's card offers nothing: a legacy tracker record refuses option B, running only show", async () => {
+    const { caller, calls, wake } = setup({ show: () => ({ metadata: { review: { images: [], pane: null, summary: "header and grid" } } }) });
+    const err = await caller.reviewDecision({ project: PROJECT, item: id("card"), decision: "accept", message: "", option: "B", seen: SEEN }).catch((e: unknown) => e);
+    expect(err).toMatchObject({ code: "PRECONDITION_FAILED" });
+    expect((err as Error).message).toContain("offers no options in the tracker");
     expect(calls.map((c) => c.args[0])).toEqual(["show"]);
     expect(wake).not.toHaveBeenCalled();
   });

@@ -26,6 +26,7 @@ import {
   ReviewDecisionInFlightError,
   REVIEW_HERDR_TIMEOUT_MS,
   ReviewRecordRefusedError,
+  type ReviewOptionSeen,
   type RunBd,
   type RunHerdr,
 } from "./review-writer.js";
@@ -450,10 +451,16 @@ describe("decisions that name an option (decision-card-reviews 3.3)", () => {
   });
 
   const OPTIONS = [
-    { id: "A", label: "Keep the tracking migration" },
-    { id: "B", label: "Skip it" },
+    { id: "A", label: "Keep the tracking migration", what: "Ship both migrations", risk: "Longer deploy" },
+    { id: "B", label: "Skip it", what: "Leave tracking as it is", risk: "Tracking stays stale" },
     { id: "C", label: "Split it" },
   ];
+  const QUESTION = "Which migration?";
+  /** What the drawer showed for option `id` of the default card. */
+  const seenOf = (id: string): ReviewOptionSeen => {
+    const { id: _id, ...text } = OPTIONS.find((o) => o.id === id)!;
+    return { question: QUESTION, ...text };
+  };
   /** The tracker's record: a card with options A, B, C recommending A, unless `review` replaces keys. */
   const card =
     (review: Record<string, unknown> = {}) =>
@@ -495,7 +502,7 @@ describe("decisions that name an option (decision-card-reviews 3.3)", () => {
   it("choosing a non-recommended option: comment, close reason, and prompt name it", async () => {
     const { runBd, calls } = recordingRunner({ show: card() });
     const herdr = recordingHerdr();
-    const result = await createReviewWriter({ runBd, runHerdr: herdr.runHerdr }).write({ ...BASE, decision: "accept", message: "skip the tracking migration", option: "B" });
+    const result = await createReviewWriter({ runBd, runHerdr: herdr.runHerdr }).write({ ...BASE, decision: "accept", message: "skip the tracking migration", option: "B", seen: seenOf("B") });
 
     expect(result).toEqual({ ok: true, written: ["comment", "remove-changes-label", "close"], attempted: true, notified: { ok: true, pane: "w1:p2" } });
     expect(calls.map((c) => c.args)).toEqual([
@@ -513,7 +520,7 @@ describe("decisions that name an option (decision-card-reviews 3.3)", () => {
   ])("accepting the recommended option %s", async (_name, message, comment, prompt) => {
     const { runBd, writes } = recordingRunner({ show: card() });
     const herdr = recordingHerdr();
-    await createReviewWriter({ runBd, runHerdr: herdr.runHerdr }).write({ ...BASE, decision: "accept", message, option: "A" });
+    await createReviewWriter({ runBd, runHerdr: herdr.runHerdr }).write({ ...BASE, decision: "accept", message, option: "A", seen: seenOf("A") });
     expect(writes().map((c) => c.args)).toEqual([
       ["comments", "add", "tides-r1", comment],
       ["update", "tides-r1", "--remove-label", "review:changes"],
@@ -528,13 +535,21 @@ describe("decisions that name an option (decision-card-reviews 3.3)", () => {
     ["an option with changes", card(), "changes", "B", "option-with-changes", `An option is chosen only by accepting; a request for changes on "tides-r1" names none. Nothing was written.`],
     ["an option on a legacy review", legacy, "accept", "A", "no-options", `Review "tides-r1" offers no options in the tracker, so none can be accepted; nothing was written.`],
     ["an option on a review without review metadata", (id: string) => shown({ id }), "accept", "A", "no-options", undefined],
-    ["an option on a review whose card is invalid", card({ options: [{ id: "A", label: "only one" }], recommend: null }), "accept", "A", "no-options", undefined],
+    ["an option on a review whose card is invalid", card({ options: [{ id: "A", label: "only one" }], recommend: null }), "accept", "A", "unreadable-card", undefined],
+    [
+      "an accept without an option on a review whose card is invalid",
+      card({ options: [{ id: "A", label: "only one" }], recommend: null }),
+      "accept",
+      undefined,
+      "unreadable-card",
+      `Review "tides-r1" carries options the board cannot read (its card is invalid in the tracker), so it cannot be accepted here; request changes, or fix the card. Nothing was written.`,
+    ],
   ] as const)("refuses %s, writing and notifying nothing", async (_name, show, decision, option, reason, message) => {
     const { runBd, calls } = recordingRunner({ show });
     const herdr = recordingHerdr();
     const onWritten = vi.fn();
     const err = await createReviewWriter({ runBd, runHerdr: herdr.runHerdr })
-      .write({ ...BASE, decision, message: decision === "changes" ? "fix" : "", ...(option !== undefined ? { option } : {}), onWritten })
+      .write({ ...BASE, decision, message: decision === "changes" ? "fix" : "", ...(option !== undefined ? { option, seen: seenOf(option === "Z" ? "A" : option) } : {}), onWritten })
       .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ReviewRecordRefusedError);
     expect((err as ReviewRecordRefusedError).reason).toBe(reason);
@@ -544,11 +559,43 @@ describe("decisions that name an option (decision-card-reviews 3.3)", () => {
     expect(herdr.calls).toEqual([]);
   });
 
-  it("the store cannot add an option: only the tracker record's options count", async () => {
-    // The record is legacy; whatever the request believes the card offers, there is nothing to choose.
-    const { runBd, writes } = recordingRunner({ show: legacy });
-    await expect(createReviewWriter({ runBd, runHerdr: recordingHerdr().runHerdr }).write({ ...BASE, decision: "accept", message: "", option: "B" })).rejects.toMatchObject({ reason: "no-options" });
-    expect(writes()).toEqual([]);
+  it.each([
+    ["a changed label", { label: "Skip the tracking migration" }],
+    ["a changed what", { what: "Ship only the schema" }],
+    ["a dropped what", { what: null }],
+    ["a changed risk", { risk: "Tracking goes away" }],
+    ["a dropped risk", { risk: null }],
+    ["a changed question", "question"],
+  ] as const)("refuses option B whose record shows %s since it was opened, running only show", async (_name, change) => {
+    const options = change === "question" ? OPTIONS : OPTIONS.map((o) => (o.id === "B" ? { ...o, ...change } : o));
+    const { runBd, calls } = recordingRunner({ show: card({ options, ...(change === "question" ? { question: "Which deploy?" } : {}) }) });
+    const err = await createReviewWriter({ runBd, runHerdr: recordingHerdr().runHerdr })
+      .write({ ...BASE, decision: "accept", message: "", option: "B", seen: seenOf("B") })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ReviewRecordRefusedError);
+    expect((err as ReviewRecordRefusedError).reason).toBe("option-changed");
+    expect((err as Error).message).toBe(`Review "tides-r1" changed since it was opened (option B or its question differs); reopen it. Nothing was written.`);
+    expect(calls.map((c) => c.args[0])).toEqual(["show"]);
+  });
+
+  it("refuses an option sent without what the person saw", async () => {
+    const { runBd, calls } = recordingRunner({ show: card() });
+    await expect(createReviewWriter({ runBd, runHerdr: recordingHerdr().runHerdr }).write({ ...BASE, decision: "accept", message: "", option: "B" })).rejects.toMatchObject({ reason: "option-changed" });
+    expect(calls.map((c) => c.args[0])).toEqual(["show"]);
+  });
+
+  it("writes when the record is exactly what was seen, other options' changes notwithstanding, and the question is read as reviewCard reads it", async () => {
+    // No `question` key: the card's question is the summary's first line, as the drawer shows it.
+    const options = OPTIONS.map((o) => (o.id === "C" ? { ...o, label: "Split it in three" } : o));
+    const { runBd, writes } = recordingRunner({ show: card({ options, question: undefined, summary: `${QUESTION}\nmore detail` }) });
+    await createReviewWriter({ runBd, runHerdr: recordingHerdr().runHerdr }).write({ ...BASE, decision: "accept", message: "", option: "B", seen: seenOf("B") });
+    expect(writes()[0]!.args).toEqual(["comments", "add", "tides-r1", "Accepted: B."]);
+  });
+
+  it("a card nobody can read still takes a request for changes", async () => {
+    const { runBd, writes } = recordingRunner({ show: card({ options: [{ id: "A", label: "only one" }], recommend: null }) });
+    await createReviewWriter({ runBd, runHerdr: recordingHerdr().runHerdr }).write({ ...BASE, decision: "changes", message: "the card is broken" });
+    expect(writes().map((c) => c.args[0])).toEqual(["comments", "update"]);
   });
 
   it.each([

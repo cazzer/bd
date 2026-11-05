@@ -59,7 +59,14 @@ The validator lives in the CLI (plain JS, no import from `packages/core`, which 
 
 ### 5. Decisions carry an option id
 
-`reviewDecision` gains `option?: string` (same id pattern). The router passes it through; `review-writer.ts`, after its existing pre-write `bd show`, normalizes the tracker's `metadata.review`: options present + `accept` without `option` → refused; `option` not among the record's ids → refused; `option` with `changes` or on a review without options → refused. Refusals are 4xx before any write. Texts: comment `Accepted: <id> — <m>` / `Accepted: <id>.`; close reason `Review accepted: <id>`; prompt `Review <bead> accepted: <id> — <m>` / `Review <bead> accepted: <id>.`. Without an option every text is exactly today's. The option is checked against the tracker's record, not the store, for the same reason pane and socket are (any agent can write a store node).
+`reviewDecision` gains `option?: string` (same id pattern) and, required with it and refused without it, `seen: { question, label, what?, risk? }` — the card's question (as `reviewCard` reads it) and the chosen option's text as the drawer showed them, capped at the normalizer's fitted lengths (140, 80, 300, 300). The router passes both through; `review-writer.ts`, after its existing pre-write `bd show`, normalizes the tracker's `metadata.review`:
+
+- an option with `changes` → refused (also at input validation);
+- an invalid review whose raw `options` is a non-empty list — a card nobody can read — fails closed: every accept is refused, with or without an option; request changes still works. Any other invalid review, or one without options, is decided the legacy way;
+- options present + `accept` without `option` → refused; `option` on a review without options → refused; `option` not among the record's ids → refused;
+- the record's question and the chosen option's label, what, and risk differ from `seen` (absent ≡ absent) → refused as `option-changed`: "changed since it was opened; reopen it". A re-request after "Request changes" reuses the open bead and replaces its review whole, so a new card can reuse ids A/B/C with new meanings; without `seen`, a stale drawer's "Choose B" would accept whatever B now says.
+
+Refusals are 4xx before any write. Texts: comment `Accepted: <id> — <m>` / `Accepted: <id>.`; close reason `Review accepted: <id>`; prompt `Review <bead> accepted: <id> — <m>` / `Review <bead> accepted: <id>.`. Without an option every text is exactly today's. The option is checked against the tracker's record, not the store, for the same reason pane and socket are (any agent can write a store node).
 
 ### 6. Card layout is chosen before it is built
 
