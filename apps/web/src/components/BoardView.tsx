@@ -22,29 +22,26 @@
 // the item after every board read (`boardVersion`), which is how a waiting
 // drawer opens without a reload.
 //
-// Live: one effect owns the subscription and the reads. It subscribes to
-// `boardEvents` FIRST and reads in `onStarted` — which the tRPC SSE link
-// calls on every (re)connection — so a change that lands between the read
-// and the subscription cannot be missed, and a reconnect re-reads. Each
-// event schedules a read 150 ms out (a burst collapses to one, and a
-// continuous stream cannot defer it past 1 s). Reads never overlap: one that
-// is requested while another runs sets a dirty flag and exactly one
-// follow-up runs after it, so sustained writes cannot starve the board. The
-// subscription is keyed on the view alone; a chip toggle re-reads on it (the
-// chosen projects live in a ref), and the previous board stays on screen,
-// filtered to the chosen chips and marked aria-busy, until the answer lands.
-//
-// Only a visible board holds the subscription. Every open board tab's stream
-// is a long-lived connection, and Chrome allows six HTTP/1.1 connections per
-// host, so enough board tabs starve every other request to the server — a
-// review decision's POST queues behind them forever. The page's visibility
-// is therefore an input to the live effect: a hidden board unsubscribes, and
-// a board shown again subscribes afresh, whose `onStarted` read catches
-// everything that changed while it was hidden. The last board stays on
-// screen meanwhile.
+// Live: one effect owns the reads, and registers with the tab's one live
+// stream (lib/liveStream.ts, review-queue design.md decision 2), which it
+// shares with the review queue. It reads in `onStarted`, which the registry
+// calls on every (re)start of the stream and at once when the stream is
+// already started — so a change that lands between the read and the stream
+// cannot be missed, and a reconnect or a tab shown again re-reads. The
+// registry holds no stream while the tab is hidden (its header says why);
+// the last board stays on screen meanwhile. Each event schedules a read
+// 150 ms out (a burst collapses to one, and a continuous stream cannot defer
+// it past 1 s), and reads never overlap: one requested while another runs
+// sets a dirty flag and exactly one follow-up runs after it, so sustained
+// writes cannot starve the board (lib/readScheduler.ts). The registration is
+// keyed on the view alone; a chip toggle re-reads on it (the chosen projects
+// live in a ref), and the previous board stays on screen, filtered to the
+// chosen chips and marked aria-busy, until the answer lands.
 
 import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
+import { subscribeLive, useLiveState } from "../lib/liveStream.js";
 import { navigate } from "../lib/navigate.js";
+import { createReadScheduler } from "../lib/readScheduler.js";
 import {
   addHighlights,
   BOARD_COLUMN_ORDER,
@@ -87,25 +84,8 @@ interface BoardData {
   registry: BeadsProjectsAnswer;
   board: Pick<BoardAnswer, "cards" | "epics" | "omittedClosed" | "truncated">;
 }
-type LiveState = "connecting" | "live" | "offline";
 
 const EMPTY_BOARD: BoardData["board"] = { cards: [], epics: [], omittedClosed: {}, truncated: false };
-
-function pageVisible(): boolean {
-  return typeof document === "undefined" || document.visibilityState !== "hidden";
-}
-
-/** Whether this tab is shown; the live effect holds its stream only while it is (see the header). */
-function usePageVisible(): boolean {
-  const [visible, setVisible] = useState(pageVisible);
-  useEffect(() => {
-    const update = () => setVisible(pageVisible());
-    update();
-    document.addEventListener("visibilitychange", update);
-    return () => document.removeEventListener("visibilitychange", update);
-  }, []);
-  return visible;
-}
 
 function messageOf(err: unknown, fallback: string): string {
   return err instanceof Error ? err.message : fallback;
@@ -128,7 +108,6 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
   const [readError, setReadError] = useState<string | null>(null);
   const [eventErrors, setEventErrors] = useState<ReadonlyMap<string, string>>(new Map());
   const [highlights, setHighlights] = useState<Highlights>(new Map());
-  const [live, setLive] = useState<LiveState>("connecting");
   const [refreshing, setRefreshing] = useState(false);
   const [refreshNote, setRefreshNote] = useState<string | null>(null);
   const [toggledLanes, setToggledLanes] = useState<ReadonlySet<string>>(new Set());
@@ -143,7 +122,7 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
   const followCardUntil = useRef(0);
   const returnFocusTo = useRef<string | null>(null);
   const wide = useWideDrawer();
-  const visible = usePageVisible();
+  const live = useLiveState();
   const projectsRef = useRef(projects);
   const appliedKeyRef = useRef(projects.join("\u0000"));
   const readRef = useRef<(() => void) | null>(null);
@@ -192,15 +171,11 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
   const view = viewState.kind === "ready" && viewState.forViewId === viewId ? viewState : null;
   const projectsKey = projects.join("\u0000");
 
-  // The live effect (see the header): subscribe first, read in onStarted; hold the stream only while visible.
+  // The live effect (see the header): register with the live stream, read in onStarted.
   useEffect(() => {
-    if (view === null || !visible) return;
+    if (view === null) return;
     const viewProjects = view.viewProjects;
     let disposed = false;
-    let inFlight = false;
-    let dirty = false;
-    let firstWake: number | null = null;
-    let timer: ReturnType<typeof setTimeout> | undefined;
     const pending = new Set<string>();
 
     async function readOnce() {
@@ -237,82 +212,44 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
       }
     }
 
-    // Reads never overlap and never supersede one another: a request that
-    // arrives while one is running marks it dirty, and exactly one follow-up
-    // read runs when it finishes, so sustained writes cannot starve the board.
-    async function read() {
-      if (inFlight) {
-        dirty = true;
-        return;
-      }
-      inFlight = true;
-      setReading(true);
-      try {
-        do {
-          dirty = false;
-          await readOnce();
-        } while (dirty && !disposed);
-      } finally {
-        inFlight = false;
-        if (!disposed) setReading(false);
-      }
-    }
-
-    // Debounced, but a continuous stream of events cannot defer the read past MAX_WAIT.
-    function scheduleRead() {
-      const now = Date.now();
-      firstWake ??= now;
-      clearTimeout(timer);
-      timer = setTimeout(
-        () => {
-          firstWake = null;
-          void read();
-        },
-        Math.min(READ_DEBOUNCE_MS, Math.max(0, firstWake + READ_MAX_WAIT_MS - now)),
-      );
-    }
-
-    readRef.current = () => void read();
-    setLive("connecting");
-    const subscription = trpc.boardEvents.subscribe(undefined, {
+    const scheduler = createReadScheduler({
+      read: readOnce,
+      debounceMs: READ_DEBOUNCE_MS,
+      maxWaitMs: READ_MAX_WAIT_MS,
+      onBusyChange: setReading,
+    });
+    readRef.current = () => scheduler.run();
+    const unsubscribe = subscribeLive({
       onStarted: () => {
-        if (disposed) return;
-        clearTimeout(timer);
-        firstWake = null;
-        void read();
+        if (!disposed) scheduler.run();
       },
-      onData: (event) => {
+      onEvent: (event) => {
         if (disposed) return;
         if (event.kind === "changed") {
           for (const id of event.changedNodeIds) pending.add(id);
-          scheduleRead();
+          scheduler.schedule();
         } else {
           setEventErrors((prev) => new Map(prev).set(event.project, event.message));
         }
       },
-      onConnectionStateChange: (state) => {
-        if (disposed) return;
-        setLive(state.state === "pending" ? "live" : state.state === "connecting" ? "connecting" : "offline");
-      },
       onError: (err) => {
         if (disposed) return;
         // No stream (e.g. no watcher on this server): the board still reads once, it just does not stay current.
-        setLive("offline");
         setReadError(messageOf(err, "The live update stream failed."));
-        void read();
+        scheduler.run();
       },
     });
 
     return () => {
       disposed = true;
       readRef.current = null;
-      clearTimeout(timer);
-      subscription.unsubscribe();
+      scheduler.dispose();
+      unsubscribe();
       setReading(false);
     };
-  }, [view?.forViewId, visible]);
+  }, [view?.forViewId]);
 
-  // A chip toggle re-reads on the live subscription instead of re-subscribing.
+  // A chip toggle re-reads on the live registration instead of re-registering.
   useEffect(() => {
     if (appliedKeyRef.current === projectsKey) return;
     appliedKeyRef.current = projectsKey;

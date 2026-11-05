@@ -13,10 +13,10 @@
 
 ## 3. One live stream per tab
 
-- [ ] 3.1 `lib/liveStream.ts`: listener registry owning the single `boardEvents` subscription, gated on listeners > 0 and page visibility, `onStarted` fan-out on every (re)start and to late joiners, `useLiveState()`; move 12d9e31's header rationale here
-- [ ] 3.2 BoardView consumes the registry instead of its own subscription and `usePageVisible`; debounce, no-overlap reads, highlights, and error map unchanged
-- [ ] 3.3 `useReviewQueue()` hook: reads `reviewQueue` on start and on every `changed` event (debounced), exposes reviews/total/truncated/version/error
-- [ ] 3.4 Unit tests for the registry (one subscription for N listeners, none while hidden, re-start on show calls every `onStarted`, late joiner, last unsubscribe closes) and the hook's debounce; live check: board still updates from a tracker write, and with the board open the tab shows one `boardEvents` request
+- [x] 3.1 `lib/liveStream.ts`: listener registry owning the single `boardEvents` subscription, gated on listeners > 0 and page visibility, `onStarted` fan-out on every (re)start and to late joiners, `useLiveState()`; move 12d9e31's header rationale here
+- [x] 3.2 BoardView consumes the registry instead of its own subscription and `usePageVisible`; debounce, no-overlap reads, highlights, and error map unchanged
+- [x] 3.3 `useReviewQueue()` hook: reads `reviewQueue` on start and on every `changed` event (debounced), exposes reviews/total/truncated/version/error
+- [x] 3.4 Unit tests for the registry (one subscription for N listeners, none while hidden, re-start on show calls every `onStarted`, late joiner, last unsubscribe closes) and the hook's debounce; live check: board still updates from a tracker write, and with the board open the tab shows one `boardEvents` request
 
 ## 4. review-request leaves open tabs alone
 
