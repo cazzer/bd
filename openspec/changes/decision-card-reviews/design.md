@@ -72,7 +72,17 @@ Refusals are 4xx before any write. Texts: comment `Accepted: <id> — <m>` / `Ac
 
 The card UI groups begin with 2–3 static prototypes (HTML in the session scratchpad, no app code) of the card in the drawer and in the Review all run at 1440 × 900, filled from the shlo fixture and the before/after fixture, each with its build cost (components touched, how the stage/column split of review-queue decision 7 is used, keyboard model). Screenshots go through `review-request bd-4zn` as an image review (the board that receives it predates cards), with `Accept = <recommended>` per visual-review.md. The pick is recorded here as decision 7 before the card UI is built. Fixed for every prototype: question first; recommended option with its risk and the decision actions above the fold; evidence collapsed when the card has question + options; attachments before evidence; `before`/`after` pairs side by side.
 
-### 7. (Reserved for the picked layout.)
+### 7. Layout A: a compact option list, every action in the pinned footer
+
+Picked through review `bd-4zn.8` (accepted 2026-11-05, A recommended) over B (each option card carries its own button) and C (an options table with row actions; diagrams and diffs only on the stage).
+
+- **Body, in spec order**: the question (its own section, larger type); `Options · N` as one bordered list — the recommended option first, accent-bordered, with a `Recommended` chip, its full what and risk; each other option below it with what and risk clamped to two lines; then the on-accept steps; then attachments (drawer only, see below); then evidence, collapsed when the card has options, open otherwise; then the thread.
+- **Footer** (the existing pinned decision form, which already owns the message box, arming, and the run's shortcuts): the message box, then `Accept <recommended label>` (primary), one `Choose <label>` per other option (option id in a mono prefix), and `Request changes` (+ `Skip` in the run). With more than two other options, they fold into one `Choose another…` control listing them, so the footer never pushes the recommendation below the fold. A legacy review or a card without options keeps today's `Accept` / `Request changes`.
+- **Drawer**: attachments render in the column between on-accept and evidence (before/after pair, then diagrams, then diffs, the diff clipped with its stats).
+- **Run**: the stage holds the attachments (a diff fills it; a before/after pair takes the top with a diagram below); the column holds question, options, on-accept, evidence. A card with no attachments keeps the run's no-stage layout.
+- **Keyboard**: unchanged bindings — ⌘↵ accepts the recommended option (the hint names its id), ⇧⌘↵ requests changes; `Choose` has no shortcut (choosing against the recommendation is deliberate). The "& next" variants and arming carry the option id.
+
+Cost M: `ReviewItemPanel` (body order, option list, footer actions), `ReviewAttachments` (mermaid/diff kinds, pair), `ReviewRunModal` (stage gets card attachments, shortcut carries the recommended id); no new layout primitive.
 
 ## Risks / Trade-offs
 

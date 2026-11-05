@@ -24,9 +24,9 @@
 
 ## 4. Card layout prototypes (visual review gate)
 
-- [ ] 4.1 2–3 static prototypes of the card in the drawer and in the Review all run at 1440 × 900 (HTML in the session scratchpad, no app code), each filled from the shlo fixture and the before/after fixture, all honouring design.md decision 6's fixed points
-- [ ] 4.2 For each, its build cost: components touched, use of the run's stage/column split, keyboard model for Accept / Choose / Request changes
-- [ ] 4.3 Screenshot them and request the pick through `review-request bd-4zn` (image form, `Accept = <recommended>`); record the chosen layout as design.md decision 7
+- [x] 4.1 2–3 static prototypes of the card in the drawer and in the Review all run at 1440 × 900 (HTML in the session scratchpad, no app code), each filled from the shlo fixture and the before/after fixture, all honouring design.md decision 6's fixed points
+- [x] 4.2 For each, its build cost: components touched, use of the run's stage/column split, keyboard model for Accept / Choose / Request changes
+- [x] 4.3 Screenshot them and request the pick through `review-request bd-4zn` (image form, `Accept = <recommended>`); record the chosen layout as design.md decision 7
 
 ## 5. Evidence renderer
 
