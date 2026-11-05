@@ -48,7 +48,7 @@
 
 - [x] 7.1 Live check (worktree servers on 4311/5174, `bd` registered in the worktree database): file the shlo card with the branch's `review-request` (`WEB_SERVER_PORT=4311`); it appears in the queue by its question; the drawer renders tables, the diff, and a diagram; "Choose B" writes `Accepted: B — …` and the prompt names B; an image-only review filed with the legacy form still renders and accepts as before
 - [x] 7.2 Update `~/.claude/skills/context/visual-review.md`: architecture and other human-in-the-loop decisions use the card form; how to write the question, options, recommendation, and before state; images only for what must be seen; never screenshot text; the legacy form still works
-- [ ] 7.3 Request the epic visual review under `bd-4zn` as a decision card (card form, against the worktree server), with screenshots of the built card as image attachments
+- [x] 7.3 Request the epic visual review under `bd-4zn` as a decision card (card form, against the worktree server), with screenshots of the built card as image attachments
 
 ## 8. Cards stay short (from review bd-4zn.9)
 
