@@ -1,0 +1,71 @@
+# Copy to local/needs-me.yaml (gitignored) and edit: what counts as "needs me" per source.
+#
+# enter:   what puts an item in the queue
+# exit:    source state that removes it (re-checked every ingest, so the
+#          source stays the truth and the queue can't drift)
+# key:     canonical artifact key used for dedupe
+
+sources:
+  gmail:
+    connector: Gmail
+    enter: "in:inbox -category:promotions -category:social"
+    exit: thread archived or deleted
+    key: gmail:thread/<threadId>
+    notifications:
+      # notification emails resolve to the artifact they point at, not the email
+      - from: [notifications@github.com, "*@asana.com", notify@mail.notion.so, comments-noreply@docs.google.com]
+        resolve_to_artifact: true
+
+  asana:
+    connector: Asana
+    enter: incomplete tasks assigned to me
+    exit: task completed or reassigned
+    key: asana:task/<gid>
+
+  notion:
+    connector: Notion
+    enter: unresolved comment threads that @-mention me or reply to a thread I started
+    exit: thread resolved, or my reply is the latest
+    key: notion:page/<pageId>#discussion/<discussionId>
+
+  gdocs:
+    # Docs/Drive connectors may not expose comments; fall back to the
+    # comments-noreply@docs.google.com emails above
+    connector: Google Drive / Gmail fallback
+    enter: unresolved comments that mention or are assigned to me
+    exit: comment resolved
+    key: gdoc:<fileId>#comment/<commentId>
+
+  github:
+    connector: GitHub
+    enter: open, non-draft PRs where my review is requested
+    exit: I've reviewed, PR closed/merged, or request removed
+    key: github:<owner>/<repo>#<number>
+
+  slack:
+    connector: Slack
+    enter: DMs and @-mentions where I haven't replied
+    exit: I replied, or reacted with :white_check_mark:
+    key: slack:<channelId>/<threadTs>
+
+  fathom:
+    connector: Fathom
+    # One recap -> one batch item with N candidates. Fathom over-reports,
+    # so the triage agent is skeptical by default: no transcript quote, no item.
+    enter: one batch per meeting I attended; candidates = recap action items + decisions
+    exit: every candidate in the batch has a verdict I've confirmed
+    key: fathom:<recordingId>              # batch
+    candidate_key: fathom:<recordingId>#<n>
+    verdicts:                              # agent pre-fills, I confirm or flip
+      - already_tracked   # links the existing Asana task / PR / thread
+      - not_actionable    # discussion, not a decision or commitment
+      - not_mine          # owner is someone else
+      - knowledge         # save to the graph, no action
+      - new_action        # proposed action, same flow as any queue item
+    evidence: transcript timestamp + quote required for new_action
+    learning: my verdict overrides are stored and fed back as examples
+
+later:
+  - Asana @-mentions on tasks not assigned to me
+  - Slack channel threads I've replied in
+  - Calendar invites awaiting a response

@@ -16,3 +16,6 @@ dist/
 
 # Beads issue tracker: local only, never published
 .beads/
+
+# Personal inbox config (Org- or person-specific rules); see config/needs-me.example.yaml
+local/

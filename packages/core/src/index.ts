@@ -33,6 +33,9 @@ export {
   InvalidWorkItemError,
   BeadsProjectConflictError,
   NotAWorkItemError,
+  NotAnInboxItemError,
+  InvalidInboxItemError,
+  InboxDecisionConflictError,
   InvalidViewError,
   InvalidEventTimeError,
 } from "./errors.js";
@@ -495,3 +498,31 @@ export {
   type LoadGitRepoTreeOptions,
   type LoadGitRepoTreeResult,
 } from "./git-repo.js";
+// The inbox (review queue for things that need the person): inbox_item
+// nodes an agent triages out of the person's sources, their metadata
+// contract, the queue read, and the person's decision write. See inbox.ts.
+export {
+  INBOX_ITEM_NODE_TYPE,
+  INBOX_SOURCE_SYSTEM,
+  INBOX_STATUSES,
+  OPEN_INBOX_STATUSES,
+  INBOX_DECISIONS,
+  MAX_INBOX_ITEMS,
+  MAX_INBOX_FEEDBACK_LENGTH,
+  normalizeInboxItemMetadata,
+  readInboxItemFields,
+  listInbox,
+  decideInboxItem,
+  carryForwardInboxDecisions,
+  loadStoredInboxMetadata,
+  type InboxStatus,
+  type InboxDecision,
+  type InboxLink,
+  type InboxFeedback,
+  type InboxItemFields,
+  type InboxItem,
+  type InboxList,
+  type ListInboxOptions,
+  type DecideInboxItemInput,
+  type DecideInboxItemResult,
+} from "./inbox.js";

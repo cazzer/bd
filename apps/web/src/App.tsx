@@ -70,6 +70,9 @@ const TimelineView = lazy(async () => ({ default: (await import("./components/Ti
 // the board component lands (task group 4).
 const BoardView = lazy(async () => ({ default: (await import("./components/BoardView.js")).BoardView }));
 
+// The inbox: lazy like the board.
+const InboxView = lazy(async () => ({ default: (await import("./components/InboxView.js")).InboxView }));
+
 const LOADING_VIEW = (
   <main className="flex h-dvh w-screen items-center justify-center">
     <p className="text-sm text-fg-muted">Loading…</p>
@@ -143,6 +146,12 @@ function renderView(route: Route) {
       return (
         <Suspense fallback={LOADING_VIEW}>
           <BoardView key="board" viewId={route.viewId} projects={route.projects} item={route.item} />
+        </Suspense>
+      );
+    case "inbox":
+      return (
+        <Suspense fallback={LOADING_VIEW}>
+          <InboxView key="inbox" item={route.item} />
         </Suspense>
       );
   }

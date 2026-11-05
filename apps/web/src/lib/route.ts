@@ -40,6 +40,9 @@ export const TIMELINE_VIEW_PATH = "/timeline";
 /** The board view's path (live-beads-board). `parseRoute` also accepts it with one trailing slash. */
 export const BOARD_VIEW_PATH = "/board";
 
+/** The inbox view (inbox.ts in core). `parseRoute` also accepts it with one trailing slash. */
+export const INBOX_VIEW_PATH = "/inbox";
+
 /** The force-graph view: the submitted query, the node-type filters it was submitted with, and the selected node. `null`/`[]` mean absent. */
 export interface GraphRoute {
   view: "graph";
@@ -103,8 +106,14 @@ export interface BoardRoute {
   item: string | null;
 }
 
+/** The inbox: the id of the selected item, or `null` for the first one. */
+export interface InboxRoute {
+  view: "inbox";
+  item: string | null;
+}
+
 /** Every addressable view. A future view widens this union. */
-export type Route = GraphRoute | FeedRoute | CodeRoute | TimelineRoute | BoardRoute;
+export type Route = GraphRoute | FeedRoute | CodeRoute | TimelineRoute | BoardRoute | InboxRoute;
 
 /** `s` trimmed, or `null` when it is missing or whitespace-only — mirrors `runSearch`'s own trim, so `?q=%20` and no `q` at all mean the same thing. */
 function nonEmpty(s: string | null): string | null {
@@ -220,6 +229,9 @@ export function parseRoute(pathname: string, search: string): Route | null {
   if (path === BOARD_VIEW_PATH) {
     return boardRouteFromSearch(search);
   }
+  if (path === INBOX_VIEW_PATH) {
+    return { view: "inbox", item: nonEmpty(new URLSearchParams(search).get("item")) };
+  }
   return null;
 }
 
@@ -245,6 +257,8 @@ export function formatRoute(route: Route): string {
       return formatTimelineRoute(route);
     case "board":
       return formatBoardRoute(route);
+    case "inbox":
+      return route.item === null ? INBOX_VIEW_PATH : `${INBOX_VIEW_PATH}?${new URLSearchParams({ item: route.item }).toString()}`;
   }
 }
 

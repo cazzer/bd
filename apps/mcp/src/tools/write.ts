@@ -22,6 +22,10 @@ import {
   mergeNodes,
   normalizeOccurredAt,
   normalizeViewMetadata,
+  normalizeInboxItemMetadata,
+  carryForwardInboxDecisions,
+  loadStoredInboxMetadata,
+  INBOX_ITEM_NODE_TYPE,
   normalizeWorkItemMetadata,
   patchWorkItem,
   upsertEdges,
@@ -89,7 +93,7 @@ const writeSchema = z.object({
 export const writeTool: ToolDef<typeof writeSchema> = {
   name: "brain_write",
   description:
-    "Create or update one node, or a batch of nodes in one call (pass items as a single object or an array, up to 1000 items). Each item is upserted on (sourceSystem, externalId) — re-writing identical content is a no-op reported as 'unchanged'; changed content is 'updated'; a new key is 'created'. sourceSystem defaults to \"agent\" when omitted. All items in one call share a single ingest run attributed to source_system='agent' and to this client as actor, so this call's writes are identifiable and revertible as a unit. Items with nodeType \"work_item\" are validated against the work-item contract (metadata status/priority/assignee/closed_at/closed_reason/spec_id/project, where project is 1-64 characters of [a-z0-9._-]; missing status defaults to open, priority to 2) and one bad item rejects the whole batch. Items with nodeType \"view\" are validated against the view contract (metadata renderer is one of graph, feed, code, timeline, board; filter is the same selection brain_list accepts, without limit or cursor), and a node's default view is declared by linking a default_view edge from it to the view with brain_link — its child_of descendants inherit it. Any item's metadata may carry occurred_at — the moment the item belongs at on a timeline — as an ISO-8601 timestamp carrying a zone (Z or ±HH:MM) or a date alone (UTC); it is stored canonically (UTC, milliseconds, e.g. 2026-03-04T08:00:00.000Z), null removes it, and an unparseable value rejects the whole batch naming the item.",
+    "Create or update one node, or a batch of nodes in one call (pass items as a single object or an array, up to 1000 items). Each item is upserted on (sourceSystem, externalId) — re-writing identical content is a no-op reported as 'unchanged'; changed content is 'updated'; a new key is 'created'. sourceSystem defaults to \"agent\" when omitted. All items in one call share a single ingest run attributed to source_system='agent' and to this client as actor, so this call's writes are identifiable and revertible as a unit. Items with nodeType \"work_item\" are validated against the work-item contract (metadata status/priority/assignee/closed_at/closed_reason/spec_id/project, where project is 1-64 characters of [a-z0-9._-]; missing status defaults to open, priority to 2) and one bad item rejects the whole batch. Items with nodeType \"view\" are validated against the view contract (metadata renderer is one of graph, feed, code, timeline, board; filter is the same selection brain_list accepts, without limit or cursor), and a node's default view is declared by linking a default_view edge from it to the view with brain_link — its child_of descendants inherit it. Items with nodeType \"inbox_item\" are things waiting on the person's decision (see the inbox-ingest skill): use sourceSystem \"inbox\" and externalId = the canonical artifact key (e.g. asana:task/<gid>, gmail:thread/<id>) so signals about the same artifact dedupe; content is the markdown the person reads (context, then the proposed draft); metadata is validated against the inbox contract (source required; status one of pending, changes, accepted, dismissed, done, default pending; action e.g. reply/create_task/comment/review/ignore; url; from; priority 0-4; verdict; links [{label,url}]; feedback is the person's decision history — carry it forward unchanged). A batch's candidates link child_of the batch item. Any item's metadata may carry occurred_at — the moment the item belongs at on a timeline — as an ISO-8601 timestamp carrying a zone (Z or ±HH:MM) or a date alone (UTC); it is stored canonically (UTC, milliseconds, e.g. 2026-03-04T08:00:00.000Z), null removes it, and an unparseable value rejects the whole batch naming the item.",
   schema: writeSchema,
   isWrite: true,
   async handler(ctx: ToolContext, args) {
@@ -111,7 +115,9 @@ export const writeTool: ToolDef<typeof writeSchema> = {
           ? normalizeWorkItemMetadata(timed, { index })
           : nodeType === VIEW_NODE_TYPE
             ? normalizeViewMetadata(timed, { itemLabel })
-            : timed;
+            : nodeType === INBOX_ITEM_NODE_TYPE
+              ? normalizeInboxItemMetadata(timed, { itemLabel })
+              : timed;
       return {
         nodeType: item.nodeType,
         externalId: item.externalId,
@@ -121,6 +127,17 @@ export const writeTool: ToolDef<typeof writeSchema> = {
         metadata,
       };
     });
+
+    // Inbox items: the person's decisions survive a re-ingest (inbox.ts,
+    // carryForwardInboxDecisions) — read before the run opens, like every
+    // other validation here.
+    const inboxInputs = input.filter((n) => n.nodeType.trim() === INBOX_ITEM_NODE_TYPE);
+    if (inboxInputs.length > 0) {
+      const stored = await loadStoredInboxMetadata(ctx.db, inboxInputs.map((n) => ({ sourceSystem: n.sourceSystem!, externalId: n.externalId })));
+      for (const n of inboxInputs) {
+        n.metadata = carryForwardInboxDecisions(n.metadata ?? {}, stored.get(`${n.sourceSystem}\u0000${n.externalId}`) ?? null);
+      }
+    }
 
     const { ingestRunId, result } = await withAgentIngestRun(ctx.db, ctx.actor(), (run) => upsertNodes(ctx.db, run, input));
 
