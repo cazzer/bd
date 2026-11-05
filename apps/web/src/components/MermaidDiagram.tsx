@@ -11,15 +11,21 @@
 // MarkdownEditor.tsx's header. mermaid's own `securityLevel: "strict"`
 // sanitizer (labels are escaped, click handlers disabled) is a second layer,
 // not the one relied on. `htmlLabels: false` draws labels as SVG text rather
-// than HTML in <foreignObject>, which an image would not lay out reliably.
+// than HTML in <foreignObject>, which an image would not lay out reliably; it
+// is added to mermaid's `secure` keys (beside mermaid's own defaults) so a
+// diagram's `%%{init}%%` directive or frontmatter cannot turn it back on.
 //
-// A source that does not parse shows the source as text with mermaid's error
-// (`suppressErrorRendering` stops mermaid drawing its own error picture
-// instead of throwing).
+// A source that does not parse — or a failure anywhere on the way to the
+// image — shows the source as text with the reason (`suppressErrorRendering`
+// makes mermaid throw instead of drawing its own error picture). A drawn
+// diagram is a button that opens it in the review Lightbox, and offers its
+// source as text beneath it.
 
 import mermaid from "mermaid";
-import { useEffect, useState } from "react";
-import { DiagramPending, DiagramSourceWithError } from "./MermaidBlock.js";
+import { useEffect, useRef, useState } from "react";
+import { diagramKindName } from "../lib/diagramKind.js";
+import { DiagramSourceWithError } from "./DiagramStates.js";
+import { Lightbox } from "./Lightbox.js";
 
 let initialized = false;
 let nextId = 0;
@@ -31,16 +37,23 @@ function ensureInitialized() {
     securityLevel: "strict",
     htmlLabels: false,
     suppressErrorRendering: true,
-    theme: "dark",
+    secure: ["secure", "securityLevel", "startOnLoad", "maxTextSize", "suppressErrorRendering", "maxEdges", "htmlLabels"],
+    // The app's palette (index.css @theme: fg #e2e8f0, fg-muted #94a3b8, a slate-800 fill) on a transparent ground; only the `base` theme takes all variables.
+    theme: "base",
+    darkMode: true,
+    themeVariables: { darkMode: true, background: "transparent", primaryColor: "#1e293b", primaryTextColor: "#e2e8f0", primaryBorderColor: "#94a3b8", lineColor: "#94a3b8", fontFamily: "ui-sans-serif, system-ui, sans-serif" },
   });
   initialized = true;
 }
 
 type Drawn = { status: "pending" } | { status: "drawn"; src: string; width?: number; height?: number } | { status: "failed"; reason: string };
 
-/** The SVG's own size from its viewBox, so the image keeps its natural size and only ever shrinks to fit. */
-function viewBoxSize(svg: string): { width?: number; height?: number } {
-  const match = /viewBox="\s*[-\d.e]+[\s,]+[-\d.e]+[\s,]+([\d.e]+)[\s,]+([\d.e]+)\s*"/.exec(svg);
+const SVG_DATA_URL_PREFIX = "data:image/svg+xml;charset=utf-8,";
+
+/** The root <svg> element's own size from its viewBox, so the image keeps its natural size and only ever shrinks to fit. */
+function rootViewBoxSize(svg: string): { width?: number; height?: number } {
+  const rootTag = /<svg\b[^>]*>/.exec(svg)?.[0];
+  const match = rootTag && /\sviewBox="\s*[-\d.e]+[\s,]+[-\d.e]+[\s,]+([\d.e]+)[\s,]+([\d.e]+)\s*"/.exec(rootTag);
   if (!match) return {};
   const width = Math.ceil(Number(match[1]));
   const height = Math.ceil(Number(match[2]));
@@ -49,35 +62,68 @@ function viewBoxSize(svg: string): { width?: number; height?: number } {
 
 export interface MermaidDiagramProps {
   source: string;
-  /** The image's accessible name: the caption, or "Diagram". */
-  label: string;
+  /** The figure's caption, shown by MermaidBlock; here only the enlarged view's title. */
+  caption?: string;
+  /** Whether the diagram is still being drawn; MermaidBlock owns the status region. */
+  onPendingChange: (pending: boolean) => void;
 }
 
-export function MermaidDiagram({ source, label }: MermaidDiagramProps) {
+export function MermaidDiagram({ source, caption, onPendingChange }: MermaidDiagramProps) {
   const [drawn, setDrawn] = useState<Drawn>({ status: "pending" });
+  const [enlarged, setEnlarged] = useState(false);
+  const enlargeRef = useRef<HTMLButtonElement>(null);
+  const returnFocus = useRef(false);
+  const kind = diagramKindName(source);
+
+  const pending = drawn.status === "pending";
+  useEffect(() => {
+    onPendingChange(pending);
+  }, [pending]);
 
   useEffect(() => {
     let current = true;
     setDrawn({ status: "pending" });
     ensureInitialized();
-    mermaid.render(`evidence-mermaid-${++nextId}`, source).then(
-      ({ svg }) => {
-        if (current) setDrawn({ status: "drawn", src: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`, ...viewBoxSize(svg) });
-      },
-      (error: unknown) => {
+    mermaid
+      .render(`evidence-mermaid-${++nextId}`, source)
+      .then(({ svg }) => {
+        if (current) setDrawn({ status: "drawn", src: SVG_DATA_URL_PREFIX + encodeURIComponent(svg), ...rootViewBoxSize(svg) });
+      })
+      .catch((error: unknown) => {
         if (current) setDrawn({ status: "failed", reason: `This diagram didn't render: ${error instanceof Error ? error.message : String(error)}` });
-      },
-    );
+      });
     return () => {
       current = false;
     };
   }, [source]);
 
-  if (drawn.status === "pending") return <DiagramPending />;
+  // Back to the diagram once the Lightbox has closed (its dialog keeps the page inert until then).
+  useEffect(() => {
+    if (enlarged) returnFocus.current = true;
+    else if (returnFocus.current) {
+      returnFocus.current = false;
+      enlargeRef.current?.focus();
+    }
+  }, [enlarged]);
+
+  if (drawn.status === "pending") return null;
   if (drawn.status === "failed") return <DiagramSourceWithError source={source} reason={drawn.reason} />;
   return (
-    <div className="overflow-hidden rounded-md border border-hairline bg-ground p-3">
-      <img src={drawn.src} alt={label} width={drawn.width} height={drawn.height} decoding="async" className="mx-auto block h-auto max-w-full" />
+    <div className="rounded-md border border-hairline bg-[#030509] p-3">
+      <button
+        ref={enlargeRef}
+        type="button"
+        aria-label={kind === "Diagram" ? "Enlarge diagram" : `Enlarge ${kind}`}
+        onClick={() => setEnlarged(true)}
+        className="mx-auto block max-w-full cursor-zoom-in rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+      >
+        <img src={drawn.src} alt={kind} width={drawn.width} height={drawn.height} decoding="async" className="block h-auto max-w-full" />
+      </button>
+      <details className="mt-2 text-xs">
+        <summary className="cursor-pointer rounded text-fg-muted hover:text-fg focus:outline-none focus-visible:ring-2 focus-visible:ring-accent">Diagram source</summary>
+        <div className="mt-1.5 whitespace-pre-wrap font-mono leading-relaxed text-fg [overflow-wrap:anywhere]">{source}</div>
+      </details>
+      {enlarged && <Lightbox images={[{ name: caption ?? kind, path: kind, src: drawn.src }]} index={0} onIndexChange={() => {}} onClose={() => setEnlarged(false)} />}
     </div>
   );
 }

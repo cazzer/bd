@@ -2,12 +2,18 @@
 // ```mermaid fence in EvidenceView and, by the card's attachments, for a
 // `mermaid` attachment. The renderer is lazy: `mermaid` is its own chunk,
 // fetched the first time a diagram is drawn, so the board and the queue never
-// pay for it. MermaidDiagram's header documents how the SVG reaches the page.
+// pay for it (mermaidSplit.test.ts keeps every other import of it out).
+// MermaidDiagram's header documents how the SVG reaches the page.
 //
-// A chunk that fails to load (offline, a deploy replaced it) shows the source
-// as text with the reason, like a diagram that does not parse — never a blank.
+// The caption is the figure's <figcaption>; the image names the diagram's
+// kind. One status region says "Drawing diagram…" from the moment the block
+// mounts until the diagram is drawn or fails, across both the chunk load and
+// mermaid's render. A chunk that fails to load (offline, a deploy replaced
+// it) shows the source as text with the reason, like a diagram that does not
+// parse — never a blank.
 
-import { Component, lazy, Suspense, type ReactNode } from "react";
+import { Component, lazy, Suspense, useState, type ReactNode } from "react";
+import { DiagramSourceWithError, DiagramStatus } from "./DiagramStates.js";
 
 const MermaidDiagram = lazy(async () => ({ default: (await import("./MermaidDiagram.js")).MermaidDiagram }));
 
@@ -17,32 +23,17 @@ export interface MermaidBlockProps {
 }
 
 export function MermaidBlock({ source, caption }: MermaidBlockProps) {
+  const [pending, setPending] = useState(true);
   return (
     <figure className="min-w-0">
       {caption && <figcaption className="mb-1.5 text-xs text-fg-muted">{caption}</figcaption>}
       <DiagramLoadBoundary source={source}>
-        <Suspense fallback={<DiagramPending />}>
-          <MermaidDiagram source={source} label={caption ?? "Diagram"} />
+        <DiagramStatus pending={pending} />
+        <Suspense fallback={null}>
+          <MermaidDiagram source={source} caption={caption} onPendingChange={setPending} />
         </Suspense>
       </DiagramLoadBoundary>
     </figure>
-  );
-}
-
-export function DiagramPending() {
-  return (
-    <p role="status" className="rounded-md border border-hairline bg-surface-strong px-3 py-6 text-center text-xs text-fg-muted">
-      Drawing diagram…
-    </p>
-  );
-}
-
-export function DiagramSourceWithError({ source, reason }: { source: string; reason: string }) {
-  return (
-    <div className="rounded-md border border-amber-400/40 bg-amber-400/10 p-3">
-      <p className="whitespace-pre-wrap break-words text-xs text-amber-200">{reason}</p>
-      <div className="mt-2 overflow-x-auto whitespace-pre font-mono text-xs leading-relaxed text-fg">{source}</div>
-    </div>
   );
 }
 
