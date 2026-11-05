@@ -405,6 +405,40 @@ describe("keys from a dialog inside the panel", () => {
   });
 });
 
+describe("the run's compact frame", () => {
+  test("a compact header is one row whose title carries its full text in a tooltip", async () => {
+    await render(boardItem(fixtureReview("shlo-k54.4.1.1")), undefined, { compactHeader: true });
+    const title = container.querySelector<HTMLElement>("[data-panel-title]")!;
+    expect(title.getAttribute("title")).toBe("Review: Retire omni_search v5–v8");
+    expect(title.className).toContain("truncate");
+    expect(title.parentElement!.textContent).toContain("shlo-k54.4.1.1");
+    expect(title.parentElement!.textContent).toContain("review");
+  });
+
+  test("with a hint target the hint is drawn there and the recipient describes the message box instead of taking a line", async () => {
+    const target = document.createElement("div");
+    document.body.append(target);
+    const raw = { ...(fixtureReview("shlo-k54.4.1.1") as object), pane: "w2:p1", socket: undefined };
+    await render(boardItem(raw), { acceptLabel: "Accept", changesLabel: "Request changes", shortcuts: true, hintTarget: target });
+    expect(target.textContent).toBe("Ctrl/⌘Enter accept option A · add Shift to request changes");
+    const box = container.querySelector("textarea")!;
+    const recipient = "Pane w2:p1 has no herdr session recorded — the comment is the record";
+    expect(box.getAttribute("title")).toBe(recipient);
+    const described = box.getAttribute("aria-describedby")!.split(" ").map((id) => document.getElementById(id)!.textContent);
+    expect(described).toEqual([recipient]);
+    expect([...container.querySelectorAll("span[title]")].some((el) => el.textContent === recipient)).toBe(false);
+    target.remove();
+  });
+
+  test("without one the drawer keeps its recipient line", async () => {
+    await render(boardItem(fixtureReview("shlo-k54.4.1.1")));
+    const box = container.querySelector("textarea")!;
+    expect(box.hasAttribute("title")).toBe(false);
+    expect(box.hasAttribute("aria-describedby")).toBe(false);
+    expect([...container.querySelectorAll("span[title]")].some((el) => el.textContent?.startsWith("Will notify pane"))).toBe(true);
+  });
+});
+
 describe("the run's stage", () => {
   test("a lone diff fills the stage beside the card", async () => {
     await render(boardItem(fixtureReview("shlo-k54.4.1.1")), undefined, { layout: "stage" });

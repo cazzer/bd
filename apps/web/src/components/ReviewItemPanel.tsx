@@ -80,6 +80,7 @@
 // "Request changes", nothing extra, no shortcuts, no arming.
 
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode, type RefObject } from "react";
+import { createPortal } from "react-dom";
 import { navigate } from "../lib/navigate.js";
 import { reviewAttachments } from "../lib/reviewAttachments.js";
 import {
@@ -131,6 +132,14 @@ export interface PanelDecisions {
   shortcuts?: boolean;
   /** Ignore decisions for this long after mount (and shortcuts until a key is released since). */
   armAfterMs?: number;
+  /**
+   * Where the shortcut hint is drawn instead of the footer (the run's
+   * header, which has the width). Given, the footer has no recipient/hint
+   * line: the recipient describes the message box (its tooltip and
+   * accessible description) and the hint goes here (from `lg` up, as in the
+   * footer). Null until the host's element mounts.
+   */
+  hintTarget?: HTMLElement | null;
 }
 
 const DRAWER_DECISIONS: PanelDecisions = { acceptLabel: "Accept", changesLabel: "Request changes" };
@@ -161,6 +170,12 @@ export interface ReviewItemPanelProps {
   headerEnd?: ReactNode;
   /** "Open in graph" in the header; the run-through hides it (it would leave the run). */
   showGraphLink?: boolean;
+  /**
+   * The header on one row — id, title (truncated, the full text in its
+   * tooltip), chips — so the card keeps the height (the run-through, where
+   * the recommendation must stay above the fold beside a full footer).
+   */
+  compactHeader?: boolean;
   layout?: AttachmentLayout;
   decisions?: PanelDecisions;
 }
@@ -239,6 +254,7 @@ export function ReviewItemPanel({
   titleId,
   headerEnd,
   showGraphLink = true,
+  compactHeader = false,
   layout = "column",
   decisions = DRAWER_DECISIONS,
 }: ReviewItemPanelProps) {
@@ -446,36 +462,60 @@ export function ReviewItemPanel({
 
   return (
     <div ref={rootRef} onKeyDown={onKeyDown} className="flex min-h-0 flex-1 flex-col">
-      <div className="border-b border-hairline p-4">
-        <div className="flex items-start gap-3">
-          <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-fg-muted">
-              <span className="font-mono">{loaded?.externalId ?? item}</span>
-              {loaded?.parent && (
-                <>
-                  <span aria-hidden="true">·</span>
-                  <span>
-                    child of <span className="font-mono">{loaded.parent.externalId}</span>
-                  </span>
-                </>
+      {compactHeader ? (
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-hairline px-4 py-2.5 sm:flex-nowrap">
+          <span className="shrink-0 font-mono text-[11px] text-fg-muted">{loaded?.externalId ?? item}</span>
+          <h2 id={titleId} ref={titleRef} tabIndex={-1} data-panel-title="" title={title} className="min-w-0 flex-1 truncate text-base font-semibold leading-snug text-fg focus:outline-none">
+            {title}
+          </h2>
+          {loaded && (
+            <div className="flex shrink-0 gap-1.5">
+              {loaded.parent && (
+                <span className="self-center whitespace-nowrap text-[11px] text-fg-muted">
+                  child of <span className="font-mono">{loaded.parent.externalId}</span>
+                </span>
               )}
+              <Chip tone={statusTone(loaded.status)}>{loaded.status}</Chip>
+              {loaded.isReview && <Chip tone="accent">review</Chip>}
+              {loaded.labels.includes("review:changes") && <Chip tone="amber">review:changes</Chip>}
+              <Chip>{loaded.project}</Chip>
             </div>
-            <h2 id={titleId} ref={titleRef} tabIndex={-1} data-panel-title="" className="mt-1 text-base font-semibold leading-snug text-fg focus:outline-none">
-              {title}
-            </h2>
-            {loaded && (
-              <div className="mt-2 flex flex-wrap gap-1.5">
-                <Chip tone={statusTone(loaded.status)}>{loaded.status}</Chip>
-                {loaded.isReview && <Chip tone="accent">review</Chip>}
-                {loaded.labels.includes("review:changes") && <Chip tone="amber">review:changes</Chip>}
-                <Chip>{loaded.project}</Chip>
-              </div>
-            )}
-          </div>
-          {loaded && showGraphLink && <GraphLink nodeId={loaded.id} className="mt-1 shrink-0 whitespace-nowrap rounded text-sm text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-accent" />}
+          )}
+          {loaded && showGraphLink && <GraphLink nodeId={loaded.id} className="shrink-0 whitespace-nowrap rounded text-sm text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-accent" />}
           {headerEnd}
         </div>
-      </div>
+      ) : (
+        <div className="border-b border-hairline p-4">
+          <div className="flex items-start gap-3">
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-fg-muted">
+                <span className="font-mono">{loaded?.externalId ?? item}</span>
+                {loaded?.parent && (
+                  <>
+                    <span aria-hidden="true">·</span>
+                    <span>
+                      child of <span className="font-mono">{loaded.parent.externalId}</span>
+                    </span>
+                  </>
+                )}
+              </div>
+              <h2 id={titleId} ref={titleRef} tabIndex={-1} data-panel-title="" className="mt-1 text-base font-semibold leading-snug text-fg focus:outline-none">
+                {title}
+              </h2>
+              {loaded && (
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  <Chip tone={statusTone(loaded.status)}>{loaded.status}</Chip>
+                  {loaded.isReview && <Chip tone="accent">review</Chip>}
+                  {loaded.labels.includes("review:changes") && <Chip tone="amber">review:changes</Chip>}
+                  <Chip>{loaded.project}</Chip>
+                </div>
+              )}
+            </div>
+            {loaded && showGraphLink && <GraphLink nodeId={loaded.id} className="mt-1 shrink-0 whitespace-nowrap rounded text-sm text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-accent" />}
+            {headerEnd}
+          </div>
+        </div>
+      )}
 
       {staged ? (
         <div className="flex min-h-0 flex-1">
@@ -691,6 +731,7 @@ function DecisionFooter({
   const messageId = useId();
   const labelId = useId();
   const hintId = useId();
+  const recipientId = useId();
   const reportRef = useRef<HTMLDivElement>(null);
   const busy = pending !== null;
   const compact = labels.acceptShort !== undefined && labels.changesShort !== undefined;
@@ -705,6 +746,24 @@ function DecisionFooter({
   const failure: Refusal | null = refusal ?? (outcome !== null && outcome.tone !== "ok" ? { text: outcome.text, detail: null } : null);
   // One row until it is focused or holds a draft, at every width, so the footer leaves the card its height.
   const textareaHeight = message !== "" ? "h-[4.5rem]" : "h-10 focus:h-[4.5rem]";
+  const hintElsewhere = labels.hintTarget !== undefined;
+  const describedBy = [needsMessage ? hintId : null, hintElsewhere ? recipientId : null].filter((id) => id !== null).join(" ") || undefined;
+  const hint = labels.shortcuts && (
+    <span aria-hidden="true" className="hidden shrink-0 items-center gap-1 whitespace-nowrap text-xs text-fg-muted lg:inline-flex">
+      {actions === null || actions.accept !== null ? (
+        <>
+          <Kbd>Ctrl/⌘</Kbd>
+          <Kbd>Enter</Kbd> accept{actions?.accept ? <> option {actions.accept.id}</> : null} · add <Kbd>Shift</Kbd> to request changes
+        </>
+      ) : (
+        <>
+          <Kbd>Ctrl/⌘</Kbd>
+          <Kbd>Shift</Kbd>
+          <Kbd>Enter</Kbd> request changes
+        </>
+      )}
+    </span>
+  );
 
   return (
     <div className="space-y-2 border-t border-hairline bg-surface-strong p-4">
@@ -721,7 +780,8 @@ function DecisionFooter({
             value={message}
             onChange={(e) => setMessage(e.target.value)}
             disabled={busy}
-            aria-describedby={needsMessage ? hintId : undefined}
+            aria-describedby={describedBy}
+            title={hintElsewhere ? recipient : undefined}
             className={`block w-full resize-none rounded-lg border border-hairline bg-ground/60 px-3 py-2 text-base text-fg focus:outline-none focus:ring-2 focus:ring-accent disabled:opacity-60 sm:text-sm ${textareaHeight}`}
           />
           {needsMessage && (
@@ -805,29 +865,20 @@ function DecisionFooter({
           {labels.extra?.({ busy })}
         </div>
       )}
-      {open && (
+      {open && !hintElsewhere && (
         <div className={`flex items-center gap-x-4 text-xs text-fg-muted ${compact ? "max-sm:hidden" : ""}`}>
           <span title={recipient} className="min-w-0 flex-1 truncate">
             {recipient}
           </span>
-          {labels.shortcuts && (
-            <span aria-hidden="true" className="hidden shrink-0 items-center gap-1 whitespace-nowrap lg:inline-flex">
-              {actions === null || actions.accept !== null ? (
-                <>
-                  <Kbd>Ctrl/⌘</Kbd>
-                  <Kbd>Enter</Kbd> accept{actions?.accept ? <> option {actions.accept.id}</> : null} · add <Kbd>Shift</Kbd> to request changes
-                </>
-              ) : (
-                <>
-                  <Kbd>Ctrl/⌘</Kbd>
-                  <Kbd>Shift</Kbd>
-                  <Kbd>Enter</Kbd> request changes
-                </>
-              )}
-            </span>
-          )}
+          {hint}
         </div>
       )}
+      {open && hintElsewhere && (
+        <span id={recipientId} hidden>
+          {recipient}
+        </span>
+      )}
+      {open && labels.hintTarget && createPortal(hint, labels.hintTarget)}
       <div ref={reportRef} tabIndex={-1} className="focus:outline-none">
         {failure !== null ? (
           <div role="alert" className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300">
