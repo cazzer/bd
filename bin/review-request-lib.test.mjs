@@ -770,6 +770,26 @@ describe("countBodyWords", () => {
     assert.equal(countBodyWords("``` a`b\nc"), 2);
     assert.equal(countBodyWords("    ```\ncounted"), 1);
   });
+  it("leaves out a fence nested in a list item, up to three spaces past the item's content column", () => {
+    assert.equal(countBodyWords("1. Run:\n    ```bash\n    pnpm install now\n    ```\n2) Then go"), 3);
+    assert.equal(countBodyWords("- Run:\n  ```\n  free\n  ```\n- next"), 2);
+    assert.equal(countBodyWords("- Run:\n\n     ```\n     free\n     ```\n"), 1);
+    assert.equal(countBodyWords("10. Run:\n     ~~~\n     free\n     ~~~\n"), 1);
+    assert.equal(countBodyWords("- ```js\n  free words\n  ```\nafter"), 1);
+  });
+  it("counts a fence deeper than three spaces past the item's content column, and after the list has ended", () => {
+    assert.equal(countBodyWords("- Run:\n      ```\n      counted\n      ```"), 2);
+    assert.equal(countBodyWords("1. Run:\n\nA paragraph.\n\n    ```\n    counted words\n    ```"), 5);
+  });
+  it("leaves out a fence inside a blockquote", () => {
+    assert.equal(countBodyWords("> Said:\n> ```\n> free words\n> ```\n> done"), 2);
+    assert.equal(countBodyWords("> > ~~~\n> > free\n> > ~~~\nafter"), 1);
+  });
+  it("does not count an ordered-list marker opening a line", () => {
+    assert.equal(countBodyWords("1. one\n2) two\n   3. three\n> 4. four"), 4);
+    assert.equal(countBodyWords("Step 1. here"), 3);
+    assert.equal(countBodyWords("1.5 is a number"), 4);
+  });
   it("counts table cells and inline code, not pipes or separator rows", () => {
     assert.equal(countBodyWords("| Caller | Uses |\n| --- | :---: |\n| web-app | `v9` |"), 4);
     assert.equal(countBodyWords("Turn on `track_functions=all` now"), 4);
@@ -794,6 +814,15 @@ describe("card body word budget", () => {
     assert.equal(h.result.exitCode, 0, h.warn.join("\n"));
     assert.deepEqual(h.warn, []);
     assert.deepEqual(order(h.calls), FILED_ORDER);
+  });
+  it("reports only the character cap when a body is over both", async () => {
+    const fx = await fixture();
+    const body = prose(1600);
+    assert.ok(body.length > 8000);
+    const card = await writeCard(fx, cardWith(body));
+    const h = await harness(fx, { argv: [ITEM, card] });
+    assert.deepEqual(h.warn, [`review-request: body: at most 8000 characters, got ${body.length}`, "review-request: Nothing was filed."]);
+    await assertNothingFiled(fx, h);
   });
   it("refuses 301 words naming the budget and the count, with nothing filed", async () => {
     const fx = await fixture();

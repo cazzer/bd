@@ -367,36 +367,74 @@ async function validateAttachments(problems, raw, cardDir) {
   return { attachments: attachments.length > 0 ? attachments : undefined, imagePaths };
 }
 
-// CommonMark fences: up to three spaces, then three or more backticks or tildes; a backtick fence's info string holds no backtick.
-const FENCE_OPEN = /^ {0,3}(`{3,}(?=[^`]*$)|~{3,})/;
-const FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+// A fence opener after its indent: three or more backticks or tildes; a backtick fence's info string holds no backtick.
+const FENCE_OPEN = /^(`{3,}(?=[^`]*$)|~{3,})/;
+const FENCE_CLOSE = /^(`{3,}|~{3,})[ \t]*$/;
+// Blockquote markers, each with up to three spaces before it and one optional space after.
+const BLOCKQUOTE = /^(?: {0,3}> ?)+/;
+// A list item's marker and the spaces after it; the item's content starts after them.
+const LIST_ITEM = /^( *)([-*+]|\d{1,9}[.)])( +|$)/;
+const ORDERED_MARKER = /^\d{1,9}[.)]$/;
 const WORD = /[\p{L}\p{N}]/u;
 
 /**
  * The words a reviewer reads in a card body (design.md decision 8): every
  * whitespace-separated token holding a letter or digit, outside fenced code
- * blocks. A fence closes on a line of the same character, at least as long,
- * with nothing after it; an unclosed fence runs to the end, as in
- * CommonMark. Table pipes, separator rows, and lone punctuation are free;
- * table cells and inline code count. Fences are recognised at the top level
- * only (one nested deeper than three spaces of indent is read as text, so it
- * counts).
+ * blocks, except an ordered-list marker (`1.`, `2)`) opening a line. Table
+ * pipes, separator rows, bullets, and lone punctuation are free; table cells
+ * and inline code count.
+ *
+ * Blockquote markers are stripped from each line first, so a fence inside a
+ * blockquote is a fence. A line is a fence opener when, after its indent,
+ * it starts with three or more backticks (an info string with no backtick)
+ * or tildes, and the indent is at most three spaces, or at most three
+ * spaces past the content column of the list item it sits under; a fence
+ * may also open right after a list marker (`- ```js`). That list
+ * item is the most recent one; a non-blank line after a blank line, indented
+ * less than its content column and not itself a list item, ends it. The
+ * fence closes on a line of the same character, at least as long, with
+ * nothing after it and indented at most three spaces past the opener's
+ * container; an unclosed fence runs to the end of the body (CommonMark would
+ * also end it with its list item or blockquote; this does not).
+ *
+ * Everything else is text, so it counts: an indented code block (four or
+ * more spaces with no list item to account for them) is read, and the spec
+ * exempts only fenced blocks.
  */
 export function countBodyWords(body) {
   let words = 0;
   let fence = null;
-  for (const line of body.split(/\r\n|\n|\r/)) {
+  let listContent = null;
+  let previousBlank = false;
+  for (const raw of body.split(/\r\n|\n|\r/)) {
+    const line = raw.replace(BLOCKQUOTE, "");
+    const indent = line.length - line.trimStart().length;
+    const rest = line.slice(indent);
     if (fence !== null) {
-      const close = FENCE_CLOSE.exec(line);
-      if (close && close[1][0] === fence[0] && close[1].length >= fence.length) fence = null;
+      const close = FENCE_CLOSE.exec(rest);
+      if (close && indent <= fence.base + 3 && close[1][0] === fence.marker[0] && close[1].length >= fence.marker.length) fence = null;
       continue;
     }
-    const open = FENCE_OPEN.exec(line);
+    const blank = rest === "";
+    const item = LIST_ITEM.exec(line);
+    if (item) {
+      // CommonMark: five or more spaces after the marker make it one space plus an indented code block.
+      const gap = item[3].length >= 5 || item[3] === "" ? 1 : item[3].length;
+      listContent = item[1].length + item[2].length + gap;
+    } else if (!blank && previousBlank && listContent !== null && indent < listContent) {
+      listContent = null;
+    }
+    previousBlank = blank;
+    // A fence may open on the item's own line (`- ```js`), or on a line of its own.
+    const base = item ? listContent : indent <= 3 ? 0 : listContent !== null && indent >= listContent && indent - listContent <= 3 ? listContent : null;
+    const open = base === null ? null : FENCE_OPEN.exec(item ? line.slice(item[0].length) : rest);
     if (open) {
-      fence = open[1];
+      fence = { marker: open[1], base };
       continue;
     }
-    for (const token of line.split(/\s+/)) if (WORD.test(token)) words += 1;
+    const tokens = rest.split(/\s+/);
+    if (item && ORDERED_MARKER.test(tokens[0])) tokens.shift();
+    for (const token of tokens) if (WORD.test(token)) words += 1;
   }
   return words;
 }

@@ -21,7 +21,9 @@ newline however the frontmatter is sliced.
 | `long-recommendation.md` | 45 | the fold's worst case: a 140-character question, a recommended option A whose `what` and `risk` are 300 characters each, options B and C, a `diff` attachment (so the run has a stage); the board must show the question, all of A, and every action without scrolling at 1440 × 900 |
 
 **Body words** is `countBodyWords` in `bin/review-request-lib.mjs`: tokens
-holding a letter or digit, outside fenced code blocks (design.md decision 8).
+holding a letter or digit, other than an ordered-list marker opening a line,
+outside fenced code blocks, including fences in blockquotes and nested in list
+items (design.md decision 8).
 The CLI refuses a body over 300; shlo, the densest real decision so far, sets
 that budget.
 
