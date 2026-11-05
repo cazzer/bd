@@ -348,6 +348,18 @@ export {
   type BeadsProject,
 } from "./board.js";
 
+// The pending review queue (review-queue change): every pending review
+// across the registered projects, oldest first, in one statement. See
+// review-queue.ts.
+export {
+  listPendingReviews,
+  MAX_PENDING_REVIEWS,
+  MAX_REVIEW_SUMMARY_LINE_LENGTH,
+  type PendingReview,
+  type PendingReviews,
+  type PendingReviewsOptions,
+} from "./review-queue.js";
+
 // The review contract (board-visual-reviews): review metadata and comment
 // normalization, the review image root, and lexical containment. Pure.
 // See reviews.ts.

@@ -30,7 +30,7 @@
 // `sourceSystem === "repo"` itself) without that bundling hazard.
 
 import path from "node:path";
-import { isEditableSourceSystem, REVIEW_IMAGE_ROOT, type BeadsProject, type BoardCard, type BoardItem, type ListedNode, type LookedUpNode, type Neighbor, type RecentNode, type RetrievedNode } from "@breakdown/core";
+import { isEditableSourceSystem, REVIEW_IMAGE_ROOT, type BeadsProject, type BoardCard, type BoardItem, type ListedNode, type PendingReview, type LookedUpNode, type Neighbor, type RecentNode, type RetrievedNode } from "@breakdown/core";
 import { reviewImageUrl } from "./review-images.js";
 
 export type RetrievedNodeDto = Omit<RetrievedNode, "updatedAt"> & { updatedAt: string; isEditable: boolean };
@@ -103,4 +103,12 @@ export function toBoardItemDto(item: BoardItem, reviewImageRoot: string = REVIEW
 
 export function toBeadsProjectDto(project: BeadsProject): BeadsProjectDto {
   return { ...project, updatedAt: project.updatedAt.toISOString() };
+}
+
+// Review queue DTO (review-queue): a pending review's request time as an ISO string.
+
+export type PendingReviewDto = Omit<PendingReview, "requestedAt"> & { requestedAt: string };
+
+export function toPendingReviewDto(review: PendingReview): PendingReviewDto {
+  return { ...review, requestedAt: review.requestedAt.toISOString() };
 }

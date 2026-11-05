@@ -6,10 +6,10 @@
 
 ## 2. Pending review queue read
 
-- [ ] 2.1 Core `listPendingReviews(db, { limit })`: one statement per design.md decision 1 (registered beads projects, label `review` and not `review:changes`, not closed, oldest `occurred_at` first, total + truncated, summary line ≤ 200, image count, invalid review tolerated); export from the index
-- [ ] 2.2 Core tests against fixtures scoped to their own project keys (never global counts): pending, sent back, closed, near-miss labels, unregistered project, invalid review metadata, cap and truncation, merged-away item folds to its survivor
-- [ ] 2.3 `reviewQueue` query on the board router with a DTO in dto.ts; router tests including read-only mode
-- [ ] 2.4 `pnpm check` passes
+- [x] 2.1 Core `listPendingReviews(db, { limit })`: one statement per design.md decision 1 (registered beads projects, label `review` and not `review:changes`, not closed, oldest `occurred_at` first, total + truncated, summary line ≤ 200, image count, invalid review tolerated); export from the index
+- [x] 2.2 Core tests against fixtures scoped to their own project keys (never global counts): pending, sent back, closed, near-miss labels, unregistered project, invalid review metadata, cap and truncation, merged-away item folds to its survivor
+- [x] 2.3 `reviewQueue` query on the board router with a DTO in dto.ts; router tests including read-only mode
+- [x] 2.4 `pnpm check` passes
 
 ## 3. One live stream per tab
 

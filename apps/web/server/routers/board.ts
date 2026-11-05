@@ -25,11 +25,18 @@
 // is one row, and core already bounds every part of it (content and metadata
 // by the write path's caps, the comment thread by the review contract's
 // character budget).
+//
+// `reviewQueue` (review-queue, design.md decision 1) is the pending review
+// queue every view's indicator reads: no input, core's `listPendingReviews`
+// at its default cap (MAX_PENDING_REVIEWS), as `{ reviews, total,
+// truncated }`. One store read, no tracker command, so a read-only server
+// serves it. Not passed through `boundResponse`: at most 100 rows of a title
+// and a 200-character summary line, far under the budget.
 
-import { getBoardItem, getWorkBoard, listBeadsProjects, MAX_BOARD_ITEM_ID_LENGTH, MAX_BOARD_PROJECTS, PROJECT_KEY_PATTERN } from "@breakdown/core";
+import { getBoardItem, getWorkBoard, listBeadsProjects, listPendingReviews, MAX_BOARD_ITEM_ID_LENGTH, MAX_BOARD_PROJECTS, PROJECT_KEY_PATTERN } from "@breakdown/core";
 import { z } from "zod";
 import { boundResponse } from "../budget.js";
-import { toBeadsProjectDto, toBoardCardDto, toBoardItemDto } from "../dto.js";
+import { toBeadsProjectDto, toBoardCardDto, toBoardItemDto, toPendingReviewDto } from "../dto.js";
 import { mapCoreError } from "../errors.js";
 import { publicProcedure, router } from "../trpc.js";
 
@@ -103,8 +110,18 @@ const boardItemProcedure = publicProcedure.input(boardItemInputSchema).query(asy
   }
 });
 
+const reviewQueueProcedure = publicProcedure.query(async ({ ctx }) => {
+  try {
+    const queue = await listPendingReviews(ctx.db);
+    return { reviews: queue.reviews.map(toPendingReviewDto), total: queue.total, truncated: queue.truncated };
+  } catch (err) {
+    throw mapCoreError("reviewQueue", err);
+  }
+});
+
 export const boardRouter = router({
   board: boardProcedure,
   boardItem: boardItemProcedure,
   beadsProjects: beadsProjectsProcedure,
+  reviewQueue: reviewQueueProcedure,
 });

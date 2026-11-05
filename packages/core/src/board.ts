@@ -210,6 +210,19 @@ function resolveBoardProjects(options: WorkBoardOptions): string[] | null {
   return [...new Set(projects)];
 }
 
+/**
+ * The `registered(key)` CTE: the keys of every `beads_project` registry
+ * node. Shared with review-queue.ts so the all-projects board and the review
+ * queue can never disagree about which projects are registered.
+ */
+export function registeredProjectsCte(): SQL {
+  return sql`registered(key) AS (
+  SELECT metadata->>'project'
+  FROM resolved_nodes
+  WHERE node_type = ${BEADS_PROJECT_NODE_TYPE} AND source_system = 'beads' AND metadata->>'project' IS NOT NULL
+)`;
+}
+
 /** Pure: builds the board statement from already-validated project keys (null = every registered project; non-empty otherwise) and a validated item cap. */
 export function buildWorkBoardQuery(projects: readonly string[] | null, maxItems: number = MAX_BOARD_ITEMS): SQL {
   const projectKeys =
@@ -221,11 +234,7 @@ export function buildWorkBoardQuery(projects: readonly string[] | null, maxItems
         );
   return sql`
 WITH RECURSIVE
-registered(key) AS (
-  SELECT metadata->>'project'
-  FROM resolved_nodes
-  WHERE node_type = ${BEADS_PROJECT_NODE_TYPE} AND source_system = 'beads' AND metadata->>'project' IS NOT NULL
-),
+${registeredProjectsCte()},
 filtered AS (
   SELECT id, title, external_id, updated_at,
          -- A work item written without a status key reads as open (readWorkItemFields).

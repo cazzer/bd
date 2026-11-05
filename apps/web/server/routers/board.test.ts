@@ -1,4 +1,5 @@
 // live-beads-board, tasks.md 2.4: the `board` and `beadsProjects` procedures
+// (and review-queue, tasks.md 2.3: `reviewQueue`)
 // through the real router chain (Zod -> packages/core -> DTO -> response
 // budget). packages/core/src/board.test.ts proves the read itself and is
 // trusted, not re-proven, here. Fixtures carry this file's own source system
@@ -24,6 +25,8 @@ const SRC = `board-router-test-${TAG}`;
 const PROJECT = `rt-${TAG}`;
 const OTHER = `ro-${TAG}`;
 const REGISTRY_KEY = `rreg-${TAG}`;
+const QUEUE_A = `rqa-${TAG}`;
+const QUEUE_B = `rqb-${TAG}`;
 
 beforeAll(async () => {
   pool = createPool(resolveDatabaseUrl());
@@ -37,7 +40,7 @@ afterAll(async () => {
   await closeIngestRun(db, beadsRun);
   await db.delete(edges).where(eq(edges.sourceSystem, SRC));
   await db.delete(nodes).where(eq(nodes.sourceSystem, SRC));
-  await db.delete(nodes).where(and(eq(nodes.sourceSystem, "beads"), inArray(nodes.externalId, [`project:${REGISTRY_KEY}`, `project:${OTHER}`])));
+  await db.delete(nodes).where(and(eq(nodes.sourceSystem, "beads"), inArray(nodes.externalId, [`project:${REGISTRY_KEY}`, `project:${OTHER}`, `project:${QUEUE_A}`, `project:${QUEUE_B}`])));
   await db.delete(ingestRuns).where(inArray(ingestRuns.id, [run.id, beadsRun.id]));
   await pool.end();
 });
@@ -269,5 +272,57 @@ describe("beadsProjects", () => {
 
     const without = (await caller().beadsProjects()).projects;
     expect(without.find((p) => p.key === REGISTRY_KEY)?.lastIngest).toBeNull();
+  });
+});
+
+describe("reviewQueue", () => {
+  // Request times sit in the year 1000 so these rows fall inside the
+  // store-wide oldest-first window; see packages/core/src/review-queue.test.ts.
+  async function writeQueue(): Promise<Map<string, string>> {
+    await upsertNodes(
+      db,
+      beadsRun,
+      [QUEUE_A, QUEUE_B].map((k) => ({ nodeType: "beads_project", sourceSystem: "beads", externalId: `project:${k}`, title: k, content: "", metadata: { project: k, path: `/tmp/${k}` } })),
+    );
+    const review = (ext: string, project: string, occurredAt: string, extra: Record<string, unknown> = {}) => ({
+      nodeType: "work_item",
+      sourceSystem: SRC,
+      externalId: ext,
+      title: `Review ${ext}`,
+      content: "must never reach the queue",
+      metadata: { project, status: "open", priority: 1, labels: ["review"], occurred_at: occurredAt, ...extra },
+    });
+    const result = await upsertNodes(db, run, [
+      review(`${TAG}-q3`, QUEUE_A, "1000-06-01T00:00:03.000Z"),
+      review(`${TAG}-q1`, QUEUE_B, "1000-06-01T00:00:01.000Z", { review: { images: ["/home/u/a.png"], pane: null, summary: "Queue header\nmore" } }),
+      review(`${TAG}-q2`, QUEUE_A, "1000-06-01T00:00:02.000Z"),
+      review(`${TAG}-qsent`, QUEUE_A, "1000-06-01T00:00:00.000Z", { labels: ["review", "review:changes"] }),
+    ]);
+    return new Map(result.rows.map((r) => [r.externalId, r.id]));
+  }
+
+  it("returns the pending reviews of registered projects oldest first, as wire-safe JSON with ISO request times", async () => {
+    const ids = await writeQueue();
+
+    const queue = await caller().reviewQueue();
+    const rows = queue.reviews.filter((r) => r.project === QUEUE_A || r.project === QUEUE_B);
+
+    expect(rows).toEqual([
+      { id: ids.get(`${TAG}-q1`), project: QUEUE_B, externalId: `${TAG}-q1`, title: `Review ${TAG}-q1`, summaryLine: "Queue header", imageCount: 1, requestedAt: "1000-06-01T00:00:01.000Z" },
+      { id: ids.get(`${TAG}-q2`), project: QUEUE_A, externalId: `${TAG}-q2`, title: `Review ${TAG}-q2`, summaryLine: null, imageCount: 0, requestedAt: "1000-06-01T00:00:02.000Z" },
+      { id: ids.get(`${TAG}-q3`), project: QUEUE_A, externalId: `${TAG}-q3`, title: `Review ${TAG}-q3`, summaryLine: null, imageCount: 0, requestedAt: "1000-06-01T00:00:03.000Z" },
+    ]);
+    expect(queue.total).toBeGreaterThanOrEqual(3);
+    expect(queue.reviews.length).toBeLessThanOrEqual(100);
+    expect(queue.truncated).toBe(queue.total > queue.reviews.length);
+    expect(JSON.parse(JSON.stringify(queue))).toEqual(queue);
+  });
+
+  it("is served by a read-only server", async () => {
+    await writeQueue();
+
+    const queue = await caller({ readOnly: true }).reviewQueue();
+
+    expect(queue.reviews.filter((r) => r.project === QUEUE_A || r.project === QUEUE_B).map((r) => r.externalId)).toEqual([`${TAG}-q1`, `${TAG}-q2`, `${TAG}-q3`]);
   });
 });
