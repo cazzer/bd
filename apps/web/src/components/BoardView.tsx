@@ -68,7 +68,7 @@ import { formatRoute, type BoardRoute, type GraphRoute } from "../lib/route.js";
 import { viewFilterOf, type ViewNode } from "../lib/viewFilter.js";
 import { trpc } from "../trpc.js";
 import { ReviewDrawer, useWideDrawer } from "./ReviewDrawer.js";
-import { ReviewQueuePill, useReviewQueueContext } from "./ReviewQueue.js";
+import { ReviewQueuePill, storeDraft, useShellDrawer } from "./ReviewQueue.js";
 
 const GRAPH_HOME: GraphRoute = { view: "graph", q: null, types: [], node: null };
 
@@ -119,14 +119,14 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
   const [announcement, setAnnouncement] = useState("");
   const [boardVersion, setBoardVersion] = useState(0);
   const boardRegionRef = useRef<HTMLDivElement>(null);
-  /** Unsent drawer messages by item, so closing the drawer or switching cards never drops one. */
-  const drafts = useRef(new Map<string, string>());
   /** The project each opened item resolved to (see openProject). */
   const pinnedProjects = useRef(new Map<string, string>());
   const followCardUntil = useRef(0);
   const returnFocusTo = useRef<string | null>(null);
   const wide = useWideDrawer();
-  const shellDrawerOpen = useReviewQueueContext().drawerOpen;
+  // Unsent drawer messages by item, shared with the shell's queue drawer, so
+  // closing a drawer, switching cards, or switching drawers never drops one.
+  const { open: shellDrawerOpen, drafts } = useShellDrawer();
   const projectsRef = useRef(projects);
   const appliedKeyRef = useRef(projects.join("\u0000"));
   const readRef = useRef<(() => void) | null>(null);
@@ -489,11 +489,8 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
           item={item}
           boardLoaded={data !== null}
           boardVersion={boardVersion}
-          initialDraft={drafts.current.get(item) ?? ""}
-          onDraftChange={(draft) => {
-            if (draft.trim() === "") drafts.current.delete(item);
-            else drafts.current.set(item, draft);
-          }}
+          initialDraft={drafts.get(item) ?? ""}
+          onDraftChange={(draft) => storeDraft(drafts, item, draft)}
           onDecided={() => {
             followCardUntil.current = Date.now() + 15_000;
           }}

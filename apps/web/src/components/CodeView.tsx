@@ -62,7 +62,7 @@ import { navigate } from "../lib/navigate.js";
 import { formatRoute, type GraphRoute } from "../lib/route.js";
 import { viewFilterOf } from "../lib/viewFilter.js";
 import { trpc } from "../trpc.js";
-import { ReviewQueuePill } from "./ReviewQueue.js";
+import { ReviewQueuePill, useShellDrawer } from "./ReviewQueue.js";
 
 type ListResult = Awaited<ReturnType<typeof trpc.list.query>>;
 type RootRow = ListResult["nodes"][number];
@@ -157,6 +157,8 @@ function ownerOf(view: ViewState, viewId: string | null, trees: ReadonlyMap<stri
 }
 
 export function CodeView({ viewId, node }: { viewId: string | null; node: string | null }) {
+  // Pads itself clear of the review queue's drawer from `sm` up, as the board does (ReviewQueue.tsx).
+  const shellDrawerOpen = useShellDrawer().open;
   const [view, setView] = useState<ViewState>(viewId === null ? { kind: "no-view" } : { kind: "loading" });
   const [trees, setTrees] = useState<ReadonlyMap<string, TreeState>>(() => new Map());
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
@@ -389,7 +391,7 @@ export function CodeView({ viewId, node }: { viewId: string | null; node: string
             ? "Loading…"
             : null;
     return (
-      <main className="flex h-dvh w-screen items-center justify-center overflow-hidden">
+      <main className={`flex h-dvh w-screen items-center justify-center overflow-hidden ${shellDrawerOpen ? "sm:pr-[492px]" : ""}`}>
         <div aria-hidden="true" className="ambience pointer-events-none fixed inset-0 -z-10" />
         <div className="glass w-96 p-6">
           <h1 className="text-base font-semibold text-fg">Code</h1>
@@ -417,7 +419,7 @@ export function CodeView({ viewId, node }: { viewId: string | null; node: string
   const paneError = shown.kind === "error" ? shown.message : owner.kind === "error" ? owner.message : null;
 
   return (
-    <main className="flex h-dvh w-screen gap-3 overflow-hidden p-3">
+    <main className={`flex h-dvh w-screen gap-3 overflow-hidden p-3 ${shellDrawerOpen ? "sm:pr-[504px]" : ""}`}>
       <div aria-hidden="true" className="ambience pointer-events-none fixed inset-0 -z-10" />
 
       <nav aria-label="Tree" className="glass flex w-72 shrink-0 flex-col overflow-hidden">

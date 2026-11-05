@@ -101,7 +101,7 @@ import { CreateNoteForm } from "./CreateNoteForm.js";
 import { DetailPanel, type OfferedView } from "./DetailPanel.js";
 import { GraphCanvas } from "./GraphCanvas.js";
 import { SearchBar, type SearchBarStatus } from "./SearchBar.js";
-import { ReviewQueuePill } from "./ReviewQueue.js";
+import { ReviewQueuePill, useShellDrawer } from "./ReviewQueue.js";
 import { TypePanel } from "./TypePanel.js";
 import { UnlinkedNotes } from "./UnlinkedNotes.js";
 import { edgeLegendOf } from "../graph/edgeLegend.js";
@@ -1122,6 +1122,7 @@ export function GraphView() {
   // DetailPanel's own w-80 (summary)/w-96 (expanded) sizing exactly,
   // defaulting to the narrower w-80 when nothing is selected (the same
   // width a freshly opened panel would start at).
+  const shellDrawerOpen = useShellDrawer().open;
   const rightColumnExpanded = Boolean(selectedNodeId) && detailExpanded;
   const rightColumnWidthClass = rightColumnExpanded ? "w-96" : "w-80";
   const rightColumnWidthPx = rightColumnExpanded ? RIGHT_COLUMN_EXPANDED_WIDTH_PX : RIGHT_COLUMN_SUMMARY_WIDTH_PX;
@@ -1219,9 +1220,15 @@ export function GraphView() {
         see `rightColumnWidthClass`'s own comment above — so the column
         never has a gap between its own edge and DetailPanel's. The review
         queue's pill heads the column (review-queue, design.md decision 3),
-        so the panels below it move down rather than sit under it.
+        so the panels below it move down rather than sit under it. While the
+        queue's drawer is open over it (from `sm` up; below that the drawer is
+        a modal sheet and the view is inert) the column is hidden, not moved:
+        moved clear of the drawer it would run under the centred search bar
+        at ordinary widths, and left in place its controls would stay
+        tabbable under the drawer. Closing the drawer shows it again before
+        focus returns to the pill.
       */}
-      <div className={`pointer-events-none fixed top-4 right-4 bottom-4 z-10 flex ${rightColumnWidthClass} flex-col items-stretch gap-3`}>
+      <div className={`pointer-events-none fixed top-4 right-4 bottom-4 z-10 flex ${shellDrawerOpen ? "sm:invisible" : ""} ${rightColumnWidthClass} flex-col items-stretch gap-3`}>
         <div className="pointer-events-auto shrink-0 self-end">
           <ReviewQueuePill variant="floating" />
         </div>

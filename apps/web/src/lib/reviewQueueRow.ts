@@ -1,6 +1,7 @@
 // Pure helpers behind the review queue's pill and popover (review-queue,
 // design.md decisions 3-4): how a request's age reads, what each row and
-// the pill say to a screen reader, the truncation note, arrow-key movement
+// the pill say to a screen reader, the order and staleness lines, what the
+// status region announces, arrow-key movement
 // through the rows, where the popover sits under its pill, and where focus
 // goes when the shell's drawer closes.
 // Structural types only, so nothing from the server reaches the bundle.
@@ -74,18 +75,51 @@ export function countText(total: number, loaded: boolean): string {
   return `${total} review${total === 1 ? "" : "s"}`;
 }
 
-/** The pill's accessible name: the count and the live state ("3 reviews waiting, live"). */
-export function pillLabel(total: number, loaded: boolean, live: LiveState): string {
-  const state = live === "connecting" ? "connecting" : live;
-  if (!loaded) return `Review queue not read yet, ${state}`;
-  if (total === 0) return `No reviews waiting, ${state}`;
-  return `${total} review${total === 1 ? "" : "s"} waiting, ${state}`;
+/** The waiting count as words: "3 reviews waiting", "1 review waiting", "No reviews waiting". */
+export function waitingText(total: number): string {
+  if (total === 0) return "No reviews waiting";
+  return `${total} review${total === 1 ? "" : "s"} waiting`;
 }
 
-/** "Showing 100 of 120" when the queue holds more than the read returned; null otherwise. */
-export function truncationNote(shown: number, total: number, truncated: boolean): string | null {
-  if (!truncated || total <= shown) return null;
-  return `Showing ${shown} of ${total}`;
+/** The pill's accessible name, in the order the pill reads: the live state, then the count ("Live, 3 reviews waiting"). */
+export function pillLabel(total: number, loaded: boolean, live: LiveState): string {
+  const state = live === "live" ? "Live" : live === "connecting" ? "Connecting" : "Offline";
+  if (!loaded) return `${state}, review queue not read yet`;
+  return `${state}, ${waitingText(total).replace(/^No/, "no")}`;
+}
+
+/** The order line under the popover's header: "Oldest first", or "Oldest 100 of 120" when the read was cut short. */
+export function orderNote(shown: number, total: number, truncated: boolean): string {
+  if (!truncated || total <= shown) return "Oldest first";
+  return `Oldest ${shown} of ${total}`;
+}
+
+/** The popover's staleness line while the stream is not live; null while it is. */
+export function staleNote(live: LiveState): string | null {
+  if (live === "live") return null;
+  if (live === "connecting") return "Reconnecting…";
+  return "Live updates offline — this list may be out of date.";
+}
+
+/** How long a live state must hold before the status region speaks of it. */
+export const LIVE_ANNOUNCE_HOLD_MS = 3000;
+
+/**
+ * What the status region says when the stream settles in `next` (held for
+ * LIVE_ANNOUNCE_HOLD_MS), given the state it last settled in: only a lasting
+ * change between live and offline is spoken. The first settled state (page
+ * load) and anything about connecting are not.
+ */
+export function liveAnnouncement(previous: LiveState | null, next: LiveState): string | null {
+  if (previous === null || next === "connecting" || previous === next) return null;
+  if (next === "offline") return "Live updates offline";
+  return previous === "offline" ? "Live updates back on" : null;
+}
+
+/** What the status region says when the count changes after the first read; null for the first read or no change. */
+export function countAnnouncement(previous: number | null, total: number): string | null {
+  if (previous === null || previous === total) return null;
+  return waitingText(total);
 }
 
 /** The row an arrow key moves to from `index` among `length` rows (no wrap); null for a key that does not move. */

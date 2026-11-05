@@ -10,12 +10,16 @@ import {
   formatImageCount,
   liveText,
   moveActive,
+  liveAnnouncement,
+  countAnnouncement,
+  orderNote,
+  staleNote,
+  waitingText,
   pillLabel,
   popoverPlacement,
   reconcileActive,
   rowLabel,
   spokenAge,
-  truncationNote,
   type QueueRow,
 } from "./reviewQueueRow.js";
 
@@ -90,19 +94,54 @@ describe("pill text", () => {
     expect(countText(0, false)).toBe("…");
   });
 
-  it("carries the count and the live state in the accessible name; zero reads as an empty queue", () => {
-    expect(pillLabel(3, true, "live")).toBe("3 reviews waiting, live");
-    expect(pillLabel(1, true, "connecting")).toBe("1 review waiting, connecting");
-    expect(pillLabel(0, true, "offline")).toBe("No reviews waiting, offline");
-    expect(pillLabel(0, false, "connecting")).toBe("Review queue not read yet, connecting");
+  it("carries the live state then the count in the accessible name, as the pill reads; zero reads as an empty queue", () => {
+    expect(pillLabel(3, true, "live")).toBe("Live, 3 reviews waiting");
+    expect(pillLabel(1, true, "connecting")).toBe("Connecting, 1 review waiting");
+    expect(pillLabel(0, true, "offline")).toBe("Offline, no reviews waiting");
+    expect(pillLabel(0, false, "connecting")).toBe("Connecting, review queue not read yet");
+  });
+
+  it("words the waiting count", () => {
+    expect(waitingText(0)).toBe("No reviews waiting");
+    expect(waitingText(1)).toBe("1 review waiting");
+    expect(waitingText(4)).toBe("4 reviews waiting");
   });
 });
 
-describe("truncationNote", () => {
-  it("says how many are shown of how many only when the read was cut short", () => {
-    expect(truncationNote(100, 120, true)).toBe("Showing 100 of 120");
-    expect(truncationNote(3, 3, false)).toBeNull();
-    expect(truncationNote(100, 100, true)).toBeNull();
+describe("orderNote", () => {
+  it("says oldest first, or how many of how many when the read was cut short", () => {
+    expect(orderNote(100, 120, true)).toBe("Oldest 100 of 120");
+    expect(orderNote(3, 3, false)).toBe("Oldest first");
+    expect(orderNote(100, 100, true)).toBe("Oldest first");
+  });
+});
+
+describe("staleNote", () => {
+  it("is silent while live and says the list may be stale otherwise", () => {
+    expect(staleNote("live")).toBeNull();
+    expect(staleNote("connecting")).toBe("Reconnecting…");
+    expect(staleNote("offline")).toBe("Live updates offline — this list may be out of date.");
+  });
+});
+
+describe("announcements", () => {
+  it("never speaks of the first settled state or of connecting", () => {
+    expect(liveAnnouncement(null, "live")).toBeNull();
+    expect(liveAnnouncement(null, "offline")).toBeNull();
+    expect(liveAnnouncement("live", "connecting")).toBeNull();
+    expect(liveAnnouncement("live", "live")).toBeNull();
+  });
+
+  it("speaks of a lasting change between live and offline", () => {
+    expect(liveAnnouncement("live", "offline")).toBe("Live updates offline");
+    expect(liveAnnouncement("offline", "live")).toBe("Live updates back on");
+  });
+
+  it("speaks of a count change after the first read only", () => {
+    expect(countAnnouncement(null, 3)).toBeNull();
+    expect(countAnnouncement(3, 3)).toBeNull();
+    expect(countAnnouncement(3, 4)).toBe("4 reviews waiting");
+    expect(countAnnouncement(1, 0)).toBe("No reviews waiting");
   });
 });
 

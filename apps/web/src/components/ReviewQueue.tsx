@@ -4,75 +4,137 @@
 // its own top-right header (`ReviewQueuePill`); the popover anchored under
 // it; and the drawer a pick opens over the current view.
 //
+// Two contexts, so a queue read re-renders only what shows the queue. The
+// queue context (queue, live state, popover actions) is read by the pills
+// alone. `ShellDrawerContext` carries whether the shell's drawer is open —
+// which views read to pad themselves clear of it, as the board already does
+// for its own — and the one draft map both drawers share, keyed by bead id,
+// so a message typed in either survives a switch to the other.
+//
 // Pill. A button holding the status light (filled green = live, half amber
 // = connecting, red ring = offline — shape as well as colour), the word for
-// that state, and the pending count; its accessible name carries both
-// (lib/reviewQueueRow.ts `pillLabel`). Views place it; each placed pill
-// registers with the provider, and while none is registered (a view that
-// does not place one, a lazy view still loading, the code view's empty
-// states) the provider draws the same pill fixed top-right, so no view is
-// ever without it. Registration is a layout effect, so the fallback never
-// paints for a frame under a view that places its own. One polite status
-// region (here, not per pill, so a view change re-announces nothing) reads
-// out the pill's label as it changes.
+// that state (from `sm` up; below it the light's shape and the accessible
+// name carry it), and the pending count; its accessible name reads the same
+// way ("Live, 3 reviews waiting", lib/reviewQueueRow.ts `pillLabel`). The
+// state word sits in a box wide enough for "Connecting…", so a flip never
+// shifts the header. Views place the pill; each placed pill registers with
+// the provider, and while none is registered (a view that does not place
+// one, a lazy view still loading, the code view's empty states) the
+// provider draws the same pill fixed top-right, so no view is ever without
+// it. Registration is a layout effect, so the fallback never paints for a
+// frame under a view that places its own. ArrowDown on the pill opens the
+// popover, or focuses its active row when it is open; Escape closes it.
+//
+// Announcements. One polite status region (here, not per pill, so a view
+// change says nothing). It speaks a change of the count after the first
+// read, and a lasting change of the stream between live and offline (held
+// LIVE_ANNOUNCE_HOLD_MS); never the first load, a reconnect, or connecting.
 //
 // Popover. Anchored under the pill (portalled to <body> and positioned from
 // the pill's rect, since the headers it sits in are `glass` — a
 // backdrop-filter makes them the containing block of anything fixed inside
-// them — and the code view's clips). A non-modal dialog: rows oldest first,
-// arrows / Home / End move between them (roving tabindex), Enter or a click
-// picks, Escape closes it and returns focus to the pill, and a click or
-// focus outside it closes it without moving focus. It shows an empty state,
-// the truncation note, and the queue's read error over the last answer.
-// "Review all" (design.md decision 6) is rendered only when the provider is
-// given `onReviewAll`; the run-through modal is task group 6, so App.tsx
-// passes none yet and the button is hidden.
+// them — and the code view's clips). It follows the pill every frame while
+// open, since a pill can move with no resize or scroll (a header narrowing
+// for a drawer). A non-modal dialog: rows oldest first, arrows / Home / End
+// move between them (roving tabindex), Enter or a click picks, Escape closes
+// it and returns focus to the pill, and a click or focus outside it closes
+// it without moving focus. Being portalled, it sits at the end of the tab
+// order, so Tab past its last control or Shift+Tab before its first closes
+// it onto the pill, and the default Tab then moves on from there. It shows
+// the order line ("Oldest first", or "Oldest 100 of 120" when truncated), a
+// staleness line while the stream is not live, an empty state, and the
+// queue's read error over the last answer. "Review all" (design.md decision
+// 6) sits in the header and is rendered only when the provider is given
+// `onReviewAll`; the run-through modal is task group 6, so App.tsx passes
+// none yet and the button is hidden.
 //
 // Drawer. A pick opens the board's ReviewDrawer from here (decision 4): the
 // project from the row, `boardLoaded` true, `boardVersion` the queue's
 // `version` (it re-reads after each queue read, as it does after each board
-// read), drafts in a map here, `onProjectConfirmed` a no-op. It is state,
+// read), the shared draft map, `onProjectConfirmed` a no-op. It is state,
 // not address — no view's URL changes. Closing it returns focus to the row
 // that opened it (the popover reopens on that row) while the review is
-// still queued, else to the pill. Below `sm` the drawer is a modal sheet,
-// so the view underneath is made inert, as BoardView does for its own.
+// still queued and was not decided here, else to the pill: a decided
+// review is leaving the queue, even before the next read says so. Below
+// `sm` the drawer is a modal sheet, so the view underneath is made inert,
+// as BoardView does for its own.
 //
 // The board's own drawer (`/board?item=`) and this one are never open
-// together. Opening this one on the board while the board's is open
-// replace-navigates `item` away (closing the board's drawer — the one
-// address change this makes, and only on the board); the board's drawer
-// opening (a card picked, back/forward) closes this one. A change of view
-// closes the popover and this drawer, since what they covered has gone.
+// together. Opening this one on the board while the board's is open pushes
+// the address without `item` (closing the board's drawer — the one address
+// change this makes, and only on the board; Back reopens the board's
+// drawer, which closes this one); the board's drawer opening (a card
+// picked, back/forward) closes this one and the popover. The popover and
+// the drawer remember the view they opened on and draw only there, so a
+// change of view never shows them for a frame over the next view.
 
 import { createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FocusEvent, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import type { LiveState } from "../lib/liveStream.js";
 import { navigate } from "../lib/navigate.js";
 import type { ReviewQueueState } from "../lib/reviewQueueReader.js";
-import { countText, focusReturnTarget, formatAge, formatImageCount, liveText, moveActive, pillLabel, popoverPlacement, reconcileActive, rowLabel, truncationNote, type QueueRow } from "../lib/reviewQueueRow.js";
+import {
+  countAnnouncement,
+  countText,
+  focusReturnTarget,
+  formatAge,
+  formatImageCount,
+  LIVE_ANNOUNCE_HOLD_MS,
+  liveAnnouncement,
+  liveText,
+  moveActive,
+  orderNote,
+  pillLabel,
+  popoverPlacement,
+  reconcileActive,
+  rowLabel,
+  staleNote,
+  type QueueRow,
+} from "../lib/reviewQueueRow.js";
 import { formatRoute, type BoardRoute, type Route } from "../lib/route.js";
 import { ReviewDrawer, useWideDrawer } from "./ReviewDrawer.js";
 
 type QueueReview = ReviewQueueState["reviews"][number];
+type ViewName = Route["view"];
 
 interface ReviewQueueContextValue {
   queue: ReviewQueueState;
   live: LiveState;
   popoverOpen: boolean;
-  /** Whether the shell's drawer is open (the board pads itself clear of it). */
-  drawerOpen: boolean;
   togglePopover: () => void;
   openPopover: () => void;
+  closePopover: (returnFocus: boolean) => void;
+  /** Move focus into the open popover (its active row). */
+  focusPopover: () => void;
   /** Register a pill's button as the popover's anchor; `placed` is false only for the shell's fallback. */
   registerPill: (el: HTMLElement, placed: boolean) => () => void;
 }
 
 const ReviewQueueContext = createContext<ReviewQueueContextValue | null>(null);
 
-export function useReviewQueueContext(): ReviewQueueContextValue {
+function useReviewQueueContext(): ReviewQueueContextValue {
   const value = useContext(ReviewQueueContext);
-  if (value === null) throw new Error("useReviewQueueContext needs a ReviewQueueProvider above it");
+  if (value === null) throw new Error("the review queue pill needs a ReviewQueueProvider above it");
   return value;
+}
+
+export interface ShellDrawerState {
+  /** Whether the shell's queue drawer is open; a view pads itself clear of it from `sm` up. */
+  open: boolean;
+  /** Unsent drawer messages by bead id, shared by the board's drawer and the shell's. */
+  drafts: Map<string, string>;
+}
+
+const ShellDrawerContext = createContext<ShellDrawerState>({ open: false, drafts: new Map() });
+
+export function useShellDrawer(): ShellDrawerState {
+  return useContext(ShellDrawerContext);
+}
+
+/** Keep `drafts` in step with a drawer's message box: an empty draft is no draft. */
+export function storeDraft(drafts: Map<string, string>, item: string, draft: string): void {
+  if (draft.trim() === "") drafts.delete(item);
+  else drafts.set(item, draft);
 }
 
 const BOARD_HOME: BoardRoute = { view: "board", viewId: null, projects: [], item: null };
@@ -82,7 +144,7 @@ interface PillEntry {
   placed: boolean;
 }
 
-type PopoverState = { open: false } | { open: true; focusId: string | null };
+type PopoverState = { open: false } | { open: true; focusId: string | null; view: ViewName };
 
 export interface ReviewQueueProviderProps {
   queue: ReviewQueueState;
@@ -98,10 +160,14 @@ export function ReviewQueueProvider({ queue, live, route, onReviewAll, children 
   const [placedCount, setPlacedCount] = useState(0);
   const [anchorVersion, setAnchorVersion] = useState(0);
   const [popover, setPopover] = useState<PopoverState>({ open: false });
-  const [picked, setPicked] = useState<QueueReview | null>(null);
+  const [picked, setPicked] = useState<{ review: QueueReview; view: ViewName } | null>(null);
   const [focusPill, setFocusPill] = useState(0);
-  const drafts = useRef(new Map<string, string>());
+  const drafts = useRef(new Map<string, string>()).current;
+  /** Reviews decided in the shell's drawer, so closing it does not return focus to a row about to leave. */
+  const decided = useRef(new Set<string>());
+  const popoverFocus = useRef<(() => void) | null>(null);
   const wide = useWideDrawer();
+  const announcement = useQueueAnnouncement(queue, live);
 
   const anchor = useCallback((): HTMLElement | null => {
     const connected = pills.current.filter((p) => p.el.isConnected);
@@ -135,97 +201,130 @@ export function ReviewQueueProvider({ queue, live, route, onReviewAll, children 
 
   function openReview(review: QueueReview) {
     setPopover({ open: false });
-    if (route.view === "board" && route.item !== null) navigate({ ...route, item: null }, "replace");
-    setPicked(review);
+    decided.current.delete(review.id);
+    if (route.view === "board" && route.item !== null) navigate({ ...route, item: null }, "push");
+    setPicked({ review, view: route.view });
   }
 
   function closeDrawer() {
     if (picked === null) return;
-    const target = focusReturnTarget(picked.id, queue.reviews);
+    const id = picked.review.id;
+    const target = decided.current.has(id) ? ({ kind: "pill" } as const) : focusReturnTarget(id, queue.reviews);
     setPicked(null);
-    if (target.kind === "row") setPopover({ open: true, focusId: target.id });
+    if (target.kind === "row") setPopover({ open: true, focusId: target.id, view: route.view });
     else setFocusPill((n) => n + 1);
   }
 
-  // The board's drawer opening closes this one.
+  // The board's drawer opening closes this one, and the popover over it.
   const boardItem = route.view === "board" ? route.item : null;
   useEffect(() => {
-    if (boardItem !== null) setPicked(null);
+    if (boardItem === null) return;
+    setPicked(null);
+    setPopover({ open: false });
   }, [boardItem]);
 
-  // A change of view closes the popover and the drawer.
-  const lastView = useRef(route.view);
+  // A change of view drops the popover and the drawer (they already draw only on their own view).
   useEffect(() => {
-    if (lastView.current === route.view) return;
-    lastView.current = route.view;
-    setPopover({ open: false });
-    setPicked(null);
+    setPopover((p) => (p.open && p.view !== route.view ? { open: false } : p));
+    setPicked((p) => (p !== null && p.view !== route.view ? null : p));
   }, [route.view]);
 
+  const view = route.view;
   const value = useMemo<ReviewQueueContextValue>(
     () => ({
       queue,
       live,
       popoverOpen: popover.open,
-      drawerOpen: picked !== null,
-      togglePopover: () => setPopover((p) => (p.open ? { open: false } : { open: true, focusId: null })),
-      openPopover: () => setPopover({ open: true, focusId: null }),
+      togglePopover: () => setPopover((p) => (p.open ? { open: false } : { open: true, focusId: null, view })),
+      openPopover: () => setPopover({ open: true, focusId: null, view }),
+      closePopover,
+      focusPopover: () => popoverFocus.current?.(),
       registerPill,
     }),
-    [queue, live, popover.open, picked, registerPill],
+    [queue, live, popover.open, view, closePopover, registerPill],
   );
 
-  const modalDrawer = picked !== null && !wide;
-  const pickedKey = picked === null ? "" : `${picked.project}\u0000${picked.externalId}`;
+  const shownPicked = picked !== null && picked.view === route.view ? picked.review : null;
+  const shownPopover = popover.open && popover.view === route.view ? popover : null;
+  const shellOpen = shownPicked !== null;
+  const drawerState = useMemo<ShellDrawerState>(() => ({ open: shellOpen, drafts }), [shellOpen, drafts]);
+  const modalDrawer = shellOpen && !wide;
 
   return (
     <ReviewQueueContext.Provider value={value}>
-      <div inert={modalDrawer}>
-        {children}
-        {placedCount === 0 && (
-          <div className="pointer-events-none fixed top-3 right-3 z-30">
-            <div className="pointer-events-auto">
-              <PillButton variant="floating" placed={false} />
+      <ShellDrawerContext.Provider value={drawerState}>
+        <div inert={modalDrawer}>
+          {children}
+          {placedCount === 0 && (
+            <div className="pointer-events-none fixed top-4 right-4 z-30">
+              <div className="pointer-events-auto">
+                <PillButton variant="floating" placed={false} />
+              </div>
             </div>
-          </div>
+          )}
+        </div>
+        <p className="sr-only" role="status" aria-live="polite">
+          {announcement}
+        </p>
+        {shownPopover !== null &&
+          createPortal(
+            <QueuePopover
+              anchor={anchor}
+              anchorVersion={anchorVersion}
+              queue={queue}
+              live={live}
+              initialFocusId={shownPopover.focusId}
+              showBoardLink={route.view !== "board"}
+              focusRef={popoverFocus}
+              onPick={openReview}
+              onClose={closePopover}
+              onReviewAll={onReviewAll}
+            />,
+            document.body,
+          )}
+        {shownPicked !== null && (
+          <ReviewDrawer
+            key={`${shownPicked.project}\u0000${shownPicked.externalId}`}
+            project={shownPicked.project}
+            item={shownPicked.externalId}
+            boardLoaded
+            boardVersion={queue.version}
+            initialDraft={drafts.get(shownPicked.externalId) ?? ""}
+            onDraftChange={(draft) => storeDraft(drafts, shownPicked.externalId, draft)}
+            onDecided={() => decided.current.add(shownPicked.id)}
+            onProjectConfirmed={() => {}}
+            onClose={closeDrawer}
+          />
         )}
-      </div>
-      <p className="sr-only" role="status" aria-live="polite">
-        {pillLabel(queue.total, queue.loaded, live)}
-      </p>
-      {popover.open &&
-        createPortal(
-          <QueuePopover
-            anchor={anchor}
-            anchorVersion={anchorVersion}
-            queue={queue}
-            initialFocusId={popover.focusId}
-            showBoardLink={route.view !== "board"}
-            onPick={openReview}
-            onClose={closePopover}
-            onReviewAll={onReviewAll}
-          />,
-          document.body,
-        )}
-      {picked !== null && (
-        <ReviewDrawer
-          key={pickedKey}
-          project={picked.project}
-          item={picked.externalId}
-          boardLoaded
-          boardVersion={queue.version}
-          initialDraft={drafts.current.get(pickedKey) ?? ""}
-          onDraftChange={(draft) => {
-            if (draft.trim() === "") drafts.current.delete(pickedKey);
-            else drafts.current.set(pickedKey, draft);
-          }}
-          onDecided={() => {}}
-          onProjectConfirmed={() => {}}
-          onClose={closeDrawer}
-        />
-      )}
+      </ShellDrawerContext.Provider>
     </ReviewQueueContext.Provider>
   );
+}
+
+/** The status region's text: count changes after the first read, and lasting live/offline changes (see the header). */
+function useQueueAnnouncement(queue: ReviewQueueState, live: LiveState): string {
+  const [text, setText] = useState("");
+  const lastTotal = useRef<number | null>(null);
+  const settled = useRef<LiveState | null>(null);
+
+  useEffect(() => {
+    if (!queue.loaded) return;
+    const message = countAnnouncement(lastTotal.current, queue.total);
+    lastTotal.current = queue.total;
+    if (message !== null) setText(message);
+  }, [queue.loaded, queue.total]);
+
+  useEffect(() => {
+    if (live === "connecting") return;
+    const timer = setTimeout(() => {
+      const message = liveAnnouncement(settled.current, live);
+      settled.current = live;
+      if (message !== null) setText(message);
+    }, LIVE_ANNOUNCE_HOLD_MS);
+    return () => clearTimeout(timer);
+  }, [live]);
+
+  return text;
 }
 
 export interface ReviewQueuePillProps {
@@ -239,7 +338,7 @@ export function ReviewQueuePill({ variant = "inline" }: ReviewQueuePillProps) {
 }
 
 function PillButton({ variant, placed }: { variant: "inline" | "floating"; placed: boolean }) {
-  const { queue, live, popoverOpen, togglePopover, openPopover, registerPill } = useReviewQueueContext();
+  const { queue, live, popoverOpen, togglePopover, openPopover, closePopover, focusPopover, registerPill } = useReviewQueueContext();
   const ref = useRef<HTMLButtonElement>(null);
 
   useLayoutEffect(() => {
@@ -249,9 +348,13 @@ function PillButton({ variant, placed }: { variant: "inline" | "floating"; place
   }, [registerPill, placed]);
 
   function onKeyDown(e: KeyboardEvent<HTMLButtonElement>) {
-    if (e.key === "ArrowDown" && !popoverOpen) {
+    if (e.key === "ArrowDown") {
       e.preventDefault();
-      openPopover();
+      if (popoverOpen) focusPopover();
+      else openPopover();
+    } else if (e.key === "Escape" && popoverOpen) {
+      e.preventDefault();
+      closePopover(false);
     }
   }
 
@@ -271,8 +374,11 @@ function PillButton({ variant, placed }: { variant: "inline" | "floating"; place
       data-review-pill={placed ? "placed" : "fallback"}
       className={`inline-flex shrink-0 items-center gap-2 rounded-full border pr-[5px] pl-3 text-xs whitespace-nowrap focus:outline-none focus-visible:ring-2 focus-visible:ring-accent ${surface} ${expanded}`}
     >
-      <StatusLight live={live} />
-      <span className="text-fg-muted">{liveText(live)}</span>
+      {/* Wide enough for "Connecting…" from `sm` up, so a state flip never moves the header's other controls. */}
+      <span className="inline-flex items-center justify-end gap-2 sm:min-w-[5.25rem]">
+        <StatusLight live={live} />
+        <span className="hidden text-fg-muted sm:inline">{liveText(live)}</span>
+      </span>
       <span aria-hidden="true" className="h-3.5 w-px bg-hairline" />
       <CountBadge zero={zero}>{countText(queue.total, queue.loaded)}</CountBadge>
     </button>
@@ -306,24 +412,35 @@ interface QueuePopoverProps {
   anchor: () => HTMLElement | null;
   anchorVersion: number;
   queue: ReviewQueueState;
+  live: LiveState;
   /** The row to focus on open (the drawer closing on it); null focuses the first. */
   initialFocusId: string | null;
   showBoardLink: boolean;
+  /** Set to this popover's "focus the active row" while it is mounted. */
+  focusRef: { current: (() => void) | null };
   onPick: (review: QueueReview) => void;
   onClose: (returnFocus: boolean) => void;
   onReviewAll: (() => void) | undefined;
 }
 
+type Placement = { top: number; right: number; width: number };
+
 /** Where the popover goes for a pill (lib/reviewQueueRow.ts `popoverPlacement`); null with no pill. */
-function placeUnder(el: HTMLElement | null): { top: number; right: number; width: number } | null {
+function placeUnder(el: HTMLElement | null): Placement | null {
   if (el === null) return null;
   return popoverPlacement(el.getBoundingClientRect(), document.documentElement.clientWidth);
+}
+
+function samePlacement(a: Placement | null, b: Placement | null): boolean {
+  return a === b || (a !== null && b !== null && a.top === b.top && a.right === b.right && a.width === b.width);
 }
 
 /** How often the open popover refreshes its ages. */
 const AGE_TICK_MS = 30_000;
 
-function QueuePopover({ anchor, anchorVersion, queue, initialFocusId, showBoardLink, onPick, onClose, onReviewAll }: QueuePopoverProps) {
+const TABBABLE = "button:not([disabled]):not([tabindex='-1']), a[href]";
+
+function QueuePopover({ anchor, anchorVersion, queue, live, initialFocusId, showBoardLink, focusRef, onPick, onClose, onReviewAll }: QueuePopoverProps) {
   const titleId = useId();
   const rootRef = useRef<HTMLDivElement>(null);
   const rowRefs = useRef(new Map<string, HTMLButtonElement>());
@@ -340,25 +457,40 @@ function QueuePopover({ anchor, anchorVersion, queue, initialFocusId, showBoardL
     return () => clearInterval(timer);
   }, []);
 
-  // Anchored under the pill, right edges aligned; follows it on scroll and resize.
+  // Follow the pill every frame while open: it can move with no resize or scroll event.
   useLayoutEffect(() => {
-    function place() {
+    let frame = 0;
+    let last = placeUnder(anchor());
+    setPos(last);
+    function follow() {
       const next = placeUnder(anchor());
-      if (next !== null) setPos(next);
+      if (next !== null && !samePlacement(last, next)) {
+        last = next;
+        setPos(next);
+      }
+      frame = requestAnimationFrame(follow);
     }
-    place();
-    window.addEventListener("resize", place);
-    window.addEventListener("scroll", place, true);
-    return () => {
-      window.removeEventListener("resize", place);
-      window.removeEventListener("scroll", place, true);
-    };
+    frame = requestAnimationFrame(follow);
+    return () => cancelAnimationFrame(frame);
   }, [anchor, anchorVersion]);
 
   // No pill to anchor to (the view went away under it): close.
   useEffect(() => {
     if (anchor() === null) onClose(false);
   }, [anchor, anchorVersion, onClose]);
+
+  function focusActive() {
+    const review = reviews[active];
+    if (review !== undefined) rowRefs.current.get(review.id)?.focus();
+    else rootRef.current?.focus();
+  }
+
+  useEffect(() => {
+    focusRef.current = focusActive;
+    return () => {
+      focusRef.current = null;
+    };
+  });
 
   function focusRow(index: number) {
     const review = reviews[index];
@@ -370,9 +502,7 @@ function QueuePopover({ anchor, anchorVersion, queue, initialFocusId, showBoardL
 
   // Focus the first (or the asked-for) row on open, or the dialog itself when the queue is empty.
   useEffect(() => {
-    const review = reviews[active];
-    if (review !== undefined) rowRefs.current.get(review.id)?.focus();
-    else rootRef.current?.focus();
+    focusActive();
     // Mount only: later list changes are reconciled below.
   }, []);
 
@@ -405,6 +535,21 @@ function QueuePopover({ anchor, anchorVersion, queue, initialFocusId, showBoardL
       e.preventDefault();
       e.stopPropagation();
       onClose(true);
+      return;
+    }
+    if (e.key !== "Tab" || rootRef.current === null) return;
+    // Portalled to the end of <body>, the popover is last in the tab order:
+    // leaving it either way goes back to the pill, as if it sat right after it.
+    const tabbables = [...rootRef.current.querySelectorAll<HTMLElement>(TABBABLE)];
+    const first = tabbables[0];
+    const last = tabbables.at(-1);
+    const current = document.activeElement;
+    if (e.shiftKey && (current === first || current === rootRef.current)) {
+      e.preventDefault();
+      onClose(true);
+    } else if (!e.shiftKey && (current === last || tabbables.length === 0)) {
+      // Focus the pill and let this Tab carry on from it to whatever follows.
+      onClose(true);
     }
   }
 
@@ -428,7 +573,7 @@ function QueuePopover({ anchor, anchorVersion, queue, initialFocusId, showBoardL
     navigate(BOARD_HOME, "push");
   }
 
-  const note = truncationNote(reviews.length, queue.total, queue.truncated);
+  const stale = staleNote(live);
 
   return (
     <div
@@ -441,12 +586,30 @@ function QueuePopover({ anchor, anchorVersion, queue, initialFocusId, showBoardL
       style={pos === null ? { visibility: "hidden" } : { top: pos.top, right: pos.right, width: pos.width }}
       className="fixed z-50 flex max-h-[70vh] flex-col overflow-hidden rounded-2xl border border-hairline bg-surface-strong text-fg shadow-[0_12px_40px_-12px_rgba(0,0,0,0.65),0_24px_60px_-20px_rgba(0,0,0,0.6)] backdrop-blur-lg focus:outline-none"
     >
-      <div className="flex items-center gap-2.5 border-b border-hairline px-3.5 py-3">
-        <h2 id={titleId} className="text-sm font-semibold text-fg">
-          Reviews waiting
-        </h2>
-        <CountBadge zero={!queue.loaded || queue.total === 0}>{queue.loaded ? queue.total : "…"}</CountBadge>
-        <span className="ml-auto text-[11px] text-fg-muted">{note ?? "oldest first"}</span>
+      <div className="border-b border-hairline px-3.5 py-3">
+        <div className="flex min-h-7 items-center gap-2.5">
+          <h2 id={titleId} className="text-sm font-semibold text-fg">
+            Reviews waiting
+          </h2>
+          <CountBadge zero={!queue.loaded || queue.total === 0}>{queue.loaded ? queue.total : "…"}</CountBadge>
+          {onReviewAll !== undefined && (
+            <button
+              type="button"
+              onClick={onReviewAll}
+              disabled={reviews.length === 0}
+              className="ml-auto min-h-11 rounded-lg bg-accent px-3 text-xs font-semibold text-ground hover:bg-accent/90 focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-ground disabled:opacity-50 sm:min-h-7"
+            >
+              Review all
+            </button>
+          )}
+        </div>
+        <p className="mt-1 text-[11px] text-fg-muted">{orderNote(reviews.length, queue.total, queue.truncated)}</p>
+        {stale !== null && (
+          <p className="mt-0.5 flex items-center gap-1.5 text-[11px] text-fg-muted">
+            <StatusLight live={live} />
+            {stale}
+          </p>
+        )}
       </div>
 
       {queue.error !== null && (
@@ -502,23 +665,15 @@ function QueuePopover({ anchor, anchorVersion, queue, initialFocusId, showBoardL
             <Kbd>Esc</Kbd> close
           </span>
         </span>
-        <span className="ml-auto flex items-center gap-3">
-          {showBoardLink && (
-            <a href={formatRoute(BOARD_HOME)} onClick={openBoard} className="rounded text-xs text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-accent">
-              Open the board
-            </a>
-          )}
-          {onReviewAll !== undefined && (
-            <button
-              type="button"
-              onClick={onReviewAll}
-              disabled={reviews.length === 0}
-              className="min-h-11 rounded-lg bg-accent px-3 text-xs font-semibold text-ground hover:bg-accent/90 focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-ground disabled:opacity-50 sm:min-h-7"
-            >
-              Review all
-            </button>
-          )}
-        </span>
+        {showBoardLink && (
+          <a
+            href={formatRoute(BOARD_HOME)}
+            onClick={openBoard}
+            className="ml-auto inline-flex min-h-11 items-center rounded text-xs text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-accent sm:min-h-0"
+          >
+            Open the board
+          </a>
+        )}
       </div>
     </div>
   );
@@ -543,12 +698,14 @@ function QueueRowButton({
   onFocus: () => void;
   onPick: () => void;
 }) {
+  const summaryId = useId();
   return (
     <button
       ref={buttonRef}
       type="button"
       tabIndex={active ? 0 : -1}
       aria-label={rowLabel(review, now)}
+      aria-describedby={review.summaryLine !== null ? summaryId : undefined}
       data-review-id={review.id}
       onFocus={onFocus}
       onClick={onPick}
@@ -564,7 +721,11 @@ function QueueRowButton({
         </time>
       </span>
       <span className="mt-1.5 line-clamp-2 text-sm leading-snug text-fg">{review.title.trim() || "(untitled)"}</span>
-      {review.summaryLine !== null && <span className="mt-0.5 block truncate text-xs text-fg-muted">{review.summaryLine}</span>}
+      {review.summaryLine !== null && (
+        <span id={summaryId} className="mt-0.5 block truncate text-xs text-fg-muted">
+          {review.summaryLine}
+        </span>
+      )}
       <span className="mt-1.5 inline-flex items-center gap-1.5 text-[11px] text-fg-muted">
         <ImageIcon />
         {formatImageCount(review.imageCount)}

@@ -46,7 +46,7 @@ import { navigate } from "../lib/navigate.js";
 import { formatRoute, type GraphRoute } from "../lib/route.js";
 import { viewFilterOf, type ViewFilter, type ViewNode } from "../lib/viewFilter.js";
 import { trpc } from "../trpc.js";
-import { ReviewQueuePill } from "./ReviewQueue.js";
+import { ReviewQueuePill, useShellDrawer } from "./ReviewQueue.js";
 
 type ListResult = Awaited<ReturnType<typeof trpc.list.query>>;
 type FeedRow = ListResult["nodes"][number];
@@ -85,6 +85,8 @@ function messageOf(err: unknown, fallback: string): string {
 }
 
 export function FeedView({ viewId }: { viewId: string | null }) {
+  // Pads itself clear of the review queue's drawer from `sm` up, as the board does (ReviewQueue.tsx).
+  const shellDrawerOpen = useShellDrawer().open;
   const [state, setState] = useState<FeedState>(viewId === null ? { kind: "no-view" } : { kind: "loading" });
 
   // Keyed on `viewId`: the shell re-renders this component with a new id
@@ -189,7 +191,7 @@ export function FeedView({ viewId }: { viewId: string | null }) {
   return (
     // `body` is `overflow: hidden` (index.css, for the canvas), so this
     // element is the page's own scroll container.
-    <main className="h-dvh w-screen overflow-y-auto">
+    <main className={`h-dvh w-screen overflow-y-auto ${shellDrawerOpen ? "sm:pr-[492px]" : ""}`}>
       <div aria-hidden="true" className="ambience pointer-events-none fixed inset-0 -z-10" />
       <div className="mx-auto max-w-3xl px-4 py-6">
         <header className="glass mb-4 flex flex-wrap items-start justify-between gap-4 p-4 sm:flex-nowrap">

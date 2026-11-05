@@ -40,9 +40,11 @@
 // ReviewQueueProvider (components/ReviewQueue.tsx) shares it with the pill
 // each view places, and owns the popover and the drawer a pick opens over
 // whichever view is mounted. Its wrapper is one stable element around the
-// switch, so it never remounts a view.
+// switch, so it never remounts a view, and the view element is memoized on
+// the route, so a queue read or a live-state flip re-renders the shell and
+// the pill but not the view (GraphView's canvas included).
 
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { FeedView } from "./components/FeedView.js";
 import { GraphView } from "./components/GraphView.js";
 import { ReviewQueueProvider } from "./components/ReviewQueue.js";
@@ -109,9 +111,11 @@ export function App() {
     };
   }, []);
 
+  const view = useMemo(() => renderView(route), [route]);
+
   return (
     <ReviewQueueProvider queue={queue} live={live} route={route}>
-      {renderView(route)}
+      {view}
     </ReviewQueueProvider>
   );
 }
