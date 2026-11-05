@@ -13,3 +13,6 @@ dist/
 # Env
 .env
 .env.local
+
+# Beads issue tracker: local only, never published
+.beads/
