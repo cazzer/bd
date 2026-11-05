@@ -17,6 +17,10 @@
 // The position line counts what the person has reached (answered and
 // current) and what is still ahead and pending, so a review decided
 // elsewhere drops out of "n of m" as soon as the live queue says so.
+//
+// A run can also be stopped before its end (`finishRun`): it is done, and
+// the reviews it did not answer that are still pending are left for later,
+// with the skipped ones — what the summary offers to review next.
 
 export type RunResult = "accepted" | "changes" | "skipped";
 
@@ -74,6 +78,11 @@ export function answerRun<T extends RunItem>(run: ReviewRun<T>, live: readonly T
   return next === -1 ? { ...synced, results, done: true } : { ...synced, results, current: next };
 }
 
+/** Stop the run where it is: done, with its answers kept. */
+export function finishRun<T extends RunItem>(run: ReviewRun<T>): ReviewRun<T> {
+  return run.done ? run : { ...run, done: true };
+}
+
 /** Whether the review on screen is still in the live queue (false once done). */
 export function currentPending<T extends RunItem>(run: ReviewRun<T>, live: readonly T[]): boolean {
   const shown = currentReview(run);
@@ -100,8 +109,24 @@ export function runTallies<T extends RunItem>(run: ReviewRun<T>): RunTallies {
   return tallies;
 }
 
-/** The skipped reviews still pending, in run order: what "Review skipped" starts a new run over. */
-export function skippedPending<T extends RunItem>(run: ReviewRun<T>, live: readonly T[]): T[] {
+/**
+ * The reviews of the run still pending and not decided in it — skipped, or
+ * not reached when the run was stopped early — in run order: what the
+ * summary starts a new run over.
+ */
+export function leftPending<T extends RunItem>(run: ReviewRun<T>, live: readonly T[]): T[] {
   const pending = new Set(live.map((r) => r.id));
-  return run.items.filter((r) => run.results.get(r.id) === "skipped" && pending.has(r.id));
+  return run.items.filter((r) => {
+    const result = run.results.get(r.id);
+    return pending.has(r.id) && (result === undefined || result === "skipped");
+  });
+}
+
+/** What became of a review in the run, for the summary's list. */
+export type RunEntryResult = RunResult | "left" | "elsewhere";
+
+/** Every review the run held, in run order, with what became of it: its answer, still pending ("left"), or gone from the queue unanswered ("elsewhere"). */
+export function runLog<T extends RunItem>(run: ReviewRun<T>, live: readonly T[]): Array<{ item: T; result: RunEntryResult }> {
+  const pending = new Set(live.map((r) => r.id));
+  return run.items.map((item) => ({ item, result: run.results.get(item.id) ?? (pending.has(item.id) ? "left" : "elsewhere") }));
 }

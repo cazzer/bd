@@ -15,6 +15,25 @@
 import { createTRPCClient, httpBatchLink, httpSubscriptionLink, splitLink } from "@trpc/client";
 import type { AppRouter } from "../server/router.js";
 
+/** A response that is neither the server's JSON nor ok: its HTTP status, kept on the error tRPC wraps (`cause`). */
+export class HttpStatusError extends Error {
+  constructor(readonly status: number, statusText: string) {
+    super(`HTTP ${status}${statusText ? ` ${statusText}` : ""}`);
+    this.name = "HttpStatusError";
+  }
+}
+
+// tRPC parses every response as JSON and drops the response when that
+// fails, so a proxy's or a crashed server's plain-text 500 would surface as
+// "Unexpected token…" with no status. Failing such a response here keeps
+// the status for a caller that must tell "refused" from "may have been
+// written" (ReviewItemPanel's decision).
+async function fetchKeepingStatus(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const res = await fetch(input, init);
+  if (!res.ok && !(res.headers.get("content-type") ?? "").includes("json")) throw new HttpStatusError(res.status, res.statusText);
+  return res;
+}
+
 export const trpc = createTRPCClient<AppRouter>({
   links: [
     // Subscriptions (the live board's change stream) travel as SSE;
@@ -25,7 +44,7 @@ export const trpc = createTRPCClient<AppRouter>({
       // origin. vite.config.ts proxies this path to the loopback-only
       // tRPC server — the browser never learns its port.
       true: httpSubscriptionLink({ url: "/trpc" }),
-      false: httpBatchLink({ url: "/trpc" }),
+      false: httpBatchLink({ url: "/trpc", fetch: fetchKeepingStatus }),
     }),
   ],
 });

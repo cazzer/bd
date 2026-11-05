@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canDecide, decisionBlocked, describeDecision, describeNotified, describeRecipient, drawerProject, stepIndex } from "./reviewDrawer.js";
+import { canDecide, decisionBlocked, decisionEffects, describeDecision, describeNotified, describeRecipient, describeThrownDecision, drawerProject, stepIndex } from "./reviewDrawer.js";
 
 describe("drawerProject", () => {
   const cards = [
@@ -125,5 +125,40 @@ describe("stepIndex", () => {
     expect(stepIndex(1, -4, 3)).toBe(0);
     expect(stepIndex(0, 1, 1)).toBe(0);
     expect(stepIndex(0, 1, 0)).toBe(0);
+  });
+});
+
+describe("describeThrownDecision", () => {
+  it("passes a 4xx refusal through as the whole story: nothing was written", () => {
+    expect(describeThrownDecision({ message: 'Review "lc-1" is already closed.', httpStatus: 409 })).toEqual({ text: 'Review "lc-1" is already closed.', detail: null, uncertain: false });
+  });
+
+  it("reads a 5xx as uncertain, names the status, and keeps the raw error as the detail", () => {
+    const d = describeThrownDecision({ message: "Unexpected token 'I'", httpStatus: 500 });
+    expect(d.uncertain).toBe(true);
+    expect(d.text).toBe("Couldn't confirm with the server (HTTP 500). The decision may or may not have been written — check the thread before deciding again.");
+    expect(d.detail).toBe("Unexpected token 'I'");
+  });
+
+  it("reads an error with no status (a dropped connection) as uncertain too", () => {
+    const d = describeThrownDecision({ message: "Failed to fetch", httpStatus: null });
+    expect(d.uncertain).toBe(true);
+    expect(d.text.startsWith("Couldn't reach the server to confirm.")).toBe(true);
+  });
+});
+
+describe("decisionEffects", () => {
+  it("tells the host the decision was written only for ok — the run-through advances on nothing else", () => {
+    expect(decisionEffects({ ok: true, decision: "accept", written: ["comment", "close"] }).written).toBe(true);
+    expect(decisionEffects({ ok: false, decision: "accept", written: [], error: "locked" }).written).toBe(false);
+    expect(decisionEffects({ ok: false, decision: "changes", written: ["comment"], error: "label failed" }).written).toBe(false);
+    expect(decisionEffects({ ok: false, decision: "accept", written: [], error: "killed", uncertain: "close" }).written).toBe(false);
+  });
+
+  it("re-reads when anything was or may have been written, and clears the box unless a retry needs it", () => {
+    expect(decisionEffects({ ok: true, decision: "accept", written: ["close"] })).toMatchObject({ reread: true, clearMessage: true });
+    expect(decisionEffects({ ok: false, decision: "accept", written: [], error: "x" })).toMatchObject({ reread: false, clearMessage: false });
+    expect(decisionEffects({ ok: false, decision: "accept", written: [], error: "x", uncertain: "close" })).toMatchObject({ reread: true });
+    expect(decisionEffects({ ok: false, decision: "changes", written: ["comment"], error: "x" })).toMatchObject({ reread: true, clearMessage: true });
   });
 });

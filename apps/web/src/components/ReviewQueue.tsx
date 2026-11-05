@@ -70,9 +70,10 @@
 // mounts ReviewRunModal (design.md decision 6) over the current view with
 // the live queue and the shared draft map; the address is untouched, even
 // on the board with its own drawer open (the modal makes it inert
-// meanwhile). Ending the run unmounts it and returns focus to the pill. Like
-// the drawer, it remembers its view and ends on a change of view or when
-// the board's drawer opens.
+// meanwhile). Ending the run unmounts it and returns focus to the pill (or,
+// when the board's drawer still makes the pill inert, to that drawer's
+// title). Like the drawer, it remembers its view and ends on a change of
+// view or when the board's drawer opens.
 
 import { createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FocusEvent, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
@@ -200,9 +201,15 @@ export function ReviewQueueProvider({ queue, live, route, children }: ReviewQueu
     [anchor],
   );
 
-  // Focus the pill once the drawer that asked for it has unmounted (and the view is no longer inert).
+  // Focus the pill once the drawer or run that asked for it has unmounted
+  // (and the view is no longer inert). A pill that is still inert — the
+  // board's own drawer is a modal sheet below `sm` — cannot take focus, so
+  // it goes to that drawer's title instead.
   useEffect(() => {
-    if (focusPill > 0) anchor()?.focus();
+    if (focusPill === 0) return;
+    const pill = anchor();
+    if (pill !== null && pill.closest("[inert]") === null) pill.focus();
+    else document.querySelector<HTMLElement>("[data-panel-title]")?.focus();
   }, [focusPill, anchor]);
 
   function openReview(review: QueueReview) {

@@ -1161,8 +1161,8 @@ export function GraphView() {
         />
       </div>
 
-      {/* Top-center: search bar + "New note" popover. */}
-      <div className="pointer-events-none fixed inset-x-0 top-4 z-20 flex justify-center px-4">
+      {/* Top-center: search bar + "New note" popover. Below `sm` it would cover the review queue's pill at the head of the right column (review-queue), so there it starts under the pill's row. */}
+      <div className="pointer-events-none fixed inset-x-0 top-[4.25rem] z-20 flex justify-center px-4 sm:top-4">
         <div className="pointer-events-auto">
           <SearchBar
             query={query}
@@ -1232,7 +1232,8 @@ export function GraphView() {
         <div className="pointer-events-auto shrink-0 self-end">
           <ReviewQueuePill variant="floating" />
         </div>
-        <div className="glass pointer-events-auto shrink-0 p-3">
+        {/* Below `sm` the search sits under the pill's row, across the full width, so the type control starts under the search. */}
+        <div className="glass pointer-events-auto shrink-0 p-3 max-sm:mt-[8.75rem]">
           <TypePanel drawnTypes={drawnTypes} storeTypes={nodeTypeCounts} selected={typePanelSelection} focusedType={focusedType} onToggleFocus={handleToggleTypeFocus} typeColors={typeColors} edgeLegend={edgeLegend} />
         </div>
         {selectedNodeId && (

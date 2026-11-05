@@ -2,10 +2,12 @@
 // attachments keyed by kind (review-queue, design.md decision 6). The
 // review panel renders the list through one slot that maps each kind to
 // its renderer (components/ReviewAttachments.tsx), so the follow-on bd-4zn
-// (diagrams, ERDs, before/recommendation parts) adds a kind here and a
-// renderer there without reshaping the drawer, the run-through modal, or
-// their props. Images are the only kind today. Structural types only, so
-// nothing from the server reaches the bundle.
+// (diagrams, ERDs) adds a kind here and a renderer there without reshaping
+// the drawer, the run-through modal, or their props. Before/recommendation
+// parts cut across kinds: they would be a `part` field on each attachment,
+// grouped part then kind inside the panel, not a kind of their own. Images
+// are the only kind today. Structural types only, so nothing from the
+// server reaches the bundle.
 
 export interface ImageAttachment {
   kind: "image";

@@ -3,13 +3,16 @@
 // (ReviewRunModal.tsx) both render, so there is one read path and one
 // decision path. The host draws the frame around it and names it by
 // `titleId`; the panel draws the header (id, parent, title, chips, graph
-// link, and the host's `headerEnd`), the scrolling body, and the pinned
-// decision footer. The title takes focus on mount. Escape inside the panel
-// goes to the host's `onEscape`, unless a draft is in the message box or a
-// decision is being written (the state is checked, not the focused
-// element), or an attachment's overlay is open (the lightbox handles
-// Escape); either way the panel takes the key (preventDefault), so a
-// native dialog around it does not cancel on it too.
+// link unless the host hides it, and the host's `headerEnd`), the body, and
+// the pinned decision footer. The title takes focus on mount.
+//
+// Escape inside the panel goes to the host's `onEscape`, unless a draft is
+// in the message box or a decision is being written (the state is checked,
+// not the focused element); in both cases the panel takes the key
+// (preventDefault), so a native dialog around it does not cancel on it too.
+// An open attachment overlay (the lightbox) is a dialog of its own that
+// stops Escape's propagation, so the panel never sees that key; the overlay
+// flag only guards the shortcuts and the focus fix below.
 //
 // It reads one item (`boardItem`) by project and external id, and re-reads
 // whenever the host's source re-reads (`boardVersion`) or a decision lands,
@@ -22,38 +25,72 @@
 // while the review is open — a pinned footer taking Accept or Request
 // changes with a message (`reviewDecision`). A success is a status line; a
 // failure is an alert box. A failure keeps the message unless the comment
-// already landed (deciding again would post it twice). Focus moves to
-// whichever line reports the outcome. For any other item: its fields, its
-// description, and a link to the graph.
+// already landed (deciding again would post it twice). A thrown call is
+// read by `describeThrownDecision`: a 4xx refusal is final, anything else
+// is uncertain — it says so, shows the raw error small, and re-reads the
+// item so the thread shows what landed. Focus moves to whichever line
+// reports the outcome, and to that line while a write is in flight (so
+// focus never falls out of the panel when the pressed button disables).
+// For any other item: its fields, its description, and a link to the
+// graph.
 //
-// `decisions` lets a host relabel the two decisions, hear when one reports
-// written (`ok` — the run-through moves on then, and only then), add its
-// own controls to the decision row (shown even when the item takes no
-// decision, so the run can always move on), and turn on the keyboard
-// shortcuts: Ctrl/Cmd+Enter takes the first decision, Ctrl/Cmd+Shift+Enter
-// the second. No plain key is ever taken, so typing in the message box is
-// never intercepted. Without it the panel is the drawer's: "Accept",
-// "Request changes", no extra controls, no shortcuts.
+// `layout` is the attachments' (ReviewAttachments.tsx): `column` stacks
+// everything in one scrolling body; `stage` gives a review with
+// attachments a two-column body — the attachments' stage on the left (two
+// thirds), summary, thread, and the decision footer on the right.
+//
+// `decisions` lets a host relabel the two decisions (with short labels for
+// phone widths, which also puts the three actions on one row there), hear
+// when one reports written (`ok` — the run-through moves on then, and only
+// then — with whether the agent could be told), add its own controls to the
+// decision row (shown even when the item takes no decision, so the run can
+// always move on, and told when a write is in flight), put a notice in
+// place of the decision form (the run's "decided elsewhere"), and turn on
+// the keyboard shortcuts: Ctrl/Cmd+Enter takes the first decision,
+// Ctrl/Cmd+Shift+Enter the second (with no message it focuses the box and
+// says one is needed). No plain key is ever taken, so typing in the message
+// box is never intercepted. `armAfterMs` keeps a decision from landing on
+// an item before it has been seen: the buttons ignore presses for that long
+// after mount, and the shortcuts ignore key repeat and wait for a fresh
+// press since mount (see useArmed) — so a held or double Cmd+Enter, or a
+// double click, decides one review, not the next. Without `decisions` the panel is
+// the drawer's: "Accept", "Request changes", nothing extra, no shortcuts,
+// no arming.
 
-import { useEffect, useId, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode, type RefObject } from "react";
 import { navigate } from "../lib/navigate.js";
-import { reviewAttachments } from "../lib/reviewAttachments.js";
-import { canDecide, decisionBlocked, describeDecision, describeNotified, describeRecipient, type DecisionOutcome, type ReviewDecisionKind } from "../lib/reviewDrawer.js";
+import { reviewAttachments, type ReviewAttachmentKind } from "../lib/reviewAttachments.js";
+import { canDecide, decisionBlocked, decisionEffects, describeNotified, describeRecipient, describeThrownDecision, type DecisionOutcome, type ReviewDecisionKind } from "../lib/reviewDrawer.js";
 import { formatRoute, type GraphRoute } from "../lib/route.js";
-import { trpc } from "../trpc.js";
-import { ReviewAttachments, SectionTitle } from "./ReviewAttachments.js";
+import { HttpStatusError, trpc } from "../trpc.js";
+import { ReviewAttachments, SectionTitle, type AttachmentLayout } from "./ReviewAttachments.js";
 
 type BoardItem = NonNullable<Awaited<ReturnType<typeof trpc.boardItem.query>>["item"]>;
+
+/** What the host hears with a written decision. */
+export interface WrittenReport {
+  /** "Agent notified (pane …)" or "Agent not notified: …"; null when the server does not say. */
+  notified: string | null;
+  /** The review promised a notice to a recorded pane and it could not be sent. */
+  notifyFailed: boolean;
+}
 
 export interface PanelDecisions {
   acceptLabel: string;
   changesLabel: string;
+  /** Below `sm`; given both, the actions share one row there and the recipient line is left out. */
+  acceptShort?: string;
+  changesShort?: string;
   /** The decision reported written (`ok`). */
-  onWritten?: (decision: ReviewDecisionKind) => void;
+  onWritten?: (decision: ReviewDecisionKind, report: WrittenReport) => void;
   /** The host's own controls at the end of the decision row. */
-  extra?: ReactNode;
+  extra?: (state: { busy: boolean }) => ReactNode;
+  /** Shown in place of the message box and the decisions, at the same height. */
+  notice?: ReactNode;
   /** Ctrl/Cmd+Enter accepts, Ctrl/Cmd+Shift+Enter requests changes. */
   shortcuts?: boolean;
+  /** Ignore decisions for this long after mount (and shortcuts until a key is released since). */
+  armAfterMs?: number;
 }
 
 const DRAWER_DECISIONS: PanelDecisions = { acceptLabel: "Accept", changesLabel: "Request changes" };
@@ -70,16 +107,21 @@ export interface ReviewItemPanelProps {
   /** The draft kept for this item from an earlier opening. */
   initialDraft: string;
   onDraftChange: (draft: string) => void;
-  /** A decision wrote something (possibly in part). */
+  /** A decision wrote something (possibly in part, or possibly at all). */
   onDecided: () => void;
   /** `boardItem` found the item in `project`. */
   onProjectConfirmed: (project: string) => void;
   /** Escape with nothing in its way (see the header). */
   onEscape: () => void;
+  /** A decision started or finished being written. */
+  onBusyChange?: (busy: boolean) => void;
   /** The id the host's frame is labelled by; it goes on the panel's title. */
   titleId: string;
   /** At the end of the header row (the drawer's Close). */
   headerEnd?: ReactNode;
+  /** "Open in graph" in the header; the run-through hides it (it would leave the run). */
+  showGraphLink?: boolean;
+  layout?: AttachmentLayout;
   decisions?: PanelDecisions;
 }
 
@@ -87,13 +129,60 @@ interface Outcome extends DecisionOutcome {
   notified: string | null;
 }
 
+interface Refusal {
+  text: string;
+  detail: string | null;
+}
+
 function messageOf(err: unknown, fallback: string): string {
   return err instanceof Error ? err.message : fallback;
+}
+
+/** The HTTP status of a thrown tRPC call: the server's error shape, else a non-JSON response's (trpc.ts `HttpStatusError`); null for no response. */
+function httpStatusOf(err: unknown): number | null {
+  const e = err as { data?: { httpStatus?: unknown } | null; cause?: unknown } | null;
+  const fromData = e?.data?.httpStatus;
+  if (typeof fromData === "number") return fromData;
+  return e?.cause instanceof HttpStatusError ? e.cause.status : null;
 }
 
 function formatTime(iso: string): string {
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+/**
+ * Decisions are ignored until `ms` after mount. Shortcuts also wait for a
+ * fresh press since mount — a key released, a pointer pressed, or a
+ * Control/Meta newly pressed — so a chord still held from the previous
+ * review (whose repeats the handler drops anyway) never decides this one,
+ * while a person who clicked "Skip" and then presses Cmd+Enter is not
+ * made to press it twice. A ref, read by the key handler of the very next
+ * event.
+ */
+function useArmed(ms: number | undefined): { timeArmed: boolean; keyArmed: { current: boolean } } {
+  const [timeArmed, setTimeArmed] = useState(ms === undefined);
+  const keyArmed = useRef(ms === undefined);
+  useEffect(() => {
+    if (ms === undefined) return;
+    const timer = setTimeout(() => setTimeArmed(true), ms);
+    const arm = () => {
+      keyArmed.current = true;
+    };
+    const onKeyDown = (e: globalThis.KeyboardEvent) => {
+      if (!e.repeat && (e.key === "Control" || e.key === "Meta")) arm();
+    };
+    window.addEventListener("keyup", arm, true);
+    window.addEventListener("pointerdown", arm, true);
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener("keyup", arm, true);
+      window.removeEventListener("pointerdown", arm, true);
+      window.removeEventListener("keydown", onKeyDown, true);
+    };
+  }, [ms]);
+  return { timeArmed, keyArmed };
 }
 
 export function ReviewItemPanel({
@@ -106,23 +195,30 @@ export function ReviewItemPanel({
   onDecided,
   onProjectConfirmed,
   onEscape,
+  onBusyChange,
   titleId,
   headerEnd,
+  showGraphLink = true,
+  layout = "column",
   decisions = DRAWER_DECISIONS,
 }: ReviewItemPanelProps) {
   const titleRef = useRef<HTMLHeadingElement>(null);
+  const messageRef = useRef<HTMLTextAreaElement>(null);
   const [answer, setAnswer] = useState<BoardItem | null | undefined>(undefined);
   const [readError, setReadError] = useState<string | null>(null);
   const [refetch, setRefetch] = useState(0);
-  const [overlayOpen, setOverlayOpen] = useState(false);
+  const [overlays, setOverlays] = useState<ReadonlySet<ReviewAttachmentKind>>(new Set());
   const [message, setMessageState] = useState(initialDraft);
   const [pending, setPending] = useState<ReviewDecisionKind | null>(null);
   const [outcome, setOutcome] = useState<Outcome | null>(null);
-  const [refusal, setRefusal] = useState<string | null>(null);
+  const [refusal, setRefusal] = useState<Refusal | null>(null);
+  const [needsMessage, setNeedsMessage] = useState(false);
+  const { timeArmed, keyArmed } = useArmed(decisions.armAfterMs);
 
   function setMessage(next: string) {
     setMessageState(next);
     onDraftChange(next);
+    if (next.trim() !== "") setNeedsMessage(false);
   }
 
   useEffect(() => {
@@ -149,6 +245,7 @@ export function ReviewItemPanel({
   }, [project, item, boardVersion, refetch]);
 
   const loaded = answer ?? null;
+  const overlayOpen = overlays.size > 0;
 
   // A re-read can take away the attachments altogether (the item is no
   // longer a review, or is gone), unmounting an open overlay with them: put
@@ -156,11 +253,21 @@ export function ReviewItemPanel({
   const reviewShown = loaded?.isReview === true;
   useEffect(() => {
     if (!overlayOpen || reviewShown) return;
-    setOverlayOpen(false);
+    setOverlays(new Set());
     titleRef.current?.focus();
   }, [overlayOpen, reviewShown]);
 
-  const decidable = loaded !== null && canDecide(loaded);
+  function onOverlayChange(kind: ReviewAttachmentKind, open: boolean) {
+    setOverlays((prev) => {
+      if (prev.has(kind) === open) return prev;
+      const next = new Set(prev);
+      if (open) next.add(kind);
+      else next.delete(kind);
+      return next;
+    });
+  }
+
+  const decidable = loaded !== null && canDecide(loaded) && decisions.notice === undefined;
 
   function onKeyDown(e: KeyboardEvent<HTMLDivElement>) {
     if (e.defaultPrevented || overlayOpen) return;
@@ -168,38 +275,89 @@ export function ReviewItemPanel({
       e.preventDefault();
       if (message.trim() !== "" || pending !== null) return;
       onEscape();
-    } else if (decisions.shortcuts && e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.altKey && decidable) {
+    } else if (decisions.shortcuts && e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.altKey) {
       e.preventDefault();
-      void decide(e.shiftKey ? "changes" : "accept");
+      if (e.repeat || !timeArmed || !keyArmed.current || !decidable) return;
+      const decision: ReviewDecisionKind = e.shiftKey ? "changes" : "accept";
+      if (decision === "changes" && message.trim() === "") {
+        setNeedsMessage(true);
+        messageRef.current?.focus();
+        return;
+      }
+      void decide(decision);
     }
   }
 
   async function decide(decision: ReviewDecisionKind) {
-    if (project === null || loaded === null || decisionBlocked(decision, message, pending !== null)) return;
+    if (!timeArmed || project === null || loaded === null || decisionBlocked(decision, message, pending !== null)) return;
     setPending(decision);
+    onBusyChange?.(true);
     setOutcome(null);
     setRefusal(null);
+    let written: { decision: ReviewDecisionKind; report: WrittenReport } | null = null;
     try {
       const result = await trpc.reviewDecision.mutate({ project, item: loaded.externalId, decision, message });
-      const described = describeDecision(result);
-      setOutcome({ ...described, notified: describeNotified(result.notified) });
-      if (!described.keepMessage) setMessage("");
-      if (result.written.length > 0 || result.uncertain !== undefined) {
+      const effects = decisionEffects(result);
+      const notified = describeNotified(result.notified);
+      setOutcome({ ...effects.outcome, notified });
+      if (effects.clearMessage) setMessage("");
+      if (effects.reread) {
         setRefetch((n) => n + 1);
         onDecided();
       }
-      if (result.ok) decisions.onWritten?.(decision);
+      // A failed notice matters only where one was promised (a pane and a herdr session recorded); otherwise the recipient line already said the comment is the record.
+      const promised = loaded.review !== null && !("invalid" in loaded.review) && loaded.review.pane !== null && loaded.review.socket !== undefined;
+      if (effects.written) written = { decision, report: { notified, notifyFailed: promised && result.notified?.ok === false } };
     } catch (err) {
-      setRefusal(messageOf(err, "The decision was refused."));
+      const thrown = describeThrownDecision({ message: messageOf(err, "The decision was refused."), httpStatus: httpStatusOf(err) });
+      setRefusal({ text: thrown.text, detail: thrown.detail });
+      if (thrown.uncertain) {
+        setRefetch((n) => n + 1);
+        onDecided();
+      }
     } finally {
       setPending(null);
+      onBusyChange?.(false);
     }
+    if (written !== null) decisions.onWritten?.(written.decision, written.report);
   }
 
   // What the panel can show: the item, still loading, or waiting for a tracker to bring it in.
   const waiting = project === null ? boardLoaded : answer === null;
   const title = loaded ? loaded.title || "(untitled)" : waiting ? `Waiting for ${item}` : readError ? item : "Loading…";
-  const reviewFooter = loaded !== null && loaded.isReview && (decidable || outcome !== null || refusal !== null);
+  const reviewFooter = loaded !== null && loaded.isReview && (decidable || outcome !== null || refusal !== null || decisions.notice !== undefined);
+  const attachments = loaded?.isReview ? reviewAttachments(loaded) : [];
+  const staged = layout === "stage" && attachments.length > 0;
+
+  const attachmentSlot = (slotLayout: AttachmentLayout) => <ReviewAttachments attachments={attachments} layout={slotLayout} focusTitle={() => titleRef.current?.focus()} onOverlayChange={onOverlayChange} />;
+
+  const body = (
+    <div className="min-h-0 flex-1 space-y-5 overflow-y-auto p-4">
+      {readError && (
+        <p role="alert" className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300">
+          {readError}
+        </p>
+      )}
+      {!loaded && waiting && <p className="text-sm text-fg-muted">Waiting for {item}; it opens when its tracker loads.</p>}
+      {loaded && (loaded.isReview ? <ReviewBody item={loaded} attachments={staged ? null : attachmentSlot("column")} /> : <PlainBody item={loaded} />)}
+    </div>
+  );
+
+  const footer = (reviewFooter || decisions.extra !== undefined) && (
+    <DecisionFooter
+      open={decidable}
+      recipient={loaded?.isReview ? describeRecipient(loaded.review) : ""}
+      labels={decisions}
+      message={message}
+      setMessage={setMessage}
+      messageRef={messageRef}
+      needsMessage={needsMessage}
+      pending={pending}
+      outcome={outcome}
+      refusal={refusal}
+      decide={(d) => void decide(d)}
+    />
+  );
 
   return (
     <div onKeyDown={onKeyDown} className="flex min-h-0 flex-1 flex-col">
@@ -217,7 +375,7 @@ export function ReviewItemPanel({
                 </>
               )}
             </div>
-            <h2 id={titleId} ref={titleRef} tabIndex={-1} className="mt-1 text-base font-semibold leading-snug text-fg focus:outline-none">
+            <h2 id={titleId} ref={titleRef} tabIndex={-1} data-panel-title="" className="mt-1 text-base font-semibold leading-snug text-fg focus:outline-none">
               {title}
             </h2>
             {loaded && (
@@ -229,38 +387,24 @@ export function ReviewItemPanel({
               </div>
             )}
           </div>
-          {loaded && <GraphLink nodeId={loaded.id} className="mt-1 shrink-0 whitespace-nowrap rounded text-sm text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-accent" />}
+          {loaded && showGraphLink && <GraphLink nodeId={loaded.id} className="mt-1 shrink-0 whitespace-nowrap rounded text-sm text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-accent" />}
           {headerEnd}
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 space-y-5 overflow-y-auto p-4">
-        {readError && (
-          <p role="alert" className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300">
-            {readError}
-          </p>
-        )}
-        {!loaded && waiting && <p className="text-sm text-fg-muted">Waiting for {item}; it opens when its tracker loads.</p>}
-        {loaded &&
-          (loaded.isReview ? (
-            <ReviewBody item={loaded} onOverlayChange={setOverlayOpen} focusTitle={() => titleRef.current?.focus()} />
-          ) : (
-            <PlainBody item={loaded} />
-          ))}
-      </div>
-
-      {(reviewFooter || decisions.extra !== undefined) && (
-        <DecisionFooter
-          open={decidable}
-          recipient={loaded?.isReview ? describeRecipient(loaded.review) : ""}
-          labels={decisions}
-          message={message}
-          setMessage={setMessage}
-          pending={pending}
-          outcome={outcome}
-          refusal={refusal}
-          decide={(d) => void decide(d)}
-        />
+      {staged ? (
+        <div className="flex min-h-0 flex-1">
+          <div className="min-h-0 min-w-0 flex-[2] border-r border-hairline p-4">{attachmentSlot("stage")}</div>
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+            {body}
+            {footer}
+          </div>
+        </div>
+      ) : (
+        <>
+          {body}
+          {footer}
+        </>
       )}
     </div>
   );
@@ -310,7 +454,8 @@ function GraphLink({ nodeId, className, children = "Open in graph" }: { nodeId: 
   );
 }
 
-function ReviewBody({ item, onOverlayChange, focusTitle }: { item: BoardItem; onOverlayChange: (open: boolean) => void; focusTitle: () => void }) {
+/** A review's body; `attachments` is the slot when it sits in the body, null when it is on the stage. */
+function ReviewBody({ item, attachments }: { item: BoardItem; attachments: ReactNode }) {
   const review = item.review;
   const invalid = review !== null && "invalid" in review;
   return (
@@ -326,7 +471,7 @@ function ReviewBody({ item, onOverlayChange, focusTitle }: { item: BoardItem; on
           <p className="whitespace-pre-wrap text-sm leading-relaxed text-fg">{review.summary}</p>
         </section>
       )}
-      <ReviewAttachments attachments={reviewAttachments(item)} focusTitle={focusTitle} onOverlayChange={onOverlayChange} />
+      {attachments}
       <Thread comments={item.comments} />
       {item.status === "closed" && (
         <p className="rounded-lg border border-hairline px-3 py-2 text-sm text-fg">
@@ -397,6 +542,8 @@ function DecisionFooter({
   labels,
   message,
   setMessage,
+  messageRef,
+  needsMessage,
   pending,
   outcome,
   refusal,
@@ -408,42 +555,58 @@ function DecisionFooter({
   labels: PanelDecisions;
   message: string;
   setMessage: (m: string) => void;
+  messageRef: RefObject<HTMLTextAreaElement | null>;
+  needsMessage: boolean;
   pending: ReviewDecisionKind | null;
   outcome: Outcome | null;
-  refusal: string | null;
+  refusal: Refusal | null;
   decide: (decision: ReviewDecisionKind) => void;
 }) {
   const messageId = useId();
   const labelId = useId();
+  const hintId = useId();
   const reportRef = useRef<HTMLDivElement>(null);
   const busy = pending !== null;
+  const compact = labels.acceptShort !== undefined && labels.changesShort !== undefined;
 
-  // Focus follows the outcome, so a keyboard or screen-reader user lands on what happened.
+  // Focus follows the outcome, so a keyboard or screen-reader user lands on
+  // what happened — and sits on that line while the write is in flight, so
+  // the pressed button disabling never drops focus out of the panel.
   useEffect(() => {
-    if (outcome !== null || refusal !== null) reportRef.current?.focus();
-  }, [outcome, refusal]);
+    if (busy || outcome !== null || refusal !== null) reportRef.current?.focus();
+  }, [busy, outcome, refusal]);
 
-  const failure = refusal ?? (outcome !== null && outcome.tone !== "ok" ? outcome.text : null);
+  const failure: Refusal | null = refusal ?? (outcome !== null && outcome.tone !== "ok" ? { text: outcome.text, detail: null } : null);
+  const textareaHeight = message !== "" ? "max-sm:h-[4.5rem]" : "max-sm:h-11 max-sm:focus:h-[4.5rem]";
 
   return (
     <div className="space-y-2 border-t border-hairline bg-surface-strong p-4">
+      {labels.notice !== undefined && <div className="flex min-h-[5.25rem] items-center rounded-lg border border-hairline bg-fg/[0.03] px-3 py-2 text-sm text-fg">{labels.notice}</div>}
       {open && (
         <>
           <label id={labelId} htmlFor={messageId} className="block text-xs text-fg-muted">
-            Message to the agent — sent with either decision, required for Request changes
+            <span className="sm:hidden">Message to the agent (required for changes)</span>
+            <span className="hidden sm:inline">Message to the agent — sent with either decision, required for Request changes</span>
           </label>
           <textarea
             id={messageId}
+            ref={messageRef}
             rows={2}
             value={message}
             onChange={(e) => setMessage(e.target.value)}
             disabled={busy}
-            className="block w-full resize-none rounded-lg border border-hairline bg-ground/60 px-3 py-2 text-base text-fg focus:outline-none focus:ring-2 focus:ring-accent disabled:opacity-60 sm:text-sm"
+            aria-describedby={needsMessage ? hintId : undefined}
+            className={`block w-full resize-none rounded-lg border border-hairline bg-ground/60 px-3 py-2 text-base text-fg focus:outline-none focus:ring-2 focus:ring-accent disabled:opacity-60 sm:text-sm ${textareaHeight}`}
           />
+          {needsMessage && (
+            <p id={hintId} role="alert" className="text-xs text-amber-200">
+              Add a message to request changes.
+            </p>
+          )}
         </>
       )}
       {(open || labels.extra !== undefined) && (
-        <div className="flex flex-wrap items-center gap-2">
+        <div className={`flex items-center gap-2 ${compact ? "max-sm:flex-nowrap max-sm:[&>button]:flex-1 sm:flex-wrap" : "flex-wrap"}`}>
           {open && (
             <>
               <button
@@ -453,7 +616,7 @@ function DecisionFooter({
                 aria-keyshortcuts={labels.shortcuts ? "Control+Enter Meta+Enter" : undefined}
                 className="min-h-11 rounded-lg bg-accent px-4 text-sm font-semibold text-ground hover:bg-accent/90 focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-ground disabled:opacity-60 sm:min-h-10"
               >
-                {pending === "accept" ? "Accepting…" : labels.acceptLabel}
+                {pending === "accept" ? "Accepting…" : <Label full={labels.acceptLabel} short={labels.acceptShort} />}
               </button>
               <button
                 type="button"
@@ -463,22 +626,34 @@ function DecisionFooter({
                 aria-keyshortcuts={labels.shortcuts ? "Control+Shift+Enter Meta+Shift+Enter" : undefined}
                 className="min-h-11 rounded-lg border border-amber-400/50 bg-amber-400/10 px-4 text-sm font-medium text-amber-200 hover:bg-amber-400/20 focus:outline-none focus:ring-2 focus:ring-amber-400 disabled:cursor-not-allowed disabled:opacity-50 sm:min-h-10"
               >
-                {pending === "changes" ? "Sending…" : labels.changesLabel}
+                {pending === "changes" ? "Sending…" : <Label full={labels.changesLabel} short={labels.changesShort} />}
               </button>
             </>
           )}
-          {labels.extra}
-          {open && <span className="text-xs text-fg-muted">{recipient}</span>}
+          {labels.extra?.({ busy })}
+        </div>
+      )}
+      {open && (
+        <div className={`flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-fg-muted ${compact ? "max-sm:hidden" : ""}`}>
+          <span>{recipient}</span>
+          {labels.shortcuts && (
+            <span aria-hidden="true" className="ml-auto hidden items-center gap-1 lg:inline-flex">
+              <Kbd>Ctrl/⌘</Kbd>
+              <Kbd>Enter</Kbd> accept · add <Kbd>Shift</Kbd> to request changes
+            </span>
+          )}
         </div>
       )}
       <div ref={reportRef} tabIndex={-1} className="focus:outline-none">
         {failure !== null ? (
           <div role="alert" className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300">
-            {failure}
+            {failure.text}
+            {failure.detail !== null && <span className="mt-1 block break-words font-mono text-xs text-fg-muted">{failure.detail}</span>}
             {refusal === null && outcome?.notified && <span className="mt-1 block text-fg-muted">{outcome.notified}</span>}
           </div>
         ) : (
           <p role="status" className="text-xs text-emerald-300">
+            {busy && <span className="text-fg-muted">Writing the decision…</span>}
             {outcome && (
               <>
                 {outcome.text}
@@ -490,4 +665,18 @@ function DecisionFooter({
       </div>
     </div>
   );
+}
+
+function Label({ full, short }: { full: string; short: string | undefined }) {
+  if (short === undefined) return <>{full}</>;
+  return (
+    <>
+      <span className="sm:hidden">{short}</span>
+      <span className="hidden sm:inline">{full}</span>
+    </>
+  );
+}
+
+function Kbd({ children }: { children: ReactNode }) {
+  return <kbd className="rounded border border-b-2 border-hairline px-1 font-mono text-xs text-fg">{children}</kbd>;
 }

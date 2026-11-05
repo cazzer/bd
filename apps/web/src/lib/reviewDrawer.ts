@@ -117,3 +117,53 @@ export function stepIndex(i: number, delta: number, n: number): number {
   if (n <= 0) return 0;
   return (((i + delta) % n) + n) % n;
 }
+
+/** What a thrown `reviewDecision` call reports: its message, and the HTTP status when known. */
+export interface ThrownDecision {
+  message: string;
+  httpStatus: number | null;
+}
+
+export interface ThrownDecisionText {
+  text: string;
+  /** The raw error, shown small under `text`; null when `text` already is it. */
+  detail: string | null;
+  /** True when the decision may have been written: the item should be re-read and the thread checked. */
+  uncertain: boolean;
+}
+
+/**
+ * How a thrown decision reads. The server refuses before writing anything
+ * with a 4xx tRPC error (read-only, unknown project or item, not a review,
+ * already closed), so that message is the whole story. Anything else — a
+ * 5xx, a response that is not the server's JSON, a dropped connection — may
+ * have landed after some steps were written, so it says so rather than
+ * inviting a retry that could post the comment twice.
+ */
+export function describeThrownDecision(err: ThrownDecision): ThrownDecisionText {
+  if (err.httpStatus !== null && err.httpStatus >= 400 && err.httpStatus < 500) {
+    return { text: err.message, detail: null, uncertain: false };
+  }
+  const where = err.httpStatus !== null ? `Couldn't confirm with the server (HTTP ${err.httpStatus}).` : "Couldn't reach the server to confirm.";
+  return {
+    text: `${where} The decision may or may not have been written — check the thread before deciding again.`,
+    detail: err.message,
+    uncertain: true,
+  };
+}
+
+/**
+ * What the panel does with a `reviewDecision` answer: how it reads, whether
+ * the message box is cleared, whether the item is re-read (something was or
+ * may have been written), and whether the host hears it was written — only
+ * for `ok`, which is what lets the run-through advance and nothing else.
+ */
+export function decisionEffects(result: { ok: boolean; decision: ReviewDecisionKind; written: readonly ReviewStepName[]; error?: string; uncertain?: ReviewStepName }): {
+  outcome: DecisionOutcome;
+  clearMessage: boolean;
+  reread: boolean;
+  written: boolean;
+} {
+  const outcome = describeDecision(result);
+  return { outcome, clearMessage: !outcome.keepMessage, reread: result.written.length > 0 || result.uncertain !== undefined, written: result.ok };
+}

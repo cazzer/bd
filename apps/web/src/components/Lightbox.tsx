@@ -46,6 +46,8 @@ export function Lightbox({ images, index, onIndexChange, onClose }: LightboxProp
   }, []);
 
   function onCancel(e: SyntheticEvent<HTMLDialogElement>) {
+    // React carries `cancel` up the tree; a dialog around this one (the review-all run) must not take it as its own.
+    e.stopPropagation();
     e.preventDefault();
     onClose();
   }

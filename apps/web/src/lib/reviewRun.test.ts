@@ -4,7 +4,7 @@
 // model level.
 
 import { describe, expect, it } from "vitest";
-import { answerRun, currentPending, currentReview, runProgress, runTallies, skippedPending, startRun, syncRun, type ReviewRun, type RunItem } from "./reviewRun.js";
+import { answerRun, currentPending, currentReview, finishRun, leftPending, runLog, runProgress, runTallies, startRun, syncRun, type ReviewRun, type RunItem } from "./reviewRun.js";
 
 const r = (id: string): RunItem => ({ id });
 const ids = (items: readonly RunItem[]) => items.map((i) => i.id);
@@ -175,7 +175,7 @@ describe("currentPending", () => {
   });
 });
 
-describe("skippedPending", () => {
+describe("leftPending", () => {
   it("lists the skipped reviews still pending, in run order", () => {
     const live = [A, B, C, D];
     let run = startRun(live);
@@ -183,8 +183,8 @@ describe("skippedPending", () => {
     run = answerRun(run, live, "b", "accepted");
     run = answerRun(run, live, "c", "skipped");
     run = answerRun(run, live, "d", "skipped");
-    expect(ids(skippedPending(run, live))).toEqual(["a", "c", "d"]);
-    expect(ids(skippedPending(run, without(live, "c")))).toEqual(["a", "d"]);
+    expect(ids(leftPending(run, live))).toEqual(["a", "c", "d"]);
+    expect(ids(leftPending(run, without(live, "c")))).toEqual(["a", "d"]);
   });
 
   it("starts a new run over them", () => {
@@ -192,7 +192,7 @@ describe("skippedPending", () => {
     let run = startRun(live);
     run = answerRun(run, live, "a", "skipped");
     run = answerRun(run, live, "b", "skipped");
-    const again = startRun(skippedPending(run, live));
+    const again = startRun(leftPending(run, live));
     expect(ids(again.items)).toEqual(["a", "b"]);
     expect(runTallies(again)).toEqual({ accepted: 0, changes: 0, skipped: 0 });
   });
@@ -219,7 +219,7 @@ describe("spec scenarios (review-queue, 'The queue can be reviewed in sequence')
     run = syncRun(run, live);
     expect(run.done).toBe(true);
     expect(runTallies(run)).toEqual({ accepted: 1, changes: 1, skipped: 1 });
-    expect(ids(skippedPending(run, live))).toEqual(["b"]);
+    expect(ids(leftPending(run, live))).toEqual(["b"]);
   });
 
   it("decided elsewhere meanwhile: the next review is passed over and the one after it shown", () => {
@@ -232,13 +232,35 @@ describe("spec scenarios (review-queue, 'The queue can be reviewed in sequence')
     expect(runProgress(run, live)).toEqual({ position: 2, total: 2 });
   });
 
-  it("write fails: no answer is recorded, so the run stays on the same review", () => {
-    // The modal calls answerRun only once a decision reports written; a
-    // failure leaves the run object untouched.
+  // "Write fails" is the panel's guarantee, not the run's: the host hears a
+  // decision only when it reports ok (lib/reviewDrawer.ts decisionEffects,
+  // tested in reviewDrawer.test.ts), and only then calls answerRun.
+});
+
+describe("finishRun", () => {
+  it("stops the run early: done, answers kept, the unreached pending ones left for later", () => {
     const live = [A, B, C];
-    const run = startRun(live);
-    expect(shown(syncRun(run, live))).toBe("a");
-    expect(runProgress(run, live)).toEqual({ position: 1, total: 3 });
-    expect(run.results.size).toBe(0);
+    let run = answerRun(startRun(live), live, "a", "accepted");
+    run = finishRun(run);
+    expect(run.done).toBe(true);
+    expect(currentReview(run)).toBeNull();
+    expect(runTallies(run)).toEqual({ accepted: 1, changes: 0, skipped: 0 });
+    expect(ids(leftPending(run, live))).toEqual(["b", "c"]);
+    expect(finishRun(run)).toBe(run);
+  });
+});
+
+describe("runLog", () => {
+  it("says what became of each review: its answer, left for later, or gone from the queue unanswered", () => {
+    const live = [A, B, C, D];
+    let run = answerRun(startRun(live), live, "a", "changes");
+    run = answerRun(run, without(live, "c"), "b", "skipped");
+    run = finishRun(run);
+    expect(runLog(run, without(live, "c")).map((e) => [e.item.id, e.result])).toEqual([
+      ["a", "changes"],
+      ["b", "skipped"],
+      ["c", "elsewhere"],
+      ["d", "left"],
+    ]);
   });
 });
