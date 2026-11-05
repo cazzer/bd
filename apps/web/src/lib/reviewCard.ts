@@ -1,11 +1,12 @@
 // Pure helpers behind a decision card in the review panel
-// (decision-card-reviews, design.md decisions 5 and 7): whether a review is
-// a card or a legacy review, the order its options are listed in, the
-// decision actions it offers, what an accept sends as `seen`, whether its
-// evidence is worth showing, and how option text marks inline code.
-// Structural types only — the card is core's `reviewCard`, served by
-// `boardItem` (server/dto.ts) — so nothing from the server or core reaches
-// the bundle.
+// (decision-card-reviews, design.md decisions 5 and 7): the order its
+// options are listed in, the decision actions it offers, what an accept
+// sends as `seen`, how a chosen option is announced, whether its evidence is
+// worth showing, which refusals mean the card moved underneath, and how
+// option text marks inline code. Structural types only — the card is core's
+// `reviewCard`, served by `boardItem` (server/dto.ts, which also says whether
+// the review was filed as a card) — so nothing from the server or core
+// reaches the bundle.
 
 export interface CardOption {
   id: string;
@@ -20,18 +21,6 @@ export interface CardLike {
   recommend: string | null;
 }
 
-/** The card keys `normalizeReviewMetadata` keeps beside the legacy ones (absent when not given). */
-const CARD_KEYS = ["question", "options", "recommend", "on_accept", "attachments"] as const;
-
-/**
- * A review filed as a card — it carries any card key. One that carries none
- * (`images` and `summary` only) is a legacy review, which the panel shows as
- * it always has: its whole summary, its screenshots, its thread.
- */
-export function isCardReview(review: object): boolean {
-  return CARD_KEYS.some((key) => key in review && (review as Record<string, unknown>)[key] !== undefined);
-}
-
 /** The recommended option, or null when the card recommends none. */
 export function recommendedOption(card: CardLike): CardOption | null {
   return card.recommend === null ? null : (card.options.find((o) => o.id === card.recommend) ?? null);
@@ -43,7 +32,11 @@ export function orderedOptions(card: CardLike): CardOption[] {
   return recommended === null ? [...card.options] : [recommended, ...card.options.filter((o) => o !== recommended)];
 }
 
-/** More "Choose" actions than this fold into one "Choose another…" control, so the footer never pushes the recommendation below the fold. */
+/**
+ * More "Choose" actions than this fold into one "Choose another…" control,
+ * so the footer never pushes the recommendation below the fold. A card that
+ * recommends nothing has no Accept button, so it shows one Choose more.
+ */
 export const MAX_INLINE_CHOICES = 2;
 
 export interface CardActions {
@@ -51,8 +44,13 @@ export interface CardActions {
   accept: CardOption | null;
   /** One "Choose <label>" each, in the card's order. */
   choices: CardOption[];
-  /** Behind "Choose another…"; empty unless the other options are more than MAX_INLINE_CHOICES. */
+  /** Behind the fold control (`foldLabel`); empty unless the choices would be more than fit inline. */
   folded: CardOption[];
+}
+
+/** The fold control's label: "Choose another…" beside a recommendation, "Choose an option…" without one. */
+export function foldLabel(actions: Pick<CardActions, "accept">): string {
+  return actions.accept === null ? "Choose an option…" : "Choose another…";
 }
 
 /**
@@ -65,7 +63,8 @@ export function cardActions(card: CardLike): CardActions | null {
   if (card.options.length === 0) return null;
   const accept = recommendedOption(card);
   const others = card.options.filter((o) => o !== accept);
-  return others.length > MAX_INLINE_CHOICES ? { accept, choices: [], folded: others } : { accept, choices: others, folded: [] };
+  const inline = accept === null ? MAX_INLINE_CHOICES + 1 : MAX_INLINE_CHOICES;
+  return others.length > inline ? { accept, choices: [], folded: others } : { accept, choices: others, folded: [] };
 }
 
 export interface OptionSeen {
@@ -88,6 +87,21 @@ export function seenFor(card: Pick<CardLike, "question">, option: CardOption): O
     ...(option.what !== undefined ? { what: option.what } : {}),
     ...(option.risk !== undefined ? { risk: option.risk } : {}),
   };
+}
+
+/** An option a decision named, and whether it was the card's recommendation. */
+export interface ChosenOption {
+  id: string;
+  recommended: boolean;
+}
+
+export function chosenOption(card: Pick<CardLike, "recommend">, option: CardOption): ChosenOption {
+  return { id: option.id, recommended: card.recommend === option.id };
+}
+
+/** How an accepted option is announced: "Accepted A", or "Chose B (not the recommendation)". */
+export function describeChosen(chosen: ChosenOption): string {
+  return chosen.recommended ? `Accepted ${chosen.id}` : `Chose ${chosen.id} (not the recommendation)`;
 }
 
 /**
@@ -117,3 +131,21 @@ export function splitInlineCode(text: string): InlineSegment[] {
   if (last < text.length) segments.push({ text: text.slice(last), code: false });
   return segments;
 }
+
+/**
+ * Whether a refused decision (its server message) means the card is not the
+ * one the person read: an option it no longer offers, an option whose text
+ * or question moved, or a card the tracker now holds unreadable
+ * (server/review-writer.ts `unknown-option`, `option-changed`,
+ * `unreadable-card`). The server sends no refusal code, so this reads the
+ * message; cardRoundtrip.test.ts runs each refusal through the real writer
+ * and checks it here, so a reworded message fails a test rather than this.
+ */
+export function isCardMovedRefusal(message: string): boolean {
+  return CARD_MOVED.some((pattern) => pattern.test(message));
+}
+
+const CARD_MOVED = [/ changed since it was opened /, / does not offer option "/, / carries options the board cannot read /];
+
+/** What the panel says for such a refusal, after re-reading the card. */
+export const CARD_MOVED_TEXT = "This card changed while you were reading it. It now shows the current version — read it again before deciding. Nothing was written.";

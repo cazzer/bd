@@ -138,8 +138,8 @@ const optionB = { id: "B", label: "Drop now" };
 const card = (extra: Record<string, unknown> = {}) => ({ images: [], pane: null, summary: "q?", question: "q?", ...extra });
 
 describe("normalizeReviewMetadata decision cards", () => {
-  it("finds both valid card fixtures", () => {
-    expect(EXPECTED).toEqual(["before-after.expected.json", "shlo-k54.4.1.1.expected.json"]);
+  it("finds every valid card fixture", () => {
+    expect(EXPECTED).toEqual(["before-after.expected.json", "long-recommendation.expected.json", "shlo-k54.4.1.1.expected.json"]);
   });
 
   it.each(EXPECTED)("normalizes %s to itself, byte for byte", (name) => {

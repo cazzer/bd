@@ -60,10 +60,10 @@ describe("describeDecision", () => {
   });
 
   it("names the option accepted on a card, and reads as before without one", () => {
-    expect(describeDecision({ ok: true, decision: "accept", written: ["comment", "close"] }, "B").text).toBe("Accepted B and closed — card moved to Closed.");
-    expect(describeDecision({ ok: true, decision: "accept", written: ["comment"] }, "B").text).toBe("Accepted B: comment added.");
+    expect(describeDecision({ ok: true, decision: "accept", written: ["comment", "close"] }, "Chose B (not the recommendation)").text).toBe("Chose B (not the recommendation) and closed — card moved to Closed.");
+    expect(describeDecision({ ok: true, decision: "accept", written: ["comment"] }, "Accepted B").text).toBe("Accepted B: comment added.");
     expect(describeDecision({ ok: true, decision: "accept", written: ["comment"] }).text).toBe("Accepted: comment added.");
-    expect(decisionEffects({ ok: true, decision: "accept", written: ["comment", "close"] }, "A").outcome.text).toBe("Accepted A and closed — card moved to Closed.");
+    expect(decisionEffects({ ok: true, decision: "accept", written: ["comment", "close"] }, "Accepted A").outcome.text).toBe("Accepted A and closed — card moved to Closed.");
   });
 
   it("reports a partial write with what landed and the tracker's error, clearing the box once the comment is posted", () => {

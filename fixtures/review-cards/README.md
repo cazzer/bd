@@ -18,6 +18,7 @@ newline however the frontmatter is sliced.
 | --- | --- |
 | `shlo-k54.4.1.1.md` | question, options A/B/C with `what`/`risk`, `recommend: A`, three on-accept steps, a `diff` attachment (the real migration diff, shlo `supa-backend` `7a641e1..7aa2657`, 7,151 characters), two tables in the body; no images |
 | `before-after.md` | no options, one on-accept step, a `before`/`after` image pair (`before.png`, `after.png` beside it), a `mermaid` ER diagram |
+| `long-recommendation.md` | the fold's worst case: a 140-character question, a recommended option A whose `what` and `risk` are 300 characters each, options B and C, a `diff` attachment (so the run has a stage); the board must show the question, all of A, and every action without scrolling at 1440 × 900 |
 
 Each has `<name>.expected.json`: the exact `metadata.review` object the CLI
 writes for that card, which `normalizeReviewMetadata` maps to itself. It holds

@@ -24,7 +24,8 @@
 // that join the live queue meanwhile join its end. The header shows "n of
 // m" (m+ while the queue's read is truncated), a progress bar, and a
 // status line at every width that says what the last answer was and where
-// the run is now ("Accepted “…”. 2 of 3."), plus whether the agent could not
+// the run is now ("Accepted “…”. 2 of 3.", or for a card "Accepted A on
+// “…”." / "Chose B (not the recommendation) on “…”."), plus whether the agent could not
 // be told, kept until the next decision. The body is ReviewItemPanel for
 // the review on screen, keyed on it, so each review mounts fresh and its
 // title takes focus; from `lg` up it uses the panel's `stage` layout (the
@@ -53,13 +54,14 @@
 // one); choosing another option has no shortcut. No plain key is ever taken, so typing is never intercepted.
 //
 // The end is a summary — accepted, changes requested, skipped, and the run's
-// reviews with what became of each — with "Close" and, when any review of
+// reviews with what became of each (a card's row names the option) — with "Close" and, when any review of
 // the run is still pending and undecided (skipped, or not reached when the
 // run was stopped), a button that starts a new run over those. Focus lands
 // on its heading. No state is stored; closing ends the run.
 
 import { useEffect, useId, useLayoutEffect, useRef, useState, type SyntheticEvent } from "react";
 import { isOwnDialogEvent } from "../lib/dialogEvents.js";
+import { describeChosen, type ChosenOption } from "../lib/reviewCard.js";
 import type { ReviewQueueState } from "../lib/reviewQueueReader.js";
 import type { ReviewDecisionKind } from "../lib/reviewDrawer.js";
 import {
@@ -124,6 +126,8 @@ export function ReviewRunModal({ queue, drafts, onEnd }: ReviewRunModalProps) {
   const [busy, setBusy] = useState(false);
   /** Reviews this run wrote something to, so their leaving the queue is not "decided elsewhere". */
   const [touched, setTouched] = useState<ReadonlySet<string>>(new Set());
+  /** The option each accepted card was decided with, by review id, for the status line and the summary. */
+  const [chosen, setChosen] = useState<ReadonlyMap<string, ChosenOption>>(new Map());
   const live = useRef(queue.reviews);
   live.current = queue.reviews;
   const staged = useMediaQuery(STAGE_QUERY);
@@ -157,7 +161,9 @@ export function ReviewRunModal({ queue, drafts, onEnd }: ReviewRunModalProps) {
     const next = answerRun(runRef.current, live.current, review.id, result);
     if (next === runRef.current) return;
     setRun(next);
-    const said = result === null ? `Moved past ${quoted(review)}.` : ANSWER_TEXT[result](quoted(review));
+    const option = result === "accepted" ? (report?.option ?? null) : null;
+    if (option !== null) setChosen((prev) => new Map(prev).set(review.id, option));
+    const said = result === null ? `Moved past ${quoted(review)}.` : option !== null ? `${describeChosen(option)} on ${quoted(review)}.` : ANSWER_TEXT[result](quoted(review));
     setStatus((prev) => ({
       text: `${said} ${positionText(next)}`,
       warning: report !== undefined ? (report.notifyFailed ? report.notified : null) : (prev?.warning ?? null),
@@ -258,7 +264,7 @@ export function ReviewRunModal({ queue, drafts, onEnd }: ReviewRunModalProps) {
           decisions={runDecisions(review, stillPending, touched.has(review.id), answer)}
         />
       ) : (
-        <RunSummary titleId={titleId} run={run} live={queue.reviews} onReviewLeft={reviewLeft} onClose={onEnd} />
+        <RunSummary titleId={titleId} run={run} live={queue.reviews} chosen={chosen} onReviewLeft={reviewLeft} onClose={onEnd} />
       )}
     </dialog>
   );
@@ -305,7 +311,21 @@ const ENTRY_TEXT: Readonly<Record<RunEntryResult, { text: string; tone: string }
   elsewhere: { text: "Decided elsewhere", tone: "text-fg-muted" },
 };
 
-function RunSummary({ titleId, run, live, onReviewLeft, onClose }: { titleId: string; run: ReviewRun<QueueReview>; live: readonly QueueReview[]; onReviewLeft: () => void; onClose: () => void }) {
+function RunSummary({
+  titleId,
+  run,
+  live,
+  chosen,
+  onReviewLeft,
+  onClose,
+}: {
+  titleId: string;
+  run: ReviewRun<QueueReview>;
+  live: readonly QueueReview[];
+  chosen: ReadonlyMap<string, ChosenOption>;
+  onReviewLeft: () => void;
+  onClose: () => void;
+}) {
   const headingRef = useRef<HTMLHeadingElement>(null);
   const tallies = runTallies(run);
   const reviewed = run.results.size;
@@ -339,7 +359,7 @@ function RunSummary({ titleId, run, live, onReviewLeft, onClose }: { titleId: st
             <li key={item.id} className="flex items-baseline gap-3 px-3 py-2">
               <span className="shrink-0 font-mono text-xs text-fg-muted">{item.externalId}</span>
               <span className="min-w-0 flex-1 truncate text-fg">{item.title.trim() || "(untitled)"}</span>
-              <span className={`shrink-0 text-xs ${ENTRY_TEXT[result].tone}`}>{ENTRY_TEXT[result].text}</span>
+              <span className={`shrink-0 text-xs ${ENTRY_TEXT[result].tone}`}>{result === "accepted" && chosen.has(item.id) ? describeChosen(chosen.get(item.id)!) : ENTRY_TEXT[result].text}</span>
             </li>
           ))}
         </ol>

@@ -26,7 +26,7 @@ See proposal.md for why; the contract was decided in `bd-4zn`'s design field (20
 
 Rejected: a second metadata key (`card`) — two objects to keep consistent and two normalizers at every writer; refusing over-long text in the normalizer — one stray character would invalidate a review a hand edit produced, while the CLI already refuses it at authoring time.
 
-**Reading a card** is a pure helper beside the normalizer, `reviewCard(review)`: `question` if present, else the summary's first line fitted to 140; attachments if present, else `images` as image attachments without caption or pair. Every UI reads through it, so a legacy review is a question-only card with its images.
+**Reading a card** is a pure helper beside the normalizer, `reviewCard(review)`: `question` if present, else the summary's first line fitted to 140; attachments if present, else `images` as image attachments without caption or pair. Every UI reads through it, so a legacy review is a question-only card with its images. The board item read (`boardItem`'s DTO, `apps/web/server/dto.ts`) carries `card` computed server-side by `reviewCard`, because the browser cannot import core, and the drawer's `seen` (decision 5) is taken from it, so it is byte-for-byte what the decision check compares.
 
 **The CLI writes the legacy keys too**: `summary` = the question and `images` = the image attachments' stored paths. A reader built before this change (main's board, an open tab mid-branch) therefore still shows the question and the images, and the queue's image count stays right with no change to its SQL.
 

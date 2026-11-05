@@ -63,12 +63,13 @@
 // can always move on, and told when a write is in flight), put a notice in
 // place of the decision form (the run's "decided elsewhere"), append its
 // suffix to a card's option actions (the run's "& next"), and turn on the
-// keyboard shortcuts: Ctrl/Cmd+Enter accepts — the recommended option on a
-// card with options (the hint names its id; nothing on a card that
-// recommends none), plain Accept otherwise — and Ctrl/Cmd+Shift+Enter
-// requests changes (with no message it focuses the box and says one is
-// needed). Choosing another option has no shortcut: going against the
-// recommendation is deliberate. No plain key is ever taken, so typing in
+// keyboard shortcuts: Ctrl/Cmd+Enter accepts — on a card with options, the
+// option whose button has focus, else the recommended one (the hint names
+// its id; nothing on a card that recommends none, or from the fold's
+// toggle), plain Accept otherwise — and Ctrl/Cmd+Shift+Enter requests
+// changes (with no message it focuses the box and says one is needed).
+// Choosing another option has no shortcut of its own: going against the
+// recommendation is deliberate, so it takes reaching its button. No plain key is ever taken, so typing in
 // the message box is never intercepted, and no key is taken from inside a
 // dialog the panel opened (a lightbox, an enlarged diagram). `armAfterMs`
 // keeps a decision from landing on an item before it has been seen: the
@@ -81,7 +82,19 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode, type RefObject } from "react";
 import { navigate } from "../lib/navigate.js";
 import { reviewAttachments } from "../lib/reviewAttachments.js";
-import { cardActions, evidenceMarkdown, isCardReview, seenFor, type CardActions, type CardOption } from "../lib/reviewCard.js";
+import {
+  CARD_MOVED_TEXT,
+  cardActions,
+  chosenOption,
+  describeChosen,
+  evidenceMarkdown,
+  foldLabel,
+  isCardMovedRefusal,
+  seenFor,
+  type CardActions,
+  type CardOption,
+  type ChosenOption,
+} from "../lib/reviewCard.js";
 import { canDecide, decisionBlocked, decisionEffects, describeNotified, describeRecipient, describeThrownDecision, type DecisionOutcome, type ReviewDecisionKind } from "../lib/reviewDrawer.js";
 import { formatRoute, type GraphRoute } from "../lib/route.js";
 import { HttpStatusError, trpc } from "../trpc.js";
@@ -96,6 +109,8 @@ export interface WrittenReport {
   notified: string | null;
   /** The review promised a notice to a recorded pane and it could not be sent. */
   notifyFailed: boolean;
+  /** The card option an accept named, and whether it was the recommendation; null for any other decision. */
+  option: ChosenOption | null;
 }
 
 export interface PanelDecisions {
@@ -240,6 +255,10 @@ export function ReviewItemPanel({
   const [outcome, setOutcome] = useState<Outcome | null>(null);
   const [refusal, setRefusal] = useState<Refusal | null>(null);
   const [needsMessage, setNeedsMessage] = useState(false);
+  /** The option whose decision button has focus: its text is shown in full in the list (ReviewCardBody.tsx). */
+  const [focusedOption, setFocusedOption] = useState<string | null>(null);
+  const optionIdPrefix = useId();
+  const optionDescId = (id: string) => `${optionIdPrefix}-option-${id}`;
   const { timeArmed, keyArmed } = useArmed(decisions.armAfterMs);
 
   function setMessage(next: string) {
@@ -319,8 +338,19 @@ export function ReviewItemPanel({
         messageRef.current?.focus();
         return;
       }
-      if (decision === "changes" || actions === null) void decide(decision);
-      else if (actions.accept !== null) void decide("accept", actions.accept);
+      if (decision === "changes" || actions === null || card === null) {
+        void decide(decision);
+        return;
+      }
+      // On an option's own button the shortcut takes that option, so a
+      // focused "Choose B" never accepts the recommendation instead; on the
+      // fold's toggle it takes nothing; anywhere else, the recommendation.
+      const target = e.target instanceof Element ? e.target : null;
+      if (target?.closest("[data-choose-toggle]")) return;
+      const focusedId = target?.closest<HTMLElement>("[data-option-id]")?.dataset["optionId"];
+      const focused = focusedId === undefined ? undefined : card.options.find((o) => o.id === focusedId);
+      const option = focused ?? actions.accept;
+      if (option !== null) void decide("accept", option);
     }
   }
 
@@ -328,6 +358,7 @@ export function ReviewItemPanel({
   async function decide(decision: ReviewDecisionKind, option?: CardOption) {
     if (!timeArmed || project === null || loaded === null || decisionBlocked(decision, message, pending !== null)) return;
     const chosen = option !== undefined && card !== null ? { option: option.id, seen: seenFor(card, option) } : {};
+    const named = option !== undefined && card !== null ? chosenOption(card, option) : null;
     setPending(decision);
     setPendingOption(option?.id ?? null);
     onBusyChange?.(true);
@@ -336,7 +367,7 @@ export function ReviewItemPanel({
     let written: { decision: ReviewDecisionKind; report: WrittenReport } | null = null;
     try {
       const result = await trpc.reviewDecision.mutate({ project, item: loaded.externalId, decision, message, ...chosen });
-      const effects = decisionEffects(result, option?.id);
+      const effects = decisionEffects(result, named === null ? undefined : describeChosen(named));
       const notified = describeNotified(result.notified);
       setOutcome({ ...effects.outcome, notified });
       if (effects.clearMessage) setMessage("");
@@ -346,10 +377,15 @@ export function ReviewItemPanel({
       }
       // A failed notice matters only where one was promised (a pane and a herdr session recorded); otherwise the recipient line already said the comment is the record.
       const promised = loaded.review !== null && !("invalid" in loaded.review) && loaded.review.pane !== null && loaded.review.socket !== undefined;
-      if (effects.written) written = { decision, report: { notified, notifyFailed: promised && result.notified?.ok === false } };
+      if (effects.written) written = { decision, report: { notified, notifyFailed: promised && result.notified?.ok === false, option: named } };
     } catch (err) {
       const thrown = describeThrownDecision({ message: messageOf(err, "The decision was refused."), httpStatus: httpStatusOf(err) });
-      setRefusal({ text: thrown.text, detail: thrown.detail });
+      // The card is not the one the person read: show the current one now
+      // (nothing was written, so the host is not told), and say so; the
+      // typed message stays.
+      const moved = !thrown.uncertain && isCardMovedRefusal(thrown.text);
+      setRefusal(moved ? { text: CARD_MOVED_TEXT, detail: thrown.text } : { text: thrown.text, detail: thrown.detail });
+      if (moved) setRefetch((n) => n + 1);
       if (thrown.uncertain) {
         setRefetch((n) => n + 1);
         onDecided();
@@ -379,7 +415,12 @@ export function ReviewItemPanel({
         </p>
       )}
       {!loaded && waiting && <p className="text-sm text-fg-muted">Waiting for {item}; it opens when its tracker loads.</p>}
-      {loaded && (loaded.isReview ? <ReviewBody item={loaded} attachments={staged ? null : attachmentSlot("column")} /> : <PlainBody item={loaded} />)}
+      {loaded &&
+        (loaded.isReview ? (
+          <ReviewBody item={loaded} attachments={staged ? null : attachmentSlot("column")} focusedOption={focusedOption} optionDescId={optionDescId} />
+        ) : (
+          <PlainBody item={loaded} />
+        ))}
     </div>
   );
 
@@ -395,6 +436,8 @@ export function ReviewItemPanel({
       needsMessage={needsMessage}
       pending={pending}
       pendingOption={pendingOption}
+      onOptionFocus={setFocusedOption}
+      optionDescId={optionDescId}
       outcome={outcome}
       refusal={refusal}
       decide={(d, option) => void decide(d, option)}
@@ -502,10 +545,20 @@ function GraphLink({ nodeId, className, children = "Open in graph" }: { nodeId: 
  * on-accept, attachments, evidence); a legacy review as before (summary,
  * screenshots); then the thread.
  */
-function ReviewBody({ item, attachments }: { item: BoardItem; attachments: ReactNode }) {
+function ReviewBody({
+  item,
+  attachments,
+  focusedOption,
+  optionDescId,
+}: {
+  item: BoardItem;
+  attachments: ReactNode;
+  focusedOption: string | null;
+  optionDescId: (id: string) => string;
+}) {
   const review = item.review;
   const invalid = review !== null && "invalid" in review;
-  const card = review !== null && !("invalid" in review) && isCardReview(review) ? item.card : null;
+  const card = item.card !== null && !item.card.legacy ? item.card : null;
   const evidence = card !== null ? evidenceMarkdown(item.content, card.question) : null;
   return (
     <>
@@ -517,7 +570,7 @@ function ReviewBody({ item, attachments }: { item: BoardItem; attachments: React
       {card !== null ? (
         <>
           <CardQuestion question={card.question} />
-          <CardOptions card={card} />
+          <CardOptions card={card} focused={focusedOption} descId={optionDescId} />
           <CardOnAccept steps={card.onAccept} />
           {attachments}
           {evidence !== null && <CardEvidence markdown={evidence} collapsible={card.options.length > 0} />}
@@ -608,6 +661,8 @@ function DecisionFooter({
   needsMessage,
   pending,
   pendingOption,
+  onOptionFocus,
+  optionDescId,
   outcome,
   refusal,
   decide,
@@ -625,6 +680,10 @@ function DecisionFooter({
   pending: ReviewDecisionKind | null;
   /** The option being accepted while `pending` is "accept". */
   pendingOption: string | null;
+  /** An option's button took or lost focus (null). */
+  onOptionFocus: (id: string | null) => void;
+  /** The id of an option's what/risk in the list, which its button is described by. */
+  optionDescId: (id: string) => string;
   outcome: Outcome | null;
   refusal: Refusal | null;
   decide: (decision: ReviewDecisionKind, option?: CardOption) => void;
@@ -644,21 +703,21 @@ function DecisionFooter({
   }, [busy, outcome, refusal]);
 
   const failure: Refusal | null = refusal ?? (outcome !== null && outcome.tone !== "ok" ? { text: outcome.text, detail: null } : null);
-  const textareaHeight = message !== "" ? "max-sm:h-[4.5rem]" : "max-sm:h-11 max-sm:focus:h-[4.5rem]";
+  // One row until it is focused or holds a draft, at every width, so the footer leaves the card its height.
+  const textareaHeight = message !== "" ? "h-[4.5rem]" : "h-10 focus:h-[4.5rem]";
 
   return (
     <div className="space-y-2 border-t border-hairline bg-surface-strong p-4">
       {labels.notice !== undefined && <div className="flex min-h-[5.25rem] items-center rounded-lg border border-hairline bg-fg/[0.03] px-3 py-2 text-sm text-fg">{labels.notice}</div>}
       {open && (
         <>
-          <label id={labelId} htmlFor={messageId} className="block text-xs text-fg-muted">
-            <span className="sm:hidden">Message to the agent (required for changes)</span>
-            <span className="hidden sm:inline">Message to the agent — sent with either decision, required for Request changes</span>
+          <label id={labelId} htmlFor={messageId} className="block truncate text-xs text-fg-muted">
+            Message to the agent (required for Request changes)
           </label>
           <textarea
             id={messageId}
             ref={messageRef}
-            rows={2}
+            rows={1}
             value={message}
             onChange={(e) => setMessage(e.target.value)}
             disabled={busy}
@@ -683,16 +742,32 @@ function DecisionFooter({
               pending={pending === "accept" && pendingOption === actions.accept.id}
               disabled={decisionBlocked("accept", message, busy)}
               keyshortcuts={labels.shortcuts ? "Control+Enter Meta+Enter" : undefined}
+              describedBy={optionDescId(actions.accept.id)}
+              onFocusChange={onOptionFocus}
               onPress={() => decide("accept", actions.accept!)}
             />
           )}
           {actions.choices.map((o) => (
-            <OptionAction key={o.id} option={o} verb="Choose" suffix={labels.optionSuffix} pending={pending === "accept" && pendingOption === o.id} disabled={decisionBlocked("accept", message, busy)} onPress={() => decide("accept", o)} />
+            <OptionAction
+              key={o.id}
+              option={o}
+              verb="Choose"
+              suffix={labels.optionSuffix}
+              pending={pending === "accept" && pendingOption === o.id}
+              disabled={decisionBlocked("accept", message, busy)}
+              describedBy={optionDescId(o.id)}
+              onFocusChange={onOptionFocus}
+              onPress={() => decide("accept", o)}
+            />
           ))}
           {actions.folded.length > 0 && (
             <ChooseAnother
+              label={foldLabel(actions)}
               options={actions.folded}
               suffix={labels.optionSuffix}
+              busy={busy}
+              optionDescId={optionDescId}
+              onOptionFocus={onOptionFocus}
               pendingOption={pending === "accept" ? pendingOption : null}
               disabled={decisionBlocked("accept", message, busy)}
               onChoose={(o) => decide("accept", o)}
@@ -731,14 +806,16 @@ function DecisionFooter({
         </div>
       )}
       {open && (
-        <div className={`flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-fg-muted ${compact ? "max-sm:hidden" : ""}`}>
-          <span>{recipient}</span>
+        <div className={`flex items-center gap-x-4 text-xs text-fg-muted ${compact ? "max-sm:hidden" : ""}`}>
+          <span title={recipient} className="min-w-0 flex-1 truncate">
+            {recipient}
+          </span>
           {labels.shortcuts && (
-            <span aria-hidden="true" className="ml-auto hidden items-center gap-1 lg:inline-flex">
+            <span aria-hidden="true" className="hidden shrink-0 items-center gap-1 whitespace-nowrap lg:inline-flex">
               {actions === null || actions.accept !== null ? (
                 <>
                   <Kbd>Ctrl/⌘</Kbd>
-                  <Kbd>Enter</Kbd> accept{actions?.accept ? <> {actions.accept.id}</> : null} · add <Kbd>Shift</Kbd> to request changes
+                  <Kbd>Enter</Kbd> accept{actions?.accept ? <> option {actions.accept.id}</> : null} · add <Kbd>Shift</Kbd> to request changes
                 </>
               ) : (
                 <>
@@ -774,7 +851,7 @@ function DecisionFooter({
   );
 }
 
-const OPTION_BUTTON_BASE = "flex min-h-11 w-full items-center gap-2 rounded-lg px-4 text-left text-sm focus:outline-none focus:ring-2 disabled:opacity-60 sm:min-h-10";
+const OPTION_BUTTON_BASE = "flex min-h-11 w-full items-center gap-2 rounded-lg px-4 text-left text-sm focus:outline-none focus:ring-2 disabled:opacity-60 sm:min-h-10 lg:min-h-9";
 const OPTION_BUTTON_PRIMARY = `${OPTION_BUTTON_BASE} bg-accent font-semibold text-ground hover:bg-accent/90 focus:ring-accent focus:ring-offset-2 focus:ring-offset-ground`;
 const OPTION_BUTTON_OTHER = `${OPTION_BUTTON_BASE} border border-accent/40 bg-accent/[0.06] font-medium text-fg hover:bg-accent/15 focus:ring-accent`;
 
@@ -791,6 +868,8 @@ function OptionAction({
   pending,
   disabled,
   keyshortcuts,
+  describedBy,
+  onFocusChange,
   onPress,
   buttonRef,
   onKeyDown,
@@ -801,13 +880,28 @@ function OptionAction({
   suffix: string | undefined;
   pending: boolean;
   disabled: boolean;
+  /** Only the recommendation's button declares the shortcut; Ctrl/Cmd+Enter on any option's button takes that option (the panel's key handler reads `data-option-id`). */
   keyshortcuts?: string;
+  describedBy: string;
+  onFocusChange: (id: string | null) => void;
   onPress: () => void;
   buttonRef?: (el: HTMLButtonElement | null) => void;
   onKeyDown?: (e: KeyboardEvent<HTMLButtonElement>) => void;
 }) {
   return (
-    <button ref={buttonRef} type="button" onClick={onPress} onKeyDown={onKeyDown} disabled={disabled} aria-keyshortcuts={keyshortcuts} className={primary ? OPTION_BUTTON_PRIMARY : OPTION_BUTTON_OTHER}>
+    <button
+      ref={buttonRef}
+      type="button"
+      data-option-id={option.id}
+      onClick={onPress}
+      onKeyDown={onKeyDown}
+      onFocus={() => onFocusChange(option.id)}
+      onBlur={() => onFocusChange(null)}
+      disabled={disabled}
+      aria-keyshortcuts={keyshortcuts}
+      aria-describedby={describedBy}
+      className={primary ? OPTION_BUTTON_PRIMARY : OPTION_BUTTON_OTHER}
+    >
       {!primary && (
         <span aria-hidden="true" className="shrink-0 font-mono text-xs text-fg-muted">
           {option.id}
@@ -827,26 +921,36 @@ function OptionAction({
         (option {option.id}
         {primary ? ", recommended" : ""})
       </span>
-      {suffix !== undefined && !pending && <span className={`ml-auto shrink-0 text-xs font-normal ${primary ? "text-ground/80" : "text-fg-muted"}`}>{suffix}</span>}
+      {suffix !== undefined && !pending && <span className={`ml-auto shrink-0 text-xs font-normal max-sm:hidden ${primary ? "text-ground/80" : "text-fg-muted"}`}>{suffix}</span>}
     </button>
   );
 }
 
 /**
- * More than two other options: one "Choose another…" disclosure button
- * that shows them as a list of Choose actions under it (keyboard: Tab, or
- * the arrow keys, Home and End between them; Escape closes the list and
- * returns to the button without leaving the panel or the run).
+ * More choices than fit inline: one disclosure button ("Choose another…",
+ * or "Choose an option…" on a card with no recommendation) that shows them
+ * as a list of Choose actions under it (keyboard: Tab, or the arrow keys,
+ * Home and End between them; Escape in the list or on the open button
+ * closes the list and stays on the button, without leaving the panel or the
+ * run). The button is disabled while a decision is being written.
  */
 function ChooseAnother({
+  label,
   options,
   suffix,
+  busy,
+  optionDescId,
+  onOptionFocus,
   pendingOption,
   disabled,
   onChoose,
 }: {
+  label: string;
   options: readonly CardOption[];
   suffix: string | undefined;
+  busy: boolean;
+  optionDescId: (id: string) => string;
+  onOptionFocus: (id: string | null) => void;
   pendingOption: string | null;
   disabled: boolean;
   onChoose: (option: CardOption) => void;
@@ -874,16 +978,33 @@ function ChooseAnother({
     }
   }
 
+  function onToggleKeyDown(e: KeyboardEvent<HTMLButtonElement>) {
+    if (e.key === "Escape" && open) {
+      e.preventDefault();
+      setOpen(false);
+    }
+  }
+
   return (
     <div>
-      <button ref={toggleRef} type="button" aria-expanded={open} aria-controls={listId} onClick={() => setOpen((o) => !o)} className={OPTION_BUTTON_OTHER}>
-        <span className="min-w-0 truncate">Choose another…</span>
+      <button
+        ref={toggleRef}
+        type="button"
+        data-choose-toggle=""
+        aria-expanded={open}
+        aria-controls={listId}
+        disabled={busy}
+        onClick={() => setOpen((o) => !o)}
+        onKeyDown={onToggleKeyDown}
+        className={OPTION_BUTTON_OTHER}
+      >
+        <span className="min-w-0 truncate">{label}</span>
         <span className="ml-auto shrink-0 text-xs font-normal text-fg-muted">
           {options.map((o) => o.id).join(" · ")} <span aria-hidden="true">{open ? "▴" : "▾"}</span>
         </span>
       </button>
       {open && (
-        <ul id={listId} aria-label="Other options" className="mt-1.5 space-y-1.5 border-l-2 border-hairline pl-2">
+        <ul id={listId} aria-label={label.replace("…", "")} className="mt-1.5 space-y-1.5 border-l-2 border-hairline pl-2">
           {options.map((o, i) => (
             <li key={o.id}>
               <OptionAction
@@ -892,6 +1013,8 @@ function ChooseAnother({
                 suffix={suffix}
                 pending={pendingOption === o.id}
                 disabled={disabled}
+                describedBy={optionDescId(o.id)}
+                onFocusChange={onOptionFocus}
                 onPress={() => onChoose(o)}
                 onKeyDown={(e) => onItemKeyDown(e, i)}
                 buttonRef={(el) => {

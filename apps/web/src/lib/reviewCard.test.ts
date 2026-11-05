@@ -1,7 +1,22 @@
 // Tests for lib/reviewCard.ts (decision-card-reviews, tasks.md 6.3 and 6.5).
 
 import { describe, expect, it } from "vitest";
-import { cardActions, evidenceMarkdown, isCardReview, MAX_INLINE_CHOICES, orderedOptions, recommendedOption, seenFor, splitInlineCode, type CardLike, type CardOption } from "./reviewCard.js";
+import {
+  CARD_MOVED_TEXT,
+  cardActions,
+  chosenOption,
+  describeChosen,
+  evidenceMarkdown,
+  foldLabel,
+  isCardMovedRefusal,
+  MAX_INLINE_CHOICES,
+  orderedOptions,
+  recommendedOption,
+  seenFor,
+  splitInlineCode,
+  type CardLike,
+  type CardOption,
+} from "./reviewCard.js";
 
 const A: CardOption = { id: "A", label: "Track function calls, then drop", what: "Turn on tracking.", risk: "Lowest." };
 const B: CardOption = { id: "B", label: "Drop on 11-12", what: "Drop now.", risk: "GraphQL callers go unseen." };
@@ -11,17 +26,6 @@ const D: CardOption = { id: "D", label: "Defer", risk: "Nothing changes." };
 function card(options: CardOption[], recommend: string | null): CardLike {
   return { question: "Drop v5–v8?", options, recommend };
 }
-
-describe("isCardReview", () => {
-  it("is false for a legacy review (images and summary only), true with any card key", () => {
-    expect(isCardReview({ images: ["/a.png"], pane: null, summary: "Header" })).toBe(false);
-    expect(isCardReview({ images: [], pane: "w1:p1", socket: "/s", summary: "x" })).toBe(false);
-    expect(isCardReview({ images: [], pane: null, summary: "q", question: "q" })).toBe(true);
-    expect(isCardReview({ images: [], pane: null, summary: "", on_accept: ["x"] })).toBe(true);
-    expect(isCardReview({ images: [], pane: null, summary: "", attachments: [] })).toBe(true);
-    expect(isCardReview({ images: [], pane: null, summary: "", question: undefined })).toBe(false);
-  });
-});
 
 describe("orderedOptions / recommendedOption", () => {
   it("lists the recommended option first, the rest in the card's order", () => {
@@ -53,9 +57,15 @@ describe("cardActions", () => {
     expect(cardActions(card([A, B, C, D], "C"))).toEqual({ accept: C, choices: [], folded: [A, B, D] });
   });
 
-  it("has no Accept when the card recommends nothing, every option a Choose (folded past the threshold)", () => {
+  it("has no Accept when the card recommends nothing, so one more Choose fits inline before the fold", () => {
     expect(cardActions(card([A, B], null))).toEqual({ accept: null, choices: [A, B], folded: [] });
-    expect(cardActions(card([A, B, C], null))).toEqual({ accept: null, choices: [], folded: [A, B, C] });
+    expect(cardActions(card([A, B, C], null))).toEqual({ accept: null, choices: [A, B, C], folded: [] });
+    expect(cardActions(card([A, B, C, D], null))).toEqual({ accept: null, choices: [], folded: [A, B, C, D] });
+  });
+
+  it("labels the fold by whether there is a recommendation beside it", () => {
+    expect(foldLabel(cardActions(card([A, B, C, D], "A"))!)).toBe("Choose another…");
+    expect(foldLabel(cardActions(card([A, B, C, D], null))!)).toBe("Choose an option…");
   });
 });
 
@@ -73,6 +83,27 @@ describe("seenFor", () => {
 
   it("keeps an empty-looking what as it is (the normalizer decides what is absent, not the drawer)", () => {
     expect(seenFor({ question: "Q" }, { id: "X", label: "L", what: " " })).toEqual({ question: "Q", label: "L", what: " " });
+  });
+});
+
+describe("chosenOption / describeChosen", () => {
+  it("announces the recommendation as accepted and any other option as chosen against it", () => {
+    expect(chosenOption(card([A, B], "A"), A)).toEqual({ id: "A", recommended: true });
+    expect(chosenOption(card([A, B], "A"), B)).toEqual({ id: "B", recommended: false });
+    expect(chosenOption(card([A, B], null), A)).toEqual({ id: "A", recommended: false });
+    expect(describeChosen({ id: "A", recommended: true })).toBe("Accepted A");
+    expect(describeChosen({ id: "B", recommended: false })).toBe("Chose B (not the recommendation)");
+  });
+});
+
+describe("isCardMovedRefusal", () => {
+  it("is true for the refusals that mean the card moved, false for the rest (wording pinned against the writer in cardRoundtrip.test.ts)", () => {
+    expect(isCardMovedRefusal('Review "x" changed since it was opened (option B or its question differs); reopen it. Nothing was written.')).toBe(true);
+    expect(isCardMovedRefusal('Review "x" does not offer option "Z" (it offers A, B); nothing was written.')).toBe(true);
+    expect(isCardMovedRefusal('Review "x" carries options the board cannot read (its card is invalid in the tracker), so it cannot be accepted here.')).toBe(true);
+    expect(isCardMovedRefusal('Review "x" is already closed.')).toBe(false);
+    expect(isCardMovedRefusal("The server is read-only (BRAIN_READ_ONLY); review decisions are refused.")).toBe(false);
+    expect(CARD_MOVED_TEXT).toContain("Nothing was written.");
   });
 });
 

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { classifyDiffLines, diffStats } from "./diffLines.js";
+import { classifyDiffLines, diffStats, fileLinePath } from "./diffLines.js";
 
 const kinds = (source: string) => classifyDiffLines(source).map((l) => l.kind);
 
@@ -43,5 +43,14 @@ describe("classifyDiffLines", () => {
 describe("diffStats", () => {
   test("counts added and removed lines", () => {
     expect(diffStats(classifyDiffLines("@@ -1,2 +1,3 @@\n-a\n+b\n+c\n d"))).toEqual({ added: 2, removed: 1 });
+  });
+});
+
+describe("fileLinePath", () => {
+  test("is the b/ side of a git file line, the path of an svn one, else the line", () => {
+    expect(fileLinePath("diff --git a/supabase/migrations/x.sql b/supabase/migrations/x.sql")).toBe("b/supabase/migrations/x.sql");
+    expect(fileLinePath("diff --git a/old name.ts b/new name.ts")).toBe("b/new name.ts");
+    expect(fileLinePath("Index: trunk/a.c")).toBe("trunk/a.c");
+    expect(fileLinePath("diff -u a b")).toBe("diff -u a b");
   });
 });

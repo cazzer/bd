@@ -66,6 +66,18 @@ function classifyBare(text: string): DiffLine {
   return { kind: "context", text };
 }
 
+/**
+ * The path a file line names, short enough for a narrow header: the `b/`
+ * side of `diff --git a/x b/x` (with its `b/`), the path of `Index: x`, or
+ * the line itself when it names neither.
+ */
+export function fileLinePath(text: string): string {
+  const git = /^diff --git .* (b\/\S.*)$/.exec(text);
+  if (git) return git[1]!;
+  const svn = /^Index: (.+)$/.exec(text);
+  return svn ? svn[1]! : text;
+}
+
 /** Lines added and removed, for a clipped diff's "Show all" control. */
 export function diffStats(lines: readonly DiffLine[]): { added: number; removed: number } {
   let added = 0;

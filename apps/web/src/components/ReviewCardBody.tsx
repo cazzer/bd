@@ -3,13 +3,15 @@
 // the recommended option first — accent-bordered, a Recommended chip, its
 // full what and risk — and each other option below it with what and risk
 // clamped to two lines (the full text stays in the accessible text and the
-// tooltip); the on-accept steps; and the evidence (the bead description
+// tooltip, and is shown in full while that option's decision button has
+// focus — the button is described by it, and the list scrolls it into
+// view); the on-accept steps; and the evidence (the bead description
 // through EvidenceView), behind a disclosure control when the card has
 // options and open otherwise. ReviewItemPanel places these around the
 // attachments and the thread. All text is React text; backtick spans are
 // the one inline mark (lib/reviewCard.ts `splitInlineCode`).
 
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { orderedOptions, recommendedOption, splitInlineCode, type CardLike, type CardOption } from "../lib/reviewCard.js";
 import { EvidenceView } from "./EvidenceView.js";
 import { SectionTitle } from "./ReviewAttachments.js";
@@ -59,9 +61,13 @@ function RiskLine({ risk, small, clamp }: { risk: string; small: boolean; clamp:
   );
 }
 
-function OptionItem({ option, recommended, clamp }: { option: CardOption; recommended: boolean; clamp: boolean }) {
+function OptionItem({ option, recommended, clamp, focused, descId }: { option: CardOption; recommended: boolean; clamp: boolean; focused: boolean; descId: string }) {
+  const ref = useRef<HTMLLIElement>(null);
+  useEffect(() => {
+    if (focused) ref.current?.scrollIntoView?.({ block: "nearest" });
+  }, [focused]);
   return (
-    <li className={`border-l-2 px-3 ${recommended ? "border-accent bg-accent/[0.09] py-2.5" : "border-transparent py-2"}`}>
+    <li ref={ref} data-focused={focused ? "" : undefined} className={`border-l-2 px-3 ${recommended ? "border-accent bg-accent/[0.09] py-2.5" : `py-2 ${focused ? "border-accent/60 bg-accent/[0.05]" : "border-transparent"}`}`}>
       <div className="flex items-center gap-2">
         <IdBadge id={option.id} accent={recommended} />
         <span className={`min-w-0 text-sm text-fg ${recommended ? "font-semibold" : "font-medium"}`}>
@@ -70,22 +76,28 @@ function OptionItem({ option, recommended, clamp }: { option: CardOption; recomm
         </span>
         {recommended && <span className="ml-auto shrink-0 rounded-full border border-accent/60 bg-accent/15 px-2 py-0.5 text-[11px] text-fg">Recommended</span>}
       </div>
-      {option.what !== undefined && (
-        <p title={clamp ? option.what : undefined} className={`leading-snug ${recommended ? "mt-1.5 text-sm text-fg/90" : "mt-1 text-xs text-fg-muted"} ${clamp ? "line-clamp-2" : ""}`}>
-          <InlineText text={option.what} />
-        </p>
-      )}
-      {option.risk !== undefined && (
-        <div className={recommended ? "mt-1" : "mt-0.5"}>
-          <RiskLine risk={option.risk} small={!recommended} clamp={clamp} />
-        </div>
-      )}
+      <div id={descId}>
+        {option.what !== undefined && (
+          <p title={clamp ? option.what : undefined} className={`leading-snug ${recommended ? "mt-1.5 text-sm text-fg/90" : "mt-1 text-xs text-fg-muted"} ${clamp ? "line-clamp-2" : ""}`}>
+            <InlineText text={option.what} />
+          </p>
+        )}
+        {option.risk !== undefined && (
+          <div className={recommended ? "mt-1" : "mt-0.5"}>
+            <RiskLine risk={option.risk} small={!recommended} clamp={clamp} />
+          </div>
+        )}
+      </div>
     </li>
   );
 }
 
-/** The options, the recommended one first. Without a recommendation none is clamped: no option is singled out. */
-export function CardOptions({ card }: { card: CardLike }) {
+/**
+ * The options, the recommended one first. Without a recommendation none is
+ * clamped: no option is singled out. `focused` is the option whose decision
+ * button has focus (shown in full); `descId` names each option's what/risk.
+ */
+export function CardOptions({ card, focused, descId }: { card: CardLike; focused: string | null; descId: (id: string) => string }) {
   const id = useId();
   if (card.options.length === 0) return null;
   const recommended = recommendedOption(card);
@@ -94,7 +106,7 @@ export function CardOptions({ card }: { card: CardLike }) {
       <SectionTitle id={id}>Options · {card.options.length}</SectionTitle>
       <ol className="divide-y divide-hairline overflow-hidden rounded-xl border border-hairline">
         {orderedOptions(card).map((o) => (
-          <OptionItem key={o.id} option={o} recommended={o === recommended} clamp={recommended !== null && o !== recommended} />
+          <OptionItem key={o.id} option={o} recommended={o === recommended} clamp={recommended !== null && o !== recommended && focused !== o.id} focused={focused === o.id} descId={descId(o.id)} />
         ))}
       </ol>
     </section>

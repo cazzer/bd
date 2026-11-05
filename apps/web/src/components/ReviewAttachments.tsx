@@ -280,15 +280,18 @@ function MermaidAttachments({ attachments, layout }: AttachmentRendererProps<"me
     const only = attachments.length === 1 ? attachments[0]! : null;
     return (
       <section aria-label={title} className={`flex flex-col ${STAGE_SHARE}`}>
-        <SectionTitle>{title}</SectionTitle>
         {only !== null ? (
+          // A lone diagram is the stage's picture: no heading, its caption under it.
           <div className="min-h-0 flex-1 overflow-y-auto">
             <MermaidBlock source={only.source} caption={attachmentLabel(only)} fill />
           </div>
         ) : (
-          <div role="region" tabIndex={0} aria-label={title} className="min-h-0 flex-1 space-y-4 overflow-y-auto rounded-md focus:outline-none focus-visible:ring-2 focus-visible:ring-accent">
-            {blocks}
-          </div>
+          <>
+            <SectionTitle>{title}</SectionTitle>
+            <div role="region" tabIndex={0} aria-label={title} className="min-h-0 flex-1 space-y-4 overflow-y-auto rounded-md focus:outline-none focus-visible:ring-2 focus-visible:ring-accent">
+              {blocks}
+            </div>
+          </>
         )}
       </section>
     );
@@ -430,7 +433,11 @@ function PairAttachments({ pairs, layout, focusTitle, onOverlayChange }: { pairs
       <figure className={`min-w-0 ${stage ? "flex min-h-0 flex-col" : ""}`}>
         <figcaption className="mb-1.5 flex min-w-0 items-center gap-2">
           <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide ${part === "before" ? "bg-fg/10 text-fg-muted" : "bg-accent/20 text-accent"}`}>{label}</span>
-          {a.caption !== undefined && <span className="truncate text-xs text-fg-muted">{a.caption}</span>}
+          {a.caption !== undefined && (
+            <span title={a.caption} className="truncate text-xs text-fg-muted">
+              {a.caption}
+            </span>
+          )}
         </figcaption>
         {content}
       </figure>

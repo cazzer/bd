@@ -5,10 +5,13 @@
 // normalized by core and shaped by server/dto.ts, as the server serves it —
 // and the tRPC client is mocked, so these tests check what the panel shows
 // and what it sends: the card's sections in spec order, the option actions
-// and the `seen` they send, the fold, the shortcuts, refusals in the
-// server's words, and a legacy review shown and decided as before.
-// EvidenceView (tiptap) and MermaidBlock (mermaid) are stubbed; they have
-// their own tests (EvidenceView.test.ts).
+// and the `seen` they send, the fold, the shortcuts (including from a
+// focused option, from the fold, and from a dialog inside the panel),
+// refusals, what the host hears, the stage layout, and a legacy review shown
+// and decided as before. EvidenceView (tiptap) and MermaidBlock (mermaid)
+// are stubbed; they have their own tests (EvidenceView.test.ts). The
+// MermaidBlock stub draws an open <dialog> with a button, standing in for
+// the enlarged diagram (a dialog the panel itself opened).
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -17,7 +20,7 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { toBoardItemDto } from "../../server/dto.js";
-import type { PanelDecisions } from "./ReviewItemPanel.js";
+import type { PanelDecisions, ReviewItemPanelProps } from "./ReviewItemPanel.js";
 
 const trpcMock = vi.hoisted(() => ({
   boardItem: { query: vi.fn() },
@@ -30,7 +33,10 @@ vi.mock("./EvidenceView.js", async () => {
 });
 vi.mock("./MermaidBlock.js", async () => {
   const { createElement: h } = await import("react");
-  return { MermaidBlock: ({ caption }: { source: string; caption?: string }) => h("figure", { "data-stub": "mermaid" }, caption ?? "Diagram") };
+  return {
+    MermaidBlock: ({ caption, fill }: { source: string; caption?: string; fill?: boolean }) =>
+      h("figure", { "data-stub": "mermaid", "data-fill": fill ? "" : undefined }, caption ?? "Diagram", h("dialog", { open: true }, h("button", { type: "button", "data-stub": "in-dialog" }, "Close"))),
+  };
 });
 
 const { ReviewItemPanel } = await import("./ReviewItemPanel.js");
@@ -68,6 +74,7 @@ function boardItem(rawReview: unknown, content = ""): unknown {
   return JSON.parse(JSON.stringify(toBoardItemDto(item, ROOT)));
 }
 
+const SHLO_DIFF_CAPTION = "Migrations on branch retire-omni-v5-v8 at 7aa2657 (not on main)";
 const SHLO = fixtureReview("shlo-k54.4.1.1") as { question: string; options: Array<{ id: string; label: string; what: string; risk: string }> };
 const EVIDENCE = "## Caller audit\n\n| Caller | Uses |\n| --- | --- |\n| web-app | v9 |";
 
@@ -88,7 +95,7 @@ afterEach(() => {
   container.remove();
 });
 
-async function render(item: unknown, decisions?: PanelDecisions) {
+async function render(item: unknown, decisions?: PanelDecisions, props: Partial<ReviewItemPanelProps> = {}) {
   trpcMock.boardItem.query.mockResolvedValue({ item });
   await act(async () => {
     root.render(
@@ -104,6 +111,7 @@ async function render(item: unknown, decisions?: PanelDecisions) {
         onEscape: () => {},
         titleId: "t",
         ...(decisions ? { decisions } : {}),
+        ...props,
       }),
     );
   });
@@ -188,7 +196,7 @@ describe("a card with options", () => {
       option: "B",
       seen: { question: SHLO.question, label: b.label, what: b.what, risk: b.risk },
     });
-    expect(container.textContent).toContain("Accepted B and closed — card moved to Closed.");
+    expect(container.textContent).toContain("Chose B (not the recommendation) and closed — card moved to Closed.");
   });
 
   test("Accept sends the recommended option; Request changes sends none", async () => {
@@ -211,7 +219,7 @@ describe("a card with options", () => {
 
   test("Ctrl/Cmd+Enter accepts the recommended option, and the hint names its id", async () => {
     await render(boardItem(fixtureReview("shlo-k54.4.1.1")), { acceptLabel: "Accept & next", changesLabel: "Request changes & next", optionSuffix: "& next", shortcuts: true });
-    expect(container.textContent).toContain("accept A · add");
+    expect(container.textContent).toContain("accept option A · add");
     expect(button("Accept Track").textContent).toContain("& next");
     const title = container.querySelector<HTMLElement>("[data-panel-title]")!;
     await act(async () => {
@@ -221,13 +229,78 @@ describe("a card with options", () => {
     expect(trpcMock.reviewDecision.mutate.mock.calls[0]![0]).toMatchObject({ decision: "accept", option: "A", seen: { label: SHLO.options[0]!.label } });
   });
 
-  test("shows the server's refusal in its own words", async () => {
+  test("a refusal because the card moved re-reads the card at once and says so, keeping the typed message", async () => {
     const refusal = Object.assign(new Error('Review "shlo-k54.4.1.1" changed since it was opened (option B or its question differs); reopen it. Nothing was written.'), { data: { httpStatus: 412 } });
     trpcMock.reviewDecision.mutate.mockRejectedValue(refusal);
     await render(boardItem(fixtureReview("shlo-k54.4.1.1")));
+    typeMessage("go with B");
+    const moved = { ...(fixtureReview("shlo-k54.4.1.1") as object), options: [SHLO.options[0], { ...SHLO.options[1], label: "Drop the table" }, SHLO.options[2]] };
+    trpcMock.boardItem.query.mockResolvedValue({ item: boardItem(moved) });
+    expect(trpcMock.boardItem.query).toHaveBeenCalledTimes(1);
     await click(button("BChoose"));
     const alert = container.querySelector("[role=alert]")!;
-    expect(alert.textContent).toBe(refusal.message);
+    expect(alert.textContent).toContain("This card changed while you were reading it. It now shows the current version — read it again before deciding. Nothing was written.");
+    expect(alert.textContent).toContain(refusal.message);
+    expect(trpcMock.boardItem.query).toHaveBeenCalledTimes(2);
+    expect(button("BChoose").textContent).toContain("Drop the table");
+    expect(container.querySelector("textarea")!.value).toBe("go with B");
+  });
+
+  test("any other 4xx refusal is shown in the server's words, without a re-read", async () => {
+    const refusal = Object.assign(new Error('Review "shlo-k54.4.1.1" is already closed.'), { data: { httpStatus: 409 } });
+    trpcMock.reviewDecision.mutate.mockRejectedValue(refusal);
+    await render(boardItem(fixtureReview("shlo-k54.4.1.1")));
+    await click(button("Accept Track"));
+    expect(container.querySelector("[role=alert]")!.textContent).toBe(refusal.message);
+    expect(trpcMock.boardItem.query).toHaveBeenCalledTimes(1);
+  });
+
+  test("tells the host which option was accepted and whether it was the recommendation", async () => {
+    const onWritten = vi.fn();
+    await render(boardItem(fixtureReview("shlo-k54.4.1.1")), { acceptLabel: "Accept & next", changesLabel: "Request changes & next", onWritten });
+    await click(button("Accept Track"));
+    expect(onWritten.mock.calls[0]![1].option).toEqual({ id: "A", recommended: true });
+    expect(container.textContent).toContain("Accepted A and closed");
+  });
+
+  test("Ctrl/Cmd+Enter on a focused Choose button takes that option, never the recommendation; on the fold's toggle it takes nothing", async () => {
+    const raw = { ...(fixtureReview("shlo-k54.4.1.1") as object), options: [...SHLO.options, { id: "D", label: "Defer a week" }] };
+    await render(boardItem(raw), { acceptLabel: "Accept", changesLabel: "Request changes", shortcuts: true });
+    const toggle = button("Choose another…");
+    await act(async () => {
+      toggle.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true }));
+    });
+    expect(trpcMock.reviewDecision.mutate).not.toHaveBeenCalled();
+    await click(toggle);
+    await act(async () => {
+      button("CChoose").dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true }));
+    });
+    expect(trpcMock.reviewDecision.mutate.mock.calls[0]![0]).toMatchObject({ option: "C", seen: { label: "Don't drop" } });
+  });
+
+  test("Ctrl/Cmd+Enter on an inline Choose button takes that option", async () => {
+    await render(boardItem(fixtureReview("shlo-k54.4.1.1")), { acceptLabel: "Accept", changesLabel: "Request changes", shortcuts: true });
+    await act(async () => {
+      button("BChoose").dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true }));
+    });
+    expect(trpcMock.reviewDecision.mutate.mock.calls[0]![0]).toMatchObject({ option: "B" });
+  });
+
+  test("a focused Choose button shows its option's clamped text in full and is described by it", async () => {
+    await render(boardItem(fixtureReview("shlo-k54.4.1.1")));
+    const choose = button("CChoose");
+    const desc = container.querySelector(`#${CSS.escape(choose.getAttribute("aria-describedby")!)}`)!;
+    expect(desc.textContent).toContain(SHLO.options[2]!.risk);
+    expect(desc.querySelector(".line-clamp-2")).not.toBeNull();
+    await act(async () => {
+      choose.focus();
+    });
+    expect(desc.querySelector(".line-clamp-2")).toBeNull();
+    expect(desc.closest("li")!.hasAttribute("data-focused")).toBe(true);
+    await act(async () => {
+      choose.blur();
+    });
+    expect(desc.querySelector(".line-clamp-2")).not.toBeNull();
   });
 
   test("folds more than two other options behind Choose another…, operable by keyboard", async () => {
@@ -254,6 +327,103 @@ describe("a card with options", () => {
     await click(toggle);
     await click(button("DChoose"));
     expect(trpcMock.reviewDecision.mutate.mock.calls[0]![0]).toMatchObject({ option: "D", seen: { label: "Defer a week" } });
+  });
+
+  test("Escape inside the fold or on its open toggle closes the list only, never the drawer", async () => {
+    const onEscape = vi.fn();
+    const raw = { ...(fixtureReview("shlo-k54.4.1.1") as object), options: [...SHLO.options, { id: "D", label: "Defer a week" }] };
+    await render(boardItem(raw), undefined, { onEscape });
+    const toggle = button("Choose another…");
+    await click(toggle);
+    await act(async () => {
+      button("BChoose").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    await click(toggle);
+    await act(async () => {
+      toggle.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(onEscape).not.toHaveBeenCalled();
+    await act(async () => {
+      toggle.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    expect(onEscape).toHaveBeenCalledTimes(1);
+  });
+
+  test("disables the fold's toggle while a decision is being written", async () => {
+    let resolve: (v: unknown) => void = () => {};
+    trpcMock.reviewDecision.mutate.mockReturnValue(new Promise((r) => (resolve = r)));
+    const raw = { ...(fixtureReview("shlo-k54.4.1.1") as object), options: [...SHLO.options, { id: "D", label: "Defer a week" }] };
+    await render(boardItem(raw));
+    await click(button("Accept Track"));
+    expect(button("Choose another…").disabled).toBe(true);
+    await act(async () => {
+      resolve({ ok: true, decision: "accept", item: "x", written: ["comment"], notified: null });
+    });
+  });
+});
+
+describe("a card that recommends nothing", () => {
+  test("shows three Choose buttons and no Accept; Ctrl/Cmd+Enter does nothing and the hint offers only request changes", async () => {
+    const raw = { ...(fixtureReview("shlo-k54.4.1.1") as object), recommend: undefined };
+    await render(boardItem(raw), { acceptLabel: "Accept", changesLabel: "Request changes", shortcuts: true });
+    expect(buttons().filter((b) => /Choose|^Accept/.test(b.textContent ?? "")).map((b) => b.getAttribute("data-option-id"))).toEqual(["A", "B", "C"]);
+    expect(buttons().some((b) => b.textContent?.startsWith("Accept"))).toBe(false);
+    const hint = container.querySelector("[aria-hidden=true].lg\\:inline-flex")!;
+    expect(hint.textContent).toBe("Ctrl/⌘ShiftEnter request changes");
+    const title = container.querySelector<HTMLElement>("[data-panel-title]")!;
+    await act(async () => {
+      title.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true }));
+    });
+    expect(trpcMock.reviewDecision.mutate).not.toHaveBeenCalled();
+  });
+
+  test("folds four or more under Choose an option…", async () => {
+    const raw = { ...(fixtureReview("shlo-k54.4.1.1") as object), recommend: undefined, options: [...SHLO.options, { id: "D", label: "Defer a week" }] };
+    await render(boardItem(raw));
+    expect(button("Choose an option…").getAttribute("aria-expanded")).toBe("false");
+  });
+});
+
+describe("keys from a dialog inside the panel", () => {
+  test("Ctrl/Cmd+Enter and Escape inside it neither decide nor leave", async () => {
+    const onEscape = vi.fn();
+    await render(boardItem(fixtureReview("before-after")), { acceptLabel: "Accept", changesLabel: "Request changes", shortcuts: true }, { onEscape });
+    const inDialog = container.querySelector<HTMLElement>("[data-stub=in-dialog]")!;
+    await act(async () => {
+      inDialog.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true }));
+      inDialog.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    expect(trpcMock.reviewDecision.mutate).not.toHaveBeenCalled();
+    expect(onEscape).not.toHaveBeenCalled();
+    const title = container.querySelector<HTMLElement>("[data-panel-title]")!;
+    await act(async () => {
+      title.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true }));
+    });
+    expect(trpcMock.reviewDecision.mutate).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("the run's stage", () => {
+  test("a lone diff fills the stage beside the card", async () => {
+    await render(boardItem(fixtureReview("shlo-k54.4.1.1")), undefined, { layout: "stage" });
+    const diffs = container.querySelector("section[aria-label='Diffs · 1']")!;
+    expect(diffs.className).toContain("flex-[2]");
+    expect(diffs.querySelector("[role=region][tabindex='0']")?.getAttribute("aria-label")).toBe(SHLO_DIFF_CAPTION);
+    expect(diffs.querySelector("figure")!.className).toContain("h-full");
+    expect(sectionTitles()).toEqual(["Diffs · 1", "Question", "Options · 3", "On accept · 3 steps", "Thread · 0"]);
+  });
+
+  test("a before/after pair takes the larger share above a lone diagram, which fills its own", async () => {
+    await render(boardItem(fixtureReview("before-after")), undefined, { layout: "stage" });
+    const pair = container.querySelector("section[aria-label='Before / after']")!;
+    const diagrams = container.querySelector("section[aria-label='Diagrams · 1']")!;
+    expect(pair.className).toContain("flex-[3]");
+    expect(diagrams.className).toContain("flex-[2]");
+    expect(pair.compareDocumentPosition(diagrams) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(diagrams.querySelector("h3")).toBeNull();
+    expect(diagrams.querySelector("[data-stub=mermaid]")!.hasAttribute("data-fill")).toBe(true);
   });
 });
 

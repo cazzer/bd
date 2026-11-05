@@ -7,12 +7,16 @@
 // out). Long lines wrap rather than scroll sideways; each file in a
 // multi-file diff starts below a rule.
 //
+// Wrapped lines hang (the continuation indents past the +/- column), so a
+// wrapped added line still reads as one line. With `fill` (the run's stage),
+// a file line shows only its `b/` path, the full header in its tooltip.
+//
 // Plain elements (div/span), not pre/code: inside EvidenceView the
 // MarkdownEditor stylesheet styles `pre` and `code` with unlayered rules that
 // would override these utilities, and the attachment copy has no such scope.
 
 import { useMemo, useState } from "react";
-import { classifyDiffLines, diffStats, type DiffLineKind } from "../lib/diffLines.js";
+import { classifyDiffLines, diffStats, fileLinePath, type DiffLineKind } from "../lib/diffLines.js";
 
 const LINE_CLASS: Record<DiffLineKind, string> = {
   added: "bg-emerald-500/10 text-emerald-300",
@@ -59,10 +63,16 @@ export function DiffBlock({ source, caption, maxLines = 24, fill = false }: Diff
         {shown.map((line, i) => {
           const prefix = SCREEN_READER_PREFIX[line.kind];
           const fileRule = line.kind === "file" && i > 0 ? "mt-2 border-t border-hairline pt-2" : "";
+          const shortFile = fill && line.kind === "file";
           return (
-            <span key={i} data-diff-line={line.kind} className={`block whitespace-pre-wrap px-3 [overflow-wrap:anywhere] ${LINE_CLASS[line.kind]} ${fileRule}`}>
+            <span
+              key={i}
+              data-diff-line={line.kind}
+              title={shortFile ? line.text : undefined}
+              className={`block whitespace-pre-wrap pl-[calc(0.75rem+2ch)] pr-3 -indent-[2ch] [overflow-wrap:anywhere] ${LINE_CLASS[line.kind]} ${fileRule}`}
+            >
               {prefix && <span className="sr-only select-none">{prefix}</span>}
-              {line.text === "" ? " " : line.text}
+              {line.text === "" ? " " : shortFile ? fileLinePath(line.text) : line.text}
             </span>
           );
         })}

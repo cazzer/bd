@@ -66,17 +66,18 @@ const COMMENT_POSTED = " Your comment is posted; deciding again would post it ag
 
 /**
  * How a `reviewDecision` answer reads in the drawer. A success says where
- * the card went, and names the option accepted when there was one. `uncertain` names a step that timed out or was killed and
+ * the card went, and names the option accepted when there was one
+ * (`acceptedAs`: "Accepted A", "Chose B (not the recommendation)"). `uncertain` names a step that timed out or was killed and
  * so may still have been written; the server's error already says to check
  * the tracker, so the text names the step and passes the error through, and
  * never claims the step did not land.
  */
 export function describeDecision(
   result: { ok: boolean; decision: ReviewDecisionKind; written: readonly ReviewStepName[]; error?: string; uncertain?: ReviewStepName },
-  option?: string,
+  acceptedAs: string = "Accepted",
 ): DecisionOutcome {
   if (result.ok) {
-    const accepted = option === undefined ? "Accepted" : `Accepted ${option}`;
+    const accepted = acceptedAs;
     const text =
       result.decision === "accept"
         ? result.written.includes("close")
@@ -164,13 +165,13 @@ export function describeThrownDecision(err: ThrownDecision): ThrownDecisionText 
  */
 export function decisionEffects(
   result: { ok: boolean; decision: ReviewDecisionKind; written: readonly ReviewStepName[]; error?: string; uncertain?: ReviewStepName },
-  option?: string,
+  acceptedAs?: string,
 ): {
   outcome: DecisionOutcome;
   clearMessage: boolean;
   reread: boolean;
   written: boolean;
 } {
-  const outcome = describeDecision(result, option);
+  const outcome = describeDecision(result, acceptedAs);
   return { outcome, clearMessage: !outcome.keepMessage, reread: result.written.length > 0 || result.uncertain !== undefined, written: result.ok };
 }

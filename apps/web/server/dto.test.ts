@@ -67,6 +67,7 @@ describe("toBoardItemDto card", () => {
         { kind: "image", path: "/elsewhere/after.png", pair: "after", name: "after.png", url: null },
         { kind: "diff", source: "+x" },
       ],
+      legacy: false,
     });
     expect(dto.card?.question).toBe(card.question);
     expect(dto.card?.options).toEqual(card.options);
@@ -82,8 +83,14 @@ describe("toBoardItemDto card", () => {
       recommend: null,
       onAccept: [],
       attachments: [{ kind: "image", path: shot, name: "01.png", url: "/review-images/bd/bd-1/01.png" }],
+      legacy: true,
     });
     expect(dto.reviewImages).toEqual([{ path: shot, name: "01.png", url: "/review-images/bd/bd-1/01.png" }]);
+  });
+
+  it("calls a review with any card key a card, even a question alone", () => {
+    expect(toBoardItemDto(item(normalized({ images: [], pane: null, summary: "q", question: "q" })), ROOT).card?.legacy).toBe(false);
+    expect(toBoardItemDto(item(normalized({ images: [], pane: null, summary: "", on_accept: ["x"] })), ROOT).card?.legacy).toBe(false);
   });
 
   it("is null for a malformed review or an item that is not a review", () => {

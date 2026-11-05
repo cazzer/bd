@@ -45,6 +45,7 @@ import {
   type RetrievedNode,
   type ReviewCard,
   type ReviewImageAttachment,
+  type ReviewMetadata,
   type ReviewSourceAttachment,
 } from "@breakdown/core";
 import { reviewImageUrl } from "./review-images.js";
@@ -107,11 +108,22 @@ export interface ReviewImageDto {
  * core (header), and so the question the drawer shows — and sends back as
  * `seen` with an option — is byte-for-byte the one the decision check
  * compares. Each image attachment carries its `name` and route `url`, as
- * `reviewImages` does.
+ * `reviewImages` does. `legacy` says the review carries no card key at all
+ * (`images` and `summary` only, as filed before cards), which the drawer
+ * shows as it always has; it is decided here so the client never copies
+ * the contract's key list.
  */
 export type ReviewCardAttachmentDto = (ReviewImageAttachment & { name: string; url: string | null }) | ReviewSourceAttachment;
-export type ReviewCardDto = Omit<ReviewCard, "attachments"> & { attachments: ReviewCardAttachmentDto[] };
-/** `reviewImages` is empty and `card` null unless the item carries a valid review. */
+export type ReviewCardDto = Omit<ReviewCard, "attachments"> & { attachments: ReviewCardAttachmentDto[]; legacy: boolean };
+
+/** The card keys of the review contract (reviews.ts), checked against its type. */
+const CARD_KEYS = ["question", "options", "recommend", "on_accept", "attachments"] as const satisfies ReadonlyArray<keyof ReviewMetadata>;
+
+/**
+ * `reviewImages` is empty and `card` null unless the item carries a valid
+ * review. `reviewImages` predates `card` and is kept for a board tab opened
+ * before cards existed, whose client still reads it.
+ */
 export type BoardItemDto = Omit<BoardItem, "updatedAt"> & { updatedAt: string; reviewImages: ReviewImageDto[]; card: ReviewCardDto | null };
 
 export function toBoardCardDto(card: BoardCard): BoardCardDto {
@@ -128,7 +140,11 @@ export function toBoardItemDto(item: BoardItem, reviewImageRoot: string = REVIEW
     card:
       card === null
         ? null
-        : { ...card, attachments: card.attachments.map((a) => (a.kind === "image" ? { ...a, name: path.basename(a.path), url: reviewImageUrl(a.path, reviewImageRoot) } : a)) },
+        : {
+            ...card,
+            attachments: card.attachments.map((a) => (a.kind === "image" ? { ...a, name: path.basename(a.path), url: reviewImageUrl(a.path, reviewImageRoot) } : a)),
+            legacy: CARD_KEYS.every((key) => review![key] === undefined),
+          },
   };
 }
 

@@ -111,7 +111,7 @@ export function MermaidDiagram({ source, caption, onPendingChange, fill = false 
   if (drawn.status === "pending") return null;
   if (drawn.status === "failed") return <DiagramSourceWithError source={source} reason={drawn.reason} />;
   return (
-    <div className={`rounded-md border border-hairline bg-[#030509] p-3 ${fill ? "flex min-h-0 flex-1 flex-col" : ""}`}>
+    <div className={`rounded-md border border-hairline bg-[#030509] p-3 ${fill ? "relative flex min-h-0 flex-1 flex-col" : ""}`}>
       <button
         ref={enlargeRef}
         type="button"
@@ -121,7 +121,7 @@ export function MermaidDiagram({ source, caption, onPendingChange, fill = false 
       >
         <img src={drawn.src} alt={kind} width={drawn.width} height={drawn.height} decoding="async" className={fill ? "block h-full w-full object-contain" : "block h-auto max-w-full"} />
       </button>
-      <details className={`mt-2 text-xs ${fill ? "max-h-[40%] shrink-0 overflow-y-auto" : ""}`}>
+      <details className={`text-xs ${fill ? "absolute bottom-2 left-2 max-h-[calc(100%-1rem)] max-w-[calc(100%-1rem)] overflow-y-auto rounded border border-hairline bg-[#030509]/95 px-2 py-1 open:right-2" : "mt-2"}`}>
         <summary className="cursor-pointer rounded text-fg-muted hover:text-fg focus:outline-none focus-visible:ring-2 focus-visible:ring-accent">Diagram source</summary>
         <div className="mt-1.5 whitespace-pre-wrap font-mono leading-relaxed text-fg [overflow-wrap:anywhere]">{source}</div>
       </details>

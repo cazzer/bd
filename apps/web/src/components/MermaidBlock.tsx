@@ -11,7 +11,9 @@
 // mermaid's render. A chunk that fails to load (offline, a deploy replaced
 // it) shows the source as text with the reason, like a diagram that does not
 // parse — never a blank. `fill` (the review run's stage) scales a drawn
-// diagram down to the height its parent gives it instead of its natural size.
+// diagram down to the height its parent gives it instead of its natural size,
+// with the caption under it and the source behind a small disclosure laid
+// over the diagram's corner, so the diagram keeps the height.
 
 import { Component, lazy, Suspense, useState, type ReactNode } from "react";
 import { DiagramSourceWithError, DiagramStatus } from "./DiagramStates.js";
@@ -32,13 +34,14 @@ export function MermaidBlock({ source, caption, fill = false }: MermaidBlockProp
   const [pending, setPending] = useState(true);
   return (
     <figure className={fill ? "flex h-full min-h-0 min-w-0 flex-col" : "min-w-0"}>
-      {caption && <figcaption className="mb-1.5 shrink-0 text-xs text-fg-muted">{caption}</figcaption>}
+      {caption && !fill && <figcaption className="mb-1.5 text-xs text-fg-muted">{caption}</figcaption>}
       <DiagramLoadBoundary source={source}>
         <DiagramStatus pending={pending} />
         <Suspense fallback={null}>
           <MermaidDiagram source={source} caption={caption} fill={fill} onPendingChange={setPending} />
         </Suspense>
       </DiagramLoadBoundary>
+      {caption && fill && <figcaption className="mt-1.5 shrink-0 text-xs text-fg-muted">{caption}</figcaption>}
     </figure>
   );
 }
