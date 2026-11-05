@@ -30,6 +30,17 @@
 // start (the tab shown again, or a first listener after the last left)
 // tries again.
 //
+// A stream the server ends cleanly (`boardEvents` returns when the server
+// shuts down, so a dev-server restart does this) is reopened by itself while
+// it is still wanted, after a backoff: 1 s, doubling per consecutive clean
+// end up to 30 s, back to 1 s once a stream has stayed up 10 s. Restarting
+// at once would hit a server that is still going down, and a server that
+// ends every stream at once must not become a hot loop. The reopened stream
+// is an ordinary start — its `onStarted` re-reads every listener — and while
+// the server is down the SSE link's own retry holds it in `connecting`. The
+// state reads `connecting` during the wait, since the stream is on its way
+// back; a hide or the last unsubscribe cancels the wait.
+//
 // `createLiveStream(deps)` is the registry over an injected subscribe
 // function and document, so it is testable without React or a tRPC client;
 // `subscribeLive` and `useLiveState` are the tab's default instance over
@@ -54,6 +65,9 @@ export interface StreamHandlers {
   onData: (event: LiveEvent) => void;
   onConnectionStateChange: (state: { state: string }) => void;
   onError: (err: unknown) => void;
+  /** The server ended the stream cleanly; tRPC calls this before onComplete. */
+  onStopped: () => void;
+  onComplete: () => void;
 }
 
 /** The slice of `document` the registry reads. */
@@ -75,6 +89,12 @@ export interface LiveStream {
   onStateChange(callback: () => void): () => void;
 }
 
+/** First wait before reopening a stream the server ended; doubles per consecutive clean end. */
+export const RESTART_BASE_MS = 1000;
+export const RESTART_MAX_MS = 30_000;
+/** A stream that stayed up this long resets the backoff. */
+export const RESTART_STABLE_MS = 10_000;
+
 export function createLiveStream(deps: LiveStreamDeps): LiveStream {
   const listeners = new Set<LiveListener>();
   const stateCallbacks = new Set<() => void>();
@@ -83,6 +103,9 @@ export function createLiveStream(deps: LiveStreamDeps): LiveStream {
   let generation = 0;
   let started = false;
   let failure: { err: unknown } | null = null;
+  let restartTimer: ReturnType<typeof setTimeout> | null = null;
+  let cleanEnds = 0;
+  let startedAt = 0;
   let state: LiveState = "connecting";
 
   function setState(next: LiveState) {
@@ -95,21 +118,53 @@ export function createLiveStream(deps: LiveStreamDeps): LiveStream {
     return deps.document === undefined || deps.document.visibilityState !== "hidden";
   }
 
+  function each(call: (l: LiveListener) => void) {
+    for (const l of [...listeners]) if (listeners.has(l)) call(l);
+  }
+
+  function cancelRestart() {
+    if (restartTimer !== null) clearTimeout(restartTimer);
+    restartTimer = null;
+  }
+
+  /** Drop the current subscription and ignore anything it still says. */
+  function drop() {
+    generation++;
+    const sub = subscription;
+    subscription = null;
+    started = false;
+    sub?.unsubscribe();
+  }
+
   function start() {
+    cancelRestart();
     const mine = ++generation;
     started = false;
     failure = null;
+    startedAt = Date.now();
     setState("connecting");
     const current = () => mine === generation;
-    subscription = deps.subscribe({
+    const ended = () => {
+      if (!current()) return;
+      drop();
+      if (Date.now() - startedAt >= RESTART_STABLE_MS) cleanEnds = 0;
+      const wait = Math.min(RESTART_BASE_MS * 2 ** cleanEnds, RESTART_MAX_MS);
+      cleanEnds++;
+      setState("connecting");
+      restartTimer = setTimeout(() => {
+        restartTimer = null;
+        reconcile();
+      }, wait);
+    };
+    const sub = deps.subscribe({
       onStarted: () => {
         if (!current()) return;
         started = true;
-        for (const l of [...listeners]) if (listeners.has(l)) l.onStarted();
+        each((l) => l.onStarted());
       },
       onData: (event) => {
         if (!current()) return;
-        for (const l of [...listeners]) if (listeners.has(l)) l.onEvent(event);
+        each((l) => l.onEvent(event));
       },
       onConnectionStateChange: ({ state: s }) => {
         if (!current()) return;
@@ -118,22 +173,22 @@ export function createLiveStream(deps: LiveStreamDeps): LiveStream {
       },
       onError: (err) => {
         if (!current()) return;
-        generation++;
-        subscription?.unsubscribe();
-        subscription = null;
-        started = false;
+        drop();
         failure = { err };
         setState("offline");
-        for (const l of [...listeners]) if (listeners.has(l)) l.onError?.(err);
+        each((l) => l.onError?.(err));
       },
+      onStopped: ended,
+      onComplete: ended,
     });
+    // A subscribe that already errored or ended (synchronously) is not ours to keep.
+    if (current()) subscription = sub;
+    else sub.unsubscribe();
   }
 
   function stop() {
-    generation++;
-    subscription?.unsubscribe();
-    subscription = null;
-    started = false;
+    cancelRestart();
+    drop();
     failure = null;
     setState("connecting");
   }
@@ -141,7 +196,7 @@ export function createLiveStream(deps: LiveStreamDeps): LiveStream {
   /** Bring the subscription in line with the rule: exists iff listeners > 0 and the page is shown. */
   function reconcile() {
     const wanted = listeners.size > 0 && shown();
-    const holding = subscription !== null || failure !== null;
+    const holding = subscription !== null || failure !== null || restartTimer !== null;
     if (wanted && !holding) start();
     else if (!wanted && holding) stop();
   }
@@ -153,9 +208,9 @@ export function createLiveStream(deps: LiveStreamDeps): LiveStream {
       const wrapped: LiveListener = { ...listener };
       if (listeners.size === 0) deps.document?.addEventListener("visibilitychange", onVisibilityChange);
       listeners.add(wrapped);
-      if (subscription === null && failure === null) reconcile();
-      else if (started) wrapped.onStarted();
+      if (started) wrapped.onStarted();
       else if (failure !== null) wrapped.onError?.(failure.err);
+      else reconcile();
       return () => {
         if (!listeners.delete(wrapped)) return;
         if (listeners.size === 0) deps.document?.removeEventListener("visibilitychange", onVisibilityChange);

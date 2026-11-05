@@ -41,7 +41,7 @@
 import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { subscribeLive, useLiveState } from "../lib/liveStream.js";
 import { navigate } from "../lib/navigate.js";
-import { createReadScheduler } from "../lib/readScheduler.js";
+import { createReadScheduler, READ_DEBOUNCE_MS, READ_MAX_WAIT_MS } from "../lib/readScheduler.js";
 import {
   addHighlights,
   BOARD_COLUMN_ORDER,
@@ -63,9 +63,6 @@ import { viewFilterOf, type ViewNode } from "../lib/viewFilter.js";
 import { trpc } from "../trpc.js";
 import { ReviewDrawer, useWideDrawer } from "./ReviewDrawer.js";
 
-const READ_DEBOUNCE_MS = 150;
-/** A continuous stream of events cannot defer the read longer than this. */
-const READ_MAX_WAIT_MS = 1000;
 const GRAPH_HOME: GraphRoute = { view: "graph", q: null, types: [], node: null };
 
 type ViewState =

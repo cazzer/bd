@@ -14,6 +14,11 @@
 // reader. `dispose()` cancels the timer and stops any follow-up; a read
 // already in flight finishes, and its caller guards its own state writes.
 
+/** The live readers' debounce: a burst of events collapses to one read this long after the last. */
+export const READ_DEBOUNCE_MS = 150;
+/** A continuous stream of events cannot defer a live reader's read longer than this. */
+export const READ_MAX_WAIT_MS = 1000;
+
 export interface ReadSchedulerOptions {
   /** One read of the whole answer; must not reject (it reports its own failure). */
   read: () => Promise<void>;
