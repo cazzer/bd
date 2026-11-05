@@ -17,10 +17,10 @@
 
 ## 3. Decisions name an option (server)
 
-- [ ] 3.1 `reviewDecision` input gains optional `option` (id pattern); router passes it through
-- [ ] 3.2 `review-writer.ts` checks the option against the pre-write `bd show` record's normalized review (design.md decision 5), refusing before any write; comment, close reason, and prompt texts with the option; texts without an option unchanged
-- [ ] 3.3 Tests with the injectable runner: choose non-recommended option, accept recommended with and without message, option not offered, accept without option on a card with options, option with `changes`, option on a legacy review, legacy accept/changes texts unchanged; router test for the input pattern
-- [ ] 3.4 `pnpm check` passes
+- [x] 3.1 `reviewDecision` input gains optional `option` (id pattern); router passes it through
+- [x] 3.2 `review-writer.ts` checks the option against the pre-write `bd show` record's normalized review (design.md decision 5), refusing before any write; comment, close reason, and prompt texts with the option; texts without an option unchanged
+- [x] 3.3 Tests with the injectable runner: choose non-recommended option, accept recommended with and without message, option not offered, accept without option on a card with options, option with `changes`, option on a legacy review, legacy accept/changes texts unchanged; router test for the input pattern
+- [x] 3.4 `pnpm check` passes
 
 ## 4. Card layout prototypes (visual review gate)
 

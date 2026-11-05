@@ -33,9 +33,22 @@
 // nothing is written. A failing `bd show` is reported like any tracker
 // failure, with nothing attempted.
 //
+// A decision may name an option (decision-card-reviews, design.md decision
+// 5). The record's `metadata.review`, put through `normalizeReviewMetadata`,
+// is the only source of the options on offer — never the request's and
+// never the store's, for the reason pane and socket are read from it below.
+// A review that normalizes to `{ invalid: true }` (or has no review
+// metadata at all) offers no options and is decided the legacy way. Refused
+// with `ReviewRecordRefusedError`, nothing written: an option sent with
+// `changes` (`option-with-changes`), an option on a review that offers none
+// (`no-options`), an option the record does not offer (`unknown-option`),
+// and an accept without an option on a review that offers some
+// (`option-required`). An accepted option is one of the record's ids, so it
+// matches REVIEW_OPTION_ID_PATTERN and can only follow a fixed prefix.
+//
 // Steps then run serially and stop at the first failure:
 //   accept  → `comments add <id> <text>`, `update <id> --remove-label review:changes`,
-//             `close <id> --reason "Review accepted"`
+//             `close <id> --reason "Review accepted"` (`"Review accepted: <option>"`)
 //   changes → `comments add <id> <text>`, `update <id> --add-label review:changes`
 // Close is last so that a failed close leaves an open review the person can
 // decide again (a closed one is refused). Accept removes `review:changes`
@@ -56,7 +69,9 @@
 // Notification (design.md decision 6): once every step has been written
 // (`ok: true`), the requesting agent's pane is told with `herdr agent prompt
 // <pane> <text>` — `Review <id> accepted: <message>` (`Review <id>
-// accepted.` with no message) or `Review <id> changes requested: <message>`.
+// accepted.` with no message) or `Review <id> changes requested: <message>`;
+// with an option, `Review <id> accepted: <option> — <message>` (`Review <id>
+// accepted: <option>.`).
 // The text always starts with `Review`, so it is never read as a flag.
 // herdr 0.9.1 does not accept `--` before positionals (it answers "unknown
 // option"), so none is passed; the pane pattern is what keeps the pane from
@@ -97,7 +112,7 @@
 
 import { execFile } from "node:child_process";
 import { statSync } from "node:fs";
-import { isReviewSocketPath, REVIEW_PANE_PATTERN } from "@breakdown/core";
+import { isReviewSocketPath, normalizeReviewMetadata, REVIEW_PANE_PATTERN } from "@breakdown/core";
 
 function isDirectory(dir: string): boolean {
   try {
@@ -151,6 +166,8 @@ export interface ReviewWriteInput {
   decision: ReviewDecision;
   /** Already trimmed; may be empty for `accept`. */
   message: string;
+  /** The option accepted, by id; checked against the tracker's record (module header). */
+  option?: string;
   /** Called once the bd steps are over and the checkout's queue is released, before the notification (module header). */
   onWritten?: (outcome: { ok: boolean; attempted: boolean }) => void;
 }
@@ -192,7 +209,7 @@ export class ReviewDecisionInFlightError extends Error {
   }
 }
 
-export type ReviewRecordRefusal = "other-issue" | "not-review" | "closed";
+export type ReviewRecordRefusal = "other-issue" | "not-review" | "closed" | "option-with-changes" | "no-options" | "unknown-option" | "option-required";
 
 /** The tracker's own record does not allow the decision; nothing was written. */
 export class ReviewRecordRefusedError extends Error {
@@ -219,18 +236,59 @@ function fitError(text: string): string {
   return trimmed.length > MAX_REVIEW_ERROR_LENGTH ? `${trimmed.slice(0, MAX_REVIEW_ERROR_LENGTH - 1)}…` : trimmed;
 }
 
+/** What follows `Accepted` in an accept's comment and prompt: `.`, `: <m>`, `: <option>.`, or `: <option> — <m>`. */
+function acceptedTail(message: string, option: string | undefined): string {
+  if (option === undefined) return message === "" ? "." : `: ${message}`;
+  return message === "" ? `: ${option}.` : `: ${option} \u2014 ${message}`;
+}
+
 /** The comment written for a decision. The fixed prefix keeps the argv element from ever starting with `-`. */
-export function commentText(decision: ReviewDecision, message: string): string {
+export function commentText(decision: ReviewDecision, message: string, option?: string): string {
   const m = message.trim();
-  if (decision === "accept") return m === "" ? "Accepted." : `Accepted: ${m}`;
+  if (decision === "accept") return `Accepted${acceptedTail(m, option)}`;
   return `Changes requested: ${m}`;
 }
 
+/** The close reason for an accept. */
+export function closeReason(option?: string): string {
+  return option === undefined ? REVIEW_ACCEPT_REASON : `${REVIEW_ACCEPT_REASON}: ${option}`;
+}
+
 /** The prompt sent to the requesting pane. Starts with `Review`, never `-`. */
-export function notifyText(decision: ReviewDecision, id: string, message: string): string {
+export function notifyText(decision: ReviewDecision, id: string, message: string, option?: string): string {
   const m = message.trim();
-  if (decision === "accept") return m === "" ? `Review ${id} accepted.` : `Review ${id} accepted: ${m}`;
+  if (decision === "accept") return `Review ${id} accepted${acceptedTail(m, option)}`;
   return `Review ${id} changes requested: ${m}`;
+}
+
+/** The option ids the tracker's record offers; none for a record without a valid review (module header). */
+function offeredOptions(record: { metadata?: unknown }): string[] {
+  const metadata = record.metadata;
+  const raw = typeof metadata === "object" && metadata !== null ? (metadata as Record<string, unknown>)["review"] : undefined;
+  const review = normalizeReviewMetadata(raw);
+  return "invalid" in review ? [] : (review.options ?? []).map((o) => o.id);
+}
+
+/** Refuses an option the record does not allow, or a missing one it requires (module header). */
+function checkOption(input: ReviewWriteInput, record: { metadata?: unknown }): void {
+  const id = input.externalId;
+  const option = input.option;
+  if (option !== undefined && input.decision !== "accept") {
+    throw new ReviewRecordRefusedError("option-with-changes", id, `An option is chosen only by accepting; a request for changes on "${id}" names none. Nothing was written.`);
+  }
+  const offered = offeredOptions(record);
+  if (option === undefined) {
+    if (input.decision === "accept" && offered.length > 0) {
+      throw new ReviewRecordRefusedError("option-required", id, `Review "${id}" offers options (${offered.join(", ")}); accepting it must name one. Nothing was written.`);
+    }
+    return;
+  }
+  if (offered.length === 0) {
+    throw new ReviewRecordRefusedError("no-options", id, `Review "${id}" offers no options in the tracker, so none can be accepted; nothing was written.`);
+  }
+  if (!offered.includes(option)) {
+    throw new ReviewRecordRefusedError("unknown-option", id, `Review "${id}" does not offer option "${option}" (it offers ${offered.join(", ")}); nothing was written.`);
+  }
 }
 
 function isSocketOnDisk(file: string): boolean {
@@ -422,12 +480,12 @@ export function createHerdrRunner(options: HerdrRunnerOptions = {}): RunHerdr {
 
 function stepsFor(input: ReviewWriteInput): Array<{ step: ReviewStep; args: string[] }> {
   const id = input.externalId;
-  const comment = { step: "comment" as const, args: ["comments", "add", id, commentText(input.decision, input.message)] };
+  const comment = { step: "comment" as const, args: ["comments", "add", id, commentText(input.decision, input.message, input.option)] };
   if (input.decision === "accept") {
     return [
       comment,
       { step: "remove-changes-label", args: ["update", id, "--remove-label", "review:changes"] },
-      { step: "close", args: ["close", id, "--reason", REVIEW_ACCEPT_REASON] },
+      { step: "close", args: ["close", id, "--reason", closeReason(input.option)] },
     ];
   }
   return [comment, { step: "add-changes-label", args: ["update", id, "--add-label", "review:changes"] }];
@@ -500,6 +558,7 @@ export function createReviewWriter(options: ReviewWriterOptions = {}): ReviewWri
     if (shown.status === "closed") {
       throw new ReviewRecordRefusedError("closed", id, `Review "${id}" is already closed in the tracker; nothing was written.`);
     }
+    checkOption(input, shown);
 
     const written: ReviewStep[] = [];
     for (const { step, args } of stepsFor(input)) {
@@ -526,7 +585,7 @@ export function createReviewWriter(options: ReviewWriterOptions = {}): ReviewWri
       notified = { ok: false, reason: target.reason };
     } else {
       try {
-        await runHerdr(["agent", "prompt", target.pane, notifyText(input.decision, input.externalId, input.message)], target.socket);
+        await runHerdr(["agent", "prompt", target.pane, notifyText(input.decision, input.externalId, input.message, input.option)], target.socket);
         notified = { ok: true, pane: target.pane };
       } catch (err) {
         notified = { ok: false, reason: err instanceof Error && err.message !== "" ? err.message : "herdr failed" };

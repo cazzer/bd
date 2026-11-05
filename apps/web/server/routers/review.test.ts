@@ -275,6 +275,47 @@ describe("reviewDecision", () => {
     expect(calls).toEqual([]);
   });
 
+  it.each([
+    ["an option that starts with '-'", { option: "-rf" }],
+    ["an option with a space", { option: "A B" }],
+    ["an option over 16 characters", { option: "A".repeat(17) }],
+    ["an empty option", { option: "" }],
+    ["an option with changes", { decision: "changes" as const, message: "fix", option: "B" }],
+  ])("refuses %s at validation", async (_name, over) => {
+    const { caller, calls } = setup({ db: poisonedDb() });
+    const err = await caller.reviewDecision({ project: PROJECT, item: id("r1"), decision: "accept", message: "", ...over }).catch((e: unknown) => e);
+    expect(err).toMatchObject({ code: "BAD_REQUEST" });
+    expect((err as Error).message).toContain("option");
+    expect(calls).toEqual([]);
+  });
+
+  const card = { images: [], summary: "Which migration?", question: "Which migration?", options: [{ id: "A", label: "Keep" }, { id: "B", label: "Skip" }, { id: "C", label: "Split" }], recommend: "A" };
+
+  it("passes the option through: the tracker's card offers it, and the comment and close reason name it", async () => {
+    const { caller, writes } = setup({ show: () => ({ metadata: { review: card } }) });
+    const result = await caller.reviewDecision({ project: PROJECT, item: id("r1"), decision: "accept", message: "skip the tracking migration", option: "B" });
+
+    expect(result).toMatchObject({ ok: true, written: ["comment", "remove-changes-label", "close"] });
+    expect(writes().map((c) => c.args)).toEqual([
+      ["comments", "add", id("r1"), "Accepted: B \u2014 skip the tracking migration"],
+      ["update", id("r1"), "--remove-label", "review:changes"],
+      ["close", id("r1"), "--reason", "Review accepted: B"],
+    ]);
+  });
+
+  it.each([
+    ["an option the tracker's card does not offer", { metadata: { review: card } }, { option: "Z" }, 'does not offer option "Z"'],
+    ["an accept without an option on a card with options", { metadata: { review: card } }, {}, "accepting it must name one"],
+    ["an option on a review that offers none", {}, { option: "A" }, "offers no options"],
+  ])("refuses %s after reading the record, writing nothing", async (_name, record, over, mentions) => {
+    const { caller, calls, wake } = setup({ show: () => record });
+    const err = await caller.reviewDecision({ project: PROJECT, item: id("r1"), decision: "accept", message: "", ...over }).catch((e: unknown) => e);
+    expect(err).toMatchObject({ code: "PRECONDITION_FAILED" });
+    expect((err as Error).message).toContain(mentions);
+    expect(calls.map((c) => c.args[0])).toEqual(["show"]);
+    expect(wake).not.toHaveBeenCalled();
+  });
+
   it("allows newline and tab in a message", async () => {
     const { caller, writes } = setup();
     await caller.reviewDecision({ project: PROJECT, item: id("r2"), decision: "changes", message: "one\n\ttwo" });
