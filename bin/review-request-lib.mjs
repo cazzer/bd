@@ -213,43 +213,41 @@ function reviewDir(homedir, key) {
   return path.join(homedir, ...REVIEW_ROOT_PARTS, key);
 }
 
-// Reusing a board tab, not opening another: every open board tab holds a
-// live-update stream, and Chrome allows six HTTP/1.1 connections per host,
-// so enough board tabs starve the review decision's POST. The script finds
-// the first Chrome tab under the board's base URL, points it at the link,
-// and brings it front. It never launches Chrome (a `tell` would), and the
-// URLs arrive as argv, never interpolated into the script text. It prints
-// `reused` or `none`; anything but `reused` falls back to `open`.
-export const CHROME_REUSE_TAB_SCRIPT = `on run argv
-  set boardPrefix to item 1 of argv
-  set targetUrl to item 2 of argv
+// An open app tab is left alone, not navigated or raised: whatever view it
+// shows (graph, feed, board), the review queue picks the new review up live,
+// and the herdr notification tells the person it is there. A second tab
+// would also hold another live-update stream, and Chrome allows six HTTP/1.1
+// connections per host. The script only probes whether any Chrome tab is
+// under the app's base URL and prints `present` or `none`; it never launches
+// Chrome (a `tell` would), and the prefix arrives as argv, never interpolated
+// into the script text. Any other answer, or a failed run, warns and opens a tab.
+export const CHROME_APP_TAB_SCRIPT = `on run argv
+  set appPrefix to item 1 of argv
   if application "Google Chrome" is not running then return "none"
   tell application "Google Chrome"
     repeat with w in windows
-      set tabIndex to 0
       repeat with t in tabs of w
-        set tabIndex to tabIndex + 1
-        if (URL of t) starts with boardPrefix then
-          set URL of t to targetUrl
-          set active tab index of w to tabIndex
-          set index of w to 1
-          activate
-          return "reused"
-        end if
+        if (URL of t) starts with appPrefix then return "present"
       end repeat
     end repeat
   end tell
   return "none"
 end run`;
 
+/** @returns {Promise<boolean>} true when an open app tab will show the review, so no tab was opened. */
 async function showInChrome(deps, boardUrl, link) {
   // The trailing slash keeps http://localhost:5310 from matching :53100.
-  const boardPrefix = `${boardUrl.replace(/\/+$/, "")}/`;
-  const reused = await deps.run("osascript", ["-e", CHROME_REUSE_TAB_SCRIPT, boardPrefix, link], { cwd: deps.cwd });
-  if (reused.code === 0 && reused.stdout.trim() === "reused") return;
-  if (reused.code !== 0) deps.warn(`${PREFIX}could not reuse a board tab (${firstLine(reused)}); opening a new one.`);
+  const appPrefix = `${boardUrl.replace(/\/+$/, "")}/`;
+  const probed = await deps.run("osascript", ["-e", CHROME_APP_TAB_SCRIPT, appPrefix], { cwd: deps.cwd });
+  const answer = probed.code === 0 ? probed.stdout.trim() : null;
+  if (answer === "present") return true;
+  if (answer !== "none") {
+    const why = probed.code === 0 ? `unexpected output ${JSON.stringify(answer)}` : firstLine(probed);
+    deps.warn(`${PREFIX}could not tell whether an app tab is open (${why}); opening a new one.`);
+  }
   const opened = await deps.run("open", ["-a", "Google Chrome", link], { cwd: deps.cwd });
   if (opened.code !== 0) deps.warn(`${PREFIX}could not open Chrome (${firstLine(opened)}); open ${link} yourself.`);
+  return false;
 }
 
 /**
@@ -481,7 +479,7 @@ async function write(deps, args, { project, item, existing, bdCwd }, staged) {
   }
 
   const link = boardLink(args.boardUrl, project.key, id);
-  await showInChrome(deps, args.boardUrl, link);
+  const queuedInOpenTab = await showInChrome(deps, args.boardUrl, link);
 
   const notified = await deps.run(
     "herdr",
@@ -507,6 +505,7 @@ async function write(deps, args, { project, item, existing, bdCwd }, staged) {
   const count = `${stored.length} image${stored.length === 1 ? "" : "s"}`;
   deps.out(`Review ${id} ${existing ? "updated" : "filed"} for ${args.itemId} in ${project.key} (${count}).`);
   deps.out(`Board: ${link}`);
+  if (queuedInOpenTab) deps.out("Review queued in the open breakdown tab.");
   deps.out(
     `End your turn now and wait for a prompt in this pane with the decision (Review ${id} accepted|changes requested: …). If none arrives, read \`bd comments ${id}\`.`,
   );

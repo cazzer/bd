@@ -5,7 +5,7 @@ import path from "node:path";
 import { realpathSync } from "node:fs";
 import { after, describe, it } from "node:test";
 import {
-  CHROME_REUSE_TAB_SCRIPT,
+  CHROME_APP_TAB_SCRIPT,
   USAGE,
   apiBase,
   boardLink,
@@ -176,6 +176,7 @@ async function harness(fx, { item, children = [], handlers = {}, env = { HERDR_P
     [`bd show ${ITEM}`]: ok(JSON.stringify([item ?? { id: ITEM, title: "Board header", issue_type: "task", dependencies: [] }])),
     [`bd list --parent`]: ok(JSON.stringify(children)),
     "bd create --title": ok(JSON.stringify({ id: REVIEW, title: "Review: Board header" })),
+    [PROBE_KEY]: ok("none\n"),
   };
   const table = { ...defaults, ...handlers };
   const run = async (cmd, args, opts) => {
@@ -205,7 +206,7 @@ async function harness(fx, { item, children = [], handlers = {}, env = { HERDR_P
 const WRITES = new Set(["create", "update", "comments", "dep"]);
 const writeCalls = (calls) => calls.filter((c) => c.cmd === "bd" && WRITES.has(c.args[0]));
 const order = (calls) => calls.map((c) => [c.cmd, c.args[0]].join(" "));
-const REUSE_KEY = `osascript -e ${CHROME_REUSE_TAB_SCRIPT}`;
+const PROBE_KEY = `osascript -e ${CHROME_APP_TAB_SCRIPT}`;
 const callTo = (h, sub) => h.calls.find((c) => c.cmd === "bd" && c.args[0] === sub);
 
 /** Every entry under the review root except the bare project directory staging may create. */
@@ -395,7 +396,7 @@ describe("requestReview writes", () => {
 
     assert.deepEqual(callTo(h, "dep").args, ["dep", "add", ITEM, REVIEW, "--type", "blocks"]);
     const link = `${BOARD}/board?project=scratch&item=${REVIEW}`;
-    assert.deepEqual(h.calls.find((c) => c.cmd === "osascript").args, ["-e", CHROME_REUSE_TAB_SCRIPT, `${BOARD}/`, link]);
+    assert.deepEqual(h.calls.find((c) => c.cmd === "osascript").args, ["-e", CHROME_APP_TAB_SCRIPT, `${BOARD}/`]);
     assert.deepEqual(h.calls.find((c) => c.cmd === "open").args, ["-a", "Google Chrome", link]);
     assert.deepEqual(h.calls.find((c) => c.cmd === "herdr").args, [
       "notification", "show", `Review requested: scratch ${ITEM}`, "--body", "check the header", "--sound", "request",
@@ -499,35 +500,74 @@ describe("requestReview writes", () => {
     assert.equal(h.calls.some((c) => c.cmd === "open" || c.cmd === "herdr"), false);
   });
 
-  it("reuses a board tab instead of opening another", async () => {
+  it("leaves an open app tab alone and still notifies", async () => {
     const fx = await fixture();
     const h = await harness(fx, {
       argv: [ITEM, "--summary", "check the header", "--board-url", `${BOARD}//`, "a.png"],
-      handlers: { [REUSE_KEY]: ok("reused\n") },
+      handlers: { [PROBE_KEY]: ok("present\n") },
     });
     assert.equal(h.result.exitCode, 0);
     const link = `${BOARD}/board?project=scratch&item=${REVIEW}`;
-    assert.deepEqual(h.calls.find((c) => c.cmd === "osascript").args, ["-e", CHROME_REUSE_TAB_SCRIPT, `${BOARD}/`, link]);
+    assert.deepEqual(h.calls.find((c) => c.cmd === "osascript").args, ["-e", CHROME_APP_TAB_SCRIPT, `${BOARD}/`]);
     assert.equal(h.calls.some((c) => c.cmd === "open"), false);
+    assert.deepEqual(order(h.calls).slice(-2), ["osascript -e", "herdr notification"]);
     assert.deepEqual(h.warn, []);
+    assert.deepEqual(h.out, [
+      `Review ${REVIEW} filed for ${ITEM} in scratch (1 image).`,
+      `Board: ${link}`,
+      "Review queued in the open breakdown tab.",
+      `End your turn now and wait for a prompt in this pane with the decision (Review ${REVIEW} accepted|changes requested: …). If none arrives, read \`bd comments ${REVIEW}\`.`,
+    ]);
   });
 
-  it("opens a new tab when no board tab matches", async () => {
+  it("opens the board link when no app tab is open or Chrome is not running", async () => {
     const fx = await fixture();
-    const h = await harness(fx, { handlers: { [REUSE_KEY]: ok("none\n") } });
+    const h = await harness(fx, { handlers: { [PROBE_KEY]: ok("none\n") } });
     assert.equal(h.result.exitCode, 0);
     assert.deepEqual(order(h.calls).slice(-3), ["osascript -e", "open -a", "herdr notification"]);
+    assert.deepEqual(h.calls.find((c) => c.cmd === "open").args, [
+      "-a", "Google Chrome", `${BOARD}/board?project=scratch&item=${REVIEW}`,
+    ]);
     assert.deepEqual(h.warn, []);
+    assert.equal(h.out.includes("Review queued in the open breakdown tab."), false);
   });
 
   it("warns and opens a new tab when osascript fails", async () => {
     const fx = await fixture();
-    const h = await harness(fx, { handlers: { [REUSE_KEY]: fail("execution error: Not authorized to send Apple events to Google Chrome. (-1743)") } });
+    const h = await harness(fx, { handlers: { [PROBE_KEY]: fail("execution error: Not authorized to send Apple events to Google Chrome. (-1743)") } });
     assert.equal(h.result.exitCode, 0);
     assert.deepEqual(order(h.calls).slice(-3), ["osascript -e", "open -a", "herdr notification"]);
     assert.deepEqual(h.warn, [
-      "review-request: could not reuse a board tab (execution error: Not authorized to send Apple events to Google Chrome. (-1743)); opening a new one.",
+      "review-request: could not tell whether an app tab is open (execution error: Not authorized to send Apple events to Google Chrome. (-1743)); opening a new one.",
     ]);
+    assert.equal(h.out.length, 3);
+  });
+
+  it("warns and opens a new tab when osascript prints something unexpected", async () => {
+    const fx = await fixture();
+    const h = await harness(fx, { handlers: { [PROBE_KEY]: ok("reused\n") } });
+    assert.equal(h.result.exitCode, 0);
+    assert.deepEqual(order(h.calls).slice(-3), ["osascript -e", "open -a", "herdr notification"]);
+    assert.deepEqual(h.warn, [
+      'review-request: could not tell whether an app tab is open (unexpected output "reused"); opening a new one.',
+    ]);
+  });
+
+  it("probes with a trailing-slash prefix so :5310 never matches :53100", async () => {
+    const fx = await fixture();
+    for (const boardUrl of [BOARD, `${BOARD}/`, `${BOARD}///`]) {
+      const h = await harness(fx, { argv: [ITEM, "--summary", "s", "--board-url", boardUrl, "a.png"] });
+      assert.deepEqual(h.calls.find((c) => c.cmd === "osascript").args.slice(2), [`${BOARD}/`]);
+    }
+  });
+
+  it("the tab probe never launches, navigates, or raises Chrome", () => {
+    for (const forbidden of ["set URL", "activate", "set index", "active tab index"]) {
+      assert.equal(CHROME_APP_TAB_SCRIPT.includes(forbidden), false, forbidden);
+    }
+    const guard = CHROME_APP_TAB_SCRIPT.indexOf('if application "Google Chrome" is not running then return "none"');
+    assert.ok(guard !== -1 && guard < CHROME_APP_TAB_SCRIPT.indexOf('tell application "Google Chrome"'));
+    assert.match(CHROME_APP_TAB_SCRIPT, /starts with appPrefix then return "present"/);
   });
 
   it("treats Chrome and herdr failures as warnings", async () => {
