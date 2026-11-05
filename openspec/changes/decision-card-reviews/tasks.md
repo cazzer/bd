@@ -49,3 +49,11 @@
 - [x] 7.1 Live check (worktree servers on 4311/5174, `bd` registered in the worktree database): file the shlo card with the branch's `review-request` (`WEB_SERVER_PORT=4311`); it appears in the queue by its question; the drawer renders tables, the diff, and a diagram; "Choose B" writes `Accepted: B — …` and the prompt names B; an image-only review filed with the legacy form still renders and accepts as before
 - [x] 7.2 Update `~/.claude/skills/context/visual-review.md`: architecture and other human-in-the-loop decisions use the card form; how to write the question, options, recommendation, and before state; images only for what must be seen; never screenshot text; the legacy form still works
 - [ ] 7.3 Request the epic visual review under `bd-4zn` as a decision card (card form, against the worktree server), with screenshots of the built card as image attachments
+
+## 8. Cards stay short (from review bd-4zn.9)
+
+- [ ] 8.1 CLI card form: body word budget per design.md decision 8 (300 words outside fenced code blocks; refused naming the budget and the count; nothing filed); fixture `invalid-body-over-budget.md` (over 300 words of prose, plus a large fence proving fences are free); every valid fixture within budget, with its count in the fixtures README
+- [ ] 8.2 Legacy `--summary` over 280 characters: files exactly as before, then warns on stderr naming the limit and the card form; stdout and exit code unchanged; never refuses
+- [ ] 8.3 Tests: the word counter (fences of both kinds, unclosed fence, tables, inline code, CRLF); budget boundary (300 accepted, 301 refused); the legacy warning at 280/281 and that the legacy path still never imports `yaml`
+- [ ] 8.4 `~/.claude/skills/context/visual-review.md`: the body is evidence for the decision only, leads with what changes for the reviewer, every table bears on the choice, no build log (commits, groups, verification counts go in the READY TO MERGE report); states both limits; README Visual reviews paragraph mentions the budget
+- [ ] 8.5 `pnpm check` passes; re-file the epic review as a tight card (new bead) and close `bd-4zn.9` as superseded

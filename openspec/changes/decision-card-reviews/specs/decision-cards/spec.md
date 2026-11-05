@@ -39,7 +39,7 @@ A card's evidence SHALL be the review bead's description, rendered in the drawer
 
 ### Requirement: An agent requests a card with one markdown file
 
-`review-request <item-id> <card.md>` SHALL read one markdown file whose YAML frontmatter holds the card (`question`, `options`, `recommend`, `on_accept`, `attachments`) and whose body is the evidence, validate all of it before anything is filed, and file or reuse the review bead as the image form does, with the body as the bead description and image attachments copied into the review image root. Image attachment paths SHALL resolve relative to the card file. Images SHALL be optional. The command SHALL refuse, filing nothing, naming the offending field, when the frontmatter is missing or not valid YAML, the question is missing or longer than 140 characters, an option id repeats, `recommend` names no option, an attachment's kind is unknown, an image is missing or not an image, or the evidence body exceeds its length budget. `review-request <item-id> --summary <text> <image>...` SHALL keep working exactly as before, and SHALL never load the frontmatter parser.
+`review-request <item-id> <card.md>` SHALL read one markdown file whose YAML frontmatter holds the card (`question`, `options`, `recommend`, `on_accept`, `attachments`) and whose body is the evidence, validate all of it before anything is filed, and file or reuse the review bead as the image form does, with the body as the bead description and image attachments copied into the review image root. Image attachment paths SHALL resolve relative to the card file. Images SHALL be optional. The command SHALL refuse, filing nothing, naming the offending field, when the frontmatter is missing or not valid YAML, the question is missing or longer than 140 characters, an option id repeats, `recommend` names no option, an attachment's kind is unknown, an image is missing or not an image, the evidence body exceeds 8,000 characters, or the evidence body exceeds its word budget of 300 words outside fenced code blocks (a word is a whitespace-separated token holding a letter or digit), naming the budget and the count. `review-request <item-id> --summary <text> <image>...` SHALL keep filing exactly as before and SHALL never load the frontmatter parser; when the summary is longer than 280 characters it SHALL still file and SHALL print a warning that names the limit and points to the card form.
 
 #### Scenario: Architecture decision without images
 
@@ -50,6 +50,16 @@ A card's evidence SHALL be the review bead's description, rendered in the drawer
 
 - **WHEN** the card's question is 160 characters
 - **THEN** the command refuses with a message naming `question` and its 140-character limit, and nothing is filed
+
+#### Scenario: Body over the word budget
+
+- **WHEN** a card's body holds 388 words outside its fenced blocks
+- **THEN** the command refuses with a message naming the 300-word budget and the count, and nothing is filed
+
+#### Scenario: Long legacy summary
+
+- **WHEN** an agent runs `review-request tides-abc --summary '<1,000 characters>' a.png`
+- **THEN** the review is filed as before, and the command prints a warning that the summary is over 280 characters and that a decision belongs in a card
 
 #### Scenario: Old form
 

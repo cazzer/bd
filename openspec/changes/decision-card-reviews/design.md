@@ -84,6 +84,15 @@ Picked through review `bd-4zn.8` (accepted 2026-11-05, A recommended) over B (ea
 
 Cost M: `ReviewItemPanel` (body order, option list, footer actions), `ReviewAttachments` (mermaid/diff kinds, pair), `ReviewRunModal` (stage gets card attachments, shortcut carries the recommended id); no new layout primitive.
 
+### 8. Cards stay short
+
+Review `bd-4zn.9` (changes requested) showed that a card can still be slow to decide on when its body is a build log, and that the legacy summary fails the same way (tides-0oi.32: a 1,000-character paragraph with the decision at its end). The 8,000-character cap bounds storage, not reading time. Two limits, both in the CLI only (the body is not in metadata, and the normalizer never refuses):
+
+- **Card body: 300 words outside fenced code blocks**, refused naming the budget and the count (`body: at most 300 words outside fenced blocks, got 388`). A word is a whitespace-separated token holding a letter or digit, so table pipes, separator rows, and lone punctuation are free; table cells and inline code count, because they are read. Fenced `diff`/`mermaid`/code blocks and attachments are excluded: they are evidence a reviewer scans, and their size is already capped. Justification: the shlo fixture, the densest real decision so far (a caller audit, a latency table, findings, and the migration notes), is 278 words; 300 holds it with room for one sentence, and refuses the 388-word build log of `bd-4zn.9`.
+- **Legacy summary: warn above 280 characters, never refuse** (tides, shlo, and tick-dog file this form daily). 280 is two questions' worth (2 × 140): the decision and one line of context. The warning goes to stderr after filing, names the limit, and points to the card form.
+
+The guidance (`visual-review.md`) carries the rest: the body is evidence for the decision only, it leads with what changes for the reviewer, every table bears on the choice, and commits, groups, and verification counts go in the session's READY TO MERGE report, never in the card.
+
 ## Risks / Trade-offs
 
 - [The `yaml` import fails on a checkout that has not reinstalled] → card form only, with an exact remedy; legacy callers in tides/shlo/tick-dog never reach it.
