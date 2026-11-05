@@ -21,6 +21,7 @@ import {
   requestReview,
   reviewMetadata,
   splitCard,
+  validateCard,
 } from "./review-request-lib.mjs";
 
 const BREAKDOWN_ROOT = "/opt/breakdown";
@@ -671,7 +672,7 @@ describe("parseArgs card form", () => {
 describe("splitCard", () => {
   it("ends the frontmatter at the first unindented --- line and trims the body", () => {
     assert.deepEqual(splitCard("---\na: |-\n  --- a/x\n  +++ b/x\n---\n\nbody\n\n"), { frontmatter: "a: |-\n  --- a/x\n  +++ b/x", body: "body" });
-    assert.deepEqual(splitCard("﻿---\r\na: 1\r\n---\r\nbody\r\n"), { frontmatter: "a: 1\r", body: "body" });
+    assert.deepEqual(splitCard("﻿---\r\na: 1\r\n---\r\nbody\r\n"), { frontmatter: "a: 1", body: "body" });
     assert.deepEqual(splitCard("---\na: 1\n---"), { frontmatter: "a: 1", body: "" });
   });
   it("is null without a leading or a closing fence", () => {
@@ -811,7 +812,7 @@ describe("card form", () => {
     ["a blank label", '---\nquestion: Q?\noptions:\n  - { id: A, label: a }\n  - { id: B, label: "  " }\n---\n', ["options[1].label: required, got blank text"]],
     ["an over-long label", `---\nquestion: Q?\noptions:\n  - { id: A, label: a }\n  - { id: B, label: ${"l".repeat(81)} }\n---\n`, ["options[1].label: at most 80 characters, got 81"]],
     ["an over-long risk", `---\nquestion: Q?\noptions:\n  - { id: A, label: a, risk: ${"r".repeat(301)} }\n  - { id: B, label: b }\n---\n`, ["options[0].risk: at most 300 characters, got 301"]],
-    ["a numeric option id", "---\nquestion: Q?\noptions:\n  - { id: 1, label: a }\n  - { id: B, label: b }\n---\n", ["options[0].id: must be a letter or digit, then up to 15 letters, digits, _ or -; got 1"]],
+    ["a numeric option id", "---\nquestion: Q?\noptions:\n  - { id: 1, label: a }\n  - { id: B, label: b }\n---\n", ['options[0].id: got the number 1; quote it: id: "1"']],
     ["an unknown option key", "---\nquestion: Q?\noptions:\n  - { id: A, label: a, rsik: x }\n  - { id: B, label: b }\n---\n", ["options[0].rsik: not a field of an option (fields: id, label, what, risk)"]],
     ['recommend: ""', '---\nquestion: Q?\noptions:\n  - { id: A, label: a }\n  - { id: B, label: b }\nrecommend: ""\n---\n', ['recommend: "" names no option (options: A, B)']],
     ["recommend without options", "---\nquestion: Q?\nrecommend: A\n---\n", ["recommend: allowed only with options"]],
@@ -828,6 +829,18 @@ describe("card form", () => {
     ],
     ["an over-long body", `${QUESTION_ONLY}${LONG}\n`, ["body: at most 8000 characters, got 8001"]],
     ["frontmatter that is a list", "---\n- a\n---\n", ["frontmatter: must be a mapping of card fields, got a list"]],
+    ["a numeric recommend", '---\nquestion: Q?\noptions:\n  - { id: "1", label: a }\n  - { id: "2", label: b }\nrecommend: 1\n---\n', ['recommend: got the number 1; quote it: recommend: "1"']],
+    ["a NUL in the body", `${QUESTION_ONLY}before\u0000after\n`, ["body: contains a NUL character"]],
+    ["an unpaired surrogate in the question", '---\nquestion: "Ship \\uD800 it?"\n---\n', ["question: contains an unpaired surrogate (not valid Unicode)"]],
+    ["an unpaired surrogate in a source", '---\nquestion: Q?\nattachments:\n  - { kind: diff, source: "+\\uDC00" }\n---\n', ["attachments[0].source: contains an unpaired surrogate (not valid Unicode)"]],
+    ["an unpaired surrogate in a step", '---\nquestion: Q?\non_accept: ["\\uD83D"]\n---\n', ["on_accept[0]: contains an unpaired surrogate (not valid Unicode)"]],
+    ["a question over two lines", '---\nquestion: "Ship it,\\nor hold?"\n---\n', ["question: must be one line"]],
+    ["a block-scalar question", "---\nquestion: |\n  Ship it,\n  or hold?\n---\n", ["question: must be one line"]],
+    [
+      "a long echoed value, cut",
+      `---\nquestion: Q?\nattachments:\n  - { kind: diff, source: x, pair: ${"p".repeat(100)} }\n---\n`,
+      [`attachments[0].pair: must be before or after, got "${"p".repeat(58)}…`],
+    ],
   ];
   for (const [what, text, problems] of refusals) {
     it(`refuses ${what}, naming the field, before any lookup`, async () => {
@@ -841,10 +854,63 @@ describe("card form", () => {
 
   it("refuses frontmatter that is not valid YAML", async () => {
     const fx = await fixture();
-    const h = await harness(fx, { argv: [ITEM, await writeCard(fx, "---\nquestion: a\nquestion: b\n---\n")] });
-    assert.deepEqual(h.warn, ["review-request: frontmatter: not valid YAML: Map keys must be unique at line 2, column 1. Nothing was filed."]);
+    for (const text of ["---\nquestion: a\nquestion: b\n---\n", "\uFEFF---\r\nquestion: a\r\nquestion: b\r\n---\r\n"]) {
+      const h = await harness(fx, { argv: [ITEM, await writeCard(fx, text)] });
+      assert.deepEqual(h.warn, [
+        "review-request: frontmatter: not valid YAML: Map keys must be unique at line 3, column 1 of cards/card.md. Nothing was filed.",
+      ]);
+      assert.deepEqual(h.calls, []);
+      await assertNothingFiled(fx, h);
+    }
+  });
+
+  it("refuses a card that is not a regular file, or is over 64 KB, before reading it", async () => {
+    const fx = await fixture();
+    await fs.mkdir(path.join(fx.worktree, "dir.md"));
+    const dir = await harness(fx, { argv: [ITEM, "dir.md"] });
+    assert.deepEqual(dir.warn, ["review-request: card dir.md: not a regular file. Nothing was filed."]);
+    await assertNothingFiled(fx, dir);
+    const big = await writeCard(fx, `${QUESTION_ONLY}${"x".repeat(64 * 1024)}`, "big.md");
+    const size = (await fs.stat(path.join(fx.worktree, big))).size;
+    const h = await harness(fx, { argv: [ITEM, big] });
+    assert.deepEqual(h.warn, [`review-request: card ${big}: ${size} bytes, over the 65536-byte limit. Nothing was filed.`]);
     assert.deepEqual(h.calls, []);
     await assertNothingFiled(fx, h);
+  });
+
+  it("names the type of a non-plain value rather than echoing it", async () => {
+    const { problems } = await validateCard({ question: new Date(0), on_accept: [new Map()] }, "", "/");
+    assert.deepEqual(problems, ["question: must be text, got a Date", "on_accept[0]: must be text, got a Map"]);
+  });
+
+  it("refuses an unpaired surrogate in the body", async () => {
+    const { problems } = await validateCard({ question: "Q?" }, "a\uD800b", "/");
+    assert.deepEqual(problems, ["body: contains an unpaired surrogate (not valid Unicode)"]);
+  });
+
+  it("files a CRLF card with a BOM exactly as its LF twin", async () => {
+    const lf = '---\nquestion: Ship it?\noptions:\n  - id: A\n    label: Ship\n  - id: B\n    label: Hold\non_accept:\n  - |-\n    two\n    lines\n---\n\nFirst line.\n\nSecond.\n';
+    const written = [];
+    for (const text of [lf, `\uFEFF${lf.replaceAll("\n", "\r\n")}`]) {
+      const fx = await fixture();
+      const h = await harness(fx, { argv: [ITEM, await writeCard(fx, text)] });
+      assert.equal(h.result.exitCode, 0, h.warn.join("\n"));
+      const create = callTo(h, "create").args;
+      written.push({ description: create[create.indexOf("-d") + 1], metadata: callTo(h, "update").args[3] });
+    }
+    assert.equal(written[0].description, "First line.\n\nSecond.");
+    assert.deepEqual(JSON.parse(written[0].metadata).review.on_accept, ["two\nlines"]);
+    assert.deepEqual(written[1], written[0]);
+  });
+
+  it("keeps a --- rule in the body as part of the evidence", async () => {
+    const fx = await fixture();
+    const body = "Before the rule.\n\n---\n\nAfter the rule.";
+    const h = await harness(fx, { argv: [ITEM, await writeCard(fx, `${QUESTION_ONLY}${body}\n`)] });
+    assert.equal(h.result.exitCode, 0, h.warn.join("\n"));
+    const create = callTo(h, "create").args;
+    assert.equal(create[create.indexOf("-d") + 1], body);
+    assert.deepEqual(Object.keys(JSON.parse(callTo(h, "update").args[3]).review), ["images", "pane", "socket", "summary", "question"]);
   });
 
   it("refuses a card file that does not exist", async () => {
@@ -891,6 +957,28 @@ describe("card form", () => {
     assert.equal(cap.result.exitCode, 0, cap.warn.join("\n"));
     assert.equal(JSON.parse(callTo(cap, "update").args[3]).review.attachments[1].source.length, atCap);
     assert.equal(callTo(cap, "update").args[3].length, `{"review":}`.length + 16_000);
+  });
+
+  it("sizes a reused review with its real id, not the new-review allowance", async () => {
+    // One image: its stored path appears twice (images, attachments), so the
+    // allowance for a new id (`.` + 15 digits) costs 2 × 14 more than `scr-1.1`.
+    const imageCard = (second) => `${sizedCard(second).slice(0, -4)}  - kind: image\n    path: ../a.png\n---\n`;
+    const probeFx = await fixture();
+    const probe = await harness(probeFx, { argv: [ITEM, await writeCard(probeFx, imageCard(8000))] });
+    const size = Number(/would be (\d+) characters/.exec(probe.warn[0])?.[1]);
+    assert.ok(size > 16_000, probe.warn.join("\n"));
+    const second = 8000 - (size - 16_010);
+
+    const newFx = await fixture();
+    const asNew = await harness(newFx, { argv: [ITEM, await writeCard(newFx, imageCard(second))] });
+    assert.match(asNew.warn[0], /would be 16010 characters/);
+    await assertNothingFiled(newFx, asNew);
+
+    const reuseFx = await fixture();
+    const existing = { id: REVIEW, created_at: "2026-10-28T00:00:00Z", labels: ["review"] };
+    const reused = await harness(reuseFx, { children: [existing], argv: [ITEM, await writeCard(reuseFx, imageCard(second))] });
+    assert.equal(reused.result.exitCode, 0, reused.warn.join("\n"));
+    assert.equal(callTo(reused, "update").args[3].length, `{"review":}`.length + 16_010 - 28);
   });
 });
 

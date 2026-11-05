@@ -84,3 +84,20 @@ The normalizer, which never refuses, fits an over-long question and drops an
 unknown key; the repeated id, unknown recommendation, and unknown kind make
 the review `{ invalid: true }`. Core tests cover those as inline objects —
 core has no YAML parser and reads only the `expected.json` files.
+
+## What only the CLI refuses
+
+Beyond the contract the normalizer enforces, the CLI refuses at authoring
+time, naming the field, wherever the normalizer would fit, drop, or replace:
+
+- over-long text in any field (the normalizer fits it); a question that is not
+  one line; a body over 8,000 characters;
+- unknown keys at any level — top-level, in an option, in an attachment;
+- `options: []`, `recommend: ""`, a blank `label`, a blank `on_accept` step, a
+  blank `source`;
+- an option id or `recommend` that YAML read as a number (`id: 1` → quote it);
+- NUL or an unpaired surrogate in any text, source, or the body;
+- a card file that is not a regular file or is over 64 KB; frontmatter that is
+  not valid YAML (reported at the card file's line);
+- a review whose JSON would exceed 16,000 characters with its stored paths
+  (checked after the read-only lookups, before anything is staged or written).

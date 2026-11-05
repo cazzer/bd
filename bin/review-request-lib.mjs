@@ -76,6 +76,9 @@ const MAX_SOURCE = 8000;
 /** MAX_REVIEW_METADATA_CHARS: over it, the board reads the review as invalid. */
 const MAX_REVIEW_JSON = 16_000;
 const MAX_BODY = 8000;
+/** A card file over this many bytes is refused before it is read; a card at every limit is well under it. */
+const MAX_CARD_FILE_BYTES = 64 * 1024;
+const MAX_ECHO = 60;
 // A new review's id is not known until bd creates it; bd names a child
 // `<parent>.<n>`, and the size check assumes n has at most this many digits.
 const NEW_REVIEW_ID_SUFFIX = `.${"9".repeat(15)}`;
@@ -158,11 +161,13 @@ export function copiedName(index, src) {
  * A card file split at its frontmatter: a first line `---`, then the YAML up
  * to the next line that is exactly `---` (a block scalar's lines are
  * indented, so a diff's `--- a/x` inside one never ends it). Null when the
- * file does not start with frontmatter. The body is trimmed.
+ * file does not start with frontmatter. A leading BOM is dropped, CRLF line
+ * ends become LF, and the body is trimmed. The frontmatter starts on the
+ * file's second line, so its line n is the file's line n + 1.
  */
 export function splitCard(text) {
-  const lines = (text.startsWith("﻿") ? text.slice(1) : text).split("\n");
-  const isFence = (line) => line.replace(/\r$/, "").trimEnd() === "---";
+  const lines = (text.startsWith("\uFEFF") ? text.slice(1) : text).split("\n").map((line) => line.replace(/\r$/, ""));
+  const isFence = (line) => line.trimEnd() === "---";
   if (!isFence(lines[0])) return null;
   const end = lines.findIndex((line, index) => index > 0 && isFence(line));
   if (end === -1) return null;
@@ -175,10 +180,31 @@ function isPlainObject(value) {
   return proto === Object.prototype || proto === null;
 }
 
+/** A value echoed in a refusal: its kind for a container, else its JSON cut to MAX_ECHO characters. */
 function describe(value) {
   if (Array.isArray(value)) return "a list";
   if (isPlainObject(value)) return "a mapping";
-  return JSON.stringify(value) ?? String(value);
+  if (typeof value === "object" && value !== null) return `a ${value.constructor?.name ?? "object"}`;
+  const text = JSON.stringify(value) ?? String(value);
+  if (text.length <= MAX_ECHO) return text;
+  const last = text.charCodeAt(MAX_ECHO - 2);
+  return `${text.slice(0, last >= 0xd800 && last <= 0xdbff ? MAX_ECHO - 2 : MAX_ECHO - 1)}…`;
+}
+
+/**
+ * Text the store can hold: no NUL (Postgres jsonb refuses it) and no unpaired
+ * surrogate (nor is that valid Unicode; one bad review would fail a tracker's
+ * whole load). The problem, or null.
+ */
+function textProblem(field, text) {
+  if (text.includes("\u0000")) return `${field}: contains a NUL character`;
+  if (!text.isWellFormed()) return `${field}: contains an unpaired surrogate (not valid Unicode)`;
+  return null;
+}
+
+/** An id YAML read as a number, which a person meant as text. */
+function numericIdProblem(field, key, value) {
+  return typeof value === "number" ? `${field}: got the number ${value}; quote it: ${key}: "${value}"` : null;
 }
 
 /**
@@ -196,8 +222,9 @@ function cardText(problems, field, value, max, required) {
     problems.push(`${field}: must be text, got ${describe(value)}`);
     return undefined;
   }
-  if (value.includes("\u0000")) {
-    problems.push(`${field}: contains a NUL character`);
+  const bad = textProblem(field, value);
+  if (bad) {
+    problems.push(bad);
     return undefined;
   }
   const text = value.trim();
@@ -239,7 +266,10 @@ function validateOptions(problems, raw) {
     }
     unknownKeys(problems, `${field}.`, option, OPTION_KEYS, "an option");
     const id = option.id;
-    if (typeof id !== "string" || !OPTION_ID.test(id)) {
+    const numeric = numericIdProblem(`${field}.id`, "id", id);
+    if (numeric) {
+      problems.push(numeric);
+    } else if (typeof id !== "string" || !OPTION_ID.test(id)) {
       problems.push(
         `${field}.id: must be a letter or digit, then up to 15 letters, digits, _ or -; got ${id === undefined ? "nothing" : describe(id)}`,
       );
@@ -319,8 +349,8 @@ async function validateAttachments(problems, raw, cardDir) {
       const source = attachment.source;
       if (typeof source !== "string" || source.trim() === "") {
         problems.push(`${field}.source: required text, got ${source === undefined ? "nothing" : describe(source)}`);
-      } else if (source.includes("\u0000")) {
-        problems.push(`${field}.source: contains a NUL character`);
+      } else if (textProblem(`${field}.source`, source)) {
+        problems.push(textProblem(`${field}.source`, source));
       } else if (source.length > MAX_SOURCE) {
         problems.push(`${field}.source: at most ${MAX_SOURCE} characters, got ${source.length}`);
       }
@@ -346,11 +376,15 @@ export async function validateCard(raw, body, cardDir) {
     if (!CARD_KEYS.includes(key)) problems.push(`${key}: unknown field (card fields: ${CARD_KEYS.join(", ")})`);
   }
   const question = cardText(problems, "question", raw.question, MAX_QUESTION, true);
+  // The question is the headline: the summary, the notification, the update comment.
+  if (question !== undefined && /[\r\n\u2028\u2029]/.test(question)) problems.push("question: must be one line");
   const options = validateOptions(problems, raw.options);
   const recommend = raw.recommend;
   if (recommend !== undefined && recommend !== null) {
     if (raw.options === undefined || raw.options === null) {
       problems.push("recommend: allowed only with options");
+    } else if (numericIdProblem("recommend", "recommend", recommend)) {
+      problems.push(numericIdProblem("recommend", "recommend", recommend));
     } else if (typeof recommend !== "string") {
       problems.push(`recommend: must be an option id, got ${describe(recommend)}`);
     } else if (options !== undefined && !options.some((option) => option.id === recommend)) {
@@ -359,7 +393,9 @@ export async function validateCard(raw, body, cardDir) {
   }
   const onAccept = validateOnAccept(problems, raw.on_accept);
   const { attachments, imagePaths } = await validateAttachments(problems, raw.attachments, cardDir);
-  if (body.length > MAX_BODY) problems.push(`body: at most ${MAX_BODY} characters, got ${body.length}`);
+  const bodyProblem = textProblem("body", body);
+  if (bodyProblem) problems.push(bodyProblem);
+  else if (body.length > MAX_BODY) problems.push(`body: at most ${MAX_BODY} characters, got ${body.length}`);
   if (problems.length > 0) return { problems, card: null, imagePaths: [] };
   const card = {
     question,
@@ -588,12 +624,16 @@ async function imageRequest(deps, args) {
 
 async function readCardRequest(deps, args) {
   const cardFile = path.resolve(deps.cwd, args.cardPath);
+  const refuseFile = (why) => new Refusal(`card ${args.cardPath}: ${why}. Nothing was filed.`);
   let text;
   try {
+    const stat = await statOrNull(cardFile);
+    if (stat === null) throw refuseFile("not found");
+    if (!stat.isFile()) throw refuseFile("not a regular file");
+    if (stat.size > MAX_CARD_FILE_BYTES) throw refuseFile(`${stat.size} bytes, over the ${MAX_CARD_FILE_BYTES}-byte limit`);
     text = await fs.readFile(cardFile, "utf8");
   } catch (err) {
-    const why = err.code === "ENOENT" ? "not found" : err.code === "EISDIR" ? "is a directory" : err.message;
-    throw new Refusal(`card ${args.cardPath}: ${why}. Nothing was filed.`);
+    throw err instanceof Refusal ? err : refuseFile(err.message);
   }
   const split = splitCard(text);
   if (split === null) {
@@ -613,7 +653,12 @@ async function readCardRequest(deps, args) {
   try {
     raw = YAML.parse(split.frontmatter) ?? {};
   } catch (err) {
-    throw new Refusal(`frontmatter: not valid YAML: ${firstLineOf(err?.message ?? String(err))}. Nothing was filed.`);
+    // The parser counts lines from the frontmatter's first; the file's is one above it (splitCard).
+    const where = firstLineOf(err?.message ?? String(err)).replace(
+      / at line (\d+), column (\d+)$/,
+      (_, line, column) => ` at line ${Number(line) + 1}, column ${column} of ${args.cardPath}`,
+    );
+    throw new Refusal(`frontmatter: not valid YAML: ${where}. Nothing was filed.`);
   }
   const { problems, card, imagePaths } = await validateCard(raw, split.body, path.dirname(cardFile));
   if (problems.length > 0) throw new Refusal([...problems, "Nothing was filed."].join("\n"));
