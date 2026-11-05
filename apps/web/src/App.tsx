@@ -33,11 +33,22 @@
 // graph parameters re-renders the shell (a fresh `Route` object) but
 // GraphView takes no props and keeps its key, so it is never remounted by
 // a search or a selection — only by a change of view.
+//
+// The review queue (review-queue, design.md decision 3) is the one piece of
+// state above the switch: `useReviewQueue` is called here, once, so its
+// stream listener and its last answer survive a change of view.
+// ReviewQueueProvider (components/ReviewQueue.tsx) shares it with the pill
+// each view places, and owns the popover and the drawer a pick opens over
+// whichever view is mounted. Its wrapper is one stable element around the
+// switch, so it never remounts a view.
 
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { FeedView } from "./components/FeedView.js";
 import { GraphView } from "./components/GraphView.js";
+import { ReviewQueueProvider } from "./components/ReviewQueue.js";
+import { useLiveState } from "./lib/liveStream.js";
 import { navigate, subscribeToNavigation } from "./lib/navigate.js";
+import { useReviewQueue } from "./lib/useReviewQueue.js";
 import { graphRouteFromSearch, parseRoute, type Route } from "./lib/route.js";
 
 // Lazy: CodeView carries CodeMirror's core, Lezer, and One Dark (its
@@ -70,6 +81,8 @@ function routeFromLocation(): Route {
 export function App() {
   const [route, setRoute] = useState<Route>(routeFromLocation);
   const didCheckInitialPath = useRef(false);
+  const queue = useReviewQueue();
+  const live = useLiveState();
 
   useEffect(() => {
     if (didCheckInitialPath.current) {
@@ -96,6 +109,14 @@ export function App() {
     };
   }, []);
 
+  return (
+    <ReviewQueueProvider queue={queue} live={live} route={route}>
+      {renderView(route)}
+    </ReviewQueueProvider>
+  );
+}
+
+function renderView(route: Route) {
   switch (route.view) {
     case "graph":
       return <GraphView key="graph" />;

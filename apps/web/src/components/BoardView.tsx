@@ -37,9 +37,15 @@
 // keyed on the view alone; a chip toggle re-reads on it (the chosen projects
 // live in a ref), and the previous board stays on screen, filtered to the
 // chosen chips and marked aria-busy, until the answer lands.
+//
+// The stream's state is shown by the review queue's pill in the header
+// (components/ReviewQueue.tsx), which replaced the board's own live label;
+// the per-project error list stays here. The shell's queue drawer and this
+// board's drawer are never open together (ReviewQueue.tsx says how); the
+// board pads itself clear of either.
 
 import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
-import { subscribeLive, useLiveState } from "../lib/liveStream.js";
+import { subscribeLive } from "../lib/liveStream.js";
 import { navigate } from "../lib/navigate.js";
 import { createReadScheduler, READ_DEBOUNCE_MS, READ_MAX_WAIT_MS } from "../lib/readScheduler.js";
 import {
@@ -62,6 +68,7 @@ import { formatRoute, type BoardRoute, type GraphRoute } from "../lib/route.js";
 import { viewFilterOf, type ViewNode } from "../lib/viewFilter.js";
 import { trpc } from "../trpc.js";
 import { ReviewDrawer, useWideDrawer } from "./ReviewDrawer.js";
+import { ReviewQueuePill, useReviewQueueContext } from "./ReviewQueue.js";
 
 const GRAPH_HOME: GraphRoute = { view: "graph", q: null, types: [], node: null };
 
@@ -119,7 +126,7 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
   const followCardUntil = useRef(0);
   const returnFocusTo = useRef<string | null>(null);
   const wide = useWideDrawer();
-  const live = useLiveState();
+  const shellDrawerOpen = useReviewQueueContext().drawerOpen;
   const projectsRef = useRef(projects);
   const appliedKeyRef = useRef(projects.join("\u0000"));
   const readRef = useRef<(() => void) | null>(null);
@@ -355,7 +362,7 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
   const heading = view ? view.title || "(untitled view)" : "Board";
 
   return (
-    <main className={`flex h-dvh w-screen flex-col overflow-hidden ${drawerOpen ? "sm:pr-[492px]" : ""}`}>
+    <main className={`flex h-dvh w-screen flex-col overflow-hidden ${drawerOpen || shellDrawerOpen ? "sm:pr-[492px]" : ""}`}>
       <div aria-hidden="true" className="ambience pointer-events-none fixed inset-0 -z-10" />
       <header inert={drawerOpen && !wide} className="glass m-3 mb-0 flex flex-wrap items-center gap-x-4 gap-y-2 p-3">
         <h1 className="min-w-0 truncate text-base font-semibold text-fg">{heading}</h1>
@@ -383,9 +390,7 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
           </div>
         )}
         <div className="ml-auto flex items-center gap-3 text-xs text-fg-muted">
-          <span role="status" aria-live="polite">
-            {live === "live" ? "Live" : live === "connecting" ? "Connecting…" : "Not live"}
-          </span>
+          <ReviewQueuePill />
           {view && (
             <button
               type="button"

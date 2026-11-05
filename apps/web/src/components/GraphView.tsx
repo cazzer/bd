@@ -101,6 +101,7 @@ import { CreateNoteForm } from "./CreateNoteForm.js";
 import { DetailPanel, type OfferedView } from "./DetailPanel.js";
 import { GraphCanvas } from "./GraphCanvas.js";
 import { SearchBar, type SearchBarStatus } from "./SearchBar.js";
+import { ReviewQueuePill } from "./ReviewQueue.js";
 import { TypePanel } from "./TypePanel.js";
 import { UnlinkedNotes } from "./UnlinkedNotes.js";
 import { edgeLegendOf } from "../graph/edgeLegend.js";
@@ -1216,9 +1217,14 @@ export function GraphView() {
         below it. Width tracks the detail panel's own summary/expanded
         state (bd-e9n, design.md decision 6) rather than a fixed `w-96` —
         see `rightColumnWidthClass`'s own comment above — so the column
-        never has a gap between its own edge and DetailPanel's.
+        never has a gap between its own edge and DetailPanel's. The review
+        queue's pill heads the column (review-queue, design.md decision 3),
+        so the panels below it move down rather than sit under it.
       */}
       <div className={`pointer-events-none fixed top-4 right-4 bottom-4 z-10 flex ${rightColumnWidthClass} flex-col items-stretch gap-3`}>
+        <div className="pointer-events-auto shrink-0 self-end">
+          <ReviewQueuePill variant="floating" />
+        </div>
         <div className="glass pointer-events-auto shrink-0 p-3">
           <TypePanel drawnTypes={drawnTypes} storeTypes={nodeTypeCounts} selected={typePanelSelection} focusedType={focusedType} onToggleFocus={handleToggleTypeFocus} typeColors={typeColors} edgeLegend={edgeLegend} />
         </div>

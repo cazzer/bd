@@ -134,6 +134,7 @@ import {
 } from "../lib/timelineRow.js";
 import { viewFilterOf, type ViewFilter, type ViewNode } from "../lib/viewFilter.js";
 import { trpc } from "../trpc.js";
+import { ReviewQueuePill } from "./ReviewQueue.js";
 
 type TimelineResult = Awaited<ReturnType<typeof trpc.timeline.query>>;
 type TimelineRow = TimelineResult["rows"][number];
@@ -527,16 +528,19 @@ export function TimelineView({ viewId, node, types }: TimelineViewProps) {
     <main className="h-dvh w-screen overflow-y-auto">
       <div aria-hidden="true" className="ambience pointer-events-none fixed inset-0 -z-10" />
       <div className="mx-auto max-w-3xl px-4 py-6">
-        <header className="glass mb-4 flex items-start justify-between gap-4 p-4">
+        <header className="glass mb-4 flex flex-wrap items-start justify-between gap-4 p-4 sm:flex-nowrap">
           <div className="min-w-0">
             <h1 className="break-words text-base font-semibold text-fg sm:truncate">{heading}</h1>
             <p className="mt-0.5 min-h-4 text-xs text-fg-muted" role="status">
               {status}
             </p>
           </div>
-          <a href={formatRoute(graphRoute)} onClick={pushOnPlainClick(graphRoute)} className="shrink-0 rounded text-sm text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-accent">
-            {graphRoute.node === null ? "Open the graph" : "Open in graph"}
-          </a>
+          <div className="flex shrink-0 flex-wrap items-center justify-end gap-3">
+            <a href={formatRoute(graphRoute)} onClick={pushOnPlainClick(graphRoute)} className="shrink-0 rounded text-sm text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-accent">
+              {graphRoute.node === null ? "Open the graph" : "Open in graph"}
+            </a>
+            <ReviewQueuePill />
+          </div>
         </header>
 
         {showChips && (

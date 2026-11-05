@@ -26,11 +26,11 @@
 
 ## 5. Indicator, queue popover, and app-level drawer (prototype A)
 
-- [ ] 5.1 Shell-level queue state: App.tsx calls `useReviewQueue` once outside the view switch and provides it plus open/close actions through `ReviewQueueContext` (design.md decision 3)
-- [ ] 5.2 `ReviewQueuePill` (status light by shape + colour with text, pending count in the accessible name) placed in each view's top-right header: board (replacing its "Live" text), graph (above the right column), feed, timeline, code; shell fallback pill fixed top-right for a view that does not place one
-- [ ] 5.3 Anchored popover listing project, title, summary line, image count, age, oldest first; empty state, truncation note; arrows/Enter/Escape, focus returns to the pill; "Review all" action (wired in group 6)
-- [ ] 5.4 Picking opens `ReviewDrawer` from the shell per design.md decision 4 (queue version as `boardVersion`, shell draft map, focus return); any drawer prop added is additive; shell and board drawers never open together
-- [ ] 5.5 Pure helpers (row formatting, age, focus-return target) unit-tested; `pnpm check` passes; screenshots of the pill on all five views at 1440 px
+- [x] 5.1 Shell-level queue state: App.tsx calls `useReviewQueue` once outside the view switch and provides it plus open/close actions through `ReviewQueueContext` (design.md decision 3)
+- [x] 5.2 `ReviewQueuePill` (status light by shape + colour with text, pending count in the accessible name) placed in each view's top-right header: board (replacing its "Live" text), graph (above the right column), feed, timeline, code; shell fallback pill fixed top-right for a view that does not place one
+- [x] 5.3 Anchored popover listing project, title, summary line, image count, age, oldest first; empty state, truncation note; arrows/Enter/Escape, focus returns to the pill; "Review all" action (wired in group 6)
+- [x] 5.4 Picking opens `ReviewDrawer` from the shell per design.md decision 4 (queue version as `boardVersion`, shell draft map, focus return); any drawer prop added is additive; shell and board drawers never open together
+- [x] 5.5 Pure helpers (row formatting, age, focus-return target) unit-tested; `pnpm check` passes; screenshots of the pill on all five views at 1440 px
 
 ## 6. Review-all run-through modal
 

@@ -46,6 +46,7 @@ import { navigate } from "../lib/navigate.js";
 import { formatRoute, type GraphRoute } from "../lib/route.js";
 import { viewFilterOf, type ViewFilter, type ViewNode } from "../lib/viewFilter.js";
 import { trpc } from "../trpc.js";
+import { ReviewQueuePill } from "./ReviewQueue.js";
 
 type ListResult = Awaited<ReturnType<typeof trpc.list.query>>;
 type FeedRow = ListResult["nodes"][number];
@@ -191,7 +192,7 @@ export function FeedView({ viewId }: { viewId: string | null }) {
     <main className="h-dvh w-screen overflow-y-auto">
       <div aria-hidden="true" className="ambience pointer-events-none fixed inset-0 -z-10" />
       <div className="mx-auto max-w-3xl px-4 py-6">
-        <header className="glass mb-4 flex items-start justify-between gap-4 p-4">
+        <header className="glass mb-4 flex flex-wrap items-start justify-between gap-4 p-4 sm:flex-nowrap">
           <div className="min-w-0">
             <h1 className="truncate text-base font-semibold text-fg">{heading}</h1>
             {state.kind === "ready" && (
@@ -200,13 +201,16 @@ export function FeedView({ viewId }: { viewId: string | null }) {
               </p>
             )}
           </div>
-          <a
-            href={formatRoute(GRAPH_HOME)}
-            onClick={handleOpenGraph}
-            className="shrink-0 rounded text-sm text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-accent"
-          >
-            Open the graph
-          </a>
+          <div className="flex shrink-0 flex-wrap items-center justify-end gap-3">
+            <a
+              href={formatRoute(GRAPH_HOME)}
+              onClick={handleOpenGraph}
+              className="shrink-0 rounded text-sm text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-accent"
+            >
+              Open the graph
+            </a>
+            <ReviewQueuePill />
+          </div>
         </header>
 
         {state.kind === "no-view" && <p className="glass p-4 text-sm text-fg-muted">No view is named in the address.</p>}

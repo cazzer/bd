@@ -62,6 +62,7 @@ import { navigate } from "../lib/navigate.js";
 import { formatRoute, type GraphRoute } from "../lib/route.js";
 import { viewFilterOf } from "../lib/viewFilter.js";
 import { trpc } from "../trpc.js";
+import { ReviewQueuePill } from "./ReviewQueue.js";
 
 type ListResult = Awaited<ReturnType<typeof trpc.list.query>>;
 type RootRow = ListResult["nodes"][number];
@@ -440,9 +441,12 @@ export function CodeView({ viewId, node }: { viewId: string | null; node: string
               </h2>
             )}
           </div>
-          <a href={formatRoute(graphRoute)} onClick={handleGraphLink(graphRoute)} className="shrink-0 rounded text-sm text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-accent">
-            {graphRoute.node === null ? "Open the graph" : "Open in graph"}
-          </a>
+          <div className="flex shrink-0 flex-wrap items-center justify-end gap-3">
+            <a href={formatRoute(graphRoute)} onClick={handleGraphLink(graphRoute)} className="shrink-0 rounded text-sm text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-accent">
+              {graphRoute.node === null ? "Open the graph" : "Open in graph"}
+            </a>
+            <ReviewQueuePill />
+          </div>
         </header>
 
         <div className="min-h-0 flex-1 overflow-hidden">
