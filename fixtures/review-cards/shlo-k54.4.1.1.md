@@ -20,55 +20,151 @@ on_accept:
   - "If `go=true`: merge the mobile branch, push the drop migration, regenerate web-app types, re-measure. If not: no drop, and I report the caller."
 attachments:
   - kind: diff
-    caption: "Migrations on branch retire-omni-v5-v8 (not on main)"
+    caption: "Migrations on branch retire-omni-v5-v8 at 7aa2657 (not on main)"
     source: |-
       diff --git a/supabase/migrations/20261105190000_track_functions_authenticator.sql b/supabase/migrations/20261105190000_track_functions_authenticator.sql
       new file mode 100644
+      index 0000000..2eb489a
       --- /dev/null
       +++ b/supabase/migrations/20261105190000_track_functions_authenticator.sql
-      @@ -0,0 +1,3 @@
-      +-- Count function calls reached through GraphQL too: pg_stat_statements
-      +-- records only the top-level graphql.graphql() statement (track=top).
+      @@ -0,0 +1,20 @@
+      +-- Count function calls made through PostgREST and pg_graphql
+      +-- (shloco/supa-backend#23, epic shloco/infra#116).
+      +--
+      +-- pg_graphql runs every GraphQL request as one graphql.graphql() statement,
+      +-- so pg_stat_statements (track = top) can't tell which SQL function a query
+      +-- hit. With track_functions = 'all', pg_stat_user_functions counts each call
+      +-- to a plpgsql or (non-inlined) SQL function, including omni_search_v5–v8
+      +-- reached through GraphQL (checked on a scratch copy: one call each).
+      +-- That makes the 7-day zero-call check before dropping v5–v8 cover GraphQL,
+      +-- not just /rest/v1/rpc.
+      +--
+      +-- track_functions is listed in supautils.privileged_role_allowed_configs, so
+      +-- postgres can set it per role (same mechanism as track_io_timing in
+      +-- 20261105130000_perf_observability.sql). Applies to new connections;
+      +-- PostgREST recycles its pool within about an hour. Overhead is two clock
+      +-- reads and a hash lookup per function call.
+      +--
+      +-- Revert: alter role authenticator reset track_functions;
+      +
       +alter role authenticator set track_functions = 'all';
       diff --git a/supabase/migrations/20261112160000_retire_omni_search_v5_v8.sql b/supabase/migrations/20261112160000_retire_omni_search_v5_v8.sql
       new file mode 100644
+      index 0000000..8923527
       --- /dev/null
       +++ b/supabase/migrations/20261112160000_retire_omni_search_v5_v8.sql
-      @@ -0,0 +1,34 @@
-      +-- Retire omni_search v5-v8. Guard first: refuse unless the result tables
-      +-- are empty and no remaining function calls v5-v8.
+      @@ -0,0 +1,111 @@
+      +-- Retire omni_search_v5–v8 and the unused omni_search_v*_result tables
+      +-- (shloco/supa-backend#23, epic shloco/infra#116).
+      +--
+      +-- Every shipped client moved to omni_search_v9: web-app 2026-05-30 (66b5150),
+      +-- mobile-v2 production 2026-05-31 (c9cce60, binary 2.3.4 bumped 2026-06-01),
+      +-- canary 2026-11-05 (#20), omni-eval harness 2026-05-28. Drop only after the
+      +-- 7-day zero-call window (2026-11-05 16:00 → 2026-11-12 16:00 UTC) and an
+      +-- approved review.
+      +--
+      +-- Why: pg_graphql builds a per-backend, per-role schema cache from every
+      +-- exposed function and table on first use (~210 ms / ~40k buffer hits on prod).
+      +-- Each *_result table is exposed as a collection, with FK relationships onto
+      +-- store/product/brand/inventory, so empty legacy tables still cost catalog work.
+      +--
+      +-- Kept on purpose:
+      +--   omni_search_v4_result      returned by brand_product_list_v2,
+      +--                              brand_product_search_v2, inventory_search_v2
+      +--   omni_search_v9_result      returned by omni_search_v9
+      +--   omni_search_v1_result_type enum used by v9_result and store_search_v*_result
+      +--
+      +-- No CASCADE: if anything unexpected depends on these objects, the drop fails
+      +-- and `supabase db push` rolls the whole migration back.
+      +
+      +-- Guard: the result tables must be empty and the kept dependents must still
+      +-- reference the kept types, so a drift since review fails loudly.
       +do $$
+      +declare
+      +  t text;
+      +  n bigint;
       +begin
-      +  if exists (select 1 from public.omni_search_v1_result)
-      +     or exists (select 1 from public.omni_search_v2_result)
-      +     or exists (select 1 from public.omni_search_v3_result)
-      +     or exists (select 1 from public.omni_search_v5_result)
-      +     or exists (select 1 from public.omni_search_v6_result) then
-      +    raise exception 'omni_search result tables are not empty';
-      +  end if;
+      +  foreach t in array array['omni_search_v1_result', 'omni_search_v2_result',
+      +                           'omni_search_v3_result', 'omni_search_v5_result',
+      +                           'omni_search_v6_result'] loop
+      +    execute format('select count(*) from public.%I', t) into n;
+      +    if n > 0 then
+      +      raise exception 'public.% has % rows; expected an empty result-type table', t, n;
+      +    end if;
+      +  end loop;
+      +
       +  if exists (
-      +    select 1 from pg_proc p
-      +    where p.prosrc ~ 'omni_search_v[5-8]\M'
-      +      and p.proname !~ '^omni_search_v[5-8]$'
+      +    select 1
+      +    from pg_proc p
+      +    where p.pronamespace = 'public'::regnamespace
+      +      and p.prorettype in ('public.omni_search_v5_result'::regtype,
+      +                           'public.omni_search_v6_result'::regtype)
+      +      and p.proname not in ('omni_search_v5', 'omni_search_v6',
+      +                            'omni_search_v7', 'omni_search_v8')
       +  ) then
-      +    raise exception 'a remaining function still calls omni_search v5-v8';
+      +    raise exception 'an unexpected function returns omni_search_v5/v6_result';
+      +  end if;
+      +
+      +  if exists (
+      +    select 1
+      +    from pg_proc p
+      +    where p.pronamespace = 'public'::regnamespace
+      +      and p.proname not in ('omni_search_v5', 'omni_search_v6',
+      +                            'omni_search_v7', 'omni_search_v8')
+      +      and p.prosrc ~* '\momni_search_v[5-8]\s*\('
+      +  ) then
+      +    raise exception 'a remaining function body calls omni_search_v5–v8';
       +  end if;
       +end
       +$$;
       +
-      +drop function public.omni_search_v5(text, integer);
-      +drop function public.omni_search_v6(text, integer);
-      +drop function public.omni_search_v7(text, integer, jsonb);
-      +drop function public.omni_search_v8(text, integer, jsonb);
+      +drop function public.omni_search_v5(
+      +  search_term text, min_longitude double precision, min_latitude double precision,
+      +  max_longitude double precision, max_latitude double precision,
+      +  result_limit integer, result_offset integer,
+      +  store_category_boost double precision, store_headline_boost double precision,
+      +  brand_description_boost double precision, brand_name_boost double precision,
+      +  no_inventory_boost double precision, similarity_weight_ratio double precision,
+      +  max_rank double precision);
       +
+      +drop function public.omni_search_v6(
+      +  search_term text, min_longitude double precision, min_latitude double precision,
+      +  max_longitude double precision, max_latitude double precision,
+      +  result_limit integer, result_offset integer, locally_owned_only boolean,
+      +  store_category_boost double precision, store_headline_boost double precision,
+      +  brand_description_boost double precision, brand_name_boost double precision,
+      +  product_category_boost double precision, products_per_store integer,
+      +  similarity_weight_ratio double precision, max_rank double precision);
+      +
+      +drop function public.omni_search_v7(
+      +  search_term text, min_longitude double precision, min_latitude double precision,
+      +  max_longitude double precision, max_latitude double precision,
+      +  result_limit integer, result_offset integer, locally_owned_only boolean,
+      +  store_category_boost double precision, store_headline_boost double precision,
+      +  brand_description_boost double precision, brand_name_boost double precision,
+      +  product_category_boost double precision, products_per_store integer,
+      +  similarity_weight_ratio double precision, max_rank double precision,
+      +  distance_decay_weight double precision);
+      +
+      +drop function public.omni_search_v8(
+      +  search_term text, min_longitude double precision, min_latitude double precision,
+      +  max_longitude double precision, max_latitude double precision,
+      +  result_limit integer, result_offset integer, locally_owned_only boolean,
+      +  store_category_boost double precision, store_headline_boost double precision,
+      +  brand_description_boost double precision, brand_name_boost double precision,
+      +  product_category_boost double precision, products_per_store integer,
+      +  similarity_weight_ratio double precision, max_rank double precision,
+      +  distance_decay_weight double precision, local_brands_only boolean,
+      +  local_brand_radius_km numeric, brand_origin_decay_radius_km numeric,
+      +  brand_distance_decay_weight double precision);
+      +
+      +-- Result-type tables: empty, never written. Their RLS policies, PKs and FKs
+      +-- go with them.
       +drop table public.omni_search_v1_result;
       +drop table public.omni_search_v2_result;
       +drop table public.omni_search_v3_result;
       +drop table public.omni_search_v5_result;
       +drop table public.omni_search_v6_result;
-      +
-      +-- Kept: omni_search_v4_result (brand_product_*_v2, inventory_search_v2),
-      +-- omni_search_v9_result, and the OmniSearchV1ResultType enum.
 ---
 **shlo-k54.4.1** · supa-backend#23 · epic infra#116
 

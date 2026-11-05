@@ -16,7 +16,7 @@ newline however the frontmatter is sliced.
 
 | Card | What it exercises |
 | --- | --- |
-| `shlo-k54.4.1.1.md` | question, options A/B/C with `what`/`risk`, `recommend: A`, three on-accept steps, a `diff` attachment, two tables in the body; no images |
+| `shlo-k54.4.1.1.md` | question, options A/B/C with `what`/`risk`, `recommend: A`, three on-accept steps, a `diff` attachment (the real migration diff, shlo `supa-backend` `7a641e1..7aa2657`, 7,151 characters), two tables in the body; no images |
 | `before-after.md` | no options, one on-accept step, a `before`/`after` image pair (`before.png`, `after.png` beside it), a `mermaid` ER diagram |
 
 Each has `<name>.expected.json`: the exact `metadata.review` object the CLI
@@ -29,6 +29,10 @@ card leaves out are absent, never empty arrays.
 
 - `summary` is the question; `images` is the image attachments' stored paths,
   in attachment order.
+- **Whole-review cap.** `JSON.stringify` of the written review is at most
+  16,000 characters (`MAX_REVIEW_METADATA_CHARS`); the CLI refuses a card
+  over it, and the normalizer marks a stored one invalid. The shlo card is
+  8,686.
 - **Placeholder root.** A stored image path is written as
   `/REVIEW_ROOT/PROJECT/BEAD/NN-<basename>`, where `NN` is the 1-based,
   two-digit position among the card's image attachments. A test substitutes
@@ -39,6 +43,29 @@ card leaves out are absent, never empty arrays.
   files are written as if `HERDR_PANE_ID=w1:p1` and
   `HERDR_SOCKET_PATH=/tmp/herdr-test.sock`. A test runs the CLI with exactly
   those values.
+
+## The CLI is stricter than the normalizer
+
+Every card the CLI accepts normalizes to itself; the converse does not hold.
+Where the normalizer fits, drops, or treats as absent, the CLI refuses,
+naming the field, so an author learns of the problem instead of losing text:
+
+| Input | CLI | Normalizer |
+| --- | --- | --- |
+| text over its cap (question 140, label 80, what/risk 300, step 200, caption 200, source 8,000) | refused | fitted |
+| body over 8,000 characters | refused | (not in metadata) |
+| `options: []`, or fewer than 2 / more than 6 | refused | `[]` absent; otherwise invalid |
+| `recommend: ""` | refused | absent |
+| `recommend` without options | refused | invalid |
+| a blank on-accept step | refused | dropped |
+| a blank or missing `label` | refused | invalid |
+| a non-string `id` or `label` | refused | invalid |
+| an unknown key inside an option or attachment | refused | dropped |
+| an unknown top-level key | refused | dropped |
+| an empty mermaid/diff `source` | refused | kept |
+| NUL in any text field | refused | replaced by U+FFFD |
+| a blank optional `what`, `risk`, or `caption` | left out | left out |
+| `on_accept: []`, `attachments: []` | left out | left out |
 
 ## Invalid cards
 

@@ -155,8 +155,12 @@ describe("normalizeReviewMetadata decision cards", () => {
     expect(JSON.stringify(normalizeReviewMetadata(legacy))).toBe(before);
     expect(JSON.stringify(normalizeReviewMetadata({ images: [], summary: "s" }))).toBe(`{"images":[],"pane":null,"summary":"s"}`);
     // Null, blank, and empty card keys are absent, not empty.
-    const emptyCard = { ...legacy, question: "  ", options: null, recommend: null, on_accept: [], attachments: [] };
-    expect(JSON.stringify(normalizeReviewMetadata(emptyCard))).toBe(before);
+    for (const empty of [
+      { question: "  ", options: null, recommend: null, on_accept: [], attachments: [] },
+      { question: null, options: [], recommend: "", on_accept: ["", "  "], attachments: null },
+    ]) {
+      expect(JSON.stringify(normalizeReviewMetadata({ ...legacy, ...empty }))).toBe(before);
+    }
   });
 
   it("keeps a card's keys in order, drops unknown keys in options and attachments, and trims text", () => {
@@ -180,6 +184,16 @@ describe("normalizeReviewMetadata decision cards", () => {
         attachments: [{ kind: "diff", source: " +a\n-b ", caption: "c" }, { kind: "image", path: img(1) }],
       }),
     );
+  });
+
+  it("reads an empty options list and a blank recommend as absent, and drops blank on-accept steps", () => {
+    expect(JSON.stringify(normalizeReviewMetadata(card({ options: [], recommend: "" })))).toBe(JSON.stringify(card()));
+    expect(JSON.stringify(normalizeReviewMetadata(card({ options: [optionA, optionB], recommend: "" })))).toBe(JSON.stringify(card({ options: [optionA, optionB] })));
+    // An empty options list cannot back a recommendation.
+    expect(normalizeReviewMetadata(card({ options: [], recommend: "A" }))).toEqual({ invalid: true });
+    const steps = normalizeReviewMetadata(card({ on_accept: ["  ", "push", "", " merge "] }));
+    expect(steps).toMatchObject({ on_accept: ["push", "merge"] });
+    expect(normalizeReviewMetadata(steps)).toEqual(steps);
   });
 
   it("accepts an attachment pair and every attachment kind", () => {
@@ -327,6 +341,25 @@ describe("reviewCard", () => {
     const long = normalizeReviewMetadata({ summary: `${"s".repeat(MAX_REVIEW_QUESTION_LENGTH + 10)}\r\nmore` }) as ReviewMetadata;
     expect(reviewCard(long).question).toBe("s".repeat(MAX_REVIEW_QUESTION_LENGTH));
     expect(reviewCard(normalizeReviewMetadata({}) as ReviewMetadata)).toEqual({ question: "", options: [], recommend: null, onAccept: [], attachments: [] });
+  });
+
+  it("trims a legacy summary's first line again after fitting it", () => {
+    const spaced = normalizeReviewMetadata({ summary: `${"s".repeat(MAX_REVIEW_QUESTION_LENGTH - 1)} tail` }) as ReviewMetadata;
+    expect(reviewCard(spaced).question).toBe("s".repeat(MAX_REVIEW_QUESTION_LENGTH - 1));
+  });
+
+  it("appends images no image attachment carries, so a hand-edited review never hides a screenshot", () => {
+    const review = normalizeReviewMetadata({
+      images: [img(1), img(2), img(3)],
+      question: "q?",
+      attachments: [{ kind: "diff", source: "+a" }, { kind: "image", path: img(2), pair: "after" }],
+    }) as ReviewMetadata;
+    expect(reviewCard(review).attachments).toEqual([
+      { kind: "diff", source: "+a" },
+      { kind: "image", path: img(2), pair: "after" },
+      { kind: "image", path: img(1) },
+      { kind: "image", path: img(3) },
+    ]);
   });
 
   it("reads a card's own keys, preferring its attachments to images", () => {

@@ -48,8 +48,10 @@
 // dangling recommendation, unknown kind or pair, too many entries — makes the
 // review `{ invalid: true }`; over-long text is fitted, never refused (the CLI
 // refuses it at authoring time); NUL becomes U+FFFD in every text field.
-// Absent, null, and empty card keys are absent in the output, so a legacy
-// review normalizes exactly as it did before cards existed. The whole-review
+// Absent, null, and empty card keys (a blank question or `recommend`, an
+// empty options, on_accept, or attachments list) are absent in the output,
+// and blank on-accept steps are dropped, so a legacy review normalizes
+// exactly as it did before cards existed. The whole-review
 // JSON cap applies after fitting. The CLI writes the legacy keys too
 // (`summary` = question, `images` = image attachment paths), so a reader that
 // predates cards still shows the question and the images. `reviewCard` is
@@ -267,7 +269,7 @@ function normalizeCard(raw: Record<string, unknown>): Card | null {
   if (question !== ABSENT) card.question = question;
 
   const rawOptions = raw["options"];
-  if (rawOptions !== undefined && rawOptions !== null) {
+  if (rawOptions !== undefined && rawOptions !== null && !(Array.isArray(rawOptions) && rawOptions.length === 0)) {
     if (!Array.isArray(rawOptions) || rawOptions.length < MIN_REVIEW_OPTIONS || rawOptions.length > MAX_REVIEW_OPTIONS) return null;
     const options: ReviewOption[] = [];
     const ids = new Set<string>();
@@ -286,7 +288,7 @@ function normalizeCard(raw: Record<string, unknown>): Card | null {
   }
 
   const recommend = raw["recommend"];
-  if (recommend !== undefined && recommend !== null) {
+  if (recommend !== undefined && recommend !== null && recommend !== "") {
     if (typeof recommend !== "string" || card.options === undefined || !card.options.some((o) => o.id === recommend)) return null;
     card.recommend = recommend;
   }
@@ -297,7 +299,8 @@ function normalizeCard(raw: Record<string, unknown>): Card | null {
     const steps: string[] = [];
     for (const step of rawSteps) {
       if (typeof step !== "string") return null;
-      steps.push(cardText(step, MAX_REVIEW_ON_ACCEPT_STEP_LENGTH));
+      const text = cardText(step, MAX_REVIEW_ON_ACCEPT_STEP_LENGTH);
+      if (text !== "") steps.push(text);
     }
     if (steps.length > 0) card.on_accept = steps;
   }
@@ -345,14 +348,23 @@ function normalizeAttachment(raw: unknown): ReviewAttachment | null {
 
 /** The first line of `text`, trimmed and fitted to MAX_REVIEW_QUESTION_LENGTH; "" when there is none. */
 function firstLineQuestion(text: string): string {
-  return fitText((text.split(/\r\n|\r|\n/, 1)[0] ?? "").trim(), MAX_REVIEW_QUESTION_LENGTH) ?? "";
+  return (fitText((text.split(/\r\n|\r|\n/, 1)[0] ?? "").trim(), MAX_REVIEW_QUESTION_LENGTH) ?? "").trimEnd();
+}
+
+/** `images` paths that no image attachment carries, as bare image attachments, in order. */
+function unattachedImages(review: ReviewMetadata): ReviewAttachment[] {
+  const attached = new Set((review.attachments ?? []).flatMap((a) => (a.kind === "image" ? [a.path] : [])));
+  return review.images.filter((imagePath) => !attached.has(imagePath)).map((imagePath) => ({ kind: "image", path: imagePath }));
 }
 
 /**
  * A normalized review as a card, the one way readers see it: the question,
  * else the summary's first line fitted to MAX_REVIEW_QUESTION_LENGTH; the
  * attachments, else `images` as image attachments without caption or pair.
- * A legacy review is therefore a question-only card with its images. Pure.
+ * A legacy review is therefore a question-only card with its images. When a
+ * review has attachments, any `images` path no image attachment carries is
+ * appended as a bare image attachment, so a hand-edited review never hides a
+ * screenshot the legacy keys still list. Pure.
  */
 export function reviewCard(review: ReviewMetadata): ReviewCard {
   return {
@@ -360,7 +372,7 @@ export function reviewCard(review: ReviewMetadata): ReviewCard {
     options: review.options ?? [],
     recommend: review.recommend ?? null,
     onAccept: review.on_accept ?? [],
-    attachments: review.attachments ?? review.images.map((imagePath): ReviewAttachment => ({ kind: "image", path: imagePath })),
+    attachments: [...(review.attachments ?? []), ...unattachedImages(review)],
   };
 }
 
