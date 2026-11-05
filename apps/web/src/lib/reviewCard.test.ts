@@ -1,5 +1,8 @@
 // Tests for lib/reviewCard.ts (decision-card-reviews, tasks.md 6.3 and 6.5).
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { mapBeadsIssueToNode } from "@breakdown/core";
 import { describe, expect, it } from "vitest";
 import {
   CARD_MOVED_TEXT,
@@ -10,6 +13,7 @@ import {
   foldLabel,
   isCardMovedRefusal,
   MAX_INLINE_CHOICES,
+  REVIEW_ACCEPTANCE,
   orderedOptions,
   recommendedOption,
   seenFor,
@@ -113,6 +117,40 @@ describe("evidenceMarkdown", () => {
     expect(evidenceMarkdown("", "Drop?")).toBeNull();
     expect(evidenceMarkdown("  \n", "Drop?")).toBeNull();
     expect(evidenceMarkdown("Drop?\n", "Drop?")).toBeNull();
+  });
+
+  // The CLI is untyped .mjs outside this package; a non-literal specifier keeps tsc from resolving it.
+  const CLI_LIB = join(import.meta.dirname, "..", "..", "..", "..", "bin", "review-request-lib.mjs");
+  const cli = () => import(CLI_LIB) as Promise<{ REVIEW_ACCEPTANCE: string; splitCard: (text: string) => { body: string } | null }>;
+  /** A review bead's node content exactly as a beads load stores it: the real mapper, the CLI's acceptance. */
+  const reviewContent = (description: string) =>
+    mapBeadsIssueToNode({ id: "bd-x.1", title: "Review: x", status: "open", priority: 2, description, acceptance_criteria: REVIEW_ACCEPTANCE }).content ?? "";
+
+  it("uses the acceptance text review-request files", async () => {
+    expect((await cli()).REVIEW_ACCEPTANCE).toBe(REVIEW_ACCEPTANCE);
+  });
+
+  it("is exactly the card body when the beads mapper appended the review's acceptance section", async () => {
+    const card = (await cli()).splitCard(readFileSync(join(import.meta.dirname, "..", "..", "..", "..", "fixtures", "review-cards", "shlo-k54.4.1.1.md"), "utf8"));
+    expect(card).not.toBeNull();
+    const content = reviewContent(card!.body);
+    expect(content).not.toBe(card!.body);
+    expect(evidenceMarkdown(content, "Drop?")).toBe(card!.body);
+  });
+
+  it("strips only that exact trailing section", () => {
+    const mid = `Before.\n\n## Acceptance criteria\n\n${REVIEW_ACCEPTANCE}\n\nAfter.`;
+    expect(evidenceMarkdown(mid, "Drop?")).toBe(mid);
+    const other = "Body.\n\n## Acceptance criteria\n\nShip it when green";
+    expect(evidenceMarkdown(other, "Drop?")).toBe(other);
+    const mention = "The Acceptance criteria field says Accepted from the breakdown board.";
+    expect(evidenceMarkdown(mention, "Drop?")).toBe(mention);
+  });
+
+  it("keeps the blank and question-only rules after stripping", () => {
+    expect(evidenceMarkdown(reviewContent(""), "Drop?")).toBeNull();
+    expect(evidenceMarkdown(reviewContent("Drop?"), "Drop?")).toBeNull();
+    expect(evidenceMarkdown(reviewContent("Evidence."), "Drop?")).toBe("Evidence.");
   });
 });
 

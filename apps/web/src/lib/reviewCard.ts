@@ -105,13 +105,28 @@ export function describeChosen(chosen: ChosenOption): string {
 }
 
 /**
- * The evidence to render: the bead description, unless it is blank or only
- * repeats the question (the card form files the question as the description
- * when the card has no body).
+ * The acceptance criteria `review-request` files on every review bead
+ * (bin/review-request-lib.mjs `REVIEW_ACCEPTANCE`; a test pins the two).
+ */
+export const REVIEW_ACCEPTANCE = "Accepted from the breakdown board";
+
+/**
+ * What the beads mapper appends to the description for that acceptance
+ * (packages/core/src/beads.ts `section("Acceptance criteria", …)`), byte for
+ * byte; a test builds it through the real mapper.
+ */
+const REVIEW_ACCEPTANCE_SECTION = `\n\n## Acceptance criteria\n\n${REVIEW_ACCEPTANCE}`;
+
+/**
+ * The evidence to render: the bead description — the node content without
+ * the review's own acceptance section when it ends with exactly that — unless
+ * it is blank or only repeats the question (the card form files the question
+ * as the description when the card has no body).
  */
 export function evidenceMarkdown(content: string, question: string): string | null {
-  const trimmed = content.trim();
-  return trimmed === "" || trimmed === question.trim() ? null : content;
+  const description = content.endsWith(REVIEW_ACCEPTANCE_SECTION) ? content.slice(0, -REVIEW_ACCEPTANCE_SECTION.length) : content;
+  const trimmed = description.trim();
+  return trimmed === "" || trimmed === question.trim() ? null : description;
 }
 
 export interface InlineSegment {

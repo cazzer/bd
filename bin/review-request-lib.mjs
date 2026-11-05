@@ -50,6 +50,8 @@ const MAX_TITLE = 120;
 const MAX_NOTIFICATION_BODY = 200;
 const REVIEW_LABEL = "review";
 const CHANGES_LABEL = "review:changes";
+/** Every review bead's acceptance criteria (bead convention). The board strips the section the beads mapper builds from it off a card's evidence (apps/web/src/lib/reviewCard.ts, REVIEW_ACCEPTANCE). */
+export const REVIEW_ACCEPTANCE = "Accepted from the breakdown board";
 const OPEN_STATUSES = "open,in_progress,blocked,deferred";
 
 // The card contract; each limit must agree with its namesake in
@@ -833,7 +835,7 @@ async function write(deps, args, { project, item, existing, bdCwd }, staged) {
         "--no-inherit-labels",
         "--parent", args.itemId,
         "-d", args.description,
-        "--acceptance", "Accepted from the breakdown board",
+        "--acceptance", REVIEW_ACCEPTANCE,
         "--json",
       ],
       bdCwd,
