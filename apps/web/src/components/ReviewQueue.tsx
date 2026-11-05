@@ -44,9 +44,7 @@
 // the order line ("Oldest first", or "Oldest 100 of 120" when truncated), a
 // staleness line while the stream is not live, an empty state, and the
 // queue's read error over the last answer. "Review all" (design.md decision
-// 6) sits in the header and is rendered only when the provider is given
-// `onReviewAll`; the run-through modal is task group 6, so App.tsx passes
-// none yet and the button is hidden.
+// 6) sits in its header, disabled while the queue is empty.
 //
 // Drawer. A pick opens the board's ReviewDrawer from here (decision 4): the
 // project from the row, `boardLoaded` true, `boardVersion` the queue's
@@ -67,6 +65,14 @@
 // picked, back/forward) closes this one and the popover. The popover and
 // the drawer remember the view they opened on and draw only there, so a
 // change of view never shows them for a frame over the next view.
+//
+// Run-through. "Review all" closes the popover and the shell's drawer and
+// mounts ReviewRunModal (design.md decision 6) over the current view with
+// the live queue and the shared draft map; the address is untouched, even
+// on the board with its own drawer open (the modal makes it inert
+// meanwhile). Ending the run unmounts it and returns focus to the pill. Like
+// the drawer, it remembers its view and ends on a change of view or when
+// the board's drawer opens.
 
 import { createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FocusEvent, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
@@ -93,6 +99,7 @@ import {
 } from "../lib/reviewQueueRow.js";
 import { formatRoute, type BoardRoute, type Route } from "../lib/route.js";
 import { ReviewDrawer, useWideDrawer } from "./ReviewDrawer.js";
+import { ReviewRunModal } from "./ReviewRunModal.js";
 
 type QueueReview = ReviewQueueState["reviews"][number];
 type ViewName = Route["view"];
@@ -150,17 +157,16 @@ export interface ReviewQueueProviderProps {
   queue: ReviewQueueState;
   live: LiveState;
   route: Route;
-  /** Starts the review-all run (task group 6); the popover hides "Review all" while absent. */
-  onReviewAll?: () => void;
   children: ReactNode;
 }
 
-export function ReviewQueueProvider({ queue, live, route, onReviewAll, children }: ReviewQueueProviderProps) {
+export function ReviewQueueProvider({ queue, live, route, children }: ReviewQueueProviderProps) {
   const pills = useRef<PillEntry[]>([]);
   const [placedCount, setPlacedCount] = useState(0);
   const [anchorVersion, setAnchorVersion] = useState(0);
   const [popover, setPopover] = useState<PopoverState>({ open: false });
   const [picked, setPicked] = useState<{ review: QueueReview; view: ViewName } | null>(null);
+  const [run, setRun] = useState<{ view: ViewName; key: number } | null>(null);
   const [focusPill, setFocusPill] = useState(0);
   const drafts = useRef(new Map<string, string>()).current;
   /** Reviews decided in the shell's drawer, so closing it does not return focus to a row about to leave. */
@@ -206,6 +212,17 @@ export function ReviewQueueProvider({ queue, live, route, onReviewAll, children 
     setPicked({ review, view: route.view });
   }
 
+  function startRun() {
+    setPopover({ open: false });
+    setPicked(null);
+    setRun((r) => ({ view: route.view, key: (r?.key ?? 0) + 1 }));
+  }
+
+  function endRun() {
+    setRun(null);
+    setFocusPill((n) => n + 1);
+  }
+
   function closeDrawer() {
     if (picked === null) return;
     const id = picked.review.id;
@@ -221,12 +238,14 @@ export function ReviewQueueProvider({ queue, live, route, onReviewAll, children 
     if (boardItem === null) return;
     setPicked(null);
     setPopover({ open: false });
+    setRun(null);
   }, [boardItem]);
 
   // A change of view drops the popover and the drawer (they already draw only on their own view).
   useEffect(() => {
     setPopover((p) => (p.open && p.view !== route.view ? { open: false } : p));
     setPicked((p) => (p !== null && p.view !== route.view ? null : p));
+    setRun((r) => (r !== null && r.view !== route.view ? null : r));
   }, [route.view]);
 
   const view = route.view;
@@ -246,6 +265,7 @@ export function ReviewQueueProvider({ queue, live, route, onReviewAll, children 
 
   const shownPicked = picked !== null && picked.view === route.view ? picked.review : null;
   const shownPopover = popover.open && popover.view === route.view ? popover : null;
+  const shownRun = run !== null && run.view === route.view ? run : null;
   const shellOpen = shownPicked !== null;
   const drawerState = useMemo<ShellDrawerState>(() => ({ open: shellOpen, drafts }), [shellOpen, drafts]);
   const modalDrawer = shellOpen && !wide;
@@ -278,7 +298,7 @@ export function ReviewQueueProvider({ queue, live, route, onReviewAll, children 
               focusRef={popoverFocus}
               onPick={openReview}
               onClose={closePopover}
-              onReviewAll={onReviewAll}
+              onReviewAll={startRun}
             />,
             document.body,
           )}
@@ -296,6 +316,7 @@ export function ReviewQueueProvider({ queue, live, route, onReviewAll, children 
             onClose={closeDrawer}
           />
         )}
+        {shownRun !== null && <ReviewRunModal key={shownRun.key} queue={queue} drafts={drafts} onEnd={endRun} />}
       </ShellDrawerContext.Provider>
     </ReviewQueueContext.Provider>
   );
@@ -420,7 +441,7 @@ interface QueuePopoverProps {
   focusRef: { current: (() => void) | null };
   onPick: (review: QueueReview) => void;
   onClose: (returnFocus: boolean) => void;
-  onReviewAll: (() => void) | undefined;
+  onReviewAll: () => void;
 }
 
 type Placement = { top: number; right: number; width: number };
@@ -592,16 +613,14 @@ function QueuePopover({ anchor, anchorVersion, queue, live, initialFocusId, show
             Reviews waiting
           </h2>
           <CountBadge zero={!queue.loaded || queue.total === 0}>{queue.loaded ? queue.total : "…"}</CountBadge>
-          {onReviewAll !== undefined && (
-            <button
-              type="button"
-              onClick={onReviewAll}
-              disabled={reviews.length === 0}
-              className="ml-auto min-h-11 rounded-lg bg-accent px-3 text-xs font-semibold text-ground hover:bg-accent/90 focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-ground disabled:opacity-50 sm:min-h-7"
-            >
-              Review all
-            </button>
-          )}
+          <button
+            type="button"
+            onClick={onReviewAll}
+            disabled={reviews.length === 0}
+            className="ml-auto min-h-11 rounded-lg bg-accent px-3 text-xs font-semibold text-ground hover:bg-accent/90 focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-ground disabled:opacity-50 sm:min-h-7"
+          >
+            Review all
+          </button>
         </div>
         <p className="mt-1 text-[11px] text-fg-muted">{orderNote(reviews.length, queue.total, queue.truncated)}</p>
         {stale !== null && (

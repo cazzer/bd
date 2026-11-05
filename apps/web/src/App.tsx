@@ -38,11 +38,12 @@
 // state above the switch: `useReviewQueue` is called here, once, so its
 // stream listener and its last answer survive a change of view.
 // ReviewQueueProvider (components/ReviewQueue.tsx) shares it with the pill
-// each view places, and owns the popover and the drawer a pick opens over
-// whichever view is mounted. Its wrapper is one stable element around the
-// switch, so it never remounts a view, and the view element is memoized on
-// the route, so a queue read or a live-state flip re-renders the shell and
-// the pill but not the view (GraphView's canvas included).
+// each view places, and owns the popover, the drawer a pick opens, and the
+// review-all run-through, over whichever view is mounted. Its wrapper is
+// one stable element around the switch, so it never remounts a view, and
+// the view element is memoized on the route, so a queue read or a
+// live-state flip re-renders the shell and the pill but not the view
+// (GraphView's canvas included).
 
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { FeedView } from "./components/FeedView.js";

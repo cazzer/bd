@@ -34,10 +34,10 @@
 
 ## 6. Review-all run-through modal
 
-- [ ] 6.1 Extract the drawer's body into `ReviewItemPanel` shared by `ReviewDrawer` and the modal; the board's drawer behaviour is unchanged (design.md decision 6)
-- [ ] 6.2 Pure run model (`lib/reviewRun.ts`): snapshot order, advance past items no longer pending, append newly pending, skip, tallies — unit-tested
-- [ ] 6.3 `ReviewRunModal`: dialog over the current view, focus trap, "n of m", Accept & next / Request changes & next / Skip, advance only after a written decision, failure stays put, end summary, Close returns focus to the pill
-- [ ] 6.4 `pnpm check` passes; live check of a three-review run (accept, skip, changes) against fixture reviews
+- [x] 6.1 Extract the drawer's body into `ReviewItemPanel` shared by `ReviewDrawer` and the modal; the board's drawer behaviour is unchanged (design.md decision 6)
+- [x] 6.2 Pure run model (`lib/reviewRun.ts`): snapshot order, advance past items no longer pending, append newly pending, skip, tallies — unit-tested
+- [x] 6.3 `ReviewRunModal`: dialog over the current view, focus trap, "n of m", Accept & next / Request changes & next / Skip, advance only after a written decision, failure stays put, end summary, Close returns focus to the pill
+- [x] 6.4 `pnpm check` passes; live check of a three-review run (accept, skip, changes) against fixture reviews
 
 ## 7. End-to-end check and epic visual review
 
