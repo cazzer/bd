@@ -20,50 +20,73 @@
 // waiting state: the address can name a bead before its tracker has
 // loaded, and the next change re-reads it.
 //
-// For a review: summary, attachments (one slot keyed by kind,
-// ReviewAttachments.tsx — screenshots today), the comment thread, and —
-// while the review is open — a pinned footer taking Accept or Request
-// changes with a message (`reviewDecision`). A success is a status line; a
-// failure is an alert box. A failure keeps the message unless the comment
-// already landed (deciding again would post it twice). A thrown call is
-// read by `describeThrownDecision`: a 4xx refusal is final, anything else
-// is uncertain — it says so, shows the raw error small, and re-reads the
-// item so the thread shows what landed. Focus moves to whichever line
-// reports the outcome, and to that line while a write is in flight (so
-// focus never falls out of the panel when the pressed button disables).
+// For a review filed as a decision card (decision-card-reviews, design.md
+// decision 7, layout A; the card is core's `reviewCard`, served by
+// `boardItem`): the question, the options with the recommended one first,
+// the on-accept steps, the attachments (ReviewAttachments.tsx: one slot
+// keyed by kind, before/after pairs ahead of the kinds), the evidence
+// (collapsed when the card has options), and the thread (ReviewCardBody.tsx).
+// A legacy review — no card keys — shows as it always has: its whole
+// summary, its screenshots, its thread. A review the tracker holds
+// malformed says it could not be read and keeps the plain decisions. While
+// the review is open a pinned footer takes the decision with a message
+// (`reviewDecision`): for a card with options, "Accept <recommended label>",
+// one "Choose <label>" per other option (more than two fold behind one
+// "Choose another…" disclosure), and "Request changes"; any other review
+// keeps Accept / Request changes. Accepting an option sends its id and
+// `seen` — the question and the option's text as shown (lib/reviewCard.ts
+// `seenFor`) — so the server refuses it if the card changed underneath.
+// A success is a status line; a failure is an alert box. A failure keeps
+// the message unless the comment already landed (deciding again would post
+// it twice). A thrown call is read by `describeThrownDecision`: a 4xx
+// refusal is final and shown in the server's words (an option the card no
+// longer offers, or a card that changed since it was opened: "reopen it"),
+// anything else is uncertain — it says so, shows the raw error small, and
+// re-reads the item so the thread shows what landed. Focus moves to
+// whichever line reports the outcome, and to that line while a write is in
+// flight (so focus never falls out of the panel when the pressed button
+// disables).
 // For any other item: its fields, its description, and a link to the
 // graph.
 //
 // `layout` is the attachments' (ReviewAttachments.tsx): `column` stacks
 // everything in one scrolling body; `stage` gives a review with
 // attachments a two-column body — the attachments' stage on the left (two
-// thirds), summary, thread, and the decision footer on the right.
+// thirds), the card (or a legacy review's summary), evidence, thread, and
+// the decision footer on the right.
 //
 // `decisions` lets a host relabel the two decisions (with short labels for
 // phone widths, which also puts the three actions on one row there), hear
 // when one reports written (`ok` — the run-through moves on then, and only
-// then — with whether the agent could be told), add its own controls to the
-// decision row (shown even when the item takes no decision, so the run can
-// always move on, and told when a write is in flight), put a notice in
-// place of the decision form (the run's "decided elsewhere"), and turn on
-// the keyboard shortcuts: Ctrl/Cmd+Enter takes the first decision,
-// Ctrl/Cmd+Shift+Enter the second (with no message it focuses the box and
-// says one is needed). No plain key is ever taken, so typing in the message
-// box is never intercepted. `armAfterMs` keeps a decision from landing on
-// an item before it has been seen: the buttons ignore presses for that long
-// after mount, and the shortcuts ignore key repeat and wait for a fresh
-// press since mount (see useArmed) — so a held or double Cmd+Enter, or a
-// double click, decides one review, not the next. Without `decisions` the panel is
-// the drawer's: "Accept", "Request changes", nothing extra, no shortcuts,
-// no arming.
+// then — with whether the agent could be told), add its own controls to
+// the decision row (shown even when the item takes no decision, so the run
+// can always move on, and told when a write is in flight), put a notice in
+// place of the decision form (the run's "decided elsewhere"), append its
+// suffix to a card's option actions (the run's "& next"), and turn on the
+// keyboard shortcuts: Ctrl/Cmd+Enter accepts — the recommended option on a
+// card with options (the hint names its id; nothing on a card that
+// recommends none), plain Accept otherwise — and Ctrl/Cmd+Shift+Enter
+// requests changes (with no message it focuses the box and says one is
+// needed). Choosing another option has no shortcut: going against the
+// recommendation is deliberate. No plain key is ever taken, so typing in
+// the message box is never intercepted, and no key is taken from inside a
+// dialog the panel opened (a lightbox, an enlarged diagram). `armAfterMs`
+// keeps a decision from landing on an item before it has been seen: the
+// buttons ignore presses for that long after mount, and the shortcuts
+// ignore key repeat and wait for a fresh press since mount (see useArmed)
+// — so a held or double Cmd+Enter, or a double click, decides one review,
+// not the next. Without `decisions` the panel is the drawer's: "Accept",
+// "Request changes", nothing extra, no shortcuts, no arming.
 
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode, type RefObject } from "react";
 import { navigate } from "../lib/navigate.js";
-import { reviewAttachments, type ReviewAttachmentKind } from "../lib/reviewAttachments.js";
+import { reviewAttachments } from "../lib/reviewAttachments.js";
+import { cardActions, evidenceMarkdown, isCardReview, seenFor, type CardActions, type CardOption } from "../lib/reviewCard.js";
 import { canDecide, decisionBlocked, decisionEffects, describeNotified, describeRecipient, describeThrownDecision, type DecisionOutcome, type ReviewDecisionKind } from "../lib/reviewDrawer.js";
 import { formatRoute, type GraphRoute } from "../lib/route.js";
 import { HttpStatusError, trpc } from "../trpc.js";
-import { ReviewAttachments, SectionTitle, type AttachmentLayout } from "./ReviewAttachments.js";
+import { ReviewAttachments, SectionTitle, type AttachmentLayout, type AttachmentSlot } from "./ReviewAttachments.js";
+import { CardEvidence, CardOnAccept, CardOptions, CardQuestion, InlineText } from "./ReviewCardBody.js";
 
 type BoardItem = NonNullable<Awaited<ReturnType<typeof trpc.boardItem.query>>["item"]>;
 
@@ -81,6 +104,8 @@ export interface PanelDecisions {
   /** Below `sm`; given both, the actions share one row there and the recipient line is left out. */
   acceptShort?: string;
   changesShort?: string;
+  /** After a card's option actions ("Accept <label>", "Choose <label>"), shown muted: the run's "& next". */
+  optionSuffix?: string;
   /** The decision reported written (`ok`). */
   onWritten?: (decision: ReviewDecisionKind, report: WrittenReport) => void;
   /** The host's own controls at the end of the decision row. */
@@ -207,9 +232,11 @@ export function ReviewItemPanel({
   const [answer, setAnswer] = useState<BoardItem | null | undefined>(undefined);
   const [readError, setReadError] = useState<string | null>(null);
   const [refetch, setRefetch] = useState(0);
-  const [overlays, setOverlays] = useState<ReadonlySet<ReviewAttachmentKind>>(new Set());
+  const rootRef = useRef<HTMLDivElement>(null);
+  const [overlays, setOverlays] = useState<ReadonlySet<AttachmentSlot>>(new Set());
   const [message, setMessageState] = useState(initialDraft);
   const [pending, setPending] = useState<ReviewDecisionKind | null>(null);
+  const [pendingOption, setPendingOption] = useState<string | null>(null);
   const [outcome, setOutcome] = useState<Outcome | null>(null);
   const [refusal, setRefusal] = useState<Refusal | null>(null);
   const [needsMessage, setNeedsMessage] = useState(false);
@@ -257,20 +284,28 @@ export function ReviewItemPanel({
     titleRef.current?.focus();
   }, [overlayOpen, reviewShown]);
 
-  function onOverlayChange(kind: ReviewAttachmentKind, open: boolean) {
+  function onOverlayChange(slot: AttachmentSlot, open: boolean) {
     setOverlays((prev) => {
-      if (prev.has(kind) === open) return prev;
+      if (prev.has(slot) === open) return prev;
       const next = new Set(prev);
-      if (open) next.add(kind);
-      else next.delete(kind);
+      if (open) next.add(slot);
+      else next.delete(slot);
       return next;
     });
   }
 
   const decidable = loaded !== null && canDecide(loaded) && decisions.notice === undefined;
+  const card = loaded?.isReview ? loaded.card : null;
+  const actions = card !== null ? cardActions(card) : null;
+
+  /** A key from inside a dialog the panel itself opened (a lightbox, an enlarged diagram) — not the host's dialog around the panel. */
+  function fromOwnDialog(target: EventTarget): boolean {
+    const dialog = target instanceof Element ? target.closest("dialog") : null;
+    return dialog !== null && rootRef.current?.contains(dialog) === true;
+  }
 
   function onKeyDown(e: KeyboardEvent<HTMLDivElement>) {
-    if (e.defaultPrevented || overlayOpen) return;
+    if (e.defaultPrevented || overlayOpen || fromOwnDialog(e.target)) return;
     if (e.key === "Escape") {
       e.preventDefault();
       if (message.trim() !== "" || pending !== null) return;
@@ -284,20 +319,24 @@ export function ReviewItemPanel({
         messageRef.current?.focus();
         return;
       }
-      void decide(decision);
+      if (decision === "changes" || actions === null) void decide(decision);
+      else if (actions.accept !== null) void decide("accept", actions.accept);
     }
   }
 
-  async function decide(decision: ReviewDecisionKind) {
+  /** `option` (an accept on a card with options) is sent with what the person saw of it. */
+  async function decide(decision: ReviewDecisionKind, option?: CardOption) {
     if (!timeArmed || project === null || loaded === null || decisionBlocked(decision, message, pending !== null)) return;
+    const chosen = option !== undefined && card !== null ? { option: option.id, seen: seenFor(card, option) } : {};
     setPending(decision);
+    setPendingOption(option?.id ?? null);
     onBusyChange?.(true);
     setOutcome(null);
     setRefusal(null);
     let written: { decision: ReviewDecisionKind; report: WrittenReport } | null = null;
     try {
-      const result = await trpc.reviewDecision.mutate({ project, item: loaded.externalId, decision, message });
-      const effects = decisionEffects(result);
+      const result = await trpc.reviewDecision.mutate({ project, item: loaded.externalId, decision, message, ...chosen });
+      const effects = decisionEffects(result, option?.id);
       const notified = describeNotified(result.notified);
       setOutcome({ ...effects.outcome, notified });
       if (effects.clearMessage) setMessage("");
@@ -317,6 +356,7 @@ export function ReviewItemPanel({
       }
     } finally {
       setPending(null);
+      setPendingOption(null);
       onBusyChange?.(false);
     }
     if (written !== null) decisions.onWritten?.(written.decision, written.report);
@@ -348,19 +388,21 @@ export function ReviewItemPanel({
       open={decidable}
       recipient={loaded?.isReview ? describeRecipient(loaded.review) : ""}
       labels={decisions}
+      actions={actions}
       message={message}
       setMessage={setMessage}
       messageRef={messageRef}
       needsMessage={needsMessage}
       pending={pending}
+      pendingOption={pendingOption}
       outcome={outcome}
       refusal={refusal}
-      decide={(d) => void decide(d)}
+      decide={(d, option) => void decide(d, option)}
     />
   );
 
   return (
-    <div onKeyDown={onKeyDown} className="flex min-h-0 flex-1 flex-col">
+    <div ref={rootRef} onKeyDown={onKeyDown} className="flex min-h-0 flex-1 flex-col">
       <div className="border-b border-hairline p-4">
         <div className="flex items-start gap-3">
           <div className="min-w-0 flex-1">
@@ -454,10 +496,17 @@ function GraphLink({ nodeId, className, children = "Open in graph" }: { nodeId: 
   );
 }
 
-/** A review's body; `attachments` is the slot when it sits in the body, null when it is on the stage. */
+/**
+ * A review's body; `attachments` is the slot when it sits in the body, null
+ * when it is on the stage. A card in spec order (question, options,
+ * on-accept, attachments, evidence); a legacy review as before (summary,
+ * screenshots); then the thread.
+ */
 function ReviewBody({ item, attachments }: { item: BoardItem; attachments: ReactNode }) {
   const review = item.review;
   const invalid = review !== null && "invalid" in review;
+  const card = review !== null && !("invalid" in review) && isCardReview(review) ? item.card : null;
+  const evidence = card !== null ? evidenceMarkdown(item.content, card.question) : null;
   return (
     <>
       {invalid && (
@@ -465,13 +514,25 @@ function ReviewBody({ item, attachments }: { item: BoardItem; attachments: React
           This review's details are malformed in the tracker, so its summary and screenshots cannot be shown. The thread and the decision still work.
         </p>
       )}
-      {review !== null && !("invalid" in review) && review.summary !== "" && (
-        <section>
-          <SectionTitle>Summary</SectionTitle>
-          <p className="whitespace-pre-wrap text-sm leading-relaxed text-fg">{review.summary}</p>
-        </section>
+      {card !== null ? (
+        <>
+          <CardQuestion question={card.question} />
+          <CardOptions card={card} />
+          <CardOnAccept steps={card.onAccept} />
+          {attachments}
+          {evidence !== null && <CardEvidence markdown={evidence} collapsible={card.options.length > 0} />}
+        </>
+      ) : (
+        <>
+          {review !== null && !("invalid" in review) && review.summary !== "" && (
+            <section>
+              <SectionTitle>Summary</SectionTitle>
+              <p className="whitespace-pre-wrap text-sm leading-relaxed text-fg">{review.summary}</p>
+            </section>
+          )}
+          {attachments}
+        </>
       )}
-      {attachments}
       <Thread comments={item.comments} />
       {item.status === "closed" && (
         <p className="rounded-lg border border-hairline px-3 py-2 text-sm text-fg">
@@ -540,11 +601,13 @@ function DecisionFooter({
   open,
   recipient,
   labels,
+  actions,
   message,
   setMessage,
   messageRef,
   needsMessage,
   pending,
+  pendingOption,
   outcome,
   refusal,
   decide,
@@ -553,14 +616,18 @@ function DecisionFooter({
   /** Who the decision will be pushed to (describeRecipient). */
   recipient: string;
   labels: PanelDecisions;
+  /** A card's option actions (lib/reviewCard.ts `cardActions`); null keeps plain Accept / Request changes. */
+  actions: CardActions | null;
   message: string;
   setMessage: (m: string) => void;
   messageRef: RefObject<HTMLTextAreaElement | null>;
   needsMessage: boolean;
   pending: ReviewDecisionKind | null;
+  /** The option being accepted while `pending` is "accept". */
+  pendingOption: string | null;
   outcome: Outcome | null;
   refusal: Refusal | null;
-  decide: (decision: ReviewDecisionKind) => void;
+  decide: (decision: ReviewDecisionKind, option?: CardOption) => void;
 }) {
   const messageId = useId();
   const labelId = useId();
@@ -605,26 +672,56 @@ function DecisionFooter({
           )}
         </>
       )}
+      {open && actions !== null && (
+        <div className="space-y-1.5">
+          {actions.accept !== null && (
+            <OptionAction
+              option={actions.accept}
+              verb="Accept"
+              primary
+              suffix={labels.optionSuffix}
+              pending={pending === "accept" && pendingOption === actions.accept.id}
+              disabled={decisionBlocked("accept", message, busy)}
+              keyshortcuts={labels.shortcuts ? "Control+Enter Meta+Enter" : undefined}
+              onPress={() => decide("accept", actions.accept!)}
+            />
+          )}
+          {actions.choices.map((o) => (
+            <OptionAction key={o.id} option={o} verb="Choose" suffix={labels.optionSuffix} pending={pending === "accept" && pendingOption === o.id} disabled={decisionBlocked("accept", message, busy)} onPress={() => decide("accept", o)} />
+          ))}
+          {actions.folded.length > 0 && (
+            <ChooseAnother
+              options={actions.folded}
+              suffix={labels.optionSuffix}
+              pendingOption={pending === "accept" ? pendingOption : null}
+              disabled={decisionBlocked("accept", message, busy)}
+              onChoose={(o) => decide("accept", o)}
+            />
+          )}
+        </div>
+      )}
       {(open || labels.extra !== undefined) && (
         <div className={`flex items-center gap-2 ${compact ? "max-sm:flex-nowrap max-sm:[&>button]:flex-1 sm:flex-wrap" : "flex-wrap"}`}>
           {open && (
             <>
-              <button
-                type="button"
-                onClick={() => decide("accept")}
-                disabled={decisionBlocked("accept", message, busy)}
-                aria-keyshortcuts={labels.shortcuts ? "Control+Enter Meta+Enter" : undefined}
-                className="min-h-11 rounded-lg bg-accent px-4 text-sm font-semibold text-ground hover:bg-accent/90 focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-ground disabled:opacity-60 sm:min-h-10"
-              >
-                {pending === "accept" ? "Accepting…" : <Label full={labels.acceptLabel} short={labels.acceptShort} />}
-              </button>
+              {actions === null && (
+                <button
+                  type="button"
+                  onClick={() => decide("accept")}
+                  disabled={decisionBlocked("accept", message, busy)}
+                  aria-keyshortcuts={labels.shortcuts ? "Control+Enter Meta+Enter" : undefined}
+                  className="min-h-11 rounded-lg bg-accent px-4 text-sm font-semibold text-ground hover:bg-accent/90 focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-ground disabled:opacity-60 sm:min-h-10"
+                >
+                  {pending === "accept" ? "Accepting…" : <Label full={labels.acceptLabel} short={labels.acceptShort} />}
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => decide("changes")}
                 disabled={decisionBlocked("changes", message, busy)}
                 aria-describedby={message.trim() === "" ? labelId : undefined}
                 aria-keyshortcuts={labels.shortcuts ? "Control+Shift+Enter Meta+Shift+Enter" : undefined}
-                className="min-h-11 rounded-lg border border-amber-400/50 bg-amber-400/10 px-4 text-sm font-medium text-amber-200 hover:bg-amber-400/20 focus:outline-none focus:ring-2 focus:ring-amber-400 disabled:cursor-not-allowed disabled:opacity-50 sm:min-h-10"
+                className={`min-h-11 rounded-lg border border-amber-400/50 bg-amber-400/10 px-4 text-sm font-medium text-amber-200 hover:bg-amber-400/20 focus:outline-none focus:ring-2 focus:ring-amber-400 disabled:cursor-not-allowed disabled:opacity-50 sm:min-h-10 ${actions !== null ? "flex-1" : ""}`}
               >
                 {pending === "changes" ? "Sending…" : <Label full={labels.changesLabel} short={labels.changesShort} />}
               </button>
@@ -638,8 +735,18 @@ function DecisionFooter({
           <span>{recipient}</span>
           {labels.shortcuts && (
             <span aria-hidden="true" className="ml-auto hidden items-center gap-1 lg:inline-flex">
-              <Kbd>Ctrl/⌘</Kbd>
-              <Kbd>Enter</Kbd> accept · add <Kbd>Shift</Kbd> to request changes
+              {actions === null || actions.accept !== null ? (
+                <>
+                  <Kbd>Ctrl/⌘</Kbd>
+                  <Kbd>Enter</Kbd> accept{actions?.accept ? <> {actions.accept.id}</> : null} · add <Kbd>Shift</Kbd> to request changes
+                </>
+              ) : (
+                <>
+                  <Kbd>Ctrl/⌘</Kbd>
+                  <Kbd>Shift</Kbd>
+                  <Kbd>Enter</Kbd> request changes
+                </>
+              )}
             </span>
           )}
         </div>
@@ -663,6 +770,138 @@ function DecisionFooter({
           </p>
         )}
       </div>
+    </div>
+  );
+}
+
+const OPTION_BUTTON_BASE = "flex min-h-11 w-full items-center gap-2 rounded-lg px-4 text-left text-sm focus:outline-none focus:ring-2 disabled:opacity-60 sm:min-h-10";
+const OPTION_BUTTON_PRIMARY = `${OPTION_BUTTON_BASE} bg-accent font-semibold text-ground hover:bg-accent/90 focus:ring-accent focus:ring-offset-2 focus:ring-offset-ground`;
+const OPTION_BUTTON_OTHER = `${OPTION_BUTTON_BASE} border border-accent/40 bg-accent/[0.06] font-medium text-fg hover:bg-accent/15 focus:ring-accent`;
+
+/**
+ * "Accept <label>" (primary) or "Choose <label>", the option id in a mono
+ * prefix. The visible text starts the accessible name; the id follows it
+ * there ("(option B)"), since the prefix is hidden from it.
+ */
+function OptionAction({
+  option,
+  verb,
+  primary = false,
+  suffix,
+  pending,
+  disabled,
+  keyshortcuts,
+  onPress,
+  buttonRef,
+  onKeyDown,
+}: {
+  option: CardOption;
+  verb: "Accept" | "Choose";
+  primary?: boolean;
+  suffix: string | undefined;
+  pending: boolean;
+  disabled: boolean;
+  keyshortcuts?: string;
+  onPress: () => void;
+  buttonRef?: (el: HTMLButtonElement | null) => void;
+  onKeyDown?: (e: KeyboardEvent<HTMLButtonElement>) => void;
+}) {
+  return (
+    <button ref={buttonRef} type="button" onClick={onPress} onKeyDown={onKeyDown} disabled={disabled} aria-keyshortcuts={keyshortcuts} className={primary ? OPTION_BUTTON_PRIMARY : OPTION_BUTTON_OTHER}>
+      {!primary && (
+        <span aria-hidden="true" className="shrink-0 font-mono text-xs text-fg-muted">
+          {option.id}
+        </span>
+      )}
+      <span className="min-w-0 truncate">
+        {pending ? (
+          `Accepting ${option.id}…`
+        ) : (
+          <>
+            {verb} <InlineText text={option.label} />
+          </>
+        )}
+      </span>
+      <span className="sr-only">
+        {" "}
+        (option {option.id}
+        {primary ? ", recommended" : ""})
+      </span>
+      {suffix !== undefined && !pending && <span className={`ml-auto shrink-0 text-xs font-normal ${primary ? "text-ground/80" : "text-fg-muted"}`}>{suffix}</span>}
+    </button>
+  );
+}
+
+/**
+ * More than two other options: one "Choose another…" disclosure button
+ * that shows them as a list of Choose actions under it (keyboard: Tab, or
+ * the arrow keys, Home and End between them; Escape closes the list and
+ * returns to the button without leaving the panel or the run).
+ */
+function ChooseAnother({
+  options,
+  suffix,
+  pendingOption,
+  disabled,
+  onChoose,
+}: {
+  options: readonly CardOption[];
+  suffix: string | undefined;
+  pendingOption: string | null;
+  disabled: boolean;
+  onChoose: (option: CardOption) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const listId = useId();
+  const toggleRef = useRef<HTMLButtonElement>(null);
+  const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
+
+  useEffect(() => {
+    if (open) itemRefs.current[0]?.focus();
+  }, [open]);
+
+  function onItemKeyDown(e: KeyboardEvent<HTMLButtonElement>, i: number) {
+    const last = options.length - 1;
+    const target = e.key === "ArrowDown" ? (i === last ? 0 : i + 1) : e.key === "ArrowUp" ? (i === 0 ? last : i - 1) : e.key === "Home" ? 0 : e.key === "End" ? last : null;
+    if (target !== null) {
+      e.preventDefault();
+      itemRefs.current[target]?.focus();
+    } else if (e.key === "Escape") {
+      // Taken here (preventDefault), so neither the panel nor a dialog around it treats it as leaving.
+      e.preventDefault();
+      setOpen(false);
+      toggleRef.current?.focus();
+    }
+  }
+
+  return (
+    <div>
+      <button ref={toggleRef} type="button" aria-expanded={open} aria-controls={listId} onClick={() => setOpen((o) => !o)} className={OPTION_BUTTON_OTHER}>
+        <span className="min-w-0 truncate">Choose another…</span>
+        <span className="ml-auto shrink-0 text-xs font-normal text-fg-muted">
+          {options.map((o) => o.id).join(" · ")} <span aria-hidden="true">{open ? "▴" : "▾"}</span>
+        </span>
+      </button>
+      {open && (
+        <ul id={listId} aria-label="Other options" className="mt-1.5 space-y-1.5 border-l-2 border-hairline pl-2">
+          {options.map((o, i) => (
+            <li key={o.id}>
+              <OptionAction
+                option={o}
+                verb="Choose"
+                suffix={suffix}
+                pending={pendingOption === o.id}
+                disabled={disabled}
+                onPress={() => onChoose(o)}
+                onKeyDown={(e) => onItemKeyDown(e, i)}
+                buttonRef={(el) => {
+                  itemRefs.current[i] = el;
+                }}
+              />
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }

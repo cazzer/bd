@@ -32,7 +32,10 @@
 //
 // Deciding. "Accept & next" and "Request changes & next" (a message is
 // required, as in the drawer; "Accept" / "Changes" below `sm`, on one row
-// with "Skip"); the run moves on only when the panel reports the decision
+// with "Skip"); a decision card with options offers "Accept <recommended>",
+// "Choose <other>" (each marked "& next"), and "Request changes & next"
+// instead (ReviewItemPanel.tsx), and its attachments take the stage — a
+// diff fills it, a before/after pair sits above a diagram. The run moves on only when the panel reports the decision
 // written (`ok`), so a failure, a partial write, or an uncertain thrown
 // call stays on the review with the panel's own messages. The panel arms
 // its decisions 500 ms after a review mounts (and its shortcuts only after
@@ -44,9 +47,10 @@
 // shared map, so a message typed here is the one the drawer shows for the
 // same review, and back. "Open in graph" is hidden: it would leave the run.
 //
-// Keyboard: Ctrl/Cmd+Enter is "Accept & next", Ctrl/Cmd+Shift+Enter
+// Keyboard: Ctrl/Cmd+Enter is "Accept & next" (on a card, accepting the
+// recommended option, whose id the hint names), Ctrl/Cmd+Shift+Enter
 // "Request changes & next" (with no message it focuses the box and asks for
-// one). No plain key is ever taken, so typing is never intercepted.
+// one); choosing another option has no shortcut. No plain key is ever taken, so typing is never intercepted.
 //
 // The end is a summary — accepted, changes requested, skipped, and the run's
 // reviews with what became of each — with "Close" and, when any review of
@@ -266,6 +270,7 @@ function runDecisions(review: QueueReview, stillPending: boolean, touched: boole
     changesLabel: "Request changes & next",
     acceptShort: "Accept",
     changesShort: "Changes",
+    optionSuffix: "& next",
     shortcuts: true,
     armAfterMs: ARM_AFTER_MS,
     onWritten: (decision: ReviewDecisionKind, report: WrittenReport) => answer(review, decision === "accept" ? "accepted" : "changes", report),

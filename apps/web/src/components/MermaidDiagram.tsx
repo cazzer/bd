@@ -66,9 +66,11 @@ export interface MermaidDiagramProps {
   caption?: string;
   /** Whether the diagram is still being drawn; MermaidBlock owns the status region. */
   onPendingChange: (pending: boolean) => void;
+  /** Scale the drawn diagram down to the parent's height (MermaidBlock `fill`). */
+  fill?: boolean;
 }
 
-export function MermaidDiagram({ source, caption, onPendingChange }: MermaidDiagramProps) {
+export function MermaidDiagram({ source, caption, onPendingChange, fill = false }: MermaidDiagramProps) {
   const [drawn, setDrawn] = useState<Drawn>({ status: "pending" });
   const [enlarged, setEnlarged] = useState(false);
   const enlargeRef = useRef<HTMLButtonElement>(null);
@@ -109,17 +111,17 @@ export function MermaidDiagram({ source, caption, onPendingChange }: MermaidDiag
   if (drawn.status === "pending") return null;
   if (drawn.status === "failed") return <DiagramSourceWithError source={source} reason={drawn.reason} />;
   return (
-    <div className="rounded-md border border-hairline bg-[#030509] p-3">
+    <div className={`rounded-md border border-hairline bg-[#030509] p-3 ${fill ? "flex min-h-0 flex-1 flex-col" : ""}`}>
       <button
         ref={enlargeRef}
         type="button"
         aria-label={kind === "Diagram" ? "Enlarge diagram" : `Enlarge ${kind}`}
         onClick={() => setEnlarged(true)}
-        className="mx-auto block max-w-full cursor-zoom-in rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        className={`mx-auto block max-w-full cursor-zoom-in rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-accent ${fill ? "min-h-0 w-full flex-1" : ""}`}
       >
-        <img src={drawn.src} alt={kind} width={drawn.width} height={drawn.height} decoding="async" className="block h-auto max-w-full" />
+        <img src={drawn.src} alt={kind} width={drawn.width} height={drawn.height} decoding="async" className={fill ? "block h-full w-full object-contain" : "block h-auto max-w-full"} />
       </button>
-      <details className="mt-2 text-xs">
+      <details className={`mt-2 text-xs ${fill ? "max-h-[40%] shrink-0 overflow-y-auto" : ""}`}>
         <summary className="cursor-pointer rounded text-fg-muted hover:text-fg focus:outline-none focus-visible:ring-2 focus-visible:ring-accent">Diagram source</summary>
         <div className="mt-1.5 whitespace-pre-wrap font-mono leading-relaxed text-fg [overflow-wrap:anywhere]">{source}</div>
       </details>

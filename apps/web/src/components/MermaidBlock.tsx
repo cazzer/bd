@@ -10,7 +10,8 @@
 // mounts until the diagram is drawn or fails, across both the chunk load and
 // mermaid's render. A chunk that fails to load (offline, a deploy replaced
 // it) shows the source as text with the reason, like a diagram that does not
-// parse — never a blank.
+// parse — never a blank. `fill` (the review run's stage) scales a drawn
+// diagram down to the height its parent gives it instead of its natural size.
 
 import { Component, lazy, Suspense, useState, type ReactNode } from "react";
 import { DiagramSourceWithError, DiagramStatus } from "./DiagramStates.js";
@@ -20,17 +21,22 @@ const MermaidDiagram = lazy(async () => ({ default: (await import("./MermaidDiag
 export interface MermaidBlockProps {
   source: string;
   caption?: string;
+  /**
+   * Fill the parent's height (the run's stage): the drawn diagram scales down
+   * to fit it, never cropped. The parent must give it a height.
+   */
+  fill?: boolean;
 }
 
-export function MermaidBlock({ source, caption }: MermaidBlockProps) {
+export function MermaidBlock({ source, caption, fill = false }: MermaidBlockProps) {
   const [pending, setPending] = useState(true);
   return (
-    <figure className="min-w-0">
-      {caption && <figcaption className="mb-1.5 text-xs text-fg-muted">{caption}</figcaption>}
+    <figure className={fill ? "flex h-full min-h-0 min-w-0 flex-col" : "min-w-0"}>
+      {caption && <figcaption className="mb-1.5 shrink-0 text-xs text-fg-muted">{caption}</figcaption>}
       <DiagramLoadBoundary source={source}>
         <DiagramStatus pending={pending} />
         <Suspense fallback={null}>
-          <MermaidDiagram source={source} caption={caption} onPendingChange={setPending} />
+          <MermaidDiagram source={source} caption={caption} fill={fill} onPendingChange={setPending} />
         </Suspense>
       </DiagramLoadBoundary>
     </figure>

@@ -66,18 +66,22 @@ const COMMENT_POSTED = " Your comment is posted; deciding again would post it ag
 
 /**
  * How a `reviewDecision` answer reads in the drawer. A success says where
- * the card went. `uncertain` names a step that timed out or was killed and
+ * the card went, and names the option accepted when there was one. `uncertain` names a step that timed out or was killed and
  * so may still have been written; the server's error already says to check
  * the tracker, so the text names the step and passes the error through, and
  * never claims the step did not land.
  */
-export function describeDecision(result: { ok: boolean; decision: ReviewDecisionKind; written: readonly ReviewStepName[]; error?: string; uncertain?: ReviewStepName }): DecisionOutcome {
+export function describeDecision(
+  result: { ok: boolean; decision: ReviewDecisionKind; written: readonly ReviewStepName[]; error?: string; uncertain?: ReviewStepName },
+  option?: string,
+): DecisionOutcome {
   if (result.ok) {
+    const accepted = option === undefined ? "Accepted" : `Accepted ${option}`;
     const text =
       result.decision === "accept"
         ? result.written.includes("close")
-          ? "Accepted and closed — card moved to Closed."
-          : `Accepted: ${stepsText(result.written)}.`
+          ? `${accepted} and closed — card moved to Closed.`
+          : `${accepted}: ${stepsText(result.written)}.`
         : "Changes requested — comment posted and review:changes added; the review stays open.";
     return { tone: "ok", text, keepMessage: false };
   }
@@ -158,12 +162,15 @@ export function describeThrownDecision(err: ThrownDecision): ThrownDecisionText 
  * may have been written), and whether the host hears it was written — only
  * for `ok`, which is what lets the run-through advance and nothing else.
  */
-export function decisionEffects(result: { ok: boolean; decision: ReviewDecisionKind; written: readonly ReviewStepName[]; error?: string; uncertain?: ReviewStepName }): {
+export function decisionEffects(
+  result: { ok: boolean; decision: ReviewDecisionKind; written: readonly ReviewStepName[]; error?: string; uncertain?: ReviewStepName },
+  option?: string,
+): {
   outcome: DecisionOutcome;
   clearMessage: boolean;
   reread: boolean;
   written: boolean;
 } {
-  const outcome = describeDecision(result);
+  const outcome = describeDecision(result, option);
   return { outcome, clearMessage: !outcome.keepMessage, reread: result.written.length > 0 || result.uncertain !== undefined, written: result.ok };
 }
