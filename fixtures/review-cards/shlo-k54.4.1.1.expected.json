@@ -1,0 +1,40 @@
+{
+  "images": [],
+  "pane": "w1:p1",
+  "socket": "/tmp/herdr-test.sock",
+  "summary": "Drop omni_search v5–v8 on or after 2026-11-12 if the 7-day delta shows zero calls?",
+  "question": "Drop omni_search v5–v8 on or after 2026-11-12 if the 7-day delta shows zero calls?",
+  "options": [
+    {
+      "id": "A",
+      "label": "Track function calls, then drop",
+      "what": "Turn on `track_functions=all` now. Drop on or after max(11-12 16:00, tracking on + 7 days) if the verify query returns `go=true`.",
+      "risk": "Lowest: both REST and GraphQL are checked. The drop slips about 1 day."
+    },
+    {
+      "id": "B",
+      "label": "Drop on 11-12 on current evidence",
+      "what": "Drop on 11-12 using `pgss_delta` and the code audit only.",
+      "risk": "GraphQL callers go unseen. A ≤2.3.3 install not opened since about June fails one search."
+    },
+    {
+      "id": "C",
+      "label": "Don't drop",
+      "what": "Don't drop. Ship only the mobile/depot cleanup.",
+      "risk": "Keeps 4 slow functions anyone with the anon key can call (v7 ~12 s cold)."
+    }
+  ],
+  "recommend": "A",
+  "on_accept": [
+    "`supabase db push` the tracking migration only, from a clean main.",
+    "On the window date, run `q.sh shoplocal \"$(cat scripts/perf/verify-omni-v5-v8-unused.sql)\"`.",
+    "If `go=true`: merge the mobile branch, push the drop migration, regenerate web-app types, re-measure. If not: no drop, and I report the caller."
+  ],
+  "attachments": [
+    {
+      "kind": "diff",
+      "source": "diff --git a/supabase/migrations/20261105190000_track_functions_authenticator.sql b/supabase/migrations/20261105190000_track_functions_authenticator.sql\nnew file mode 100644\n--- /dev/null\n+++ b/supabase/migrations/20261105190000_track_functions_authenticator.sql\n@@ -0,0 +1,3 @@\n+-- Count function calls reached through GraphQL too: pg_stat_statements\n+-- records only the top-level graphql.graphql() statement (track=top).\n+alter role authenticator set track_functions = 'all';\ndiff --git a/supabase/migrations/20261112160000_retire_omni_search_v5_v8.sql b/supabase/migrations/20261112160000_retire_omni_search_v5_v8.sql\nnew file mode 100644\n--- /dev/null\n+++ b/supabase/migrations/20261112160000_retire_omni_search_v5_v8.sql\n@@ -0,0 +1,34 @@\n+-- Retire omni_search v5-v8. Guard first: refuse unless the result tables\n+-- are empty and no remaining function calls v5-v8.\n+do $$\n+begin\n+  if exists (select 1 from public.omni_search_v1_result)\n+     or exists (select 1 from public.omni_search_v2_result)\n+     or exists (select 1 from public.omni_search_v3_result)\n+     or exists (select 1 from public.omni_search_v5_result)\n+     or exists (select 1 from public.omni_search_v6_result) then\n+    raise exception 'omni_search result tables are not empty';\n+  end if;\n+  if exists (\n+    select 1 from pg_proc p\n+    where p.prosrc ~ 'omni_search_v[5-8]\\M'\n+      and p.proname !~ '^omni_search_v[5-8]$'\n+  ) then\n+    raise exception 'a remaining function still calls omni_search v5-v8';\n+  end if;\n+end\n+$$;\n+\n+drop function public.omni_search_v5(text, integer);\n+drop function public.omni_search_v6(text, integer);\n+drop function public.omni_search_v7(text, integer, jsonb);\n+drop function public.omni_search_v8(text, integer, jsonb);\n+\n+drop table public.omni_search_v1_result;\n+drop table public.omni_search_v2_result;\n+drop table public.omni_search_v3_result;\n+drop table public.omni_search_v5_result;\n+drop table public.omni_search_v6_result;\n+\n+-- Kept: omni_search_v4_result (brand_product_*_v2, inventory_search_v2),\n+-- omni_search_v9_result, and the OmniSearchV1ResultType enum.",
+      "caption": "Migrations on branch retire-omni-v5-v8 (not on main)"
+    }
+  ]
+}

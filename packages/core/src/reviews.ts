@@ -34,6 +34,26 @@
 // the assembled total as well. NUL, which Postgres jsonb refuses, becomes
 // U+FFFD in summary and comment fields. The tracker remains authoritative
 // for the full thread.
+//
+// Decision cards (decision-card-reviews, design.md decision 1). Beside the
+// legacy keys a review may carry a card: `question` (fitted to
+// MAX_REVIEW_QUESTION_LENGTH), `options` (MIN_REVIEW_OPTIONS to
+// MAX_REVIEW_OPTIONS of `{ id, label, what?, risk? }`, ids unique and
+// matching REVIEW_OPTION_ID_PATTERN), `recommend` (one option's id; only with
+// options), `on_accept` (at most MAX_REVIEW_ON_ACCEPT_STEPS strings), and
+// `attachments` (at most MAX_REVIEW_ATTACHMENTS of `{ kind: "image", path }`
+// or `{ kind: "mermaid" | "diff", source }`, each with optional `caption` and
+// `pair` of `before`/`after`; an image path obeys the same rule as `images`).
+// A structural break — wrong type, bad or repeated id, missing label,
+// dangling recommendation, unknown kind or pair, too many entries — makes the
+// review `{ invalid: true }`; over-long text is fitted, never refused (the CLI
+// refuses it at authoring time); NUL becomes U+FFFD in every text field.
+// Absent, null, and empty card keys are absent in the output, so a legacy
+// review normalizes exactly as it did before cards existed. The whole-review
+// JSON cap applies after fitting. The CLI writes the legacy keys too
+// (`summary` = question, `images` = image attachment paths), so a reader that
+// predates cards still shows the question and the images. `reviewCard` is
+// how every reader sees a review as a card, legacy or not.
 
 import os from "node:os";
 import path from "node:path";
@@ -63,6 +83,23 @@ export const MAX_REVIEW_COMMENTS_CHARS = 24_000;
 /** Cap on `JSON.stringify(review).length` for a normalized review; over it, the review is invalid. */
 export const MAX_REVIEW_METADATA_CHARS = 16_000;
 
+export const MAX_REVIEW_QUESTION_LENGTH = 140;
+export const MIN_REVIEW_OPTIONS = 2;
+export const MAX_REVIEW_OPTIONS = 6;
+/** An option id: a letter or digit, then up to 15 letters, digits, `_`, `-`. */
+export const REVIEW_OPTION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,15}$/;
+export const MAX_REVIEW_OPTION_LABEL_LENGTH = 80;
+/** Cap on an option's `what` and on its `risk`. */
+export const MAX_REVIEW_OPTION_TEXT_LENGTH = 300;
+export const MAX_REVIEW_ON_ACCEPT_STEPS = 8;
+export const MAX_REVIEW_ON_ACCEPT_STEP_LENGTH = 200;
+export const MAX_REVIEW_ATTACHMENTS = 20;
+export const MAX_REVIEW_ATTACHMENT_CAPTION_LENGTH = 200;
+/** Cap on a mermaid or diff attachment's `source`. */
+export const MAX_REVIEW_ATTACHMENT_SOURCE_LENGTH = 8000;
+export const REVIEW_ATTACHMENT_KINDS = ["image", "mermaid", "diff"] as const;
+export const REVIEW_ATTACHMENT_PAIRS = ["before", "after"] as const;
+
 // eslint-disable-next-line no-control-regex
 const CONTROL_CHAR = /[\u0000-\u001f\u007f]/;
 
@@ -71,12 +108,55 @@ function withoutNul(value: string): string {
   return value.includes("\u0000") ? value.replaceAll("\u0000", "\uFFFD") : value;
 }
 
+export type ReviewAttachmentKind = (typeof REVIEW_ATTACHMENT_KINDS)[number];
+export type ReviewAttachmentPair = (typeof REVIEW_ATTACHMENT_PAIRS)[number];
+
+export interface ReviewOption {
+  id: string;
+  label: string;
+  what?: string;
+  risk?: string;
+}
+
+export interface ReviewImageAttachment {
+  kind: "image";
+  /** Absolute; the same rule as `ReviewMetadata.images`. */
+  path: string;
+  caption?: string;
+  pair?: ReviewAttachmentPair;
+}
+
+export interface ReviewSourceAttachment {
+  kind: "mermaid" | "diff";
+  source: string;
+  caption?: string;
+  pair?: ReviewAttachmentPair;
+}
+
+export type ReviewAttachment = ReviewImageAttachment | ReviewSourceAttachment;
+
 export interface ReviewMetadata {
   images: string[];
   pane: string | null;
   /** The herdr server socket the pane id belongs to; present only when recorded. */
   socket?: string;
   summary: string;
+  /** Decision card keys (module header); each present only when the review carries it. */
+  question?: string;
+  options?: ReviewOption[];
+  /** The id of one of `options`. */
+  recommend?: string;
+  on_accept?: string[];
+  attachments?: ReviewAttachment[];
+}
+
+/** A review as a card (`reviewCard`): every key present, legacy reviews included. */
+export interface ReviewCard {
+  question: string;
+  options: ReviewOption[];
+  recommend: string | null;
+  onAccept: string[];
+  attachments: ReviewAttachment[];
 }
 
 /** A herdr socket path as the review contract accepts it: absolute, bounded, no control characters. Says nothing about whether it exists. */
@@ -116,9 +196,7 @@ export function normalizeReviewMetadata(raw: unknown): ReviewMetadata | InvalidR
   } else {
     if (!Array.isArray(rawImages) || rawImages.length > MAX_REVIEW_IMAGES) return { ...INVALID };
     for (const image of rawImages) {
-      if (typeof image !== "string" || image.length === 0 || image.length > MAX_REVIEW_IMAGE_PATH_LENGTH || CONTROL_CHAR.test(image) || !path.isAbsolute(image)) {
-        return { ...INVALID };
-      }
+      if (!isReviewImagePath(image)) return { ...INVALID };
     }
     images = [...(rawImages as string[])];
   }
@@ -150,8 +228,140 @@ export function normalizeReviewMetadata(raw: unknown): ReviewMetadata | InvalidR
     summary = withoutNul(fitText(rawSummary.trim(), MAX_REVIEW_SUMMARY_LENGTH) ?? "");
   }
 
-  const review: ReviewMetadata = socket === undefined ? { images, pane, summary } : { images, pane, socket, summary };
+  const card = normalizeCard(raw);
+  if (card === null) return { ...INVALID };
+
+  const review: ReviewMetadata = socket === undefined ? { images, pane, summary, ...card } : { images, pane, socket, summary, ...card };
   return JSON.stringify(review).length > MAX_REVIEW_METADATA_CHARS ? { ...INVALID } : review;
+}
+
+/** An image path as the review contract accepts it: absolute, bounded, no control characters. */
+function isReviewImagePath(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= MAX_REVIEW_IMAGE_PATH_LENGTH && !CONTROL_CHAR.test(value) && path.isAbsolute(value);
+}
+
+const ABSENT = Symbol("absent");
+type Fitted = string | typeof ABSENT | null;
+
+/** Card text trimmed, fitted, and trimmed again (a cut can land on a space; re-normalizing must not move it), NUL replaced. */
+function cardText(value: string, max: number): string {
+  return withoutNul((fitText(value.trim(), max) ?? "").trimEnd());
+}
+
+/** An optional text field: absent, null, or blank → ABSENT; a non-string → null (invalid); else `cardText`. */
+function optionalText(value: unknown, max: number): Fitted {
+  if (value === undefined || value === null) return ABSENT;
+  if (typeof value !== "string") return null;
+  const text = cardText(value, max);
+  return text === "" ? ABSENT : text;
+}
+
+type Card = Pick<ReviewMetadata, "question" | "options" | "recommend" | "on_accept" | "attachments">;
+
+/** The card keys of a raw review, normalized; null when one breaks the contract. Keys absent, null, or empty are left out. */
+function normalizeCard(raw: Record<string, unknown>): Card | null {
+  const card: Card = {};
+
+  const question = optionalText(raw["question"], MAX_REVIEW_QUESTION_LENGTH);
+  if (question === null) return null;
+  if (question !== ABSENT) card.question = question;
+
+  const rawOptions = raw["options"];
+  if (rawOptions !== undefined && rawOptions !== null) {
+    if (!Array.isArray(rawOptions) || rawOptions.length < MIN_REVIEW_OPTIONS || rawOptions.length > MAX_REVIEW_OPTIONS) return null;
+    const options: ReviewOption[] = [];
+    const ids = new Set<string>();
+    for (const rawOption of rawOptions) {
+      if (!isPlainObject(rawOption)) return null;
+      const id = rawOption["id"];
+      if (typeof id !== "string" || !REVIEW_OPTION_ID_PATTERN.test(id) || ids.has(id)) return null;
+      ids.add(id);
+      const label = optionalText(rawOption["label"], MAX_REVIEW_OPTION_LABEL_LENGTH);
+      const what = optionalText(rawOption["what"], MAX_REVIEW_OPTION_TEXT_LENGTH);
+      const risk = optionalText(rawOption["risk"], MAX_REVIEW_OPTION_TEXT_LENGTH);
+      if (label === null || label === ABSENT || what === null || risk === null) return null;
+      options.push({ id, label, ...(what === ABSENT ? {} : { what }), ...(risk === ABSENT ? {} : { risk }) });
+    }
+    card.options = options;
+  }
+
+  const recommend = raw["recommend"];
+  if (recommend !== undefined && recommend !== null) {
+    if (typeof recommend !== "string" || card.options === undefined || !card.options.some((o) => o.id === recommend)) return null;
+    card.recommend = recommend;
+  }
+
+  const rawSteps = raw["on_accept"];
+  if (rawSteps !== undefined && rawSteps !== null) {
+    if (!Array.isArray(rawSteps) || rawSteps.length > MAX_REVIEW_ON_ACCEPT_STEPS) return null;
+    const steps: string[] = [];
+    for (const step of rawSteps) {
+      if (typeof step !== "string") return null;
+      steps.push(cardText(step, MAX_REVIEW_ON_ACCEPT_STEP_LENGTH));
+    }
+    if (steps.length > 0) card.on_accept = steps;
+  }
+
+  const rawAttachments = raw["attachments"];
+  if (rawAttachments !== undefined && rawAttachments !== null) {
+    if (!Array.isArray(rawAttachments) || rawAttachments.length > MAX_REVIEW_ATTACHMENTS) return null;
+    const attachments: ReviewAttachment[] = [];
+    for (const rawAttachment of rawAttachments) {
+      const attachment = normalizeAttachment(rawAttachment);
+      if (attachment === null) return null;
+      attachments.push(attachment);
+    }
+    if (attachments.length > 0) card.attachments = attachments;
+  }
+
+  return card;
+}
+
+function normalizeAttachment(raw: unknown): ReviewAttachment | null {
+  if (!isPlainObject(raw)) return null;
+  const caption = optionalText(raw["caption"], MAX_REVIEW_ATTACHMENT_CAPTION_LENGTH);
+  if (caption === null) return null;
+  const rawPair = raw["pair"];
+  let pair: ReviewAttachmentPair | undefined;
+  if (rawPair !== undefined && rawPair !== null) {
+    if (!(REVIEW_ATTACHMENT_PAIRS as readonly unknown[]).includes(rawPair)) return null;
+    pair = rawPair as ReviewAttachmentPair;
+  }
+  const extras = { ...(caption === ABSENT ? {} : { caption }), ...(pair === undefined ? {} : { pair }) };
+
+  const kind = raw["kind"];
+  if (kind === "image") {
+    const imagePath = raw["path"];
+    if (!isReviewImagePath(imagePath)) return null;
+    return { kind, path: imagePath, ...extras };
+  }
+  if (kind === "mermaid" || kind === "diff") {
+    const source = raw["source"];
+    if (typeof source !== "string") return null;
+    return { kind, source: withoutNul(fitText(source, MAX_REVIEW_ATTACHMENT_SOURCE_LENGTH) ?? ""), ...extras };
+  }
+  return null;
+}
+
+/** The first line of `text`, trimmed and fitted to MAX_REVIEW_QUESTION_LENGTH; "" when there is none. */
+function firstLineQuestion(text: string): string {
+  return fitText((text.split(/\r\n|\r|\n/, 1)[0] ?? "").trim(), MAX_REVIEW_QUESTION_LENGTH) ?? "";
+}
+
+/**
+ * A normalized review as a card, the one way readers see it: the question,
+ * else the summary's first line fitted to MAX_REVIEW_QUESTION_LENGTH; the
+ * attachments, else `images` as image attachments without caption or pair.
+ * A legacy review is therefore a question-only card with its images. Pure.
+ */
+export function reviewCard(review: ReviewMetadata): ReviewCard {
+  return {
+    question: review.question ?? firstLineQuestion(review.summary),
+    options: review.options ?? [],
+    recommend: review.recommend ?? null,
+    onAccept: review.on_accept ?? [],
+    attachments: review.attachments ?? review.images.map((imagePath): ReviewAttachment => ({ kind: "image", path: imagePath })),
+  };
 }
 
 function toIsoOrNull(value: unknown): string | null {

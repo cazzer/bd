@@ -1,9 +1,23 @@
-// Pure tests for the review contract (board-visual-reviews, task 1.1).
+// Pure tests for the review contract (board-visual-reviews, task 1.1) and
+// its decision-card keys (decision-card-reviews, task 1.3). The card
+// fixtures are read from fixtures/review-cards/*.expected.json only; core has
+// no YAML parser.
 
+import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   isInsideReviewRoot,
+  MAX_REVIEW_ATTACHMENT_CAPTION_LENGTH,
+  MAX_REVIEW_ATTACHMENT_SOURCE_LENGTH,
+  MAX_REVIEW_ATTACHMENTS,
+  MAX_REVIEW_ON_ACCEPT_STEP_LENGTH,
+  MAX_REVIEW_ON_ACCEPT_STEPS,
+  MAX_REVIEW_OPTION_LABEL_LENGTH,
+  MAX_REVIEW_OPTION_TEXT_LENGTH,
+  MAX_REVIEW_OPTIONS,
+  MAX_REVIEW_QUESTION_LENGTH,
   MAX_REVIEW_COMMENT_AUTHOR_LENGTH,
   MAX_REVIEW_COMMENT_LENGTH,
   MAX_REVIEW_COMMENTS,
@@ -16,6 +30,8 @@ import {
   normalizeReviewComments,
   normalizeReviewMetadata,
   REVIEW_IMAGE_ROOT,
+  reviewCard,
+  type ReviewMetadata,
 } from "./reviews.js";
 
 const img = (n: number) => path.join(REVIEW_IMAGE_ROOT, "proj", "bd-1", `${String(n).padStart(2, "0")}-shot.png`);
@@ -107,6 +123,231 @@ describe("normalizeReviewMetadata", () => {
     const valid = normalizeReviewMetadata({ images: [img(1)], pane: "p1", summary: "s" });
     expect(normalizeReviewMetadata(valid)).toEqual(valid);
     expect(normalizeReviewMetadata({ invalid: true })).toEqual({ invalid: true });
+  });
+});
+
+const FIXTURE_DIR = fileURLToPath(new URL("../../../fixtures/review-cards/", import.meta.url));
+const EXPECTED = readdirSync(FIXTURE_DIR).filter((f) => f.endsWith(".expected.json")).sort();
+
+function fixture(name: string): Record<string, unknown> {
+  return JSON.parse(readFileSync(path.join(FIXTURE_DIR, name), "utf8")) as Record<string, unknown>;
+}
+
+const optionA = { id: "A", label: "Track first" };
+const optionB = { id: "B", label: "Drop now" };
+const card = (extra: Record<string, unknown> = {}) => ({ images: [], pane: null, summary: "q?", question: "q?", ...extra });
+
+describe("normalizeReviewMetadata decision cards", () => {
+  it("finds both valid card fixtures", () => {
+    expect(EXPECTED).toEqual(["before-after.expected.json", "shlo-k54.4.1.1.expected.json"]);
+  });
+
+  it.each(EXPECTED)("normalizes %s to itself, byte for byte", (name) => {
+    const raw = fixture(name);
+    const review = normalizeReviewMetadata(raw);
+    expect(review).not.toHaveProperty("invalid");
+    expect(JSON.stringify(review)).toBe(JSON.stringify(raw));
+  });
+
+  it("normalizes a legacy review byte-identical to before cards existed", () => {
+    const legacy = { images: [img(1)], pane: "w1:p2", socket: "/tmp/herdr.sock", summary: "Board header" };
+    const before = `{"images":[${JSON.stringify(img(1))}],"pane":"w1:p2","socket":"/tmp/herdr.sock","summary":"Board header"}`;
+    expect(JSON.stringify(normalizeReviewMetadata(legacy))).toBe(before);
+    expect(JSON.stringify(normalizeReviewMetadata({ images: [], summary: "s" }))).toBe(`{"images":[],"pane":null,"summary":"s"}`);
+    // Null, blank, and empty card keys are absent, not empty.
+    const emptyCard = { ...legacy, question: "  ", options: null, recommend: null, on_accept: [], attachments: [] };
+    expect(JSON.stringify(normalizeReviewMetadata(emptyCard))).toBe(before);
+  });
+
+  it("keeps a card's keys in order, drops unknown keys in options and attachments, and trims text", () => {
+    const review = normalizeReviewMetadata({
+      attachments: [{ kind: "diff", source: " +a\n-b ", caption: " c ", extra: 1 }, { kind: "image", path: img(1), source: "ignored" }],
+      on_accept: ["  push  "],
+      recommend: "B",
+      options: [{ ...optionA, what: "  w ", risk: "", extra: 1 }, { ...optionB, risk: null }],
+      question: "  Drop it?  ",
+      summary: "Drop it?",
+    });
+    expect(JSON.stringify(review)).toBe(
+      JSON.stringify({
+        images: [],
+        pane: null,
+        summary: "Drop it?",
+        question: "Drop it?",
+        options: [{ id: "A", label: "Track first", what: "w" }, { id: "B", label: "Drop now" }],
+        recommend: "B",
+        on_accept: ["push"],
+        attachments: [{ kind: "diff", source: " +a\n-b ", caption: "c" }, { kind: "image", path: img(1) }],
+      }),
+    );
+  });
+
+  it("accepts an attachment pair and every attachment kind", () => {
+    const attachments = [
+      { kind: "image", path: img(1), pair: "before" },
+      { kind: "image", path: img(2), pair: "after" },
+      { kind: "mermaid", source: "erDiagram\n  A ||--o{ B : has" },
+    ];
+    expect(normalizeReviewMetadata(card({ attachments }))).toMatchObject({ attachments });
+  });
+
+  it.each([
+    ["a non-string question", { question: 7 }],
+    ["options not an array", { options: optionA }],
+    ["one option", { options: [optionA] }],
+    ["too many options", { options: Array.from({ length: MAX_REVIEW_OPTIONS + 1 }, (_, i) => ({ id: `o${i}`, label: "l" })) }],
+    ["an option that is not a plain object", { options: [optionA, "B"] }],
+    ["an option id with a bad character", { options: [optionA, { id: "B C", label: "l" }] }],
+    ["an option id that starts with '-'", { options: [optionA, { id: "-B", label: "l" }] }],
+    ["an over-long option id", { options: [optionA, { id: "B".repeat(17), label: "l" }] }],
+    ["a non-string option id", { options: [optionA, { id: 2, label: "l" }] }],
+    ["a repeated option id", { options: [optionA, { id: "A", label: "again" }] }],
+    ["a missing label", { options: [optionA, { id: "B" }] }],
+    ["a blank label", { options: [optionA, { id: "B", label: "  " }] }],
+    ["a non-string what", { options: [optionA, { ...optionB, what: 1 }] }],
+    ["a non-string risk", { options: [optionA, { ...optionB, risk: ["r"] }] }],
+    ["recommend without options", { recommend: "A" }],
+    ["recommend naming no option", { options: [optionA, optionB], recommend: "D" }],
+    ["a non-string recommend", { options: [optionA, optionB], recommend: 1 }],
+    ["on_accept not an array", { on_accept: "push" }],
+    ["too many on-accept steps", { on_accept: Array.from({ length: MAX_REVIEW_ON_ACCEPT_STEPS + 1 }, () => "s") }],
+    ["a non-string on-accept step", { on_accept: ["push", 2] }],
+    ["attachments not an array", { attachments: { kind: "diff", source: "" } }],
+    ["too many attachments", { attachments: Array.from({ length: MAX_REVIEW_ATTACHMENTS + 1 }, () => ({ kind: "diff", source: "+" })) }],
+    ["an attachment that is not a plain object", { attachments: ["diff"] }],
+    ["an unknown attachment kind", { attachments: [{ kind: "video", path: img(1) }] }],
+    ["an attachment without a kind", { attachments: [{ path: img(1) }] }],
+    ["an image attachment without a path", { attachments: [{ kind: "image" }] }],
+    ["a relative image attachment path", { attachments: [{ kind: "image", path: "shots/a.png" }] }],
+    ["an over-long image attachment path", { attachments: [{ kind: "image", path: `/${"a".repeat(MAX_REVIEW_IMAGE_PATH_LENGTH)}` }] }],
+    ["a control character in an image attachment path", { attachments: [{ kind: "image", path: "/tmp/a\nb.png" }] }],
+    ["a mermaid attachment without a source", { attachments: [{ kind: "mermaid" }] }],
+    ["a diff attachment with a non-string source", { attachments: [{ kind: "diff", source: ["+a"] }] }],
+    ["an unknown pair", { attachments: [{ kind: "image", path: img(1), pair: "during" }] }],
+    ["a non-string caption", { attachments: [{ kind: "image", path: img(1), caption: 3 }] }],
+  ])("marks a card with %s invalid", (_label, extra) => {
+    expect(normalizeReviewMetadata(card(extra))).toEqual({ invalid: true });
+  });
+
+  it("accepts exactly the option, step, and attachment caps", () => {
+    const options = Array.from({ length: MAX_REVIEW_OPTIONS }, (_, i) => ({ id: `o-${i}_${"x".repeat(12)}`, label: "l" }));
+    const on_accept = Array.from({ length: MAX_REVIEW_ON_ACCEPT_STEPS }, (_, i) => `step ${i}`);
+    const attachments = Array.from({ length: MAX_REVIEW_ATTACHMENTS }, (_, i) => ({ kind: "image", path: img(i) }));
+    expect(options[0]!.id).toHaveLength(16);
+    expect(normalizeReviewMetadata(card({ options, recommend: options.at(-1)!.id, on_accept, attachments }))).toMatchObject({ options, on_accept, attachments });
+  });
+
+  it("fits every over-long text field instead of refusing", () => {
+    const over = (max: number, ch = "x") => ch.repeat(max + 25);
+    const review = normalizeReviewMetadata({
+      question: over(MAX_REVIEW_QUESTION_LENGTH),
+      options: [
+        { id: "A", label: over(MAX_REVIEW_OPTION_LABEL_LENGTH), what: over(MAX_REVIEW_OPTION_TEXT_LENGTH), risk: over(MAX_REVIEW_OPTION_TEXT_LENGTH) },
+        optionB,
+      ],
+      on_accept: [over(MAX_REVIEW_ON_ACCEPT_STEP_LENGTH)],
+      attachments: [{ kind: "mermaid", source: over(MAX_REVIEW_ATTACHMENT_SOURCE_LENGTH), caption: over(MAX_REVIEW_ATTACHMENT_CAPTION_LENGTH) }],
+    }) as ReviewMetadata;
+    expect(review.question).toBe("x".repeat(MAX_REVIEW_QUESTION_LENGTH));
+    expect(review.options?.[0]).toEqual({
+      id: "A",
+      label: "x".repeat(MAX_REVIEW_OPTION_LABEL_LENGTH),
+      what: "x".repeat(MAX_REVIEW_OPTION_TEXT_LENGTH),
+      risk: "x".repeat(MAX_REVIEW_OPTION_TEXT_LENGTH),
+    });
+    expect(review.on_accept).toEqual(["x".repeat(MAX_REVIEW_ON_ACCEPT_STEP_LENGTH)]);
+    expect(review.attachments).toEqual([
+      { kind: "mermaid", source: "x".repeat(MAX_REVIEW_ATTACHMENT_SOURCE_LENGTH), caption: "x".repeat(MAX_REVIEW_ATTACHMENT_CAPTION_LENGTH) },
+    ]);
+    expect(normalizeReviewMetadata(review)).toEqual(review);
+  });
+
+  it("is idempotent when a fitted cut lands on a space", () => {
+    const spaced = (max: number) => `${"x".repeat(max - 1)} ${"y".repeat(10)}`;
+    const raw = {
+      question: spaced(MAX_REVIEW_QUESTION_LENGTH),
+      options: [{ id: "A", label: spaced(MAX_REVIEW_OPTION_LABEL_LENGTH), what: spaced(MAX_REVIEW_OPTION_TEXT_LENGTH) }, optionB],
+      on_accept: [spaced(MAX_REVIEW_ON_ACCEPT_STEP_LENGTH)],
+      attachments: [{ kind: "image", path: img(1), caption: spaced(MAX_REVIEW_ATTACHMENT_CAPTION_LENGTH) }],
+    };
+    const once = normalizeReviewMetadata(raw) as ReviewMetadata;
+    expect(once.question).toBe("x".repeat(MAX_REVIEW_QUESTION_LENGTH - 1));
+    expect(once.on_accept).toEqual(["x".repeat(MAX_REVIEW_ON_ACCEPT_STEP_LENGTH - 1)]);
+    expect(JSON.stringify(normalizeReviewMetadata(once))).toBe(JSON.stringify(once));
+  });
+
+  it("does not split a surrogate pair when fitting the question", () => {
+    const review = normalizeReviewMetadata({ question: `${"x".repeat(MAX_REVIEW_QUESTION_LENGTH - 1)}😀` }) as ReviewMetadata;
+    expect(review.question).toBe("x".repeat(MAX_REVIEW_QUESTION_LENGTH - 1));
+  });
+
+  it("replaces NUL with U+FFFD in every card text field", () => {
+    const review = normalizeReviewMetadata({
+      question: "q\u0000",
+      options: [{ id: "A", label: "l\u0000", what: "w\u0000", risk: "r\u0000" }, optionB],
+      on_accept: ["s\u0000"],
+      attachments: [{ kind: "diff", source: "+\u0000", caption: "c\u0000" }],
+    });
+    expect(review).toMatchObject({
+      question: "q�",
+      options: [{ id: "A", label: "l�", what: "w�", risk: "r�" }, optionB],
+      on_accept: ["s�"],
+      attachments: [{ kind: "diff", source: "+�", caption: "c�" }],
+    });
+    expect(JSON.stringify(review)).not.toContain("\\u0000");
+  });
+
+  it("marks a card whose JSON exceeds MAX_REVIEW_METADATA_CHARS after fitting invalid", () => {
+    const attachments = Array.from({ length: 3 }, () => ({ kind: "diff", source: "+".repeat(MAX_REVIEW_ATTACHMENT_SOURCE_LENGTH) }));
+    expect(normalizeReviewMetadata(card({ attachments: attachments.slice(0, 1) }))).toMatchObject({ attachments: attachments.slice(0, 1) });
+    expect(normalizeReviewMetadata(card({ attachments }))).toEqual({ invalid: true });
+  });
+
+  it("is idempotent on a card", () => {
+    for (const name of EXPECTED) {
+      const once = normalizeReviewMetadata(fixture(name));
+      expect(normalizeReviewMetadata(once)).toEqual(once);
+    }
+  });
+});
+
+describe("reviewCard", () => {
+  it("reads a legacy review as a question-only card: the summary's first line, its images as attachments", () => {
+    const legacy = normalizeReviewMetadata({ images: [img(1), img(2)], pane: "w1:p2", summary: "  Board header\nSecond line" }) as ReviewMetadata;
+    expect(reviewCard(legacy)).toEqual({
+      question: "Board header",
+      options: [],
+      recommend: null,
+      onAccept: [],
+      attachments: [{ kind: "image", path: img(1) }, { kind: "image", path: img(2) }],
+    });
+  });
+
+  it("fits a legacy summary's first line to the question cap, and reads an empty summary as an empty question", () => {
+    const long = normalizeReviewMetadata({ summary: `${"s".repeat(MAX_REVIEW_QUESTION_LENGTH + 10)}\r\nmore` }) as ReviewMetadata;
+    expect(reviewCard(long).question).toBe("s".repeat(MAX_REVIEW_QUESTION_LENGTH));
+    expect(reviewCard(normalizeReviewMetadata({}) as ReviewMetadata)).toEqual({ question: "", options: [], recommend: null, onAccept: [], attachments: [] });
+  });
+
+  it("reads a card's own keys, preferring its attachments to images", () => {
+    const shlo = normalizeReviewMetadata(fixture("shlo-k54.4.1.1.expected.json")) as ReviewMetadata;
+    const read = reviewCard(shlo);
+    expect(read.question).toBe("Drop omni_search v5–v8 on or after 2026-11-12 if the 7-day delta shows zero calls?");
+    expect(read.options.map((o) => o.id)).toEqual(["A", "B", "C"]);
+    expect(read.recommend).toBe("A");
+    expect(read.onAccept).toHaveLength(3);
+    expect(read.attachments.map((a) => a.kind)).toEqual(["diff"]);
+
+    const beforeAfter = normalizeReviewMetadata(fixture("before-after.expected.json")) as ReviewMetadata;
+    expect(reviewCard(beforeAfter).attachments.map((a) => [a.kind, a.pair])).toEqual([
+      ["image", "before"],
+      ["image", "after"],
+      ["mermaid", undefined],
+    ]);
+    expect(reviewCard(beforeAfter)).toMatchObject({ options: [], recommend: null });
+
+    // A card without attachments falls back to its images, like a legacy review.
+    expect(reviewCard(normalizeReviewMetadata({ images: [img(1)], question: "q?" }) as ReviewMetadata).attachments).toEqual([{ kind: "image", path: img(1) }]);
   });
 });
 

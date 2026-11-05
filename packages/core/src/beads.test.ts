@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { deriveBeadsEdges, fitText, mapBeadsIssueToNode, resolveBeadsEdges, type BeadsIssue } from "./beads.js";
 import { InvalidEventTimeError, InvalidWorkItemError } from "./errors.js";
@@ -201,6 +202,15 @@ describe("mapBeadsIssueToNode reviews", () => {
       expect(node.metadata).not.toHaveProperty("review");
       expect(node.metadata).not.toHaveProperty("review_comments");
     }
+  });
+
+  it("carries a decision card as written, and stores a card that breaks the contract as invalid", () => {
+    const shlo = JSON.parse(readFileSync(new URL("../../../fixtures/review-cards/shlo-k54.4.1.1.expected.json", import.meta.url), "utf8")) as Record<string, unknown>;
+    const node = mapBeadsIssueToNode({ ...reviewBead, metadata: { review: shlo } }, 0, { comments: threeComments });
+    expect(JSON.stringify(node.metadata?.["review"])).toBe(JSON.stringify(shlo));
+
+    const dangling = mapBeadsIssueToNode({ ...reviewBead, metadata: { review: { ...shlo, recommend: "D" } } });
+    expect(dangling.metadata?.["review"]).toEqual({ invalid: true });
   });
 
   it("maps a plain bead's metadata exactly as before reviews existed", () => {

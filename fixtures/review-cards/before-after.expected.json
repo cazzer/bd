@@ -1,0 +1,32 @@
+{
+  "images": [
+    "/REVIEW_ROOT/PROJECT/BEAD/01-before.png",
+    "/REVIEW_ROOT/PROJECT/BEAD/02-after.png"
+  ],
+  "pane": "w1:p1",
+  "socket": "/tmp/herdr-test.sock",
+  "summary": "Move the default-view picker from the toolbar into the node header?",
+  "question": "Move the default-view picker from the toolbar into the node header?",
+  "on_accept": [
+    "Move the picker into the node header and remove the toolbar control."
+  ],
+  "attachments": [
+    {
+      "kind": "image",
+      "path": "/REVIEW_ROOT/PROJECT/BEAD/01-before.png",
+      "caption": "Picker in the toolbar today",
+      "pair": "before"
+    },
+    {
+      "kind": "image",
+      "path": "/REVIEW_ROOT/PROJECT/BEAD/02-after.png",
+      "caption": "Picker in the node header",
+      "pair": "after"
+    },
+    {
+      "kind": "mermaid",
+      "source": "erDiagram\n  NODE ||--o{ EDGE : \"source of\"\n  VIEW ||--o{ EDGE : \"target of\"\n  NODE {\n    uuid id\n    text node_type\n    text title\n  }\n  EDGE {\n    uuid source_id\n    uuid target_id\n    text relation \"default_view\"\n    real weight\n  }\n  VIEW {\n    uuid id\n    text renderer\n    jsonb filter\n  }",
+      "caption": "What the picker writes: a default_view edge to a view node"
+    }
+  ]
+}
