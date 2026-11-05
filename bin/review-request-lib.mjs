@@ -1,15 +1,29 @@
 // review-request: files or refreshes a review bead for an item and points the
-// breakdown board at it. Plain Node ESM with no dependencies so it runs from
-// any checkout without the workspace toolchain (design decision 7 of
+// breakdown board at it. Plain Node ESM so it runs from any checkout without
+// the workspace toolchain (design decision 7 of
 // openspec/changes/board-visual-reviews). Every external effect — git, bd,
 // open, herdr, fetch — is injected so the flow is testable without them.
+//
+// Two forms (decision-card-reviews, design.md decision 4). The image form,
+// `<item-id> --summary <text> <image>...`, has no dependencies at all. The
+// card form, `<item-id> <card.md>`, reads one markdown file — YAML
+// frontmatter holding a decision card, a body holding the evidence — and is
+// the only path that loads the `yaml` package, through a dynamic import, so
+// the image form keeps working in a checkout that has not run `pnpm install`
+// since the package was added. The card validator mirrors
+// `normalizeReviewMetadata` in packages/core/src/reviews.ts strictly: where
+// the normalizer fits over-long text, this refuses it naming the field, so
+// every card it accepts normalizes to itself (fixtures/review-cards/).
 
 import fs from "node:fs/promises";
 import { realpathSync } from "node:fs";
 import path from "node:path";
 import { parseArgs as parseNodeArgs } from "node:util";
 
-export const USAGE = "usage: review-request <item-id> --summary <text> [--board-url <url>] <image>...";
+export const USAGE = [
+  "usage: review-request <item-id> <card.md> [--board-url <url>]",
+  "       review-request <item-id> --summary <text> [--board-url <url>] <image>...",
+].join("\n");
 const PREFIX = "review-request: ";
 
 // Must agree with REVIEW_IMAGE_ROOT in packages/core/src/reviews.ts: the
@@ -38,7 +52,39 @@ const REVIEW_LABEL = "review";
 const CHANGES_LABEL = "review:changes";
 const OPEN_STATUSES = "open,in_progress,blocked,deferred";
 
-/** @returns {{ help: true } | { error: string } | { args: { itemId: string, summary: string, boardUrl: string, images: string[] } }} */
+// The card contract; each limit must agree with its namesake in
+// packages/core/src/reviews.ts (MAX_REVIEW_QUESTION_LENGTH and the rest).
+const CARD_KEYS = ["question", "options", "recommend", "on_accept", "attachments"];
+const OPTION_KEYS = ["id", "label", "what", "risk"];
+const ATTACHMENT_KEYS = {
+  image: ["kind", "path", "caption", "pair"],
+  mermaid: ["kind", "source", "caption", "pair"],
+  diff: ["kind", "source", "caption", "pair"],
+};
+const ATTACHMENT_PAIRS = ["before", "after"];
+const MAX_QUESTION = 140;
+const MIN_OPTIONS = 2;
+const MAX_OPTIONS = 6;
+const OPTION_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,15}$/;
+const MAX_OPTION_LABEL = 80;
+const MAX_OPTION_TEXT = 300;
+const MAX_ON_ACCEPT_STEPS = 8;
+const MAX_ON_ACCEPT_STEP = 200;
+const MAX_ATTACHMENTS = 20;
+const MAX_CAPTION = 200;
+const MAX_SOURCE = 8000;
+/** MAX_REVIEW_METADATA_CHARS: over it, the board reads the review as invalid. */
+const MAX_REVIEW_JSON = 16_000;
+const MAX_BODY = 8000;
+// A new review's id is not known until bd creates it; bd names a child
+// `<parent>.<n>`, and the size check assumes n has at most this many digits.
+const NEW_REVIEW_ID_SUFFIX = `.${"9".repeat(15)}`;
+
+/**
+ * @returns {{ help: true } | { error: string }
+ *   | { args: { itemId: string, summary: string, boardUrl: string, images: string[] } }
+ *   | { args: { itemId: string, cardPath: string, boardUrl: string } }}
+ */
 export function parseArgs(argv) {
   let parsed;
   try {
@@ -60,6 +106,11 @@ export function parseArgs(argv) {
   const [itemId, ...images] = positionals;
   if (itemId === undefined) return { error: "missing <item-id>" };
   if (!ITEM_ID.test(itemId)) return { error: `not an issue id: ${itemId}` };
+  if (values.summary === undefined && images.length === 1 && images[0].endsWith(".md")) {
+    const boardUrl = values["board-url"] ?? DEFAULT_BOARD_URL;
+    if (!isHttpUrl(boardUrl)) return { error: `--board-url must be an http(s) URL: ${boardUrl}` };
+    return { args: { itemId, cardPath: images[0], boardUrl } };
+  }
   const summary = values.summary?.trim();
   if (!summary) return { error: "--summary is required" };
   if (summary.length > MAX_SUMMARY) return { error: `--summary is longer than ${MAX_SUMMARY} characters` };
@@ -101,6 +152,240 @@ export function imageProblem(imagePath, stat) {
 export function copiedName(index, src) {
   const base = path.basename(src).replace(/[^A-Za-z0-9._-]/g, "_");
   return `${String(index + 1).padStart(2, "0")}-${base}`;
+}
+
+/**
+ * A card file split at its frontmatter: a first line `---`, then the YAML up
+ * to the next line that is exactly `---` (a block scalar's lines are
+ * indented, so a diff's `--- a/x` inside one never ends it). Null when the
+ * file does not start with frontmatter. The body is trimmed.
+ */
+export function splitCard(text) {
+  const lines = (text.startsWith("﻿") ? text.slice(1) : text).split("\n");
+  const isFence = (line) => line.replace(/\r$/, "").trimEnd() === "---";
+  if (!isFence(lines[0])) return null;
+  const end = lines.findIndex((line, index) => index > 0 && isFence(line));
+  if (end === -1) return null;
+  return { frontmatter: lines.slice(1, end).join("\n"), body: lines.slice(end + 1).join("\n").trim() };
+}
+
+function isPlainObject(value) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+function describe(value) {
+  if (Array.isArray(value)) return "a list";
+  if (isPlainObject(value)) return "a mapping";
+  return JSON.stringify(value) ?? String(value);
+}
+
+/**
+ * A card text field, strictly: a string, trimmed, no NUL, within `max`
+ * (UTF-16 units, as fitText measures). A missing or blank optional field is
+ * left out, as the normalizer leaves it out; a required one is refused.
+ * @returns {string | undefined}
+ */
+function cardText(problems, field, value, max, required) {
+  if (value === undefined || value === null) {
+    if (required) problems.push(`${field}: required`);
+    return undefined;
+  }
+  if (typeof value !== "string") {
+    problems.push(`${field}: must be text, got ${describe(value)}`);
+    return undefined;
+  }
+  if (value.includes("\u0000")) {
+    problems.push(`${field}: contains a NUL character`);
+    return undefined;
+  }
+  const text = value.trim();
+  if (text === "") {
+    if (required) problems.push(`${field}: required, got blank text`);
+    return undefined;
+  }
+  if (text.length > max) {
+    problems.push(`${field}: at most ${max} characters, got ${text.length}`);
+    return undefined;
+  }
+  return text;
+}
+
+function unknownKeys(problems, prefix, value, allowed, what) {
+  for (const key of Object.keys(value)) {
+    if (!allowed.includes(key)) problems.push(`${prefix}${key}: not a field of ${what} (fields: ${allowed.join(", ")})`);
+  }
+}
+
+function validateOptions(problems, raw) {
+  if (raw === undefined || raw === null) return undefined;
+  if (!Array.isArray(raw)) {
+    problems.push(`options: must be a list of ${MIN_OPTIONS} to ${MAX_OPTIONS} options, got ${describe(raw)}`);
+    return undefined;
+  }
+  if (raw.length < MIN_OPTIONS || raw.length > MAX_OPTIONS) {
+    problems.push(`options: ${MIN_OPTIONS} to ${MAX_OPTIONS} options, got ${raw.length}`);
+    return undefined;
+  }
+  const before = problems.length;
+  const options = [];
+  const seen = new Map();
+  for (const [index, option] of raw.entries()) {
+    const field = `options[${index}]`;
+    if (!isPlainObject(option)) {
+      problems.push(`${field}: must be a mapping with id and label, got ${describe(option)}`);
+      continue;
+    }
+    unknownKeys(problems, `${field}.`, option, OPTION_KEYS, "an option");
+    const id = option.id;
+    if (typeof id !== "string" || !OPTION_ID.test(id)) {
+      problems.push(
+        `${field}.id: must be a letter or digit, then up to 15 letters, digits, _ or -; got ${id === undefined ? "nothing" : describe(id)}`,
+      );
+    } else if (seen.has(id)) {
+      problems.push(`${field}.id: ${id} repeats options[${seen.get(id)}].id`);
+    } else {
+      seen.set(id, index);
+    }
+    const label = cardText(problems, `${field}.label`, option.label, MAX_OPTION_LABEL, true);
+    const what = cardText(problems, `${field}.what`, option.what, MAX_OPTION_TEXT, false);
+    const risk = cardText(problems, `${field}.risk`, option.risk, MAX_OPTION_TEXT, false);
+    options.push({ id, label, ...(what === undefined ? {} : { what }), ...(risk === undefined ? {} : { risk }) });
+  }
+  return problems.length === before ? options : undefined;
+}
+
+function validateOnAccept(problems, raw) {
+  if (raw === undefined || raw === null) return undefined;
+  if (!Array.isArray(raw)) {
+    problems.push(`on_accept: must be a list of at most ${MAX_ON_ACCEPT_STEPS} steps, got ${describe(raw)}`);
+    return undefined;
+  }
+  if (raw.length > MAX_ON_ACCEPT_STEPS) {
+    problems.push(`on_accept: at most ${MAX_ON_ACCEPT_STEPS} steps, got ${raw.length}`);
+    return undefined;
+  }
+  const steps = raw.map((step, index) => cardText(problems, `on_accept[${index}]`, step, MAX_ON_ACCEPT_STEP, true));
+  return steps.length > 0 && steps.every((step) => step !== undefined) ? steps : undefined;
+}
+
+/** @returns {Promise<{ attachments: object[] | undefined, imagePaths: string[] }>} image paths absolute, in attachment order. */
+async function validateAttachments(problems, raw, cardDir) {
+  const none = { attachments: undefined, imagePaths: [] };
+  if (raw === undefined || raw === null) return none;
+  if (!Array.isArray(raw)) {
+    problems.push(`attachments: must be a list of at most ${MAX_ATTACHMENTS} attachments, got ${describe(raw)}`);
+    return none;
+  }
+  if (raw.length > MAX_ATTACHMENTS) {
+    problems.push(`attachments: at most ${MAX_ATTACHMENTS} attachments, got ${raw.length}`);
+    return none;
+  }
+  const before = problems.length;
+  const attachments = [];
+  const imagePaths = [];
+  for (const [index, attachment] of raw.entries()) {
+    const field = `attachments[${index}]`;
+    if (!isPlainObject(attachment)) {
+      problems.push(`${field}: must be a mapping with a kind, got ${describe(attachment)}`);
+      continue;
+    }
+    const kind = attachment.kind;
+    if (!Object.hasOwn(ATTACHMENT_KEYS, kind)) {
+      problems.push(`${field}.kind: must be image, mermaid, or diff, got ${kind === undefined ? "nothing" : describe(kind)}`);
+      continue;
+    }
+    unknownKeys(problems, `${field}.`, attachment, ATTACHMENT_KEYS[kind], `${kind === "image" ? "an" : "a"} ${kind} attachment`);
+    const caption = cardText(problems, `${field}.caption`, attachment.caption, MAX_CAPTION, false);
+    const pair = attachment.pair;
+    if (pair !== undefined && pair !== null && !ATTACHMENT_PAIRS.includes(pair)) {
+      problems.push(`${field}.pair: must be before or after, got ${describe(pair)}`);
+    }
+    const extras = { ...(caption === undefined ? {} : { caption }), ...(pair === undefined || pair === null ? {} : { pair }) };
+    if (kind === "image") {
+      const given = attachment.path;
+      if (typeof given !== "string" || given.trim() === "" || given.includes("\u0000")) {
+        problems.push(`${field}.path: must be the path of an image, relative to the card, got ${given === undefined ? "nothing" : describe(given)}`);
+        continue;
+      }
+      const abs = path.resolve(cardDir, given);
+      const problem = imageProblem(given, await statOrNull(abs));
+      if (problem) problems.push(`${field}.path: ${problem}`);
+      imagePaths.push(abs);
+      // The stored path replaces this one once the image is staged (cardReview).
+      attachments.push({ kind, path: abs, ...extras });
+    } else {
+      const source = attachment.source;
+      if (typeof source !== "string" || source.trim() === "") {
+        problems.push(`${field}.source: required text, got ${source === undefined ? "nothing" : describe(source)}`);
+      } else if (source.includes("\u0000")) {
+        problems.push(`${field}.source: contains a NUL character`);
+      } else if (source.length > MAX_SOURCE) {
+        problems.push(`${field}.source: at most ${MAX_SOURCE} characters, got ${source.length}`);
+      }
+      attachments.push({ kind, source, ...extras });
+    }
+  }
+  if (problems.length > before) return none;
+  return { attachments: attachments.length > 0 ? attachments : undefined, imagePaths };
+}
+
+/**
+ * A parsed frontmatter value and body checked against the card contract,
+ * every problem collected and named by its field. The card comes back in
+ * the normalizer's key order, with image paths absolute (resolved against
+ * `cardDir`); `problems` is empty when it may be filed.
+ */
+export async function validateCard(raw, body, cardDir) {
+  const problems = [];
+  if (!isPlainObject(raw)) {
+    return { problems: [`frontmatter: must be a mapping of card fields, got ${describe(raw)}`], card: null, imagePaths: [] };
+  }
+  for (const key of Object.keys(raw)) {
+    if (!CARD_KEYS.includes(key)) problems.push(`${key}: unknown field (card fields: ${CARD_KEYS.join(", ")})`);
+  }
+  const question = cardText(problems, "question", raw.question, MAX_QUESTION, true);
+  const options = validateOptions(problems, raw.options);
+  const recommend = raw.recommend;
+  if (recommend !== undefined && recommend !== null) {
+    if (raw.options === undefined || raw.options === null) {
+      problems.push("recommend: allowed only with options");
+    } else if (typeof recommend !== "string") {
+      problems.push(`recommend: must be an option id, got ${describe(recommend)}`);
+    } else if (options !== undefined && !options.some((option) => option.id === recommend)) {
+      problems.push(`recommend: ${JSON.stringify(recommend)} names no option (options: ${options.map((o) => o.id).join(", ")})`);
+    }
+  }
+  const onAccept = validateOnAccept(problems, raw.on_accept);
+  const { attachments, imagePaths } = await validateAttachments(problems, raw.attachments, cardDir);
+  if (body.length > MAX_BODY) problems.push(`body: at most ${MAX_BODY} characters, got ${body.length}`);
+  if (problems.length > 0) return { problems, card: null, imagePaths: [] };
+  const card = {
+    question,
+    ...(options === undefined ? {} : { options }),
+    ...(recommend === undefined || recommend === null ? {} : { recommend }),
+    ...(onAccept === undefined ? {} : { on_accept: onAccept }),
+    ...(attachments === undefined ? {} : { attachments }),
+  };
+  return { problems, card, imagePaths };
+}
+
+/**
+ * The `review` value the card form writes: the legacy keys (`summary` = the
+ * question, `images` = the stored image paths) and then the card, each image
+ * attachment's path replaced by its stored path, in order.
+ */
+export function cardReview({ card, images, pane, socket = null }) {
+  let next = 0;
+  const attachments = card.attachments?.map((attachment) =>
+    attachment.kind === "image" ? { ...attachment, path: images[next++] } : attachment,
+  );
+  return {
+    ...reviewMetadata({ images, pane, socket, summary: card.question }).review,
+    ...card,
+    ...(attachments === undefined ? {} : { attachments }),
+  };
 }
 
 /** The main working tree is the parent of the shared git dir, from a worktree or the checkout itself. */
@@ -270,9 +555,11 @@ export async function requestReview(deps) {
   }
   let staged = null;
   try {
-    const plan = await check(deps, parsed.args);
-    staged = await stageImages(deps, plan.project.key, parsed.args.images);
-    return await write(deps, parsed.args, plan, staged);
+    const request = "cardPath" in parsed.args ? await readCardRequest(deps, parsed.args) : await imageRequest(deps, parsed.args);
+    const plan = await check(deps, request);
+    if (request.card) checkCardSize(deps, request, plan);
+    staged = await stageImages(deps, plan.project.key, request.images);
+    return await write(deps, request, plan, staged);
   } catch (err) {
     const message = err instanceof Refusal ? err.message : `unexpected error: ${err?.message ?? String(err)}`;
     for (const line of message.split("\n")) deps.warn(PREFIX + line);
@@ -283,16 +570,88 @@ export async function requestReview(deps) {
   }
 }
 
-/** Everything that can refuse runs here, before any write. */
-async function check(deps, args) {
-  const images = args.images.map((given) => ({ given, abs: path.resolve(deps.cwd, given) }));
+/**
+ * What `write` files, from either form: `images` as given (resolved against
+ * the cwd when staged), `description` for the bead, `headline` for the
+ * notification and the update comment, and the validated card or null.
+ */
+async function imageRequest(deps, args) {
   const problems = [];
-  for (const image of images) {
-    const problem = imageProblem(image.given, await statOrNull(image.abs));
+  for (const given of args.images) {
+    const problem = imageProblem(given, await statOrNull(path.resolve(deps.cwd, given)));
     if (problem) problems.push(problem);
   }
   if (problems.length > 0) throw new Refusal([...problems, "Nothing was filed."].join("\n"));
+  const { itemId, boardUrl, images, summary } = args;
+  return { itemId, boardUrl, images, description: summary, headline: summary, card: null };
+}
 
+async function readCardRequest(deps, args) {
+  const cardFile = path.resolve(deps.cwd, args.cardPath);
+  let text;
+  try {
+    text = await fs.readFile(cardFile, "utf8");
+  } catch (err) {
+    const why = err.code === "ENOENT" ? "not found" : err.code === "EISDIR" ? "is a directory" : err.message;
+    throw new Refusal(`card ${args.cardPath}: ${why}. Nothing was filed.`);
+  }
+  const split = splitCard(text);
+  if (split === null) {
+    throw new Refusal(
+      `frontmatter: missing in ${args.cardPath}; a card starts with a \`---\` line, the card's YAML, and another \`---\` line. Nothing was filed.`,
+    );
+  }
+  let YAML;
+  try {
+    YAML = await (deps.importYaml ?? (() => import("yaml")))();
+  } catch (err) {
+    throw new Refusal(
+      `the card form needs the yaml package, which did not load (${firstLineOf(err?.message ?? String(err))}): run pnpm install in ${deps.breakdownRoot}. Nothing was filed.`,
+    );
+  }
+  let raw;
+  try {
+    raw = YAML.parse(split.frontmatter) ?? {};
+  } catch (err) {
+    throw new Refusal(`frontmatter: not valid YAML: ${firstLineOf(err?.message ?? String(err))}. Nothing was filed.`);
+  }
+  const { problems, card, imagePaths } = await validateCard(raw, split.body, path.dirname(cardFile));
+  if (problems.length > 0) throw new Refusal([...problems, "Nothing was filed."].join("\n"));
+  return {
+    itemId: args.itemId,
+    boardUrl: args.boardUrl,
+    images: imagePaths,
+    description: split.body === "" ? card.question : split.body,
+    headline: card.question,
+    card,
+  };
+}
+
+function firstLineOf(text) {
+  return text.split("\n")[0].replace(/[:.]\s*$/, "");
+}
+
+/**
+ * Refuses, before any write, a card whose review would be over the board's
+ * JSON cap. Stored paths are predicted: a reused review's id is known; a new
+ * one is assumed to be `<item>.<n>` with n of at most 15 digits.
+ */
+function checkCardSize(deps, request, { project, existing }) {
+  const id = existing ? existing.review.id : `${request.itemId}${NEW_REVIEW_ID_SUFFIX}`;
+  const dir = path.join(reviewDir(deps.homedir, project.key), id);
+  const images = request.images.map((given, index) => path.join(dir, copiedName(index, given)));
+  const review = cardReview({ card: request.card, images, pane: paneFrom(deps.env), socket: socketFrom(deps.env) });
+  // The normalizer writes `pane: null` when there is none; count it as it will be stored.
+  const size = JSON.stringify({ pane: null, ...review }).length;
+  if (size > MAX_REVIEW_JSON) {
+    throw new Refusal(
+      `card: the review would be ${size} characters of JSON, over the board's limit of ${MAX_REVIEW_JSON}; shorten attachment sources or move that evidence into the body. Nothing was filed.`,
+    );
+  }
+}
+
+/** Everything else that can refuse runs here, before any write. */
+async function check(deps, args) {
   const git = await deps.run("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: deps.cwd });
   if (git.code !== 0 || !git.stdout.trim()) {
     throw new Refusal(
@@ -398,10 +757,14 @@ async function placeImages(deps, key, id, staged) {
   return staged.names.map((name) => path.join(finalDir, name));
 }
 
-/** A reused bead with images on record finished a request before; one without is a retry of a failed first request. */
-function hadImages(review) {
-  const images = review.metadata?.review?.images;
-  return Array.isArray(images) && images.length > 0;
+/**
+ * A reused bead with images or a question on record finished a request
+ * before; one without is a retry of a failed first request. (A card may have
+ * no images, so its question is the mark.)
+ */
+function finishedBefore(review) {
+  const recorded = review.metadata?.review;
+  return (Array.isArray(recorded?.images) && recorded.images.length > 0) || typeof recorded?.question === "string";
 }
 
 async function write(deps, args, { project, item, existing, bdCwd }, staged) {
@@ -424,7 +787,7 @@ async function write(deps, args, { project, item, existing, bdCwd }, staged) {
         "--labels", REVIEW_LABEL,
         "--no-inherit-labels",
         "--parent", args.itemId,
-        "-d", args.summary,
+        "-d", args.description,
         "--acceptance", "Accepted from the breakdown board",
         "--json",
       ],
@@ -461,15 +824,17 @@ async function write(deps, args, { project, item, existing, bdCwd }, staged) {
     return partial("moving images into place", err.message);
   }
 
-  const metadata = reviewMetadata({ images: stored, pane, socket, summary: args.summary });
+  const metadata = args.card
+    ? { review: cardReview({ card: args.card, images: stored, pane, socket }) }
+    : reviewMetadata({ images: stored, pane, socket, summary: args.headline });
   const updateArgs = ["update", id, "--metadata", JSON.stringify(metadata)];
-  if (existing) updateArgs.push("--description", args.summary);
+  if (existing) updateArgs.push("--description", args.description);
   if (existing && (review.labels ?? []).includes(CHANGES_LABEL)) updateArgs.push("--remove-label", CHANGES_LABEL);
   const updated = await deps.run("bd", updateArgs, bdCwd);
   if (updated.code !== 0) return partial("bd update", firstLine(updated));
 
-  if (existing && hadImages(review)) {
-    const commented = await deps.run("bd", ["comments", "add", id, `Review updated: ${args.summary}`], bdCwd);
+  if (existing && finishedBefore(review)) {
+    const commented = await deps.run("bd", ["comments", "add", id, `Review updated: ${args.headline}`], bdCwd);
     if (commented.code !== 0) return partial("bd comments add", firstLine(commented));
   }
 
@@ -486,7 +851,7 @@ async function write(deps, args, { project, item, existing, bdCwd }, staged) {
     "herdr",
     [
       "notification", "show", `Review requested: ${project.key} ${args.itemId}`,
-      "--body", args.summary.slice(0, MAX_NOTIFICATION_BODY),
+      "--body", args.headline.slice(0, MAX_NOTIFICATION_BODY),
       "--sound", "request",
     ],
     { cwd: deps.cwd },

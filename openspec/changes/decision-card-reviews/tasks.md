@@ -8,12 +8,12 @@
 
 ## 2. review-request card form
 
-- [ ] 2.1 Root `package.json` adds `yaml` at an exact version; `pnpm install`; lockfile committed
-- [ ] 2.2 `parseArgs` form detection (design.md decision 4): no `--summary` + one `.md` positional → card form; legacy form unchanged; usage text shows both
-- [ ] 2.3 Card form: frontmatter split, `await import("yaml")` only in this branch (missing package → "run pnpm install in <root>"), strict validation naming the field, image attachments resolved relative to the card and validated before any write, body ≤ 8,000 characters
-- [ ] 2.4 Filing: description = body (question when empty), `metadata.review` = card + legacy keys, images staged as today, notification body = question; reuse/re-request path identical to the legacy form
-- [ ] 2.5 Tests: each fixture card produces its `expected.json` (root substituted); each invalid fixture refuses naming its field with nothing filed; the legacy form's existing tests pass untouched and a test asserts the legacy path never imports `yaml`
-- [ ] 2.6 `pnpm check` passes
+- [x] 2.1 Root `package.json` adds `yaml` at an exact version; `pnpm install`; lockfile committed
+- [x] 2.2 `parseArgs` form detection (design.md decision 4): no `--summary` + one `.md` positional → card form; legacy form unchanged; usage text shows both
+- [x] 2.3 Card form: frontmatter split, `await import("yaml")` only in this branch (missing package → "run pnpm install in <root>"), strict validation naming the field, image attachments resolved relative to the card and validated before any write, body ≤ 8,000 characters
+- [x] 2.4 Filing: description = body (question when empty), `metadata.review` = card + legacy keys, images staged as today, notification body = question; reuse/re-request path identical to the legacy form
+- [x] 2.5 Tests: each fixture card produces its `expected.json` (root substituted); each invalid fixture refuses naming its field with nothing filed; the legacy form's existing tests pass untouched and a test asserts the legacy path never imports `yaml`
+- [x] 2.6 `pnpm check` passes
 
 ## 3. Decisions name an option (server)
 
