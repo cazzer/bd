@@ -41,6 +41,6 @@
 
 ## 7. End-to-end check and epic visual review
 
-- [ ] 7.1 Live check (headless Playwright, worktree servers on 4311/5174): file a review in a registered fixture project with the graph view open → count rises without reload; pick it → drawer over the graph, URL unchanged; accept → leaves the queue; with board open, one `boardEvents` request; hide/show tab re-reads
+- [x] 7.1 Live check (headless Playwright, worktree servers on 4311/5174): file a review in a registered fixture project with the graph view open → count rises without reload; pick it → drawer over the graph, URL unchanged; accept → leaves the queue; with board open, one `boardEvents` request; hide/show tab re-reads
 - [ ] 7.2 Run `review-request` against the worktree server with an app tab open → no tab opened or navigated (verified via osascript tab list before/after)
-- [ ] 7.3 Screenshots of the pill (zero, some, offline), popover, drawer over two views, and a review-all run (item, failure, summary); request the epic visual review under bd-etk
+- [x] 7.3 Screenshots of the pill (zero, some, offline), popover, drawer over two views, and a review-all run (item, failure, summary); request the epic visual review under bd-etk
