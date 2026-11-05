@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Database } from "@breakdown/db";
 import { upsertEdges } from "./edges.js";
 import { InboxDecisionConflictError, InvalidInboxItemError, NotAnInboxItemError } from "./errors.js";
-import { carryForwardInboxDecisions, completeInboxItem, decideInboxItem, requestInboxItem, INBOX_ITEM_NODE_TYPE, listInbox, loadStoredInboxMetadata, normalizeInboxItemMetadata } from "./inbox.js";
+import { carryForwardInboxDecisions, completeInboxItem, decideInboxItem, handOffInboxItem, requestInboxItem, INBOX_ITEM_NODE_TYPE, listInbox, loadStoredInboxMetadata, normalizeInboxItemMetadata } from "./inbox.js";
 import { closeIngestRun, openIngestRun, type IngestRunHandle } from "./ingest-runs.js";
 import { upsertNodes } from "./nodes.js";
 import { connectTestDb, type TestPool, uniqueSuffix } from "./test-helpers.js";
@@ -147,5 +147,44 @@ describe("session requests and completion", () => {
     const done = (await listInbox(db, { statuses: ["done"] })).items.find((i) => i.id === first.id)!;
     expect(done.content.startsWith("**Done:** sent in #retail-ops")).toBe(true);
     await expect(completeInboxItem(db, first.id, "again")).rejects.toThrow(InboxDecisionConflictError);
+  });
+});
+
+describe("handing an item to an interactive session", () => {
+  const key = `session:handoff-${SRC}`;
+  afterAll(async () => {
+    await db.execute(sql`DELETE FROM nodes WHERE source_system = 'inbox' AND external_id = ${key}`);
+  });
+
+  it("moves it to session, survives a re-ingest, returns on the session's own re-request, and completes", async () => {
+    const queued = await requestInboxItem(db, { externalId: key, title: "Review the RFP", content: "summary", metadata: { source: "gmail", action: "decide" } });
+    const handed = await handOffInboxItem(db, queued.id, { pane: "w9:p1", socket: "/tmp/herdr.sock", tab: "w9:t1" });
+    expect(handed.before).toBe("pending");
+
+    let item = (await listInbox(db, { ids: [queued.id] })).items[0]!;
+    expect(item).toMatchObject({ status: "session", sessionTab: "w9:t1" });
+    expect(item.feedback.at(-1)).toMatchObject({ decision: "session" });
+
+    // A re-ingest (no pane) leaves it with the session.
+    await requestInboxItem(db, { externalId: key, title: "Review the RFP", content: "summary v2", metadata: { source: "gmail", action: "decide" } });
+    item = (await listInbox(db, { ids: [queued.id] })).items[0]!;
+    expect(item).toMatchObject({ status: "session", sessionTab: "w9:t1" });
+    await expect(decideInboxItem(db, queued.id, { decision: "accept" })).rejects.toThrow(InboxDecisionConflictError);
+
+    // The session re-queues its draft from the same pane: back to the person, still pointing at the session.
+    await requestInboxItem(db, { externalId: key, title: "Review the RFP", content: "draft answer", metadata: { source: "session", action: "reply", pane: "w9:p1", socket: "/tmp/herdr.sock" } });
+    item = (await listInbox(db, { ids: [queued.id] })).items[0]!;
+    expect(item).toMatchObject({ status: "pending", sessionTab: "w9:t1" });
+    expect(await decideInboxItem(db, queued.id, { decision: "accept" })).toMatchObject({ pane: "w9:p1" });
+    await completeInboxItem(db, queued.id, "submitted");
+  });
+
+  it("refuses a closed item and lets a session close what it worked directly", async () => {
+    const closed = await write("asana:task/closed-handoff", { source: "asana", status: "done" });
+    await expect(handOffInboxItem(db, closed, { pane: "w9:p2", socket: "/tmp/herdr.sock", tab: "w9:t2" })).rejects.toThrow(InboxDecisionConflictError);
+    const open = await write("asana:task/open-handoff", { source: "asana" });
+    await handOffInboxItem(db, open, { pane: "w9:p2", socket: "/tmp/herdr.sock", tab: "w9:t2" });
+    await completeInboxItem(db, open, "answered in the session");
+    expect((await mine()).find((i) => i.id === open)?.status).toBe("done");
   });
 });

@@ -5,6 +5,7 @@
 
 import type { Database } from "@breakdown/db";
 import type { BeadsWatcher } from "./beads-watcher.js";
+import type { RunHerdrJson } from "./inbox-session.js";
 import type { ReviewWriter, RunHerdr } from "./review-writer.js";
 
 export interface Context {
@@ -27,9 +28,15 @@ export interface Context {
   reviewWriter?: ReviewWriter;
   /** Tells a live session's herdr pane about an inbox decision (routers/inbox.ts). Optional; without it nobody is told. */
   runHerdr?: RunHerdr;
+  /** Runs herdr commands whose JSON result matters (opening an inbox item's session). Optional; without it "Open session" is refused. */
+  herdrJson?: RunHerdrJson;
+  /** The herdr server socket those commands use; null when none was found. */
+  herdrSocket?: string | null;
+  /** Where an inbox item's interactive session starts. */
+  sessionCwd?: string;
 }
 
 /** Builds the per-request context factory tRPC's HTTP adapter calls. `db` is created once, at startup, and shared across every request. */
-export function createContextFactory(db: Database, live: Pick<Context, "watcher" | "shutdownSignal" | "readOnly" | "reviewWriter" | "runHerdr"> = {}) {
+export function createContextFactory(db: Database, live: Pick<Context, "watcher" | "shutdownSignal" | "readOnly" | "reviewWriter" | "runHerdr" | "herdrJson" | "herdrSocket" | "sessionCwd"> = {}) {
   return async (): Promise<Context> => ({ db, ...live });
 }

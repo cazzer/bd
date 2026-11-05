@@ -9,7 +9,8 @@
 // back with changes. This view only reads and records.
 //
 // Keys (outside a text field): j / k move, a accepts, d dismisses, c focuses
-// the change request box.
+// the change request box, o opens the item in an interactive Claude session
+// (a new herdr tab; the session re-queues its draft here for approval).
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { navigate } from "../lib/navigate.js";
@@ -24,7 +25,7 @@ type Tab = "mine" | "agent" | "closed";
 
 const TABS: { key: Tab; label: string; statuses: Item["status"][] }[] = [
   { key: "mine", label: "Needs me", statuses: ["pending"] },
-  { key: "agent", label: "With agent", statuses: ["changes", "accepted"] },
+  { key: "agent", label: "With agent", statuses: ["changes", "accepted", "session"] },
   { key: "closed", label: "Closed", statuses: ["done", "dismissed"] },
 ];
 
@@ -45,6 +46,7 @@ const STATUS_LABEL: Record<Item["status"], string> = {
   pending: "needs you",
   changes: "agent revising",
   accepted: "agent executing",
+  session: "in your session",
   dismissed: "dismissed",
   done: "done",
 };
@@ -77,7 +79,7 @@ export function InboxView({ item: selectedId }: { item: string | null }) {
     try {
       // Batches are listed by their own status; their candidates come along
       // whatever theirs is, so a batch always shows every candidate.
-      const result = await trpc.inbox.query({ statuses: tab === "closed" ? ["done", "dismissed"] : ["pending", "changes", "accepted", "done", "dismissed"] });
+      const result = await trpc.inbox.query({ statuses: tab === "closed" ? ["done", "dismissed"] : ["pending", "changes", "accepted", "session", "done", "dismissed"] });
       if (mine !== generation.current) return;
       setData(result);
       setError(null);
@@ -145,6 +147,28 @@ export function InboxView({ item: selectedId }: { item: string | null }) {
     [rows, select, load],
   );
 
+  const [sessionError, setSessionError] = useState<string | null>(null);
+  const openSession = useCallback(
+    async (item: Item) => {
+      setSessionError(null);
+      try {
+        await trpc.inboxOpenSession.mutate({ id: item.id });
+        await load();
+      } catch (err) {
+        setSessionError(err instanceof Error ? err.message : String(err));
+      }
+    },
+    [load],
+  );
+  const focusSession = useCallback(async (item: Item) => {
+    setSessionError(null);
+    try {
+      await trpc.inboxFocusSession.mutate({ id: item.id });
+    } catch (err) {
+      setSessionError(err instanceof Error ? err.message : String(err));
+    }
+  }, []);
+
   const changesBox = useRef<HTMLTextAreaElement | null>(null);
 
   useEffect(() => {
@@ -155,13 +179,15 @@ export function InboxView({ item: selectedId }: { item: string | null }) {
       else if (e.key === "c") {
         e.preventDefault();
         changesBox.current?.focus();
+      } else if (e.key === "o" && selected !== null && ["pending", "changes", "session"].includes(selected.status)) {
+        void openSession(selected);
       } else if (selected !== null && selected.status === "pending" && (e.key === "a" || e.key === "d")) {
         void decide(selected, e.key === "a" ? "accept" : "dismiss");
       }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [move, decide, selected]);
+  }, [move, decide, selected, openSession]);
 
   return (
     <main className="flex h-dvh w-screen flex-col overflow-hidden">
@@ -187,12 +213,17 @@ export function InboxView({ item: selectedId }: { item: string | null }) {
         <p className="hidden text-xs text-fg-muted lg:block">
           <kbd className="rounded border border-hairline px-1">j</kbd>/<kbd className="rounded border border-hairline px-1">k</kbd> move ·{" "}
           <kbd className="rounded border border-hairline px-1">a</kbd> accept · <kbd className="rounded border border-hairline px-1">c</kbd> request changes ·{" "}
-          <kbd className="rounded border border-hairline px-1">d</kbd> dismiss
+          <kbd className="rounded border border-hairline px-1">d</kbd> dismiss · <kbd className="rounded border border-hairline px-1">o</kbd> open session
         </p>
         <ReviewQueuePill />
         </div>
       </header>
 
+      {sessionError !== null && (
+        <p role="alert" className="mx-4 mt-3 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-2 text-sm text-red-300">
+          {sessionError}
+        </p>
+      )}
       {error !== null && (
         <p role="alert" className="mx-4 mt-3 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-2 text-sm text-red-300">
           {error}
@@ -244,6 +275,8 @@ export function InboxView({ item: selectedId }: { item: string | null }) {
               changesBox={changesBox}
               onDecide={decide}
               onSelect={select}
+              onOpenSession={openSession}
+              onFocusSession={focusSession}
             />
           )}
         </section>
@@ -260,9 +293,11 @@ interface DetailProps {
   changesBox: React.RefObject<HTMLTextAreaElement | null>;
   onDecide: (item: Item, decision: "accept" | "changes" | "dismiss", message?: string) => Promise<void>;
   onSelect: (id: string) => void;
+  onOpenSession: (item: Item) => Promise<void>;
+  onFocusSession: (item: Item) => Promise<void>;
 }
 
-function Detail({ item, parent, candidates, now, changesBox, onDecide, onSelect }: DetailProps) {
+function Detail({ item, parent, candidates, now, changesBox, onDecide, onSelect, onOpenSession, onFocusSession }: DetailProps) {
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -402,7 +437,9 @@ function Detail({ item, parent, candidates, now, changesBox, onDecide, onSelect 
           <ol className="space-y-1 text-xs text-fg-muted">
             {item.feedback.map((f, i) => (
               <li key={i}>
-                <span className="text-fg">{f.decision === "changes" ? "Changes requested" : f.decision === "accept" ? "Accepted" : "Dismissed"}</span> · {ago(f.at, now)}
+                <span className="text-fg">
+                  {f.decision === "changes" ? "Changes requested" : f.decision === "accept" ? "Accepted" : f.decision === "session" ? "Opened in a session" : "Dismissed"}
+                </span> · {ago(f.at, now)}
                 {f.message !== "" && <span className="mt-0.5 block whitespace-pre-wrap text-fg">{f.message}</span>}
               </li>
             ))}
@@ -430,6 +467,29 @@ function Detail({ item, parent, candidates, now, changesBox, onDecide, onSelect 
             <button type="button" disabled={busy} onClick={() => void run("dismiss")} className="rounded-lg px-4 py-1.5 text-sm text-fg-muted hover:text-fg disabled:opacity-60">
               Dismiss
             </button>
+            <span className="ml-auto flex gap-2">
+              {item.sessionTab !== null && (
+                <button type="button" onClick={() => void onFocusSession(item)} className="rounded-lg px-3 py-1.5 text-sm text-accent hover:underline">
+                  Go to session
+                </button>
+              )}
+              <button
+                type="button"
+                disabled={busy}
+                onClick={async () => {
+                  setBusy(true);
+                  try {
+                    await onOpenSession(item);
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+                title="Open a new herdr tab with Claude working on this item (o)"
+                className="rounded-lg border border-accent/50 px-4 py-1.5 text-sm text-fg hover:bg-surface-strong disabled:opacity-60"
+              >
+                Open session ↗
+              </button>
+            </span>
             {error !== null && (
               <span role="alert" className="text-xs text-red-300">
                 {error}
@@ -437,13 +497,32 @@ function Detail({ item, parent, candidates, now, changesBox, onDecide, onSelect 
             )}
           </div>
         </section>
+      ) : item.status === "session" || item.status === "changes" ? (
+        <section aria-label="Session" className="flex flex-wrap items-center gap-2 text-xs text-fg-muted">
+          <span>
+            {item.status === "session"
+              ? "In an interactive session. It will send a draft back here for approval, or close the item when the work is done there."
+              : "Sent back. The agent will revise it and return it to you."}
+          </span>
+          {item.sessionTab !== null && (
+            <button type="button" onClick={() => void onFocusSession(item)} className="rounded-lg border border-hairline px-3 py-1 text-fg hover:bg-surface-strong">
+              Go to session
+            </button>
+          )}
+          <button type="button" onClick={() => void onOpenSession(item)} className="rounded-lg border border-hairline px-3 py-1 text-fg hover:bg-surface-strong">
+            {item.status === "session" ? "Open a new session" : "Open session ↗"}
+          </button>
+          <button type="button" onClick={() => void onDecide(item, "dismiss")} className="rounded-lg px-3 py-1 hover:text-fg">
+            Dismiss
+          </button>
+        </section>
       ) : (
         <p className="text-xs text-fg-muted">
           {item.status === "accepted"
-            ? "Accepted. The executor session will carry it out and mark it done."
-            : item.status === "changes"
-              ? "Sent back. The agent will revise it and return it to you."
-              : "Closed."}
+            ? item.sessionTab !== null
+              ? "Accepted. The session that drafted it is carrying it out."
+              : "Accepted. The inbox watcher (or /inbox-execute) will carry it out and mark it done."
+            : "Closed."}
         </p>
       )}
     </article>

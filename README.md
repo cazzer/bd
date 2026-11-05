@@ -116,7 +116,7 @@ The top two hits are exact full-text matches on `design.md` and `architecture-ha
 
 ## Inbox
 
-A review queue for everything that needs a decision: email, Asana, Slack, Notion, Google Docs comments, GitHub reviews, Fathom action items, and drafts from live Claude sessions. Open `http://localhost:5310/inbox` (with `pnpm dev` running). Keys: `j`/`k` move, `a` accept, `c` request changes, `d` dismiss.
+A review queue for everything that needs a decision: email, Asana, Slack, Notion, Google Docs comments, GitHub reviews, Fathom action items, and drafts from live Claude sessions. Open `http://localhost:5310/inbox` (with `pnpm dev` running). Keys: `j`/`k` move, `a` accept, `c` request changes, `d` dismiss, `o` open session.
 
 Items are `inbox_item` nodes (`packages/core/src/inbox.ts`). The app makes no model call. Claude sessions fill and work the queue:
 
@@ -126,8 +126,10 @@ Items are `inbox_item` nodes (`packages/core/src/inbox.ts`). The app makes no mo
 | Carry out accepted items | `/inbox-execute` |
 | Queue a draft from any session | `inbox request --key session:<slug> --title ... < body.md` (decision is prompted back into that herdr pane) |
 | Close an item after acting | `inbox done <id> "<what you did>"` |
+| Go deep on one item | **Open session ↗** (`o`): a new tab in herdr's `inbox` workspace with Claude primed on the item. It sends its draft back here with `inbox request`, and your Accept is prompted back into that tab. `pnpm dev` has to run inside herdr (or herdr's default socket must exist). |
+| Make Accept act on its own | `inbox-watch` in a spare terminal: runs `claude -p` with `inbox-execute` (accepted) or the revise step (changes) for items no session owns |
 
-Headless, e.g. from launchd/cron: `claude -p --mcp-config .mcp.json "/inbox-ingest"`. Put the CLI on `PATH` once: `ln -sf "$PWD/bin/inbox" ~/.local/bin/inbox`.
+Headless, e.g. from launchd/cron: `claude -p --mcp-config .mcp.json "/inbox-ingest"`. Put the CLIs on `PATH` once: `ln -sf "$PWD/bin/inbox" "$PWD/bin/inbox-watch" ~/.local/bin/`.
 
 ## Visual reviews
 

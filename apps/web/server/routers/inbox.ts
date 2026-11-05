@@ -1,11 +1,15 @@
 // The inbox (inbox.ts in core): the queue read and the person's decision.
 // Deciding is a pure Postgres write — it records the decision and moves the
 // item to the next turn (accepted → the executor session's, changes → the
-// agent's). Nothing here runs a command or calls a model.
+// agent's). Nothing here calls a model. The commands it runs are herdr's:
+// telling a live session about a decision, and opening an interactive
+// session on an item when the person asks to go deep (inbox-session.ts).
 
 import {
   completeInboxItem,
   decideInboxItem,
+  handOffInboxItem,
+  INBOX_HANDOFF_STATUSES,
   DEFAULT_MAX_CONTENT_LENGTH,
   DEFAULT_MAX_TITLE_LENGTH,
   INBOX_DECISIONS,
@@ -21,6 +25,7 @@ import {
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { mapCoreError } from "../errors.js";
+import { openInboxSession } from "../inbox-session.js";
 import { publicProcedure, router } from "../trpc.js";
 
 export interface InboxItemDto extends Omit<InboxItem, "receivedAt" | "updatedAt"> {
@@ -125,7 +130,57 @@ const inboxCompleteProcedure = publicProcedure.input(inboxCompleteInputSchema).m
   }
 });
 
+const inboxIdSchema = z.object({ id: z.string().uuid() });
+
+async function loadItem(ctx: { db: Parameters<typeof listInbox>[0] }, id: string): Promise<InboxItem> {
+  let item: InboxItem | undefined;
+  try {
+    item = (await listInbox(ctx.db, { ids: [id], statuses: INBOX_STATUSES })).items[0];
+  } catch (err) {
+    throw mapCoreError("inbox", err);
+  }
+  if (item === undefined) throw new TRPCError({ code: "NOT_FOUND", message: `No inbox item ${id}.` });
+  return item;
+}
+
+const NO_HERDR = "herdr isn't reachable from the breakdown server. Start `pnpm dev` from inside a herdr pane (or keep herdr's default socket) and try again.";
+
+const inboxOpenSessionProcedure = publicProcedure.input(inboxIdSchema).mutation(async ({ ctx, input }) => {
+  if (ctx.readOnly) throw new TRPCError({ code: "FORBIDDEN", message: "The server is read-only (BRAIN_READ_ONLY)." });
+  if (ctx.herdrJson === undefined || ctx.herdrSocket === undefined || ctx.herdrSocket === null) throw new TRPCError({ code: "PRECONDITION_FAILED", message: NO_HERDR });
+  const item = await loadItem(ctx, input.id);
+  if (!INBOX_HANDOFF_STATUSES.includes(item.status)) {
+    throw new TRPCError({ code: "CONFLICT", message: `This item is ${item.status}; only an item waiting on you (or sent back) can be opened in a session.` });
+  }
+  let opened;
+  try {
+    opened = await openInboxSession(ctx.herdrJson, ctx.herdrSocket, item, { cwd: ctx.sessionCwd ?? process.cwd() });
+  } catch (err) {
+    throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: `Couldn't open the session: ${err instanceof Error ? err.message : String(err)}` });
+  }
+  try {
+    await handOffInboxItem(ctx.db, item.id, { pane: opened.pane, socket: ctx.herdrSocket, tab: opened.tab });
+  } catch (err) {
+    throw mapCoreError("inboxDecision", err);
+  }
+  return opened;
+});
+
+const inboxFocusSessionProcedure = publicProcedure.input(inboxIdSchema).mutation(async ({ ctx, input }) => {
+  if (ctx.herdrJson === undefined || ctx.herdrSocket === undefined || ctx.herdrSocket === null) throw new TRPCError({ code: "PRECONDITION_FAILED", message: NO_HERDR });
+  const item = await loadItem(ctx, input.id);
+  if (item.sessionTab === null) throw new TRPCError({ code: "CONFLICT", message: "This item was never opened in a session." });
+  try {
+    await ctx.herdrJson(["tab", "focus", item.sessionTab], ctx.herdrSocket);
+  } catch (err) {
+    throw new TRPCError({ code: "NOT_FOUND", message: `The session tab is gone (${err instanceof Error ? err.message : String(err)}). Open a new session instead.` });
+  }
+  return { tab: item.sessionTab };
+});
+
 export const inboxRouter = router({
+  inboxOpenSession: inboxOpenSessionProcedure,
+  inboxFocusSession: inboxFocusSessionProcedure,
   inbox: inboxProcedure,
   inboxDecision: inboxDecisionProcedure,
   inboxRequest: inboxRequestProcedure,

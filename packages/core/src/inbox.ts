@@ -19,6 +19,9 @@
 //   pending   — the person's: decide accept / changes / dismiss
 //   changes   — the agent's: revise per the latest feedback, then set pending
 //   accepted  — the executor's: carry out the proposed action, then set done
+//   session   — handed to an interactive Claude session the person opened on
+//               it (herdr tab); the session re-queues a draft as pending, or
+//               closes it done itself
 //   dismissed — closed by the person, nothing to do
 //   done      — closed: the action ran (or the source resolved on its own)
 //
@@ -61,11 +64,16 @@ import { asPgError, formatPgInfo, sqlArray } from "./sql-helpers.js";
 
 export const INBOX_ITEM_NODE_TYPE = "inbox_item";
 export const INBOX_SOURCE_SYSTEM = "inbox";
-export const INBOX_STATUSES = ["pending", "changes", "accepted", "dismissed", "done"] as const;
+export const INBOX_STATUSES = ["pending", "changes", "accepted", "session", "dismissed", "done"] as const;
 export type InboxStatus = (typeof INBOX_STATUSES)[number];
-export const OPEN_INBOX_STATUSES: readonly InboxStatus[] = ["pending", "changes", "accepted"];
+export const OPEN_INBOX_STATUSES: readonly InboxStatus[] = ["pending", "changes", "accepted", "session"];
 export const INBOX_DECISIONS = ["accept", "changes", "dismiss"] as const;
 export type InboxDecision = (typeof INBOX_DECISIONS)[number];
+/** What a feedback entry can record: the person's decisions, plus handing the item to an interactive session. */
+export const INBOX_FEEDBACK_KINDS = [...INBOX_DECISIONS, "session"] as const;
+export type InboxFeedbackKind = (typeof INBOX_FEEDBACK_KINDS)[number];
+/** Statuses an item can be handed to an interactive session from (session again: the earlier one was closed). */
+export const INBOX_HANDOFF_STATUSES: readonly InboxStatus[] = ["pending", "changes", "session"];
 
 export const MAX_INBOX_LINKS = 20;
 export const MAX_INBOX_FEEDBACK = 50;
@@ -79,7 +87,7 @@ export interface InboxLink {
 }
 
 export interface InboxFeedback {
-  decision: InboxDecision;
+  decision: InboxFeedbackKind;
   message: string;
   /** `toISOString()` form. */
   at: string;
@@ -103,6 +111,10 @@ export interface InboxItemFields {
   links: InboxLink[];
   /** The person's decisions, oldest first. */
   feedback: InboxFeedback[];
+  /** The herdr tab of the interactive session the item was handed to, while it is (or was) in one. */
+  sessionTab: string | null;
+  /** The herdr pane of the live session that owns the item (queued it, or was opened on it); such items are that session's to carry out. */
+  pane: string | null;
 }
 
 const CONTROL_CHAR = /[\u0000-\u0008\u000b-\u001f\u007f]/;
@@ -194,8 +206,8 @@ export function normalizeInboxItemMetadata(raw: Record<string, unknown> | undefi
   metadata["feedback"] = rawFeedback.slice(-MAX_INBOX_FEEDBACK).map((entry, i): InboxFeedback => {
     if (!isPlainObject(entry)) throw new InvalidInboxItemError(`feedback[${i}]`, entry, "must be a {decision, message, at} object", itemLabel);
     const decision = entry["decision"];
-    if (typeof decision !== "string" || !(INBOX_DECISIONS as readonly string[]).includes(decision)) {
-      throw new InvalidInboxItemError(`feedback[${i}].decision`, decision, `must be one of ${INBOX_DECISIONS.join(", ")}`, itemLabel);
+    if (typeof decision !== "string" || !(INBOX_FEEDBACK_KINDS as readonly string[]).includes(decision)) {
+      throw new InvalidInboxItemError(`feedback[${i}].decision`, decision, `must be one of ${INBOX_FEEDBACK_KINDS.join(", ")}`, itemLabel);
     }
     const message = entry["message"] ?? "";
     if (typeof message !== "string" || message.length > MAX_INBOX_FEEDBACK_LENGTH) {
@@ -205,7 +217,7 @@ export function normalizeInboxItemMetadata(raw: Record<string, unknown> | undefi
     if (at === null || Number.isNaN(at.getTime())) {
       throw new InvalidInboxItemError(`feedback[${i}].at`, entry["at"], "must be an ISO-8601 timestamp", itemLabel);
     }
-    return { decision: decision as InboxDecision, message, at: at.toISOString() };
+    return { decision: decision as InboxFeedbackKind, message, at: at.toISOString() };
   });
 
   return metadata;
@@ -223,12 +235,16 @@ export function readInboxItemFields(metadata: Record<string, unknown>): InboxIte
     verdict: (metadata["verdict"] as string | undefined) ?? null,
     links: metadata["links"] as InboxLink[],
     feedback: metadata["feedback"] as InboxFeedback[],
+    sessionTab: typeof metadata["session_tab"] === "string" ? metadata["session_tab"] : null,
+    pane: typeof metadata["pane"] === "string" ? metadata["pane"] : null,
   };
 }
 
 // --- The queue ----------------------------------------------------------------
 
 export const MAX_INBOX_ITEMS = 500;
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export interface InboxItem extends InboxItemFields {
   id: string;
@@ -245,6 +261,8 @@ export interface InboxItem extends InboxItemFields {
 export interface ListInboxOptions {
   /** Statuses to include; defaults to the open ones (pending, changes, accepted). */
   statuses?: readonly InboxStatus[];
+  /** Only these item ids (any status in `statuses`). */
+  ids?: readonly string[];
   limit?: number;
 }
 
@@ -280,6 +298,11 @@ export async function listInbox(db: Database, options: ListInboxOptions = {}): P
     }
   }
   if (statuses.length === 0) return { items: [], total: 0, truncated: false };
+  if (options.ids !== undefined) {
+    for (const id of options.ids) if (!UUID_RE.test(id)) throw new InvalidLookupIdError(id, "must be a valid uuid");
+    if (options.ids.length === 0) return { items: [], total: 0, truncated: false };
+  }
+  const idFilter = options.ids === undefined ? sql`` : sql`AND n.id = ANY (${sqlArray(options.ids, "uuid")})`;
 
   let result: { rows: RawInboxRow[] };
   try {
@@ -298,6 +321,7 @@ SELECT n.id, n.external_id, n.title, n.content, n.metadata,
 FROM resolved_nodes n
 WHERE n.node_type = ${INBOX_ITEM_NODE_TYPE}
   AND COALESCE(n.metadata->>'status', 'pending') = ANY (${sqlArray(statuses, "text")})
+  ${idFilter}
 ORDER BY CASE WHEN jsonb_typeof(n.metadata->'priority') = 'number' THEN (n.metadata->>'priority')::int ELSE 2 END,
          received_at, n.id
 LIMIT ${limit}::int
@@ -330,8 +354,6 @@ LIMIT ${limit}::int
 }
 
 // --- Deciding -----------------------------------------------------------------
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export interface DecideInboxItemInput {
   decision: InboxDecision;
@@ -450,6 +472,17 @@ export function carryForwardInboxDecisions(incoming: Record<string, unknown>, st
   // setting `needs_you` (why); that is the one way pending overrides accepted.
   const handBack = stored["status"] === "accepted" && typeof incoming["needs_you"] === "string" && incoming["needs_you"].trim() !== "";
   if (incoming["status"] === "pending" && SETTLED_BY_PERSON.includes(stored["status"] as InboxStatus) && !handBack) merged["status"] = stored["status"];
+  // An item handed to an interactive session stays with it: a re-ingest
+  // does not pull it back, only the session itself (same pane) re-queuing
+  // its draft does. Its session tab is kept either way.
+  if (stored["status"] === "session") {
+    const fromSession = typeof stored["pane"] === "string" && incoming["pane"] === stored["pane"];
+    if (incoming["status"] === "pending" && !fromSession) {
+      merged["status"] = "session";
+      for (const key of ["pane", "socket"]) if (stored[key] !== undefined) merged[key] = stored[key];
+    }
+    if (merged["session_tab"] === undefined && stored["session_tab"] !== undefined) merged["session_tab"] = stored["session_tab"];
+  }
   return merged;
 }
 
@@ -524,7 +557,8 @@ export async function requestInboxItem(db: Database, input: RequestInboxItemInpu
 }
 
 /**
- * The executor's last step: an accepted item becomes done, with a
+ * The executor's last step: an accepted item (or one worked in an
+ * interactive session) becomes done, with a
  * `**Done:**` line put at the top of its content. Refuses anything not
  * accepted. Row-locked; attributed to an `agent` ingest run.
  */
@@ -547,7 +581,8 @@ export async function completeInboxItem(db: Database, id: string, note: string, 
       if (!existing) throw new NodeNotFoundError(requestedId);
       if (existing.node_type !== INBOX_ITEM_NODE_TYPE) throw new NotAnInboxItemError(existing.id, existing.node_type);
       const current = normalizeInboxItemMetadata(normalizeOccurredAt(existing.metadata));
-      if (current["status"] !== "accepted") throw new InboxDecisionConflictError(existing.id, current["status"] as string);
+      // accepted: the executor did it. session: the person did it in the session they opened.
+      if (current["status"] !== "accepted" && current["status"] !== "session") throw new InboxDecisionConflictError(existing.id, current["status"] as string);
       const { needs_you: _ignored, ...rest } = current;
       const prepared = unsafePrepareNodes(
         [
@@ -573,6 +608,77 @@ export async function completeInboxItem(db: Database, id: string, note: string, 
       const row = written.rows[0];
       if (!row) throw new NodeUpsertFailedError(`completeInboxItem: upsert returned no row for node ${existing.id}`, 0, 0);
       return { id: row.id, ingestRunId: run.id };
+    });
+  } finally {
+    await closeIngestRun(db, run);
+  }
+}
+
+// --- Handing an item to an interactive session ------------------------------------
+
+export interface HandOffInboxItemInput {
+  /** The herdr pane the interactive session runs in, its server socket, and its tab. */
+  pane: string;
+  socket: string;
+  tab: string;
+  now?: Date;
+}
+
+/**
+ * Records that the person opened an interactive Claude session on the item
+ * (the server already started it): status `session`, the session's pane,
+ * socket, and tab, and a `session` feedback entry. Allowed from pending,
+ * changes, or session (re-opening after the earlier session was closed).
+ * The session takes it from there: re-queuing a draft with `inbox request`
+ * from the same pane returns it to pending, and the person's decision is
+ * prompted back to that pane like any session item. Row-locked, under a
+ * `human` ingest run. Pure Postgres.
+ */
+export async function handOffInboxItem(db: Database, id: string, input: HandOffInboxItemInput): Promise<{ id: string; ingestRunId: string; before: InboxStatus }> {
+  const requestedId = typeof id === "string" ? id.trim() : "";
+  if (!UUID_RE.test(requestedId)) throw new InvalidLookupIdError(id, "must be a valid uuid");
+  for (const [field, value] of [["pane", input.pane], ["socket", input.socket], ["tab", input.tab]] as const) {
+    if (typeof value !== "string" || value.trim() === "" || value.length > 512 || CONTROL_CHAR.test(value)) {
+      throw new InvalidInboxItemError(field, value, "is required, without control characters");
+    }
+  }
+  const run = await openIngestRun(db, "human", { actor: "human" });
+  try {
+    return await db.transaction(async (tx) => {
+      let locked: { rows: { id: string; node_type: string; source_system: string; external_id: string; title: string; content: string; metadata: Record<string, unknown> }[] };
+      try {
+        locked = await tx.execute(sql`
+          SELECT id, node_type, source_system, external_id, title, content, metadata
+          FROM nodes WHERE id = (SELECT COALESCE(merged_into, id) FROM nodes WHERE id = ${requestedId}::uuid)
+          FOR UPDATE
+        `);
+      } catch (err) {
+        throw new LookupFailedError(`handOffInboxItem lock failed${formatPgInfo(asPgError(err))}`, "decideInboxItem", { cause: err });
+      }
+      const existing = locked.rows[0];
+      if (!existing) throw new NodeNotFoundError(requestedId);
+      if (existing.node_type !== INBOX_ITEM_NODE_TYPE) throw new NotAnInboxItemError(existing.id, existing.node_type);
+      const current = normalizeInboxItemMetadata(normalizeOccurredAt(existing.metadata));
+      const before = current["status"] as InboxStatus;
+      if (!INBOX_HANDOFF_STATUSES.includes(before)) throw new InboxDecisionConflictError(existing.id, before);
+      const feedback = [...(current["feedback"] as InboxFeedback[]), { decision: "session", message: `opened in herdr tab ${input.tab}`, at: (input.now ?? new Date()).toISOString() }];
+      const { needs_you: _handedBack, ...rest } = current;
+      const metadata = normalizeInboxItemMetadata({ ...rest, status: "session", pane: input.pane, socket: input.socket, session_tab: input.tab, feedback });
+      const prepared = unsafePrepareNodes(
+        [{ nodeType: existing.node_type, sourceSystem: existing.source_system, externalId: existing.external_id, title: existing.title, content: existing.content, metadata }],
+        DEFAULT_MAX_CONTENT_LENGTH,
+        DEFAULT_MAX_METADATA_LENGTH,
+        DEFAULT_MAX_TITLE_LENGTH,
+      );
+      let written: { rows: UpsertNodeRow[] };
+      try {
+        written = await tx.execute<UpsertNodeRow>(unsafeBuildUpsertNodesQuery(prepared, run.id));
+      } catch (err) {
+        throw unsafeWrapNodeWriteError(err, prepared);
+      }
+      const row = written.rows[0];
+      if (!row) throw new NodeUpsertFailedError(`handOffInboxItem: upsert returned no row for node ${existing.id}`, 0, 0);
+      return { id: row.id, ingestRunId: run.id, before };
     });
   } finally {
     await closeIngestRun(db, run);

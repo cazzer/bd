@@ -17,7 +17,7 @@ If the person named specific sources ("just Asana"), ingest only those.
 
 ## Steps
 
-1. **Load what's already there.** `brain_list` with `nodeTypes: ["inbox_item"]` and `where: [{ key: "status", op: "oneOf", values: ["pending", "changes", "accepted"] }]` (page through with the cursor). Keep a map of `externalId → {id, status, feedback}`. Items with status `changes` need revising (step 5), not re-triaging.
+1. **Load what's already there.** `brain_list` with `nodeTypes: ["inbox_item"]` and `where: [{ key: "status", op: "oneOf", values: ["pending", "changes", "accepted"] }]` (page through with the cursor). Keep a map of `externalId → {id, status, feedback}`. Items with status `changes` need revising (step 5), not re-triaging. Items with status `session` are with an interactive session the person opened: leave them alone (don't re-triage, don't close them), and skip any `changes` item that has a `pane`, since its session revises it.
 2. **Pull each source** per its `enter` rule, through its connector. Keep it bounded: the last 14 days, at most ~50 signals per source.
 3. **Resolve each signal to its artifact key** (the dedupe):
    - A notification email from GitHub, Asana, Notion, or Google Docs is about that artifact. Key it as the artifact (`github:<owner>/<repo>#<n>`, `asana:task/<gid>`, `notion:page/<id>#discussion/<id>`, `gdoc:<fileId>#comment/<id>`), not as `gmail:thread/...`, and add the email to `links`.
