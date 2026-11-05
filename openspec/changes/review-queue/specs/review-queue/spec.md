@@ -25,7 +25,7 @@ A review SHALL be pending when it is a work item of a registered beads project, 
 
 ### Requirement: The queue indicator is on every view
 
-Every view of the app SHALL show a queue indicator holding a status light and the pending count. The light SHALL show whether the tab's live stream is connected, connecting, or offline, and SHALL carry a text equivalent for assistive technology. The count SHALL change without a reload within two seconds of a review being filed or decided, in ordinary conditions, while the tab is shown. A count of zero SHALL read as an empty queue, not as an error. The indicator SHALL open the queue panel.
+Every view of the app SHALL show a queue indicator holding a status light and the pending count, placed in that view's own header so it covers none of the view's controls. The light SHALL show whether the tab's live stream is connected, connecting, or offline, and SHALL carry a text equivalent for assistive technology. The count SHALL change without a reload within two seconds of a review being filed or decided, in ordinary conditions, while the tab is shown. A count of zero SHALL read as an empty queue, not as an error. The indicator SHALL open the queue panel.
 
 #### Scenario: Count on a non-board view
 
@@ -50,6 +50,25 @@ The queue panel SHALL list the pending reviews. Picking one SHALL open the revie
 
 - **WHEN** a person on the board picks a queued review
 - **THEN** the review's drawer opens and the board's columns and chosen projects are unchanged
+
+### Requirement: The queue can be reviewed in sequence
+
+The queue panel SHALL offer to review every pending review in turn. Doing so SHALL open a dialog over the current view, without changing the view or its address, that shows one review at a time with its position in the run (for example "2 of 5"), its summary, images, and comments, and the decision form. Accepting or requesting changes SHALL write the decision exactly as the drawer does and, once it is written, SHALL show the next review in the run; skipping SHALL show the next review without writing anything. A failed write SHALL keep the review on screen with the failure shown. A review that stops being pending while the run is open SHALL be passed over, and one that becomes pending SHALL join the end of the run. After the last review the dialog SHALL say how many were accepted, sent back, and skipped. Closing the dialog SHALL end the run and return focus to the queue indicator.
+
+#### Scenario: Working through the queue
+
+- **WHEN** three reviews are pending and a person reviews all, accepts the first, skips the second, and requests changes on the third
+- **THEN** each decided review is written and leaves the queue, the dialog moves to the next review after each answer, and it ends saying one accepted, one sent back, one skipped
+
+#### Scenario: Decided elsewhere meanwhile
+
+- **WHEN** during a run the next review is accepted from another tab
+- **THEN** the dialog passes over it and shows the review after it
+
+#### Scenario: Write fails
+
+- **WHEN** a decision in the run fails to write
+- **THEN** the same review stays on screen with the tracker's message, and the run does not advance
 
 ### Requirement: One live stream per tab
 

@@ -1,8 +1,8 @@
 ## 1. Layout prototypes (visual review gate)
 
-- [ ] 1.1 Build 2–3 static prototypes of the indicator + queue panel (e.g. header-corner pill with popover; edge tab with side sheet; docked bottom strip), each drawn over a real screenshot of the graph and board views at 1440 px, in the session scratchpad — no app code
-- [ ] 1.2 For each, note its cost: components touched, how it coexists with each view's own header, keyboard/focus model
-- [ ] 1.3 Screenshot them side by side and request the pick through `review-request bd-etk`; record the chosen layout in design.md decision 3
+- [x] 1.1 Build 2–3 static prototypes of the indicator + queue panel (e.g. header-corner pill with popover; edge tab with side sheet; docked bottom strip), each drawn over a real screenshot of the graph and board views at 1440 px, in the session scratchpad — no app code
+- [x] 1.2 For each, note its cost: components touched, how it coexists with each view's own header, keyboard/focus model
+- [x] 1.3 Screenshot them side by side and request the pick through `review-request bd-etk`; record the chosen layout in design.md decision 3
 
 ## 2. Pending review queue read
 
@@ -24,15 +24,23 @@
 - [x] 4.2 Update review-request-lib tests: present → no `open`, notification still sent; none → `open` on the board link; failure → warning + `open`; the script text contains no `set URL`/`activate`
 - [x] 4.3 `node --test bin/*.test.mjs` passes
 
-## 5. Indicator, queue panel, and app-level drawer
+## 5. Indicator, queue popover, and app-level drawer (prototype A)
 
-- [ ] 5.1 `ReviewQueue` component in the chosen layout, mounted by App.tsx outside the view switch: status light (with text), pending count, empty state, truncation note
-- [ ] 5.2 Queue panel listing project, title, summary line, image count, age; keyboard-operable, Escape closes
-- [ ] 5.3 Picking opens `ReviewDrawer` from the shell per design.md decision 4 (queue version as `boardVersion`, shell draft map, focus return); any drawer prop added is additive; shell and board drawers never open together
-- [ ] 5.4 Pure helpers (row formatting, focus-return target) unit-tested; `pnpm check` passes
+- [ ] 5.1 Shell-level queue state: App.tsx calls `useReviewQueue` once outside the view switch and provides it plus open/close actions through `ReviewQueueContext` (design.md decision 3)
+- [ ] 5.2 `ReviewQueuePill` (status light by shape + colour with text, pending count in the accessible name) placed in each view's top-right header: board (replacing its "Live" text), graph (above the right column), feed, timeline, code; shell fallback pill fixed top-right for a view that does not place one
+- [ ] 5.3 Anchored popover listing project, title, summary line, image count, age, oldest first; empty state, truncation note; arrows/Enter/Escape, focus returns to the pill; "Review all" action (wired in group 6)
+- [ ] 5.4 Picking opens `ReviewDrawer` from the shell per design.md decision 4 (queue version as `boardVersion`, shell draft map, focus return); any drawer prop added is additive; shell and board drawers never open together
+- [ ] 5.5 Pure helpers (row formatting, age, focus-return target) unit-tested; `pnpm check` passes; screenshots of the pill on all five views at 1440 px
 
-## 6. End-to-end check and epic visual review
+## 6. Review-all run-through modal
 
-- [ ] 6.1 Live check (headless Playwright, worktree servers on 4311/5174): file a review in a registered fixture project with the graph view open → count rises without reload; pick it → drawer over the graph, URL unchanged; accept → leaves the queue; with board open, one `boardEvents` request; hide/show tab re-reads
-- [ ] 6.2 Run `review-request` against the worktree server with an app tab open → no tab opened or navigated (verified via osascript tab list before/after)
-- [ ] 6.3 Screenshots of indicator (zero, some, offline), panel, and drawer over two views; request the epic visual review under bd-etk
+- [ ] 6.1 Extract the drawer's body into `ReviewItemPanel` shared by `ReviewDrawer` and the modal; the board's drawer behaviour is unchanged (design.md decision 6)
+- [ ] 6.2 Pure run model (`lib/reviewRun.ts`): snapshot order, advance past items no longer pending, append newly pending, skip, tallies — unit-tested
+- [ ] 6.3 `ReviewRunModal`: dialog over the current view, focus trap, "n of m", Accept & next / Request changes & next / Skip, advance only after a written decision, failure stays put, end summary, Close returns focus to the pill
+- [ ] 6.4 `pnpm check` passes; live check of a three-review run (accept, skip, changes) against fixture reviews
+
+## 7. End-to-end check and epic visual review
+
+- [ ] 7.1 Live check (headless Playwright, worktree servers on 4311/5174): file a review in a registered fixture project with the graph view open → count rises without reload; pick it → drawer over the graph, URL unchanged; accept → leaves the queue; with board open, one `boardEvents` request; hide/show tab re-reads
+- [ ] 7.2 Run `review-request` against the worktree server with an app tab open → no tab opened or navigated (verified via osascript tab list before/after)
+- [ ] 7.3 Screenshots of the pill (zero, some, offline), popover, drawer over two views, and a review-all run (item, failure, summary); request the epic visual review under bd-etk
