@@ -52,8 +52,8 @@
 
 ## 8. Cards stay short (from review bd-4zn.9)
 
-- [ ] 8.1 CLI card form: body word budget per design.md decision 8 (300 words outside fenced code blocks; refused naming the budget and the count; nothing filed); fixture `invalid-body-over-budget.md` (over 300 words of prose, plus a large fence proving fences are free); every valid fixture within budget, with its count in the fixtures README
-- [ ] 8.2 Legacy `--summary` over 280 characters: files exactly as before, then warns on stderr naming the limit and the card form; stdout and exit code unchanged; never refuses
-- [ ] 8.3 Tests: the word counter (fences of both kinds, unclosed fence, tables, inline code, CRLF); budget boundary (300 accepted, 301 refused); the legacy warning at 280/281 and that the legacy path still never imports `yaml`
-- [ ] 8.4 `~/.claude/skills/context/visual-review.md`: the body is evidence for the decision only, leads with what changes for the reviewer, every table bears on the choice, no build log (commits, groups, verification counts go in the READY TO MERGE report); states both limits; README Visual reviews paragraph mentions the budget
+- [x] 8.1 CLI card form: body word budget per design.md decision 8 (300 words outside fenced code blocks; refused naming the budget and the count; nothing filed); fixture `invalid-body-over-budget.md` (over 300 words of prose, plus a large fence proving fences are free); every valid fixture within budget, with its count in the fixtures README
+- [x] 8.2 Legacy `--summary` over 280 characters: files exactly as before, then warns on stderr naming the limit and the card form; stdout and exit code unchanged; never refuses
+- [x] 8.3 Tests: the word counter (fences of both kinds, unclosed fence, tables, inline code, CRLF); budget boundary (300 accepted, 301 refused); the legacy warning at 280/281 and that the legacy path still never imports `yaml`
+- [x] 8.4 `~/.claude/skills/context/visual-review.md`: the body is evidence for the decision only, leads with what changes for the reviewer, every table bears on the choice, no build log (commits, groups, verification counts go in the READY TO MERGE report); states both limits; README Visual reviews paragraph mentions the budget
 - [ ] 8.5 `pnpm check` passes; re-file the epic review as a tight card (new bead) and close `bd-4zn.9` as superseded

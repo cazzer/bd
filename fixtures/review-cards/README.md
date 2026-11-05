@@ -14,11 +14,16 @@ newline however the frontmatter is sliced.
 
 ## Valid cards
 
-| Card | What it exercises |
-| --- | --- |
-| `shlo-k54.4.1.1.md` | question, options A/B/C with `what`/`risk`, `recommend: A`, three on-accept steps, a `diff` attachment (the real migration diff, shlo `supa-backend` `7a641e1..7aa2657`, 7,151 characters), two tables in the body; no images |
-| `before-after.md` | no options, one on-accept step, a `before`/`after` image pair (`before.png`, `after.png` beside it), a `mermaid` ER diagram |
-| `long-recommendation.md` | the fold's worst case: a 140-character question, a recommended option A whose `what` and `risk` are 300 characters each, options B and C, a `diff` attachment (so the run has a stage); the board must show the question, all of A, and every action without scrolling at 1440 × 900 |
+| Card | Body words | What it exercises |
+| --- | --- | --- |
+| `shlo-k54.4.1.1.md` | 278 | question, options A/B/C with `what`/`risk`, `recommend: A`, three on-accept steps, a `diff` attachment (the real migration diff, shlo `supa-backend` `7a641e1..7aa2657`, 7,151 characters), two tables in the body; no images |
+| `before-after.md` | 39 | no options, one on-accept step, a `before`/`after` image pair (`before.png`, `after.png` beside it), a `mermaid` ER diagram |
+| `long-recommendation.md` | 45 | the fold's worst case: a 140-character question, a recommended option A whose `what` and `risk` are 300 characters each, options B and C, a `diff` attachment (so the run has a stage); the board must show the question, all of A, and every action without scrolling at 1440 × 900 |
+
+**Body words** is `countBodyWords` in `bin/review-request-lib.mjs`: tokens
+holding a letter or digit, outside fenced code blocks (design.md decision 8).
+The CLI refuses a body over 300; shlo, the densest real decision so far, sets
+that budget.
 
 Each has `<name>.expected.json`: the exact `metadata.review` object the CLI
 writes for that card, which `normalizeReviewMetadata` maps to itself. It holds
@@ -55,6 +60,7 @@ naming the field, so an author learns of the problem instead of losing text:
 | --- | --- | --- |
 | text over its cap (question 140, label 80, what/risk 300, step 200, caption 200, source 8,000) | refused | fitted |
 | body over 8,000 characters | refused | (not in metadata) |
+| body over 300 words outside fenced blocks | refused | (not in metadata) |
 | `options: []`, or fewer than 2 / more than 6 | refused | `[]` absent; otherwise invalid |
 | `recommend: ""` | refused | absent |
 | `recommend` without options | refused | invalid |
@@ -80,6 +86,7 @@ The CLI refuses each, filing nothing, naming the field:
 | `invalid-unknown-kind.md` | `attachments` (kind `video`) |
 | `invalid-unknown-key.md` | `recomend` (unknown top-level key) |
 | `invalid-missing-frontmatter.md` | frontmatter |
+| `invalid-body-over-budget.md` | `body` (315 words of build log outside fences, budget 300; its 40-line `diff` fence is free) |
 
 The normalizer, which never refuses, fits an over-long question and drops an
 unknown key; the repeated id, unknown recommendation, and unknown kind make
@@ -92,7 +99,8 @@ Beyond the contract the normalizer enforces, the CLI refuses at authoring
 time, naming the field, wherever the normalizer would fit, drop, or replace:
 
 - over-long text in any field (the normalizer fits it); a question that is not
-  one line; a body over 8,000 characters;
+  one line; a body over 8,000 characters or over 300 words outside fenced
+  blocks;
 - unknown keys at any level — top-level, in an option, in an attachment;
 - `options: []`, `recommend: ""`, a blank `label`, a blank `on_accept` step, a
   blank `source`;

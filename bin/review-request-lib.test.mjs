@@ -8,11 +8,14 @@ import { after, describe, it } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   CHROME_APP_TAB_SCRIPT,
+  MAX_BODY_WORDS,
+  SUMMARY_WARN_CHARS,
   USAGE,
   apiBase,
   boardLink,
   chooseReview,
   copiedName,
+  countBodyWords,
   findProject,
   paneFrom,
   socketFrom,
@@ -21,6 +24,7 @@ import {
   requestReview,
   reviewMetadata,
   splitCard,
+  summaryWarning,
   validateCard,
 } from "./review-request-lib.mjs";
 
@@ -633,6 +637,7 @@ const INVALID_REFUSALS = {
   "invalid-recommend-unknown.md": ['recommend: "D" names no option (options: A, B, C)', "Nothing was filed."],
   "invalid-unknown-kind.md": ['attachments[0].kind: must be image, mermaid, or diff, got "video"', "Nothing was filed."],
   "invalid-unknown-key.md": ["recomend: unknown field (card fields: question, options, recommend, on_accept, attachments)", "Nothing was filed."],
+  "invalid-body-over-budget.md": ["body: at most 300 words outside fenced blocks, got 315", "Nothing was filed."],
   "invalid-missing-frontmatter.md": [
     `frontmatter: missing in ${path.join(CARDS, "invalid-missing-frontmatter.md")}; a card starts with a \`---\` line, the card's YAML, and another \`---\` line. Nothing was filed.`,
   ],
@@ -729,6 +734,119 @@ describe("card fixtures", () => {
       await assertNothingFiled(fx, h);
     });
   }
+});
+
+// ---- Cards stay short (design.md decision 8) ----
+
+/** `n` words of prose, eight to a line. */
+const prose = (n) =>
+  Array.from({ length: n }, (_, i) => `w${i}`)
+    .reduce((lines, word, i) => (i % 8 === 0 ? [...lines, word] : [...lines.slice(0, -1), `${lines.at(-1)} ${word}`]), [])
+    .join("\n");
+
+describe("countBodyWords", () => {
+  it("counts whitespace-separated tokens holding a letter or digit", () => {
+    assert.equal(countBodyWords(""), 0);
+    assert.equal(countBodyWords("Drop v5–v8 on 11-12 — if zero calls ."), 7);
+    assert.equal(countBodyWords("- * > # ## -- → ... |"), 0);
+    assert.equal(countBodyWords("**bold** _it_ [link](http://x) 42 é"), 5);
+  });
+  it("leaves fenced blocks of both kinds out, with any info string", () => {
+    assert.equal(countBodyWords("one\n```\nfree words here\n```\ntwo"), 2);
+    assert.equal(countBodyWords("one\n```diff\n+free words\n```\ntwo"), 2);
+    assert.equal(countBodyWords("one\n~~~ mermaid title=x\nerDiagram A B\n~~~\ntwo"), 2);
+    assert.equal(countBodyWords("one\n   ```sql\nselect 1\n   ```\ntwo"), 2);
+  });
+  it("closes a fence only on the same character, at least as long, with nothing after it", () => {
+    assert.equal(countBodyWords("````\nfree\n```\nstill free\n````\nafter"), 1);
+    assert.equal(countBodyWords("```\nfree\n~~~\nstill free\n```\nafter"), 1);
+    assert.equal(countBodyWords("~~~\nfree\n~~~ not a close\nstill free\n~~~~\nafter"), 1);
+  });
+  it("runs an unclosed fence to the end", () => {
+    assert.equal(countBodyWords("one two\n```diff\n+a b c\nd e f"), 2);
+  });
+  it("is not a fence: two backticks, a backtick info string, four spaces of indent", () => {
+    assert.equal(countBodyWords("``\nthree words here"), 3);
+    assert.equal(countBodyWords("``` a`b\nc"), 2);
+    assert.equal(countBodyWords("    ```\ncounted"), 1);
+  });
+  it("counts table cells and inline code, not pipes or separator rows", () => {
+    assert.equal(countBodyWords("| Caller | Uses |\n| --- | :---: |\n| web-app | `v9` |"), 4);
+    assert.equal(countBodyWords("Turn on `track_functions=all` now"), 4);
+  });
+  it("reads CRLF and CR line ends like LF", () => {
+    assert.equal(countBodyWords("one\r\n```\r\nfree\r\n```\r\ntwo"), 2);
+    assert.equal(countBodyWords("one\r```\rfree\r```\rtwo"), 2);
+  });
+  it("counts the shlo fixture at 278, within the budget", async () => {
+    const { body } = splitCard(await fs.readFile(path.join(CARDS, "shlo-k54.4.1.1.md"), "utf8"));
+    assert.equal(countBodyWords(body), 278);
+    assert.equal(MAX_BODY_WORDS, 300);
+  });
+});
+
+describe("card body word budget", () => {
+  const cardWith = (body) => `---\nquestion: Ship it?\n---\n${body}\n`;
+  it("files a body of exactly 300 words, fences free", async () => {
+    const fx = await fixture();
+    const card = await writeCard(fx, cardWith(`${prose(300)}\n\n\`\`\`diff\n${prose(500)}\n\`\`\``));
+    const h = await harness(fx, { argv: [ITEM, card] });
+    assert.equal(h.result.exitCode, 0, h.warn.join("\n"));
+    assert.deepEqual(h.warn, []);
+    assert.deepEqual(order(h.calls), FILED_ORDER);
+  });
+  it("refuses 301 words naming the budget and the count, with nothing filed", async () => {
+    const fx = await fixture();
+    const card = await writeCard(fx, cardWith(prose(301)));
+    const h = await harness(fx, { argv: [ITEM, card] });
+    assert.deepEqual(h.warn, ["review-request: body: at most 300 words outside fenced blocks, got 301", "review-request: Nothing was filed."]);
+    assert.deepEqual(h.calls, []);
+    await assertNothingFiled(fx, h);
+  });
+});
+
+describe("long legacy summary", () => {
+  const summaryOf = (n) => "s".repeat(n);
+  const warning = (n) =>
+    `review-request: warning: the summary is ${n} characters, over 280; a decision reads faster as a card: review-request ${ITEM} <card.md> (examples: ${path.join(BREAKDOWN_ROOT, "fixtures", "review-cards")}).`;
+
+  it("is quiet at 280 characters", async () => {
+    assert.equal(SUMMARY_WARN_CHARS, 280);
+    assert.equal(summaryWarning({ itemId: ITEM, summary: summaryOf(280) }, BREAKDOWN_ROOT), null);
+    const h = await harness(await fixture(), { argv: [ITEM, "--summary", summaryOf(280), "a.png"] });
+    assert.equal(h.result.exitCode, 0);
+    assert.deepEqual(h.warn, []);
+  });
+
+  it("at 281 files exactly as at 280, then warns once on stderr naming the limit and the card form", async () => {
+    const quiet = await harness(await fixture(), { argv: [ITEM, "--summary", summaryOf(280), "a.png"] });
+    const loud = await harness(await fixture(), { argv: [ITEM, "--summary", summaryOf(281), "a.png"] });
+    assert.equal(loud.result.exitCode, 0);
+    assert.deepEqual(loud.out, quiet.out);
+    assert.deepEqual(order(loud.calls), order(quiet.calls));
+    assert.deepEqual(loud.warn, [warning(281)]);
+    const create = callTo(loud, "create").args;
+    assert.equal(create[create.indexOf("-d") + 1], summaryOf(281));
+    const written = JSON.parse(callTo(loud, "update").args[3]);
+    const quietWritten = JSON.parse(callTo(quiet, "update").args[3]);
+    assert.equal(written.review.summary, summaryOf(281));
+    assert.deepEqual({ ...written.review, summary: null, images: written.review.images.map((p) => path.basename(p)) }, {
+      ...quietWritten.review,
+      summary: null,
+      images: quietWritten.review.images.map((p) => path.basename(p)),
+    });
+  });
+
+  it("warns after the other warnings, and never when nothing was filed", async () => {
+    const fx = await fixture();
+    const unpaned = await harness(fx, { argv: [ITEM, "--summary", summaryOf(1000), "a.png"], env: {} });
+    assert.equal(unpaned.result.exitCode, 0);
+    assert.equal(unpaned.warn.at(-1), warning(1000));
+    assert.equal(unpaned.warn.filter((l) => l.includes("warning: the summary")).length, 1);
+    const refused = await harness(await fixture(), { argv: [ITEM, "--summary", summaryOf(1000), "gone.png"] });
+    assert.equal(refused.result.exitCode, 1);
+    assert.equal(refused.warn.some((l) => l.includes("warning: the summary")), false);
+  });
 });
 
 describe("card form", () => {
@@ -992,6 +1110,8 @@ describe("the image form never loads yaml", () => {
     const fx = await fixture();
     const filed = await harness(fx, { importYaml });
     assert.equal(filed.result.exitCode, 0, filed.warn.join("\n"));
+    const long = await harness(fx, { importYaml, argv: [ITEM, "--summary", "s".repeat(281), "a.png"] });
+    assert.equal(long.result.exitCode, 0);
     const refused = await harness(fx, { importYaml, argv: [ITEM, "--summary", "s", "gone.png"] });
     assert.equal(refused.result.exitCode, 1);
     await fs.writeFile(path.join(fx.worktree, "card.md"), QUESTION_ONLY);
@@ -1050,6 +1170,11 @@ console.log(JSON.stringify({ exitCode, resolved, warn }));
   it("resolves no yaml module in a full image-form run, and does in a card run", async () => {
     const legacy = await inChild(await fixture(), [ITEM, "--summary", "check the header", "a.png"]);
     assert.deepEqual(legacy, { exitCode: 0, resolved: [], warn: [] });
+    const long = await inChild(await fixture(), [ITEM, "--summary", "s".repeat(281), "a.png"]);
+    assert.equal(long.exitCode, 0);
+    assert.deepEqual(long.resolved, []);
+    assert.equal(long.warn.length, 1);
+    assert.match(long.warn[0], /^review-request: warning: the summary is 281 characters, over 280; /);
     const card = await inChild(await fixture(), [ITEM, path.join(CARDS, "shlo-k54.4.1.1.md")]);
     assert.equal(card.exitCode, 0, card.warn.join("\n"));
     assert.deepEqual(card.resolved, ["yaml"]);

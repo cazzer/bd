@@ -78,6 +78,10 @@ const MAX_SOURCE = 8000;
 /** MAX_REVIEW_METADATA_CHARS: over it, the board reads the review as invalid. */
 const MAX_REVIEW_JSON = 16_000;
 const MAX_BODY = 8000;
+// Reading time, not storage (design.md decision 8): words outside fenced blocks. CLI only; the normalizer never sees the body.
+export const MAX_BODY_WORDS = 300;
+// A legacy summary longer than two questions' worth (2 × 140) is filed, then warned about (design.md decision 8).
+export const SUMMARY_WARN_CHARS = 280;
 /** A card file over this many bytes is refused before it is read; a card at every limit is well under it. */
 const MAX_CARD_FILE_BYTES = 64 * 1024;
 const MAX_ECHO = 60;
@@ -363,6 +367,40 @@ async function validateAttachments(problems, raw, cardDir) {
   return { attachments: attachments.length > 0 ? attachments : undefined, imagePaths };
 }
 
+// CommonMark fences: up to three spaces, then three or more backticks or tildes; a backtick fence's info string holds no backtick.
+const FENCE_OPEN = /^ {0,3}(`{3,}(?=[^`]*$)|~{3,})/;
+const FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+const WORD = /[\p{L}\p{N}]/u;
+
+/**
+ * The words a reviewer reads in a card body (design.md decision 8): every
+ * whitespace-separated token holding a letter or digit, outside fenced code
+ * blocks. A fence closes on a line of the same character, at least as long,
+ * with nothing after it; an unclosed fence runs to the end, as in
+ * CommonMark. Table pipes, separator rows, and lone punctuation are free;
+ * table cells and inline code count. Fences are recognised at the top level
+ * only (one nested deeper than three spaces of indent is read as text, so it
+ * counts).
+ */
+export function countBodyWords(body) {
+  let words = 0;
+  let fence = null;
+  for (const line of body.split(/\r\n|\n|\r/)) {
+    if (fence !== null) {
+      const close = FENCE_CLOSE.exec(line);
+      if (close && close[1][0] === fence[0] && close[1].length >= fence.length) fence = null;
+      continue;
+    }
+    const open = FENCE_OPEN.exec(line);
+    if (open) {
+      fence = open[1];
+      continue;
+    }
+    for (const token of line.split(/\s+/)) if (WORD.test(token)) words += 1;
+  }
+  return words;
+}
+
 /**
  * A parsed frontmatter value and body checked against the card contract,
  * every problem collected and named by its field. The card comes back in
@@ -398,6 +436,10 @@ export async function validateCard(raw, body, cardDir) {
   const bodyProblem = textProblem("body", body);
   if (bodyProblem) problems.push(bodyProblem);
   else if (body.length > MAX_BODY) problems.push(`body: at most ${MAX_BODY} characters, got ${body.length}`);
+  else {
+    const words = countBodyWords(body);
+    if (words > MAX_BODY_WORDS) problems.push(`body: at most ${MAX_BODY_WORDS} words outside fenced blocks, got ${words}`);
+  }
   if (problems.length > 0) return { problems, card: null, imagePaths: [] };
   const card = {
     question,
@@ -597,7 +639,12 @@ export async function requestReview(deps) {
     const plan = await check(deps, request);
     if (request.card) checkCardSize(deps, request, plan);
     staged = await stageImages(deps, plan.project.key, request.images);
-    return await write(deps, request, plan, staged);
+    const result = await write(deps, request, plan, staged);
+    if (result.exitCode === 0 && "summary" in parsed.args) {
+      const warning = summaryWarning(parsed.args, deps.breakdownRoot);
+      if (warning) deps.warn(warning);
+    }
+    return result;
   } catch (err) {
     const message = err instanceof Refusal ? err.message : `unexpected error: ${err?.message ?? String(err)}`;
     for (const line of message.split("\n")) deps.warn(PREFIX + line);
@@ -606,6 +653,16 @@ export async function requestReview(deps) {
     // Already gone once the images were moved into place; on any other path nothing may be left behind.
     if (staged) await fs.rm(staged.dir, { recursive: true, force: true });
   }
+}
+
+/**
+ * The image form's one warning, printed after a successful filing (design.md
+ * decision 8): a summary over SUMMARY_WARN_CHARS is a decision written as a
+ * paragraph. Null when the summary is within it. Never a refusal.
+ */
+export function summaryWarning({ itemId, summary }, breakdownRoot) {
+  if (summary.length <= SUMMARY_WARN_CHARS) return null;
+  return `${PREFIX}warning: the summary is ${summary.length} characters, over ${SUMMARY_WARN_CHARS}; a decision reads faster as a card: review-request ${itemId} <card.md> (examples: ${path.join(breakdownRoot, "fixtures", "review-cards")}).`;
 }
 
 /**
