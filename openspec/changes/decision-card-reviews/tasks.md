@@ -30,11 +30,11 @@
 
 ## 5. Evidence renderer
 
-- [ ] 5.1 Add `@tiptap/extension-table` (pinned to the installed Tiptap version) and `mermaid` to `apps/web`; confirm `@tiptap/markdown` parses GFM tables through TableKit, else stop and report (design.md decision 3)
-- [ ] 5.2 Read-only `EvidenceView`: StarterKit + Markdown + TableKit + CodeBlock with a node view dispatching `mermaid` / `diff` / default; `MarkdownEditor` and its extension set unchanged
-- [ ] 5.3 `DiffBlock` (line classes, screen-reader prefixes, React text only) and `MermaidBlock` → lazily imported `MermaidDiagram` (strict, `htmlLabels: false`, SVG shown only through `<img>` data URL, parse error shows source + error)
-- [ ] 5.4 Tests: tables render as tables; a `diff` fence marks added/removed lines; a `mermaid` fence mounts the lazy component; a broken diagram shows source and error; evidence containing `<script>`, an `<img onerror>`, and a mermaid source with an HTML/`javascript:` label produce no executable markup; build output shows mermaid in its own chunk not imported by the entry
-- [ ] 5.5 `pnpm check` passes
+- [x] 5.1 Add `@tiptap/extension-table` (pinned to the installed Tiptap version) and `mermaid` to `apps/web`; confirm `@tiptap/markdown` parses GFM tables through TableKit, else stop and report (design.md decision 3)
+- [x] 5.2 Read-only `EvidenceView`: StarterKit + Markdown + TableKit + CodeBlock with a node view dispatching `mermaid` / `diff` / default; `MarkdownEditor` and its extension set unchanged
+- [x] 5.3 `DiffBlock` (line classes, screen-reader prefixes, React text only) and `MermaidBlock` → lazily imported `MermaidDiagram` (strict, `htmlLabels: false`, SVG shown only through `<img>` data URL, parse error shows source + error)
+- [x] 5.4 Tests: tables render as tables; a `diff` fence marks added/removed lines; a `mermaid` fence mounts the lazy component; a broken diagram shows source and error; evidence containing `<script>`, an `<img onerror>`, and a mermaid source with an HTML/`javascript:` label produce no executable markup; build output shows mermaid in its own chunk not imported by the entry
+- [x] 5.5 `pnpm check` passes
 
 ## 6. Card in the drawer and the run
 

@@ -1,0 +1,34 @@
+/* Tables in EvidenceView.tsx — the one node kind its extension set adds to
+   MarkdownEditor's typography (markdown-editor.css, which EvidenceView also
+   loads). Plain CSS for the same reason as that file: ProseMirror builds the
+   table DOM itself and Tailwind's preflight strips table styling. Scoped to
+   .evidence-view, set by EvidenceView's editorProps, so the editor proper is
+   untouched. */
+
+.evidence-view .tableWrapper {
+  overflow-x: auto;
+}
+
+.evidence-view table {
+  border-collapse: collapse;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+}
+
+.evidence-view th,
+.evidence-view td {
+  border: 1px solid var(--color-hairline);
+  padding: 0.35em 0.65em;
+  text-align: left;
+  vertical-align: top;
+}
+
+.evidence-view th {
+  background: var(--color-surface-strong);
+  font-weight: 600;
+}
+
+.evidence-view th > * + *,
+.evidence-view td > * + * {
+  margin-top: 0.4em;
+}
