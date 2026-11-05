@@ -128,6 +128,8 @@ It files (or refreshes) a `review` child bead of the item, copies the images und
 ln -sf "$PWD/bin/review-request" ~/.local/bin/review-request
 ```
 
+For a decision rather than a look (an architecture choice, a risky operational step, a pick between layouts), file a decision card instead: `review-request <item-id> <card.md>`. The card is one markdown file whose YAML frontmatter holds a `question`, `options` (each with a `label`, `what`, and `risk`), the `recommend`ed option, `on_accept` steps, and `attachments` (images, optionally a `before`/`after` pair; `mermaid` diagrams; `diff`s), and whose body is the evidence in markdown (tables, `diff` and `mermaid` fences). The board shows the question and the recommendation first, with the evidence one expand away; Accept takes the recommended option and "Choose X" another, and the decision written back names it (`Accepted: B — <message>`). Examples and the full contract: [`fixtures/review-cards/`](fixtures/review-cards/README.md).
+
 ## Working on it
 
 Specs live in OpenSpec, work lives in beads.
