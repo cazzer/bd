@@ -114,6 +114,21 @@ Ask Claude something the seeded docs actually answer — e.g. "search the brain 
 
 The top two hits are exact full-text matches on `design.md` and `architecture-handoff.md` (both discuss "no embeddings" directly); everything else was reached by following `part-of-change`/`sibling` edges outward — no vector search involved.
 
+## Inbox
+
+A review queue for everything that needs a decision: email, Asana, Slack, Notion, Google Docs comments, GitHub reviews, Fathom action items, and drafts from live Claude sessions. Open `http://localhost:5310/inbox` (with `pnpm dev` running). Keys: `j`/`k` move, `a` accept, `c` request changes, `d` dismiss.
+
+Items are `inbox_item` nodes (`packages/core/src/inbox.ts`). The app makes no model call. Claude sessions fill and work the queue:
+
+| What | How |
+|---|---|
+| Fill it from your connectors | `/inbox-ingest` in a Claude session in this repo (rules: `local/needs-me.yaml`, copied from `config/needs-me.example.yaml`) |
+| Carry out accepted items | `/inbox-execute` |
+| Queue a draft from any session | `inbox request --key session:<slug> --title ... < body.md` (decision is prompted back into that herdr pane) |
+| Close an item after acting | `inbox done <id> "<what you did>"` |
+
+Headless, e.g. from launchd/cron: `claude -p --mcp-config .mcp.json "/inbox-ingest"`. Put the CLI on `PATH` once: `ln -sf "$PWD/bin/inbox" ~/.local/bin/inbox`.
+
 ## Visual reviews
 
 An agent asks a person to accept screenshots with one command, run from a registered checkout or any git worktree of one:

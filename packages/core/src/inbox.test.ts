@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Database } from "@breakdown/db";
 import { upsertEdges } from "./edges.js";
 import { InboxDecisionConflictError, InvalidInboxItemError, NotAnInboxItemError } from "./errors.js";
-import { carryForwardInboxDecisions, decideInboxItem, INBOX_ITEM_NODE_TYPE, listInbox, loadStoredInboxMetadata, normalizeInboxItemMetadata } from "./inbox.js";
+import { carryForwardInboxDecisions, completeInboxItem, decideInboxItem, requestInboxItem, INBOX_ITEM_NODE_TYPE, listInbox, loadStoredInboxMetadata, normalizeInboxItemMetadata } from "./inbox.js";
 import { closeIngestRun, openIngestRun, type IngestRunHandle } from "./ingest-runs.js";
 import { upsertNodes } from "./nodes.js";
 import { connectTestDb, type TestPool, uniqueSuffix } from "./test-helpers.js";
@@ -121,5 +121,31 @@ describe("re-ingest keeps the person's decisions", () => {
     const map = await loadStoredInboxMetadata(db, [{ sourceSystem: SRC, externalId: "slack:C1/1.2" }, { sourceSystem: SRC, externalId: "nope" }]);
     expect(map.size).toBe(1);
     expect(map.get(`${SRC}\u0000slack:C1/1.2`)?.["status"]).toBe("accepted");
+  });
+});
+
+describe("session requests and completion", () => {
+  const key = `session:test-${SRC}`;
+  afterAll(async () => {
+    await db.execute(sql`DELETE FROM nodes WHERE source_system = 'inbox' AND external_id = ${key}`);
+  });
+
+  it("queues, keeps the decision on re-request, reports the pane, and completes", async () => {
+    const meta = { source: "session", action: "reply", pane: "w1:p1", socket: "/tmp/herdr.sock" };
+    const first = await requestInboxItem(db, { externalId: key, title: "Ask ops", content: "draft", metadata: meta });
+    expect(first.action).toBe("created");
+    const decided = await decideInboxItem(db, first.id, { decision: "accept", message: "send it" });
+    expect(decided).toMatchObject({ after: "accepted", pane: "w1:p1", socket: "/tmp/herdr.sock", title: "Ask ops" });
+
+    await requestInboxItem(db, { externalId: key, title: "Ask ops", content: "draft v2", metadata: meta });
+    const again = (await listInbox(db, { statuses: ["accepted"] })).items.find((i) => i.id === first.id)!;
+    expect(again.status).toBe("accepted");
+    expect(again.feedback).toHaveLength(1);
+
+    await expect(completeInboxItem(db, first.id, "  ")).rejects.toThrow(InvalidInboxItemError);
+    await completeInboxItem(db, first.id, "sent in #retail-ops");
+    const done = (await listInbox(db, { statuses: ["done"] })).items.find((i) => i.id === first.id)!;
+    expect(done.content.startsWith("**Done:** sent in #retail-ops")).toBe(true);
+    await expect(completeInboxItem(db, first.id, "again")).rejects.toThrow(InboxDecisionConflictError);
   });
 });

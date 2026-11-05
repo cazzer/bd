@@ -1,0 +1,96 @@
+#!/usr/bin/env node
+// inbox — queue a decision for the person from any Claude session, and
+// close it once done. Talks to the local breakdown server (pnpm dev); needs
+// no MCP. See .claude/skills/inbox-ingest and the README "Inbox" section.
+//
+//   inbox request --key session:<slug> --title <t> [--action reply] [--priority 0-4]
+//                 [--url <u>] [--from <who>] [--source session] [--link 'label|url']...
+//                 [--body-file <path>]          (else the body is read from stdin)
+//   inbox done <id> <what you did, with link>
+//   inbox list
+//
+// `request` records this session's herdr pane ($HERDR_PANE_ID, $HERDR_SOCKET_PATH),
+// so the person's decision is prompted straight back into this session.
+
+import { readFileSync } from "node:fs";
+import { parseArgs } from "node:util";
+
+const API = process.env.BREAKDOWN_API ?? `http://127.0.0.1:${process.env.WEB_SERVER_PORT ?? "4310"}`;
+const UI = process.env.BREAKDOWN_UI ?? "http://localhost:5310";
+
+async function call(kind, procedure, input) {
+  const url = kind === "query" ? `${API}/trpc/${procedure}?input=${encodeURIComponent(JSON.stringify(input ?? {}))}` : `${API}/trpc/${procedure}`;
+  let res;
+  try {
+    res = await fetch(url, kind === "query" ? {} : { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) });
+  } catch (err) {
+    throw new Error(`cannot reach the breakdown server at ${API} (${err.message}); start it with \`pnpm dev\` in the breakdown checkout`);
+  }
+  const body = await res.json().catch(() => null);
+  if (!res.ok || body?.error) throw new Error(body?.error?.message ?? `HTTP ${res.status}`);
+  return body.result.data;
+}
+
+async function readStdin() {
+  if (process.stdin.isTTY) return "";
+  const chunks = [];
+  for await (const c of process.stdin) chunks.push(c);
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+const [command, ...rest] = process.argv.slice(2);
+
+try {
+  if (command === "request") {
+    const { values } = parseArgs({
+      args: rest,
+      options: {
+        key: { type: "string" },
+        title: { type: "string" },
+        action: { type: "string" },
+        priority: { type: "string" },
+        url: { type: "string" },
+        from: { type: "string" },
+        source: { type: "string" },
+        link: { type: "string", multiple: true },
+        "body-file": { type: "string" },
+      },
+    });
+    if (!values.key || !values.title) throw new Error("request needs --key and --title");
+    const content = values["body-file"] ? readFileSync(values["body-file"], "utf8") : await readStdin();
+    const links = (values.link ?? []).map((l) => {
+      const i = l.lastIndexOf("|");
+      if (i < 1) throw new Error(`--link must be 'label|url': ${l}`);
+      return { label: l.slice(0, i).trim(), url: l.slice(i + 1).trim() };
+    });
+    const metadata = {
+      source: values.source ?? "session",
+      action: values.action ?? "decide",
+      priority: values.priority === undefined ? 2 : Number(values.priority),
+      occurred_at: new Date().toISOString(),
+      links,
+      ...(values.url ? { url: values.url } : {}),
+      ...(values.from ? { from: values.from } : {}),
+      ...(process.env.HERDR_PANE_ID ? { pane: process.env.HERDR_PANE_ID } : {}),
+      ...(process.env.HERDR_SOCKET_PATH ? { socket: process.env.HERDR_SOCKET_PATH } : {}),
+    };
+    const r = await call("mutation", "inboxRequest", { key: values.key, title: values.title, content, metadata });
+    console.log(`queued ${r.id} (${r.action}) → ${UI}/inbox?item=${r.id}`);
+    if (!process.env.HERDR_PANE_ID) console.error("note: not in a herdr pane, so the decision won't be prompted back here; check the inbox");
+  } else if (command === "done") {
+    const [id, ...note] = rest;
+    if (!id || note.length === 0) throw new Error("usage: inbox done <id> <what you did, with link>");
+    await call("mutation", "inboxComplete", { id, note: note.join(" ") });
+    console.log(`done ${id}`);
+  } else if (command === "list") {
+    const r = await call("query", "inbox", {});
+    for (const i of r.items.filter((i) => i.parentId === null)) console.log(`${i.status.padEnd(9)} P${i.priority} ${i.source.padEnd(8)} ${i.id}  ${i.title}`);
+    if (r.items.length === 0) console.log("inbox is empty");
+  } else {
+    console.error("usage: inbox request|done|list (see the header of bin/inbox)");
+    process.exitCode = 2;
+  }
+} catch (err) {
+  console.error(`inbox: ${err.message}`);
+  process.exitCode = 1;
+}

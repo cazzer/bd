@@ -346,6 +346,10 @@ export interface DecideInboxItemResult {
   ingestRunId: string;
   before: InboxStatus;
   after: InboxStatus;
+  title: string;
+  /** The herdr pane (and server socket) of the live session that queued the item, when it recorded one. */
+  pane: string | null;
+  socket: string | null;
 }
 
 const NEXT_STATUS: Record<InboxDecision, InboxStatus> = { accept: "accepted", changes: "changes", dismiss: "dismissed" };
@@ -413,7 +417,9 @@ export async function decideInboxItem(db: Database, id: string, input: DecideInb
       }
       const row = written.rows[0];
       if (!row) throw new NodeUpsertFailedError(`decideInboxItem: upsert returned no row for node ${existing.id}`, 0, 0);
-      return { id: row.id, ingestRunId: run.id, before, after };
+      const pane = typeof current["pane"] === "string" ? current["pane"] : null;
+      const socket = typeof current["socket"] === "string" ? current["socket"] : null;
+      return { id: row.id, ingestRunId: run.id, before, after, title: existing.title, pane, socket };
     });
   } finally {
     await closeIngestRun(db, run);
@@ -471,4 +477,104 @@ WHERE n.node_type = ${INBOX_ITEM_NODE_TYPE}
     }
   }
   return map;
+}
+
+// --- Session requests and completion ---------------------------------------------
+
+export interface RequestInboxItemInput {
+  /** The canonical key; `session:<slug>` for a decision a live session wants queued. */
+  externalId: string;
+  title: string;
+  /** Markdown the person reads: what happened, the proposed action, the draft. */
+  content: string;
+  /** Contract metadata (source, action, url, from, priority, links, pane, socket, …). */
+  metadata: Record<string, unknown>;
+  /** Recorded on the ingest run, e.g. "inbox-cli". */
+  actor?: string;
+}
+
+/**
+ * Queues (or refreshes) one inbox item for a caller without MCP — a live
+ * Claude session in another directory, through `bin/inbox request`. Same
+ * contract and same re-ingest protection as brain_write; attributed to an
+ * `agent` ingest run so the write is identifiable and revertible.
+ */
+export async function requestInboxItem(db: Database, input: RequestInboxItemInput): Promise<{ id: string; action: string; ingestRunId: string }> {
+  const itemLabel = `(${INBOX_SOURCE_SYSTEM}/${input.externalId})`;
+  const incoming = normalizeInboxItemMetadata(normalizeOccurredAt(input.metadata, { itemLabel }), { itemLabel });
+  const stored = await loadStoredInboxMetadata(db, [{ sourceSystem: INBOX_SOURCE_SYSTEM, externalId: input.externalId }]);
+  const metadata = carryForwardInboxDecisions(incoming, stored.get(`${INBOX_SOURCE_SYSTEM}\u0000${input.externalId}`) ?? null);
+  const node = { nodeType: INBOX_ITEM_NODE_TYPE, sourceSystem: INBOX_SOURCE_SYSTEM, externalId: input.externalId, title: input.title, content: input.content, metadata };
+  const prepared = unsafePrepareNodes([node], DEFAULT_MAX_CONTENT_LENGTH, DEFAULT_MAX_METADATA_LENGTH, DEFAULT_MAX_TITLE_LENGTH);
+
+  const run = await openIngestRun(db, "agent", { actor: input.actor ?? "inbox-cli" });
+  try {
+    let written: { rows: UpsertNodeRow[] };
+    try {
+      written = await db.execute<UpsertNodeRow>(unsafeBuildUpsertNodesQuery(prepared, run.id));
+    } catch (err) {
+      throw unsafeWrapNodeWriteError(err, prepared);
+    }
+    const row = written.rows[0];
+    if (!row) throw new NodeUpsertFailedError(`requestInboxItem: upsert returned no row for ${input.externalId}`, 0, 0);
+    return { id: row.id, action: row.action, ingestRunId: run.id };
+  } finally {
+    await closeIngestRun(db, run);
+  }
+}
+
+/**
+ * The executor's last step: an accepted item becomes done, with a
+ * `**Done:**` line put at the top of its content. Refuses anything not
+ * accepted. Row-locked; attributed to an `agent` ingest run.
+ */
+export async function completeInboxItem(db: Database, id: string, note: string, options: { actor?: string } = {}): Promise<{ id: string; ingestRunId: string }> {
+  const requestedId = typeof id === "string" ? id.trim() : "";
+  if (!UUID_RE.test(requestedId)) throw new InvalidLookupIdError(id, "must be a valid uuid");
+  const trimmed = note.trim();
+  if (trimmed === "" || trimmed.length > MAX_INBOX_FEEDBACK_LENGTH) {
+    throw new InvalidInboxItemError("note", note, `must say what was done, in at most ${MAX_INBOX_FEEDBACK_LENGTH} characters`);
+  }
+  const run = await openIngestRun(db, "agent", { actor: options.actor ?? "inbox-cli" });
+  try {
+    return await db.transaction(async (tx) => {
+      const locked = await tx.execute<{ id: string; node_type: string; source_system: string; external_id: string; title: string; content: string; metadata: Record<string, unknown> }>(sql`
+        SELECT id, node_type, source_system, external_id, title, content, metadata
+        FROM nodes WHERE id = (SELECT COALESCE(merged_into, id) FROM nodes WHERE id = ${requestedId}::uuid)
+        FOR UPDATE
+      `);
+      const existing = locked.rows[0];
+      if (!existing) throw new NodeNotFoundError(requestedId);
+      if (existing.node_type !== INBOX_ITEM_NODE_TYPE) throw new NotAnInboxItemError(existing.id, existing.node_type);
+      const current = normalizeInboxItemMetadata(normalizeOccurredAt(existing.metadata));
+      if (current["status"] !== "accepted") throw new InboxDecisionConflictError(existing.id, current["status"] as string);
+      const { needs_you: _ignored, ...rest } = current;
+      const prepared = unsafePrepareNodes(
+        [
+          {
+            nodeType: existing.node_type,
+            sourceSystem: existing.source_system,
+            externalId: existing.external_id,
+            title: existing.title,
+            content: `**Done:** ${trimmed}\n\n${existing.content}`,
+            metadata: normalizeInboxItemMetadata({ ...rest, status: "done" }),
+          },
+        ],
+        DEFAULT_MAX_CONTENT_LENGTH,
+        DEFAULT_MAX_METADATA_LENGTH,
+        DEFAULT_MAX_TITLE_LENGTH,
+      );
+      let written: { rows: UpsertNodeRow[] };
+      try {
+        written = await tx.execute<UpsertNodeRow>(unsafeBuildUpsertNodesQuery(prepared, run.id));
+      } catch (err) {
+        throw unsafeWrapNodeWriteError(err, prepared);
+      }
+      const row = written.rows[0];
+      if (!row) throw new NodeUpsertFailedError(`completeInboxItem: upsert returned no row for node ${existing.id}`, 0, 0);
+      return { id: row.id, ingestRunId: run.id };
+    });
+  } finally {
+    await closeIngestRun(db, run);
+  }
 }
