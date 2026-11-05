@@ -122,7 +122,7 @@ An agent asks a person to accept screenshots with one command, run from a regist
 review-request <item-id> --summary 'what to look at' shot-1.png shot-2.png [--board-url http://localhost:5310]
 ```
 
-It files (or refreshes) a `review` child bead of the item, copies the images under `~/.local/share/breakdown/reviews/<project>/<bead-id>/`, opens Chrome on the board's drawer for it, and shows a herdr notification. It needs `pnpm dev` running here (it reads registered projects from the API server) and the checkout registered with `pnpm ingest:beads <path> --project <key>`. Put it on `PATH` once, from this repo:
+It files (or refreshes) a `review` child bead of the item, copies the images under `~/.local/share/breakdown/reviews/<project>/<bead-id>/`, opens the board's drawer for it in a new Chrome tab unless a breakdown tab is already open (then the review appears in that tab's review queue instead), and shows a herdr notification either way. It needs `pnpm dev` running here (it reads registered projects from the API server) and the checkout registered with `pnpm ingest:beads <path> --project <key>`. Put it on `PATH` once, from this repo:
 
 ```bash
 ln -sf "$PWD/bin/review-request" ~/.local/bin/review-request

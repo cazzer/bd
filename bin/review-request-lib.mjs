@@ -218,19 +218,20 @@ function reviewDir(homedir, key) {
 // and the herdr notification tells the person it is there. A second tab
 // would also hold another live-update stream, and Chrome allows six HTTP/1.1
 // connections per host. The script only probes whether any Chrome tab is
-// under the app's base URL and prints `present` or `none`; it never launches
-// Chrome (a `tell` would), and the prefix arrives as argv, never interpolated
-// into the script text. Any other answer, or a failed run, warns and opens a tab.
+// under the app's base URL and prints `present` or `none`. Every tab's URL
+// comes back in one Apple event, so many tabs cost one round trip and a tab
+// closing mid-scan cannot fail the probe. It never launches Chrome (a `tell`
+// would), and the prefix arrives as argv, never interpolated into the script
+// text. Any other answer, or a failed run, warns and opens a tab.
 export const CHROME_APP_TAB_SCRIPT = `on run argv
   set appPrefix to item 1 of argv
   if application "Google Chrome" is not running then return "none"
-  tell application "Google Chrome"
-    repeat with w in windows
-      repeat with t in tabs of w
-        if (URL of t) starts with appPrefix then return "present"
-      end repeat
+  tell application "Google Chrome" to set urlsByWindow to URL of every tab of every window
+  repeat with windowUrls in urlsByWindow
+    repeat with tabUrl in windowUrls
+      if (tabUrl as text) starts with appPrefix then return "present"
     end repeat
-  end tell
+  end repeat
   return "none"
 end run`;
 

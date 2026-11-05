@@ -22,7 +22,7 @@
 
 - [x] 4.1 Replace `CHROME_REUSE_TAB_SCRIPT` with `CHROME_APP_TAB_SCRIPT` (probe only: `present`/`none`, never launches, navigates, or activates) and the `present`/`none`/failure branches per design.md decision 5
 - [x] 4.2 Update review-request-lib tests: present → no `open`, notification still sent; none → `open` on the board link; failure → warning + `open`; the script text contains no `set URL`/`activate`
-- [x] 4.3 `node --test bin/` passes
+- [x] 4.3 `node --test bin/*.test.mjs` passes
 
 ## 5. Indicator, queue panel, and app-level drawer
 

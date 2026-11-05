@@ -562,7 +562,7 @@ describe("requestReview writes", () => {
   });
 
   it("the tab probe never launches, navigates, or raises Chrome", () => {
-    for (const forbidden of ["set URL", "activate", "set index", "active tab index"]) {
+    for (const forbidden of ["set URL", "activate", "set index", "active tab index", "make new", "open location", "reload", "close"]) {
       assert.equal(CHROME_APP_TAB_SCRIPT.includes(forbidden), false, forbidden);
     }
     const guard = CHROME_APP_TAB_SCRIPT.indexOf('if application "Google Chrome" is not running then return "none"');
