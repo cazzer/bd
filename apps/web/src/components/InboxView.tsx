@@ -330,6 +330,9 @@ function Detail({ item, parent, candidates, now, changesBox, onDecide, onSelect 
                   setBusy(true);
                   try {
                     for (const c of pendingIgnores) await onDecide(c, "dismiss");
+                    // Nothing actionable left in the batch: the batch itself is settled too.
+                    const remaining = candidates.filter((c) => c.status === "pending" && !pendingIgnores.includes(c));
+                    if (remaining.length === 0 && item.status === "pending") await onDecide(item, "dismiss", "verdicts confirmed");
                   } finally {
                     setBusy(false);
                   }
@@ -337,6 +340,7 @@ function Detail({ item, parent, candidates, now, changesBox, onDecide, onSelect 
                 className="rounded-lg border border-hairline px-3 py-1 text-xs text-fg hover:bg-surface-strong disabled:opacity-60"
               >
                 Agree with {pendingIgnores.length} ignore verdict{pendingIgnores.length === 1 ? "" : "s"}
+                {candidates.every((c) => c.status !== "pending" || pendingIgnores.includes(c)) ? " and close" : ""}
               </button>
             )}
           </div>
