@@ -38,11 +38,11 @@
 
 ## 6. Card in the drawer and the run
 
-- [ ] 6.1 `ReviewItemPanel` renders through `reviewCard` in the order of the spec (question, recommended option, other options, on-accept, attachments, evidence) per the layout picked in 4.3; evidence collapsed when the card has question + options; legacy reviews read as before
-- [ ] 6.2 `ReviewAttachments` gains `mermaid` and `diff` kinds (reusing 5.3's blocks) and renders a `before` followed by an `after` side by side, labelled, in both `column` and `stage` layouts
-- [ ] 6.3 Decision actions: "Accept <recommended label>", "Choose <label>" per other option, "Request changes"; option id sent with the decision; the run modal's "& next" variants, arming, and shortcuts carry the option; legacy reviews keep Accept / Request changes
-- [ ] 6.4 Queue popover shows the question line (already served by 1.4); no other queue change
-- [ ] 6.5 Pure helpers unit-tested (action list from a card, pairing); `pnpm check` passes; screenshots at 1440 × 900 of the shlo card (drawer + run) showing question, recommendation, and actions above the fold
+- [x] 6.1 `ReviewItemPanel` renders through `reviewCard` in the order of the spec (question, recommended option, other options, on-accept, attachments, evidence) per the layout picked in 4.3; evidence collapsed when the card has question + options; legacy reviews read as before
+- [x] 6.2 `ReviewAttachments` gains `mermaid` and `diff` kinds (reusing 5.3's blocks) and renders a `before` followed by an `after` side by side, labelled, in both `column` and `stage` layouts
+- [x] 6.3 Decision actions: "Accept <recommended label>", "Choose <label>" per other option, "Request changes"; option id sent with the decision; the run modal's "& next" variants, arming, and shortcuts carry the option; legacy reviews keep Accept / Request changes
+- [x] 6.4 Queue popover shows the question line (already served by 1.4); no other queue change
+- [x] 6.5 Pure helpers unit-tested (action list from a card, pairing); `pnpm check` passes; screenshots at 1440 × 900 of the shlo card (drawer + run) showing question, recommendation, and actions above the fold
 
 ## 7. End-to-end check, guidance, and epic visual review
 
