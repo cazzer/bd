@@ -13,15 +13,30 @@
 // containment per registered key — `{"project": k, "labels": ["review"]}` —
 // which nodes_metadata_gin_idx (jsonb_path_ops) serves, and which, like the
 // board's review flag, matches only a labels ARRAY holding the exact string.
+// That predicate is a deliberate separate copy of the board's (board.ts
+// tests `metadata->'labels' @> '["review"]'` per row, after its project
+// filter): here it is folded into the project containment so the GIN index
+// finds the reviews directly. The `registered` CTE is shared; the label
+// predicate is not.
+//
+// Like the board, the work item's source system is not filtered: a work item
+// of a registered project is in the queue whoever wrote it (the beads loader,
+// an agent's `brain_write`); only the registry node must be a `beads` row.
 //
 // Order is the request time, then id. The request time is `occurred_at` (the
 // bead's creation instant, written by the loader in the fixed-width
-// `toISOString()` form, so text order is time order) when it has that form,
-// else the row's `created_at` rendered in the same form — so a raw-written
-// or pre-contract value can neither fail the statement (no cast) nor sort
-// out of place. `count(*) OVER ()` is computed before the LIMIT, so `total`
-// is every pending review and `truncated` is `total > reviews.length`; no
-// limit + 1 probe row is needed.
+// `toISOString()` form, so text order is time order) when it has that form
+// (four-digit year, month 01-12, day 01-31, hour 00-23, minute and second
+// 00-59, milliseconds, `Z`), else the row's `created_at` rendered in the same
+// form — so a raw-written or pre-contract value cannot fail the statement
+// (no cast). The SQL shape check cannot see a day the month does not have
+// (`2026-02-30`), so the reported `requestedAt` is checked again in
+// JavaScript by round trip (`new Date(text).toISOString() === text`) and
+// falls back to `created_at` when it fails; such a row still sorts by its
+// stored text, which is the one place it can sit out of order.
+// `count(*) OVER ()` is computed before the LIMIT, so `total` is every
+// pending review and `truncated` is `total > reviews.length`; no limit + 1
+// probe row is needed.
 //
 // The summary line and image count are read off the stored `review` object
 // re-normalized here (reviews.ts, idempotent), so the queue and the drawer
@@ -45,7 +60,9 @@ export const MAX_PENDING_REVIEWS = 100;
 export const MAX_REVIEW_SUMMARY_LINE_LENGTH = 200;
 
 /** The `toISOString()` form `occurred_at` is stored in (event-time.ts). */
-const CANONICAL_INSTANT_PATTERN = "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$";
+const CANONICAL_INSTANT_PATTERN = "^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$";
+/** `created_at` rendered in that same form. */
+const CREATED_AT_TEXT = sql`to_char(n.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`;
 
 export interface PendingReviewsOptions {
   /** Reviews to return, 1..MAX_PENDING_REVIEWS; defaults to MAX_PENDING_REVIEWS. */
@@ -84,8 +101,15 @@ type RawPendingRow = {
   title: string;
   review: unknown;
   requested_at: string;
+  created_at_text: string;
   total: string | number;
 };
+
+/** `text` as an instant when it is exactly a `toISOString()` value (so `2026-02-30…`, which Date rolls over, is not); null otherwise. */
+function instantOf(text: string): Date | null {
+  const d = new Date(text);
+  return !Number.isNaN(d.getTime()) && d.toISOString() === text ? d : null;
+}
 
 /** The first line of a review summary, fitted; null for an empty one. */
 function summaryLineOf(summary: string): string | null {
@@ -112,7 +136,8 @@ SELECT n.id, n.metadata->>'project' AS project, n.external_id, n.title,
        n.metadata->(${REVIEW_METADATA_KEY}::text) AS review,
        CASE WHEN n.metadata->>'occurred_at' ~ ${CANONICAL_INSTANT_PATTERN}
             THEN n.metadata->>'occurred_at'
-            ELSE to_char(n.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') END AS requested_at,
+            ELSE ${CREATED_AT_TEXT} END AS requested_at,
+       ${CREATED_AT_TEXT} AS created_at_text,
        count(*) OVER () AS total
 FROM resolved_nodes n
 WHERE n.node_type = ${WORK_ITEM_NODE_TYPE}
@@ -135,7 +160,7 @@ LIMIT ${limit}::int
       title: r.title,
       summaryLine: valid === null ? null : summaryLineOf(valid.summary),
       imageCount: valid === null ? 0 : valid.images.length,
-      requestedAt: new Date(r.requested_at),
+      requestedAt: instantOf(r.requested_at) ?? new Date(r.created_at_text),
     };
   });
   const total = result.rows.length === 0 ? 0 : Number(result.rows[0]!.total);

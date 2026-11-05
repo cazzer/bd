@@ -312,9 +312,9 @@ describe("reviewQueue", () => {
       { id: ids.get(`${TAG}-q2`), project: QUEUE_A, externalId: `${TAG}-q2`, title: `Review ${TAG}-q2`, summaryLine: null, imageCount: 0, requestedAt: "1000-06-01T00:00:02.000Z" },
       { id: ids.get(`${TAG}-q3`), project: QUEUE_A, externalId: `${TAG}-q3`, title: `Review ${TAG}-q3`, summaryLine: null, imageCount: 0, requestedAt: "1000-06-01T00:00:03.000Z" },
     ]);
+    // Smoke checks only: the store-wide count and cap are core's (review-queue.test.ts).
     expect(queue.total).toBeGreaterThanOrEqual(3);
     expect(queue.reviews.length).toBeLessThanOrEqual(100);
-    expect(queue.truncated).toBe(queue.total > queue.reviews.length);
     expect(JSON.parse(JSON.stringify(queue))).toEqual(queue);
   });
 

@@ -6,7 +6,7 @@ Shows the reviews agents are waiting on as a live queue inside the breakdown web
 
 ### Requirement: Pending reviews form a queue
 
-A review SHALL be pending when it is a work item loaded from a registered beads project, labelled `review` exactly, not closed, and not labelled `review:changes`. The pending queue SHALL be every pending review across every registered project, oldest request first, each with its project, bead id, title, the first line of its review summary, its image count, and when it was requested. It SHALL be read from the store alone; showing it SHALL NOT create, change, or delete any stored row.
+A review SHALL be pending when it is a work item of a registered beads project, labelled `review` exactly, not closed, and not labelled `review:changes`. The pending queue SHALL be every pending review across every registered project, oldest request first, each with its project, bead id, title, the first line of its review summary, its image count, and when it was requested. It SHALL be read from the store alone; showing it SHALL NOT create, change, or delete any stored row.
 
 #### Scenario: A new review joins the queue
 

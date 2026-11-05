@@ -7,7 +7,10 @@
 // `occurred_at` instants far in the past (years 1000-1001) to sit inside any
 // window a test reads; the cap tests use the oldest of all (1000-01), which
 // only this file writes, and each test's work items are deleted after it so
-// one test's rows never occupy another's window. The router suite
+// one test's rows never occupy another's window. Rows of this file left by a
+// crashed run (its source-system and project-key prefixes, older than
+// STALE_AFTER so a concurrent run is untouched) are deleted before the suite.
+// Assertions on a limited read never assume which rows are oldest store-wide. The router suite
 // (apps/web/server/routers/board.test.ts) writes a few at 1000-06, after
 // the cap fixtures and before everything else here.
 
@@ -23,7 +26,10 @@ import { listPendingReviews, MAX_PENDING_REVIEWS, MAX_REVIEW_SUMMARY_LINE_LENGTH
 import { connectTestDb, type TestPool, uniqueSuffix } from "./test-helpers.js";
 
 const SUFFIX = uniqueSuffix().slice(0, 10);
-const SRC = `review-queue-test-${SUFFIX}`;
+const SRC_PREFIX = "review-queue-test-";
+const KEY_PREFIX = "rvq-";
+const SRC = `${SRC_PREFIX}${SUFFIX}`;
+const STALE_AFTER = "10 minutes";
 
 let pool: TestPool;
 let db: Database;
@@ -44,6 +50,14 @@ async function register(...keys: string[]): Promise<void> {
 
 beforeAll(async () => {
   ({ pool, db } = connectTestDb());
+  await db.execute(sql`DELETE FROM nodes WHERE source_system LIKE ${`${SRC_PREFIX}%`} AND updated_at < now() - ${STALE_AFTER}::interval`);
+  await db.execute(sql`DELETE FROM nodes WHERE source_system = 'beads' AND external_id LIKE ${`project:${KEY_PREFIX}%`} AND updated_at < now() - ${STALE_AFTER}::interval`);
+  await db.execute(sql`
+    DELETE FROM ingest_runs ir
+    WHERE ir.source_system LIKE ${`${SRC_PREFIX}%`} AND ir.started_at < now() - ${STALE_AFTER}::interval
+      AND NOT EXISTS (SELECT 1 FROM nodes n WHERE n.ingest_run_id = ir.id)
+      AND NOT EXISTS (SELECT 1 FROM node_revisions v WHERE v.ingest_run_id = ir.id)
+      AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.ingest_run_id = ir.id)`);
   run = await openIngestRun(db, SRC, { actor: "review-queue-test" });
   beadsRun = await openIngestRun(db, "beads", { actor: "review-queue-test" });
 });
@@ -65,7 +79,7 @@ afterAll(async () => {
 async function scope() {
   testNo += 1;
   const tag = `${SUFFIX}-${testNo}`;
-  const keys = { a: `qa-${tag}`, b: `qb-${tag}`, u: `qu-${tag}`, tag };
+  const keys = { a: `${KEY_PREFIX}a-${tag}`, b: `${KEY_PREFIX}b-${tag}`, u: `${KEY_PREFIX}u-${tag}`, tag };
   await register(keys.a, keys.b);
   return keys;
 }
@@ -230,10 +244,16 @@ describe("listPendingReviews row fields", () => {
       { ext: `${tag}-missing`, project: a, status: "open" },
       { ext: `${tag}-malformed`, project: a, status: "open", occurredAt: "yesterday" },
       { ext: `${tag}-between`, project: a, status: "open", occurredAt: "1001-07-02T00:00:00.000Z" },
+      // Shape-valid but impossible: month 13 and hour 25 fail the SQL check.
+      { ext: `${tag}-month13`, project: a, status: "open", occurredAt: "1001-13-01T00:00:00.000Z" },
+      { ext: `${tag}-hour25`, project: a, status: "open", occurredAt: "1001-07-01T25:00:00.000Z" },
     ]);
     // Pin creation times so the fallback has a known value inside the window.
-    await db.execute(sql`UPDATE nodes SET created_at = '1001-07-01T00:00:00Z' WHERE id = ${ids.get(`${tag}-missing`)!}`);
-    await db.execute(sql`UPDATE nodes SET created_at = '1001-07-03T00:00:00Z' WHERE id = ${ids.get(`${tag}-malformed`)!}`);
+    const pin = (ext: string, at: string) => db.execute(sql`UPDATE nodes SET created_at = ${at}::timestamptz WHERE id = ${ids.get(`${tag}-${ext}`)!}`);
+    await pin("missing", "1001-07-01T00:00:00Z");
+    await pin("malformed", "1001-07-03T00:00:00Z");
+    await pin("month13", "1001-07-04T00:00:00Z");
+    await pin("hour25", "1001-07-05T00:00:00Z");
 
     const rows = mine(await listPendingReviews(db), a);
 
@@ -241,7 +261,20 @@ describe("listPendingReviews row fields", () => {
       [`${tag}-missing`, "1001-07-01T00:00:00.000Z"],
       [`${tag}-between`, "1001-07-02T00:00:00.000Z"],
       [`${tag}-malformed`, "1001-07-03T00:00:00.000Z"],
+      [`${tag}-month13`, "1001-07-04T00:00:00.000Z"],
+      [`${tag}-hour25`, "1001-07-05T00:00:00.000Z"],
     ]);
+  });
+
+  it("reports the creation time for a day the month does not have, which passes the SQL shape check", async () => {
+    const { a, tag } = await scope();
+    const ids = await items([{ ext: `${tag}-feb30`, project: a, status: "open", occurredAt: "1001-02-30T00:00:00.000Z" }]);
+    await db.execute(sql`UPDATE nodes SET created_at = '1001-08-01T00:00:00Z' WHERE id = ${ids.get(`${tag}-feb30`)!}`);
+
+    const [row] = mine(await listPendingReviews(db), a);
+
+    expect(row?.externalId).toBe(`${tag}-feb30`);
+    expect(row?.requestedAt.toISOString()).toBe("1001-08-01T00:00:00.000Z");
   });
 });
 
@@ -254,13 +287,16 @@ describe("listPendingReviews cap", () => {
       { ext: `${tag}-2`, project: a, status: "open", occurredAt: "1000-01-01T00:00:02.000Z" },
     ]);
 
-    const cut = await listPendingReviews(db, { limit: 2 });
-    expect(cut.reviews.map((r) => r.externalId)).toEqual([`${tag}-1`, `${tag}-2`]);
-    expect(cut.total).toBeGreaterThanOrEqual(3);
-    expect(cut.truncated).toBe(true);
-
     const all = await listPendingReviews(db);
     expect(mine(all, a, b).map((r) => r.externalId)).toEqual([`${tag}-1`, `${tag}-2`, `${tag}-3`]);
+
+    // Which rows are oldest store-wide is not this suite's to know: the
+    // limited read is checked only against the full read.
+    const cut = await listPendingReviews(db, { limit: 2 });
+    expect(cut.reviews).toHaveLength(2);
+    expect(cut.reviews.map((r) => r.id)).toEqual(all.reviews.slice(0, 2).map((r) => r.id));
+    expect(cut.total).toBeGreaterThanOrEqual(3);
+    expect(cut.truncated).toBe(true);
     expect(all.truncated).toBe(all.total > all.reviews.length);
     expect(all.reviews.length).toBeLessThanOrEqual(MAX_PENDING_REVIEWS);
   });
