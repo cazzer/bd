@@ -219,6 +219,32 @@ describe("listPendingReviews row fields", () => {
     ]);
   });
 
+  it("carries a card's question as the line, its first line when it has several, and the summary's for a legacy review", async () => {
+    const { a, tag } = await scope();
+    const images = ["/home/u/.local/share/breakdown/reviews/p/r/01-a.png"];
+    await items([
+      {
+        ext: `${tag}-card`,
+        project: a,
+        status: "open",
+        occurredAt: "1001-05-11T00:00:00.000Z",
+        review: { images, pane: null, summary: "Legacy summary line\nmore", question: "Drop omni_search v5–v8?", options: [{ id: "A", label: "Yes" }, { id: "B", label: "No" }], recommend: "A" },
+      },
+      { ext: `${tag}-multiline`, project: a, status: "open", occurredAt: "1001-05-12T00:00:00.000Z", review: { images: [], pane: null, summary: "s", question: "First\nSecond" } },
+      { ext: `${tag}-legacy`, project: a, status: "open", occurredAt: "1001-05-13T00:00:00.000Z", review: { images, pane: null, summary: "Board header\nSecond" } },
+      { ext: `${tag}-dangling`, project: a, status: "open", occurredAt: "1001-05-14T00:00:00.000Z", review: { images, summary: "s", question: "q?", options: [{ id: "A", label: "Yes" }, { id: "B", label: "No" }], recommend: "D" } },
+    ]);
+
+    const rows = mine(await listPendingReviews(db), a);
+
+    expect(rows.map((r) => [r.externalId, r.summaryLine, r.imageCount])).toEqual([
+      [`${tag}-card`, "Drop omni_search v5–v8?", 1],
+      [`${tag}-multiline`, "First", 0],
+      [`${tag}-legacy`, "Board header", 1],
+      [`${tag}-dangling`, null, 0],
+    ]);
+  });
+
   it("keeps a review with invalid or missing review metadata, with no summary and no images", async () => {
     const { a, tag } = await scope();
     await items([

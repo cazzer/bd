@@ -6,7 +6,7 @@
 // scenario; see the ticket's requirements list for the mapping.
 
 import { randomUUID } from "node:crypto";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -58,7 +58,20 @@ afterEach(async () => {
   // edge_count>0, so "agent" + both zero can only be a run that opened
   // and immediately failed. Swept up after every test rather than
   // per-test, since which test id produced it isn't otherwise knowable.
-  await db.delete(ingestRuns).where(and(eq(ingestRuns.sourceSystem, "agent"), eq(ingestRuns.nodeCount, 0), eq(ingestRuns.edgeCount, 0)));
+  // Runs other test files open concurrently are not this file's to sweep:
+  // the inbox's own writers (actor inbox-cli) open agent runs too, and one
+  // still open has zero counts. The reference checks cover any other writer
+  // that has already written.
+  await db.delete(ingestRuns).where(
+    and(
+      eq(ingestRuns.sourceSystem, "agent"),
+      eq(ingestRuns.nodeCount, 0),
+      eq(ingestRuns.edgeCount, 0),
+      sql`${ingestRuns.actor} IS DISTINCT FROM 'inbox-cli'`,
+      sql`NOT EXISTS (SELECT 1 FROM nodes WHERE nodes.ingest_run_id = ${ingestRuns.id})`,
+      sql`NOT EXISTS (SELECT 1 FROM edges WHERE edges.ingest_run_id = ${ingestRuns.id})`,
+    ),
+  );
 });
 
 afterAll(async () => {

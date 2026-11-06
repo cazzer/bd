@@ -6,7 +6,7 @@
 // exactly this suite's rows and runs. No assertion reads a store-wide count.
 
 import { and, eq, inArray, like, or } from "drizzle-orm";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -113,6 +113,21 @@ describe("ingestBeadsCheckout reviews", () => {
     expect(fourth.changed).toBe(true);
     expect(fourth.nodes).toEqual({ created: 0, updated: 1, unchanged: 4 });
     expect(((await rowOf(reviewId))?.metadata as { review_comments: { text: string }[] }).review_comments.at(-1)?.text).toBe("Accepted: looks right");
+  });
+
+  it("lands a decision card as written and reports a reload unchanged", async () => {
+    const project = keyOf("card");
+    const reviewId = `${PREFIX}-60`;
+    const card = JSON.parse(readFileSync(new URL("../../../fixtures/review-cards/before-after.expected.json", import.meta.url), "utf8")) as Record<string, unknown>;
+    const bead = [issue(60, { labels: ["review"], comment_count: 0, metadata: { review: card } })];
+
+    const first = await load(project, bead, {});
+    expect(first.nodes.created).toBe(2);
+    expect((await rowOf(reviewId))?.metadata).toMatchObject({ review: card });
+
+    const again = await load(project, bead, {});
+    expect(again.nodes).toEqual({ created: 0, updated: 0, unchanged: 2 });
+    expect(again.changed).toBe(false);
   });
 
   it("fails the load when bd comments does not return an array, writing nothing", async () => {

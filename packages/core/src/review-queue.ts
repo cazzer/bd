@@ -40,7 +40,8 @@
 //
 // The summary line and image count are read off the stored `review` object
 // re-normalized here (reviews.ts, idempotent), so the queue and the drawer
-// share one contract: the summary's first line, cut to
+// share one contract: the first line of the card's question when it has one,
+// else of its summary (decision-card-reviews, design.md decision 2), cut to
 // MAX_REVIEW_SUMMARY_LINE_LENGTH, and the number of images. A review that
 // breaks the contract (`{ invalid: true }`) or is absent reads as no summary
 // and zero images; the item stays in the queue.
@@ -77,7 +78,7 @@ export interface PendingReview {
   /** The bead id (the work item's external id, as the board addresses it). */
   externalId: string;
   title: string;
-  /** First line of the review summary, at most MAX_REVIEW_SUMMARY_LINE_LENGTH; null when there is none or the review is invalid. */
+  /** First line of the review's question, else of its summary, at most MAX_REVIEW_SUMMARY_LINE_LENGTH; null when there is none or the review is invalid. */
   summaryLine: string | null;
   /** Images attached to the review; 0 when there are none or the review is invalid. */
   imageCount: number;
@@ -111,7 +112,7 @@ function instantOf(text: string): Date | null {
   return !Number.isNaN(d.getTime()) && d.toISOString() === text ? d : null;
 }
 
-/** The first line of a review summary, fitted; null for an empty one. */
+/** The first line of a review question or summary, fitted; null for an empty one. */
 function summaryLineOf(summary: string): string | null {
   const first = (summary.split(/\r\n|\r|\n/, 1)[0] ?? "").trim();
   return first === "" ? null : (fitText(first, MAX_REVIEW_SUMMARY_LINE_LENGTH) ?? null);
@@ -158,7 +159,7 @@ LIMIT ${limit}::int
       project: r.project,
       externalId: r.external_id,
       title: r.title,
-      summaryLine: valid === null ? null : summaryLineOf(valid.summary),
+      summaryLine: valid === null ? null : summaryLineOf(valid.question ?? valid.summary),
       imageCount: valid === null ? 0 : valid.images.length,
       requestedAt: instantOf(r.requested_at) ?? new Date(r.created_at_text),
     };

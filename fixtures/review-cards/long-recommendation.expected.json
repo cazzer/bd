@@ -1,0 +1,39 @@
+{
+  "images": [],
+  "pane": "w1:p1",
+  "socket": "/tmp/herdr-test.sock",
+  "summary": "Retire the v1 search endpoint on 2026-12-01 once the mobile forced upgrade reaches 98% of weekly active installs, or keep it running, as is?",
+  "question": "Retire the v1 search endpoint on 2026-12-01 once the mobile forced upgrade reaches 98% of weekly active installs, or keep it running, as is?",
+  "options": [
+    {
+      "id": "A",
+      "label": "Force the upgrade, then retire v1 at 98%",
+      "what": "Ship the forced-upgrade prompt in mobile 2.4.0 now, watch the weekly-active share on the new build each morning, and remove the v1 route, its rate-limit bucket, and the compatibility shim in one migration on the first day the share stays at or above 98% for seven days running, not before 2026-12-01.",
+      "risk": "Low: installs below 2.4.0 that never open the app again keep failing quietly, about 2% of weekly actives today; support has a canned reply ready, and the shim can be restored from the migration's revert section within the hour if a partner integration turns out to depend on it after all, as one did."
+    },
+    {
+      "id": "B",
+      "label": "Retire v1 on 2026-12-01 regardless",
+      "what": "Remove the route on the date whatever the upgrade share is.",
+      "risk": "Every install below 2.4.0 loses search that day."
+    },
+    {
+      "id": "C",
+      "label": "Keep v1",
+      "what": "Leave the route and its shim in place.",
+      "risk": "The shim keeps the old rate-limit bucket alive."
+    }
+  ],
+  "recommend": "A",
+  "on_accept": [
+    "Ship the forced-upgrade prompt in mobile 2.4.0.",
+    "Post the weekly-active share each morning until it holds at 98% for seven days."
+  ],
+  "attachments": [
+    {
+      "kind": "diff",
+      "source": "diff --git a/api/routes.ts b/api/routes.ts\nindex 3c1e0a2..9f4b7d1 100644\n--- a/api/routes.ts\n+++ b/api/routes.ts\n@@ -12,9 +12,6 @@ export const routes = [\n   route(\"/v2/search\", searchV2),\n   route(\"/v2/suggest\", suggestV2),\n-  // v1 kept for mobile < 2.4.0 (forced upgrade pending)\n-  route(\"/v1/search\", withV1Shim(searchV2)),\n-  rateLimit(\"v1-search\", { perMinute: 600 }),\n   route(\"/health\", health),\n ];",
+      "caption": "The retirement, as it will land"
+    }
+  ]
+}

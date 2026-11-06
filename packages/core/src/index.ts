@@ -364,7 +364,8 @@ export {
 } from "./review-queue.js";
 
 // The review contract (board-visual-reviews): review metadata and comment
-// normalization, the review image root, and lexical containment. Pure.
+// normalization, the review image root, and lexical containment; the
+// decision-card keys and `reviewCard` (decision-card-reviews). Pure.
 // See reviews.ts.
 export {
   REVIEW_LABEL,
@@ -385,10 +386,31 @@ export {
   MAX_REVIEW_COMMENT_LENGTH,
   MAX_REVIEW_COMMENT_AUTHOR_LENGTH,
   MAX_REVIEW_COMMENTS_CHARS,
+  MAX_REVIEW_QUESTION_LENGTH,
+  MIN_REVIEW_OPTIONS,
+  MAX_REVIEW_OPTIONS,
+  REVIEW_OPTION_ID_PATTERN,
+  MAX_REVIEW_OPTION_LABEL_LENGTH,
+  MAX_REVIEW_OPTION_TEXT_LENGTH,
+  MAX_REVIEW_ON_ACCEPT_STEPS,
+  MAX_REVIEW_ON_ACCEPT_STEP_LENGTH,
+  MAX_REVIEW_ATTACHMENTS,
+  MAX_REVIEW_ATTACHMENT_CAPTION_LENGTH,
+  MAX_REVIEW_ATTACHMENT_SOURCE_LENGTH,
+  REVIEW_ATTACHMENT_KINDS,
+  REVIEW_ATTACHMENT_PAIRS,
   normalizeReviewMetadata,
   normalizeReviewComments,
+  reviewCard,
   isInsideReviewRoot,
   type ReviewMetadata,
+  type ReviewOption,
+  type ReviewAttachment,
+  type ReviewAttachmentKind,
+  type ReviewAttachmentPair,
+  type ReviewImageAttachment,
+  type ReviewSourceAttachment,
+  type ReviewCard,
   type InvalidReview,
   type ReviewComment,
 } from "./reviews.js";

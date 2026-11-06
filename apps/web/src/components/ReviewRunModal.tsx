@@ -24,7 +24,8 @@
 // that join the live queue meanwhile join its end. The header shows "n of
 // m" (m+ while the queue's read is truncated), a progress bar, and a
 // status line at every width that says what the last answer was and where
-// the run is now ("Accepted “…”. 2 of 3."), plus whether the agent could not
+// the run is now ("Accepted “…”. 2 of 3.", or for a card "Accepted A on
+// “…”." / "Chose B (not the recommendation) on “…”."), plus whether the agent could not
 // be told, kept until the next decision. The body is ReviewItemPanel for
 // the review on screen, keyed on it, so each review mounts fresh and its
 // title takes focus; from `lg` up it uses the panel's `stage` layout (the
@@ -32,7 +33,10 @@
 //
 // Deciding. "Accept & next" and "Request changes & next" (a message is
 // required, as in the drawer; "Accept" / "Changes" below `sm`, on one row
-// with "Skip"); the run moves on only when the panel reports the decision
+// with "Skip"); a decision card with options offers "Accept <recommended>",
+// "Choose <other>" (each marked "& next"), and "Request changes & next"
+// instead (ReviewItemPanel.tsx), and its attachments take the stage — a
+// diff fills it, a before/after pair sits above a diagram. The run moves on only when the panel reports the decision
 // written (`ok`), so a failure, a partial write, or an uncertain thrown
 // call stays on the review with the panel's own messages. The panel arms
 // its decisions 500 ms after a review mounts (and its shortcuts only after
@@ -44,18 +48,25 @@
 // shared map, so a message typed here is the one the drawer shows for the
 // same review, and back. "Open in graph" is hidden: it would leave the run.
 //
-// Keyboard: Ctrl/Cmd+Enter is "Accept & next", Ctrl/Cmd+Shift+Enter
+// The header is one compact row (counter, progress, the status line, the
+// panel's shortcut hint, Close), and the panel's footer leaves out its
+// recipient line (the recipient describes the message box instead), so a
+// card's recommendation stays above the fold beside the decision buttons.
+//
+// Keyboard: Ctrl/Cmd+Enter is "Accept & next" (on a card, accepting the
+// recommended option, whose id the hint names), Ctrl/Cmd+Shift+Enter
 // "Request changes & next" (with no message it focuses the box and asks for
-// one). No plain key is ever taken, so typing is never intercepted.
+// one); choosing another option has no shortcut. No plain key is ever taken, so typing is never intercepted.
 //
 // The end is a summary — accepted, changes requested, skipped, and the run's
-// reviews with what became of each — with "Close" and, when any review of
+// reviews with what became of each (a card's row names the option) — with "Close" and, when any review of
 // the run is still pending and undecided (skipped, or not reached when the
 // run was stopped), a button that starts a new run over those. Focus lands
 // on its heading. No state is stored; closing ends the run.
 
 import { useEffect, useId, useLayoutEffect, useRef, useState, type SyntheticEvent } from "react";
 import { isOwnDialogEvent } from "../lib/dialogEvents.js";
+import { describeChosen, type ChosenOption } from "../lib/reviewCard.js";
 import type { ReviewQueueState } from "../lib/reviewQueueReader.js";
 import type { ReviewDecisionKind } from "../lib/reviewDrawer.js";
 import {
@@ -120,9 +131,13 @@ export function ReviewRunModal({ queue, drafts, onEnd }: ReviewRunModalProps) {
   const [busy, setBusy] = useState(false);
   /** Reviews this run wrote something to, so their leaving the queue is not "decided elsewhere". */
   const [touched, setTouched] = useState<ReadonlySet<string>>(new Set());
+  /** The option each accepted card was decided with, by review id, for the status line and the summary. */
+  const [chosen, setChosen] = useState<ReadonlyMap<string, ChosenOption>>(new Map());
   const live = useRef(queue.reviews);
   live.current = queue.reviews;
   const staged = useMediaQuery(STAGE_QUERY);
+  /** The header's slot for the panel's shortcut hint (PanelDecisions `hintTarget`). */
+  const [hintTarget, setHintTarget] = useState<HTMLElement | null>(null);
 
   function setRun(next: ReviewRun<QueueReview>) {
     runRef.current = next;
@@ -153,7 +168,9 @@ export function ReviewRunModal({ queue, drafts, onEnd }: ReviewRunModalProps) {
     const next = answerRun(runRef.current, live.current, review.id, result);
     if (next === runRef.current) return;
     setRun(next);
-    const said = result === null ? `Moved past ${quoted(review)}.` : ANSWER_TEXT[result](quoted(review));
+    const option = result === "accepted" ? (report?.option ?? null) : null;
+    if (option !== null) setChosen((prev) => new Map(prev).set(review.id, option));
+    const said = result === null ? `Moved past ${quoted(review)}.` : option !== null ? `${describeChosen(option)} on ${quoted(review)}.` : ANSWER_TEXT[result](quoted(review));
     setStatus((prev) => ({
       text: `${said} ${positionText(next)}`,
       warning: report !== undefined ? (report.notifyFailed ? report.notified : null) : (prev?.warning ?? null),
@@ -202,37 +219,37 @@ export function ReviewRunModal({ queue, drafts, onEnd }: ReviewRunModalProps) {
       onClose={onClosed}
       className="m-0 h-dvh max-h-none w-screen max-w-none flex-col overflow-hidden border-0 bg-surface-strong p-0 text-fg backdrop-blur-xl backdrop:bg-black/70 open:flex sm:m-auto sm:h-[min(58rem,calc(100dvh-3rem))] sm:w-[min(68rem,calc(100vw-3rem))] sm:rounded-2xl sm:border sm:border-hairline sm:shadow-[0_24px_80px_-20px_rgba(0,0,0,0.8)] lg:w-[min(86rem,calc(100vw-3rem))]"
     >
-      <header className="border-b border-hairline px-4 py-3 sm:px-5">
-        <div className="flex items-center gap-4">
-          <div className="shrink-0">
-            <p id={eyebrowId} className="text-[11px] font-semibold uppercase tracking-wide text-fg-muted">
-              Review all
-            </p>
-            <p id={progressId} className="text-lg font-semibold tabular-nums leading-tight text-fg">
-              {review !== null ? (
-                <>
-                  {progress.position} <span className="font-normal text-fg-muted">of</span> {totalText}
-                </>
-              ) : (
-                "Done"
-              )}
-            </p>
-          </div>
-          <ProgressBar position={review !== null ? progress.position - 1 : progress.total} total={progress.total} />
-          <button
-            type="button"
-            aria-label={review !== null && run.results.size > 0 ? "Stop and show the summary" : "Close review all"}
-            onClick={requestLeave}
-            disabled={busy}
-            className="grid size-11 shrink-0 place-items-center rounded-lg border border-hairline text-fg-muted hover:bg-surface-strong hover:text-fg focus:outline-none focus:ring-2 focus:ring-accent disabled:opacity-50 sm:size-9"
-          >
-            ✕
-          </button>
-        </div>
-        <p role="status" className="mt-1.5 min-h-4 truncate text-xs text-fg-muted">
+      {/* One compact row — counter, progress, status, close — so the review below keeps the height. */}
+      <header className="flex items-center gap-3 border-b border-hairline px-4 py-1.5 sm:px-5">
+        <p className="shrink-0 whitespace-nowrap">
+          <span id={eyebrowId} className="text-[11px] font-semibold uppercase tracking-wide text-fg-muted">
+            Review all
+          </span>{" "}
+          <span id={progressId} className="text-sm font-semibold tabular-nums text-fg">
+            {review !== null ? (
+              <>
+                {progress.position} <span className="font-normal text-fg-muted">of</span> {totalText}
+              </>
+            ) : (
+              "Done"
+            )}
+          </span>
+        </p>
+        <ProgressBar position={review !== null ? progress.position - 1 : progress.total} total={progress.total} />
+        <p role="status" className="min-w-0 flex-1 truncate text-xs text-fg-muted">
           {status?.text}
           {status?.warning && <span className="text-amber-200"> {status.warning}.</span>}
         </p>
+        <span ref={setHintTarget} className="contents" />
+        <button
+          type="button"
+          aria-label={review !== null && run.results.size > 0 ? "Stop and show the summary" : "Close review all"}
+          onClick={requestLeave}
+          disabled={busy}
+          className="grid size-11 shrink-0 place-items-center rounded-lg border border-hairline text-fg-muted hover:bg-surface-strong hover:text-fg focus:outline-none focus:ring-2 focus:ring-accent disabled:opacity-50 sm:size-8"
+        >
+          ✕
+        </button>
       </header>
 
       {review !== null ? (
@@ -250,11 +267,12 @@ export function ReviewRunModal({ queue, drafts, onEnd }: ReviewRunModalProps) {
           onBusyChange={setBusy}
           titleId={titleId}
           showGraphLink={false}
+          compactHeader
           layout={staged ? "stage" : "column"}
-          decisions={runDecisions(review, stillPending, touched.has(review.id), answer)}
+          decisions={{ ...runDecisions(review, stillPending, touched.has(review.id), answer), hintTarget }}
         />
       ) : (
-        <RunSummary titleId={titleId} run={run} live={queue.reviews} onReviewLeft={reviewLeft} onClose={onEnd} />
+        <RunSummary titleId={titleId} run={run} live={queue.reviews} chosen={chosen} onReviewLeft={reviewLeft} onClose={onEnd} />
       )}
     </dialog>
   );
@@ -266,6 +284,7 @@ function runDecisions(review: QueueReview, stillPending: boolean, touched: boole
     changesLabel: "Request changes & next",
     acceptShort: "Accept",
     changesShort: "Changes",
+    optionSuffix: "& next",
     shortcuts: true,
     armAfterMs: ARM_AFTER_MS,
     onWritten: (decision: ReviewDecisionKind, report: WrittenReport) => answer(review, decision === "accept" ? "accepted" : "changes", report),
@@ -286,7 +305,7 @@ function runDecisions(review: QueueReview, stillPending: boolean, touched: boole
 function ProgressBar({ position, total }: { position: number; total: number }) {
   const pct = total === 0 ? 100 : Math.min(100, Math.round((position / total) * 100));
   return (
-    <div aria-hidden="true" className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-fg/10">
+    <div aria-hidden="true" className="h-1.5 w-16 shrink-0 overflow-hidden rounded-full bg-fg/10 sm:w-32 lg:w-48">
       <div className="h-full rounded-full bg-accent transition-[width] duration-300 motion-reduce:transition-none" style={{ width: `${pct}%` }} />
     </div>
   );
@@ -300,7 +319,21 @@ const ENTRY_TEXT: Readonly<Record<RunEntryResult, { text: string; tone: string }
   elsewhere: { text: "Decided elsewhere", tone: "text-fg-muted" },
 };
 
-function RunSummary({ titleId, run, live, onReviewLeft, onClose }: { titleId: string; run: ReviewRun<QueueReview>; live: readonly QueueReview[]; onReviewLeft: () => void; onClose: () => void }) {
+function RunSummary({
+  titleId,
+  run,
+  live,
+  chosen,
+  onReviewLeft,
+  onClose,
+}: {
+  titleId: string;
+  run: ReviewRun<QueueReview>;
+  live: readonly QueueReview[];
+  chosen: ReadonlyMap<string, ChosenOption>;
+  onReviewLeft: () => void;
+  onClose: () => void;
+}) {
   const headingRef = useRef<HTMLHeadingElement>(null);
   const tallies = runTallies(run);
   const reviewed = run.results.size;
@@ -334,7 +367,7 @@ function RunSummary({ titleId, run, live, onReviewLeft, onClose }: { titleId: st
             <li key={item.id} className="flex items-baseline gap-3 px-3 py-2">
               <span className="shrink-0 font-mono text-xs text-fg-muted">{item.externalId}</span>
               <span className="min-w-0 flex-1 truncate text-fg">{item.title.trim() || "(untitled)"}</span>
-              <span className={`shrink-0 text-xs ${ENTRY_TEXT[result].tone}`}>{ENTRY_TEXT[result].text}</span>
+              <span className={`shrink-0 text-xs ${ENTRY_TEXT[result].tone}`}>{result === "accepted" && chosen.has(item.id) ? describeChosen(chosen.get(item.id)!) : ENTRY_TEXT[result].text}</span>
             </li>
           ))}
         </ol>

@@ -1,0 +1,65 @@
+/* EvidenceView.tsx's additions to MarkdownEditor's typography
+   (markdown-editor.css, which EvidenceView also loads). Plain CSS for the same
+   reason as that file: ProseMirror builds this DOM itself and Tailwind's
+   preflight strips its styling. Scoped to .evidence-view, set beside
+   .markdown-editor-prosemirror by EvidenceView's editorProps, and written as
+   the pair so each rule outranks the editor's own; the editor proper is
+   untouched.
+
+   The evidence sits on the drawer's surface (bg-surface-strong), where the
+   editor's surface-strong backgrounds for inline code and table headers
+   would vanish, so those are a light wash instead. */
+
+.markdown-editor-prosemirror.evidence-view h3,
+.markdown-editor-prosemirror.evidence-view h4 {
+  font-size: 0.9375rem;
+  font-weight: 600;
+}
+
+.markdown-editor-prosemirror.evidence-view h5,
+.markdown-editor-prosemirror.evidence-view h6 {
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.markdown-editor-prosemirror.evidence-view code {
+  background: rgba(226, 232, 240, 0.07);
+}
+
+.markdown-editor-prosemirror.evidence-view pre code {
+  background: none;
+}
+
+.markdown-editor-prosemirror.evidence-view .tableWrapper {
+  overflow-x: auto;
+  border-radius: 0.25rem;
+}
+
+.markdown-editor-prosemirror.evidence-view .tableWrapper:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+.markdown-editor-prosemirror.evidence-view table {
+  border-collapse: collapse;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+}
+
+.markdown-editor-prosemirror.evidence-view th,
+.markdown-editor-prosemirror.evidence-view td {
+  border: 1px solid var(--color-hairline);
+  padding: 0.35em 0.65em;
+  text-align: left;
+  vertical-align: top;
+}
+
+.markdown-editor-prosemirror.evidence-view th {
+  background: rgba(226, 232, 240, 0.05);
+  font-weight: 600;
+}
+
+.markdown-editor-prosemirror.evidence-view th > * + *,
+.markdown-editor-prosemirror.evidence-view td > * + * {
+  margin-top: 0.4em;
+}

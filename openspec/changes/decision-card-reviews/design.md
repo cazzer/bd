@@ -1,0 +1,106 @@
+## Context
+
+See proposal.md for why; the contract was decided in `bd-4zn`'s design field (2026-11-05). What exists:
+
+- `packages/core/src/reviews.ts` — `normalizeReviewMetadata` turns a bead's `metadata.review` into `{ images, pane, socket?, summary }` or `{ invalid: true }`, never throwing, idempotent, JSON-length capped (`MAX_REVIEW_METADATA_CHARS` 16,000). `beads.ts` applies it to issues labelled `review`; `review-queue.ts` derives the queue's summary line and image count from it; `getBoardItem` returns the item's `content` (the bead description) beside the review.
+- `bin/review-request-lib.mjs` — dependency-free Node ESM, symlinked into `~/.local/bin`; `--summary` required, at least one image; writes the summary as the description (`-d`) and `metadata.review` with `bd update --metadata`; notifies with the summary as body.
+- `apps/web/server/routers/review.ts` + `review-writer.ts` — `reviewDecision({ project, item, decision, message })`, a pre-write `bd show` (the tracker's record is trusted for pane and socket, never the store), then comment, close/label, wake, prompt. Texts: `Accepted: <m>` / `Accepted.`, close reason `Review accepted`, prompt `Review <id> accepted: <m>`.
+- `ReviewItemPanel` (shared by `ReviewDrawer` and `ReviewRunModal`) renders summary, attachments through `ReviewAttachments` (one slot keyed by kind, `layout: "column" | "stage"`; review-queue decisions 6–7 reserved before/after as a cross-kind `pair`), thread, and the decision form.
+- `MarkdownEditor` — Tiptap with a fixed `[StarterKit, Markdown]` set used for both read-only display and editing; its header documents why no markdown becomes an HTML string.
+
+## Goals / Non-Goals
+
+**Goals:** a typed card the drawer can act on; markdown evidence with tables, diagrams, and diffs; one-file authoring; every existing review and the current CLI form unchanged at every commit.
+
+**Non-Goals:** editing a card from the board; tables or diagrams in the node editor (DetailPanel) — the evidence renderer is read-only and separate; server-side rendering of diagrams; attachments other than image, mermaid, diff; changing how review images are served.
+
+## Decisions
+
+### 1. One review object, card keys beside the legacy keys
+
+`ReviewMetadata` keeps `images`, `pane`, `socket?`, `summary` and gains optional `question`, `options`, `recommend`, `on_accept`, `attachments`. Normalization rules, in `normalizeReviewMetadata` (so the beads mapper, the board read, and the server's decision check share one definition):
+
+- **Structure breaks → `{ invalid: true }`**: a non-string question; options not an array of 2–6 plain objects; an option `id` not matching `^[A-Za-z0-9][A-Za-z0-9_-]{0,15}$` or repeated; a missing `label`; `recommend` present without options or naming no option; `on_accept` not an array of strings or longer than 8; attachments not an array, more than 20, an unknown `kind`, an image without an absolute control-character-free `path` (same rule as `images`), a mermaid/diff without a string `source`, a `pair` other than `before`/`after`.
+- **Over-long text → fitted** with `fitText`, like `summary` today: question 140, label 80, what and risk 300, each on-accept step 200, caption 200, attachment source 8,000. NUL becomes U+FFFD in every text field. The whole-review JSON cap (16,000) still applies after fitting; the evidence body is not in metadata, so the cap is ample for a card.
+- Absent card keys are absent in the output (not empty arrays), so a legacy review normalizes byte-identical to today and reloads report it unchanged.
+
+Rejected: a second metadata key (`card`) — two objects to keep consistent and two normalizers at every writer; refusing over-long text in the normalizer — one stray character would invalidate a review a hand edit produced, while the CLI already refuses it at authoring time.
+
+**Reading a card** is a pure helper beside the normalizer, `reviewCard(review)`: `question` if present, else the summary's first line fitted to 140; attachments if present, else `images` as image attachments without caption or pair. Every UI reads through it, so a legacy review is a question-only card with its images. The board item read (`boardItem`'s DTO, `apps/web/server/dto.ts`) carries `card` computed server-side by `reviewCard`, because the browser cannot import core, and the drawer's `seen` (decision 5) is taken from it, so it is byte-for-byte what the decision check compares.
+
+**The CLI writes the legacy keys too**: `summary` = the question and `images` = the image attachments' stored paths. A reader built before this change (main's board, an open tab mid-branch) therefore still shows the question and the images, and the queue's image count stays right with no change to its SQL.
+
+### 2. Queue line reads the question
+
+`listPendingReviews` keeps one statement; its summary line becomes `coalesce(question, first line of summary)` from the stored metadata, still cut to 200. No other queue change.
+
+### 3. Evidence: a separate read-only renderer
+
+`MarkdownEditor`'s extension set is shared with editing; adding tables there would change how every editable node serializes. Instead a read-only `EvidenceView` (same module family, same safety argument cited from MarkdownEditor's header) uses `StarterKit`, `Markdown`, `TableKit` from `@tiptap/extension-table` (pinned to the installed Tiptap 3.31.0), and a `CodeBlock` extended with a read-only React node view: `language === "mermaid"` → `MermaidBlock`, `language === "diff"` → `DiffBlock`, anything else → the default `<pre>`. If `@tiptap/markdown` does not parse GFM tables through TableKit's markdown handlers at 3.31.0, the implementer stops and reports rather than adding a second markdown parser.
+
+- **`DiffBlock`**: lines split on `\n`; a leading `+`, `-`, `@@` gets a class (and a visually hidden "added"/"removed" prefix for screen readers); rendered as React text, never HTML.
+- **`MermaidBlock`**: `lazy(() => import("./MermaidDiagram"))`, so `mermaid` is its own chunk fetched the first time a diagram renders (verified in the build output). `MermaidDiagram` initializes mermaid once with `startOnLoad: false`, `securityLevel: "strict"`, `htmlLabels: false`, and renders to an SVG string that is shown **only as `<img src="data:image/svg+xml;…">`** — an SVG loaded as an image never runs script or loads resources, so the strict-mode sanitizer is a second layer, not the only one. A parse error shows the source in a `<pre>` with the error text. The diagram is announced by an accessible name from the caption (or "Diagram").
+
+The same `MermaidBlock` and `DiffBlock` render `mermaid` and `diff` attachments, so evidence fences and attachments look identical.
+
+Rejected: `dangerouslySetInnerHTML` of mermaid's SVG (inline SVG can carry script; the renderer's documented property is that no markup string reaches the DOM); rendering diagrams server-side (a headless browser on the server); a raw `marked` renderer for evidence (a second parser with its own safety story).
+
+### 4. CLI: `review-request <item> <card.md>`
+
+Form detection in `parseArgs`: no `--summary` and exactly one positional after the item id that ends in `.md` → card form; otherwise the legacy form, byte-for-byte unchanged (an `.md` with `--summary` is still refused as not an image). The card form:
+
+1. Reads the file, splits a leading `---\n…\n---\n` frontmatter (refusing "missing frontmatter"), parses it with the `yaml` package loaded by `await import("yaml")` **only in this branch**, so the legacy form never loads it and keeps working in a checkout that has not run `pnpm install` since this lands. A missing package is refused as "run pnpm install in <breakdown root>".
+2. Validates with the same rules as decision 1 but strictly — refusing, naming the field (`question: at most 140 characters, got 163`), where the normalizer would fit — plus: question required; unknown top-level keys refused (typos must not silently drop a field); body ≤ 8,000 characters; image attachments resolved relative to the card file and checked like today's images (exist, image extension).
+3. Files exactly as the legacy form does (reuse rules, staging, `blocks`, notification), with description = body (or the question when the body is empty), `metadata.review` = the card plus the legacy keys from decision 1, and the notification body = the question.
+
+The validator lives in the CLI (plain JS, no import from `packages/core`, which needs the workspace toolchain), and a shared test fixture set — the shlo card, a before/after image card, and invalid variants — is run through both the CLI validator and `normalizeReviewMetadata` so the two cannot drift: every card the CLI accepts normalizes to itself.
+
+`yaml` (eemeli/yaml, no dependencies) is added to the root `package.json` at an exact version. Rejected: a hand-written YAML subset (quoting and colon edge cases in exactly the prose agents write); JSON frontmatter (correct, but agents and people write YAML).
+
+### 5. Decisions carry an option id
+
+`reviewDecision` gains `option?: string` (same id pattern) and, required with it and refused without it, `seen: { question, label, what?, risk? }` — the card's question (as `reviewCard` reads it) and the chosen option's text as the drawer showed them, capped at the normalizer's fitted lengths (140, 80, 300, 300). The router passes both through; `review-writer.ts`, after its existing pre-write `bd show`, normalizes the tracker's `metadata.review`:
+
+- an option with `changes` → refused (also at input validation);
+- an invalid review whose raw `options` is a non-empty list — a card nobody can read — fails closed: every accept is refused, with or without an option; request changes still works. Any other invalid review, or one without options, is decided the legacy way;
+- options present + `accept` without `option` → refused; `option` on a review without options → refused; `option` not among the record's ids → refused;
+- the record's question and the chosen option's label, what, and risk differ from `seen` (absent ≡ absent) → refused as `option-changed`: "changed since it was opened; reopen it". A re-request after "Request changes" reuses the open bead and replaces its review whole, so a new card can reuse ids A/B/C with new meanings; without `seen`, a stale drawer's "Choose B" would accept whatever B now says.
+
+Refusals are 4xx before any write. Texts: comment `Accepted: <id> — <m>` / `Accepted: <id>.`; close reason `Review accepted: <id>`; prompt `Review <bead> accepted: <id> — <m>` / `Review <bead> accepted: <id>.`. Without an option every text is exactly today's. The option is checked against the tracker's record, not the store, for the same reason pane and socket are (any agent can write a store node).
+
+### 6. Card layout is chosen before it is built
+
+The card UI groups begin with 2–3 static prototypes (HTML in the session scratchpad, no app code) of the card in the drawer and in the Review all run at 1440 × 900, filled from the shlo fixture and the before/after fixture, each with its build cost (components touched, how the stage/column split of review-queue decision 7 is used, keyboard model). Screenshots go through `review-request bd-4zn` as an image review (the board that receives it predates cards), with `Accept = <recommended>` per visual-review.md. The pick is recorded here as decision 7 before the card UI is built. Fixed for every prototype: question first; recommended option with its risk and the decision actions above the fold; evidence collapsed when the card has question + options; attachments before evidence; `before`/`after` pairs side by side.
+
+### 7. Layout A: a compact option list, every action in the pinned footer
+
+Picked through review `bd-4zn.8` (accepted 2026-11-05, A recommended) over B (each option card carries its own button) and C (an options table with row actions; diagrams and diffs only on the stage).
+
+- **Body, in spec order**: the question (its own section, larger type); `Options · N` as one bordered list — the recommended option first, accent-bordered, with a `Recommended` chip, its full what and risk; each other option below it with what and risk clamped to two lines; then the on-accept steps; then attachments (drawer only, see below); then evidence, collapsed when the card has options, open otherwise; then the thread.
+- **Footer** (the existing pinned decision form, which already owns the message box, arming, and the run's shortcuts): the message box, then `Accept <recommended label>` (primary), one `Choose <label>` per other option (option id in a mono prefix), and `Request changes` (+ `Skip` in the run). With more than two other options, they fold into one `Choose another…` control listing them, so the footer never pushes the recommendation below the fold. A legacy review or a card without options keeps today's `Accept` / `Request changes`.
+- **Drawer**: attachments render in the column between on-accept and evidence (before/after pair, then diagrams, then diffs, the diff clipped with its stats).
+- **Run**: the stage holds the attachments (a diff fills it; a before/after pair takes the top with a diagram below); the column holds question, options, on-accept, evidence. A card with no attachments keeps the run's no-stage layout.
+- **Keyboard**: unchanged bindings — ⌘↵ accepts the recommended option (the hint names its id), ⇧⌘↵ requests changes; `Choose` has no shortcut (choosing against the recommendation is deliberate). The "& next" variants and arming carry the option id.
+
+Cost M: `ReviewItemPanel` (body order, option list, footer actions), `ReviewAttachments` (mermaid/diff kinds, pair), `ReviewRunModal` (stage gets card attachments, shortcut carries the recommended id); no new layout primitive.
+
+### 8. Cards stay short
+
+Review `bd-4zn.9` (changes requested) showed that a card can still be slow to decide on when its body is a build log, and that the legacy summary fails the same way (tides-0oi.32: a 1,000-character paragraph with the decision at its end). The 8,000-character cap bounds storage, not reading time. Two limits, both in the CLI only (the body is not in metadata, and the normalizer never refuses):
+
+- **Card body: 300 words outside fenced code blocks**, refused naming the budget and the count (`body: at most 300 words outside fenced blocks, got 388`). A word is a whitespace-separated token holding a letter or digit, other than an ordered-list marker (`1.`, `2)`) opening a line, so table pipes, separator rows, list markers, and lone punctuation are free; table cells and inline code count, because they are read. Fenced `diff`/`mermaid`/code blocks (at the top level, inside a blockquote, or nested in a list item) and attachments are excluded, while an indented code block is not fenced and counts: they are evidence a reviewer scans, and their size is already capped. Justification: the shlo fixture, the densest real decision so far (a caller audit, a latency table, findings, and the migration notes), is 278 words; 300 holds it with room for one sentence, and refuses the 388-word build log of `bd-4zn.9`.
+- **Legacy summary: warn above 280 characters, never refuse** (tides, shlo, and tick-dog file this form daily). 280 is two questions' worth (2 × 140): the decision and one line of context. The warning goes to stderr after filing, names the limit, and points to the card form.
+
+The guidance (`visual-review.md`) carries the rest: the body is evidence for the decision only, it leads with what changes for the reviewer, every table bears on the choice, and commits, groups, and verification counts go in the session's READY TO MERGE report, never in the card.
+
+## Risks / Trade-offs
+
+- [The `yaml` import fails on a checkout that has not reinstalled] → card form only, with an exact remedy; legacy callers in tides/shlo/tick-dog never reach it.
+- [mermaid is large (~1 MB+ minified with its diagram types)] → its own chunk, fetched only when a diagram renders; the board and the queue never pay for it.
+- [An SVG drawn through `<img>` cannot use page fonts or link out] → diagrams are for reading; text uses mermaid's default font stack. Accepted.
+- [Between group 3 (server requires an option for a card with options) and group 6 (buttons that send one), the branch's drawer cannot accept such a card; Request changes still works] → accepted: only the branch's own CLI (group 2) can file a card, legacy reviews are unaffected at every commit, and main never sees the intermediate state.
+- [Two validators (CLI and core) drift] → one fixture set run through both, decision 4.
+
+## Migration Plan
+
+No data migration. Legacy reviews normalize unchanged. After merge: `pnpm install` in the main checkout (for `yaml`, needed only by the card form), then the visual-review.md update tells agents about the card form. Rollback is reverting the branch; card keys are inert to the previous normalizer only in the sense that it ignores them — a reverted normalizer keeps `{ images, summary }`, and the CLI wrote both.

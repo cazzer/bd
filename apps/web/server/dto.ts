@@ -30,7 +30,24 @@
 // `sourceSystem === "repo"` itself) without that bundling hazard.
 
 import path from "node:path";
-import { isEditableSourceSystem, REVIEW_IMAGE_ROOT, type BeadsProject, type BoardCard, type BoardItem, type ListedNode, type LookedUpNode, type Neighbor, type PendingReview, type RecentNode, type RetrievedNode } from "@breakdown/core";
+import {
+  isEditableSourceSystem,
+  REVIEW_IMAGE_ROOT,
+  reviewCard,
+  type BeadsProject,
+  type BoardCard,
+  type BoardItem,
+  type ListedNode,
+  type LookedUpNode,
+  type Neighbor,
+  type PendingReview,
+  type RecentNode,
+  type RetrievedNode,
+  type ReviewCard,
+  type ReviewImageAttachment,
+  type ReviewMetadata,
+  type ReviewSourceAttachment,
+} from "@breakdown/core";
 import { reviewImageUrl } from "./review-images.js";
 
 export type RetrievedNodeDto = Omit<RetrievedNode, "updatedAt"> & { updatedAt: string; isEditable: boolean };
@@ -85,19 +102,49 @@ export interface ReviewImageDto {
   name: string;
   url: string | null;
 }
-/** `reviewImages` is empty unless the item carries a valid review. */
-export type BoardItemDto = Omit<BoardItem, "updatedAt"> & { updatedAt: string; reviewImages: ReviewImageDto[] };
+/**
+ * A review as the drawer reads it (decision-card-reviews, design.md decision
+ * 1): core's `reviewCard`, computed here because the client cannot import
+ * core (header), and so the question the drawer shows — and sends back as
+ * `seen` with an option — is byte-for-byte the one the decision check
+ * compares. Each image attachment carries its `name` and route `url`, as
+ * `reviewImages` does. `legacy` says the review carries no card key at all
+ * (`images` and `summary` only, as filed before cards), which the drawer
+ * shows as it always has; it is decided here so the client never copies
+ * the contract's key list.
+ */
+export type ReviewCardAttachmentDto = (ReviewImageAttachment & { name: string; url: string | null }) | ReviewSourceAttachment;
+export type ReviewCardDto = Omit<ReviewCard, "attachments"> & { attachments: ReviewCardAttachmentDto[]; legacy: boolean };
+
+/** The card keys of the review contract (reviews.ts), checked against its type. */
+const CARD_KEYS = ["question", "options", "recommend", "on_accept", "attachments"] as const satisfies ReadonlyArray<keyof ReviewMetadata>;
+
+/**
+ * `reviewImages` is empty and `card` null unless the item carries a valid
+ * review. `reviewImages` predates `card` and is kept for a board tab opened
+ * before cards existed, whose client still reads it.
+ */
+export type BoardItemDto = Omit<BoardItem, "updatedAt"> & { updatedAt: string; reviewImages: ReviewImageDto[]; card: ReviewCardDto | null };
 
 export function toBoardCardDto(card: BoardCard): BoardCardDto {
   return { ...card, updatedAt: card.updatedAt.toISOString() };
 }
 
 export function toBoardItemDto(item: BoardItem, reviewImageRoot: string = REVIEW_IMAGE_ROOT): BoardItemDto {
-  const images = item.review !== null && !("invalid" in item.review) ? item.review.images : [];
+  const review = item.review !== null && !("invalid" in item.review) ? item.review : null;
+  const card = review === null ? null : reviewCard(review);
   return {
     ...item,
     updatedAt: item.updatedAt.toISOString(),
-    reviewImages: images.map((p) => ({ path: p, name: path.basename(p), url: reviewImageUrl(p, reviewImageRoot) })),
+    reviewImages: (review?.images ?? []).map((p) => ({ path: p, name: path.basename(p), url: reviewImageUrl(p, reviewImageRoot) })),
+    card:
+      card === null
+        ? null
+        : {
+            ...card,
+            attachments: card.attachments.map((a) => (a.kind === "image" ? { ...a, name: path.basename(a.path), url: reviewImageUrl(a.path, reviewImageRoot) } : a)),
+            legacy: CARD_KEYS.every((key) => review![key] === undefined),
+          },
   };
 }
 
