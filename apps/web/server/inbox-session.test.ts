@@ -38,7 +38,7 @@ describe("openInboxSession", () => {
     const start = calls.find((c) => c[0] === "agent" && c[1] === "start")!;
     expect(start.slice(3, 7)).toEqual(["--kind", "claude", "--pane", "w9:p1"]);
     expect(start[2]).toMatch(/^inbox-9d4b4417-[0-9a-f]{4}$/);
-    expect(start.at(-1)).toContain("the RFP landed");
+    expect(start.at(-1)).toMatch(/^Read \S+ and do what it says\.$/);
     expect(calls.at(-1)).toEqual(["tab", "focus", "w9:t1"]);
   });
 
