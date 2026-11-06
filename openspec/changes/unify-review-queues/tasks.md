@@ -2,16 +2,16 @@
 
 ## 1. Shared card normalizer (upstreamable)
 
-- [ ] 1.1 Export the card normalizer from `packages/core/src/reviews.ts` as `normalizeDecisionCard`; `normalizeReviewMetadata` calls it unchanged
-- [ ] 1.2 Unit tests for `normalizeDecisionCard` directly; existing `reviews.test.ts` stays green
-- [ ] 1.3 `pnpm check` green
+- [x] 1.1 Export the card normalizer from `packages/core/src/reviews.ts` as `normalizeDecisionCard`; `normalizeReviewMetadata` calls it unchanged
+- [x] 1.2 Unit tests for `normalizeDecisionCard` directly; existing `reviews.test.ts` stays green
+- [x] 1.3 `pnpm check` green
 
 ## 2. Shared card UI (upstreamable)
 
-- [ ] 2.1 Extract `DecisionCard` (card body + decision footer, option actions, Choose another, Request changes, keys, arming) from `ReviewItemPanel.tsx`, taking a `decide` callback, `extraActions`, and `sessionLinks`
-- [ ] 2.2 `ReviewItemPanel` renders through `DecisionCard`, passing a `reviewDecision` decider; `ReviewItemPanel.test.ts` and `ReviewRunModal.test.ts` pass unchanged
-- [ ] 2.3 Generalize `ReviewSessionLinks` into `SessionLinks({ canFocus, focus, open })`; the review panel passes `reviewSession` calls
-- [ ] 2.4 Live check: the board drawer and Review all on a card review and a legacy review (keys, Choose another, Request changes, Talk it through)
+- [x] 2.1 Extract `DecisionCard` (card body + decision footer, option actions, Choose another, Request changes, keys, arming) from `ReviewItemPanel.tsx`, taking a `decide` callback, `extraActions`, and `sessionLinks`
+- [x] 2.2 `ReviewItemPanel` renders through `DecisionCard`, passing a `reviewDecision` decider; `ReviewItemPanel.test.ts` and `ReviewRunModal.test.ts` pass unchanged
+- [x] 2.3 Generalize `ReviewSessionLinks` into `SessionLinks({ canFocus, focus, open })`; the review panel passes `reviewSession` calls
+- [x] 2.4 Live check: the board drawer and Review all on a card review and a legacy review (keys, Choose another, Request changes, Talk it through)
 
 ## 3. Inbox cards and option decisions
 

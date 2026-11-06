@@ -230,7 +230,7 @@ export function normalizeReviewMetadata(raw: unknown): ReviewMetadata | InvalidR
     summary = withoutNul(fitText(rawSummary.trim(), MAX_REVIEW_SUMMARY_LENGTH) ?? "");
   }
 
-  const card = normalizeCard(raw);
+  const card = normalizeDecisionCard(raw);
   if (card === null) return { ...INVALID };
 
   const review: ReviewMetadata = socket === undefined ? { images, pane, summary, ...card } : { images, pane, socket, summary, ...card };
@@ -258,10 +258,17 @@ function optionalText(value: unknown, max: number): Fitted {
   return text === "" ? ABSENT : text;
 }
 
-type Card = Pick<ReviewMetadata, "question" | "options" | "recommend" | "on_accept" | "attachments">;
+/** The decision card keys as stored: each present only when carried. */
+export type DecisionCard = Pick<ReviewMetadata, "question" | "options" | "recommend" | "on_accept" | "attachments">;
+type Card = DecisionCard;
 
-/** The card keys of a raw review, normalized; null when one breaks the contract. Keys absent, null, or empty are left out. */
-function normalizeCard(raw: Record<string, unknown>): Card | null {
+/**
+ * The card keys of a raw record, normalized; null when one breaks the
+ * contract. Keys absent, null, or empty are left out. Shared by every
+ * holder of a card — a review's metadata here, an inbox item's in inbox.ts
+ * (unify-review-queues, design.md decision 1) — so the rules exist once.
+ */
+export function normalizeDecisionCard(raw: Record<string, unknown>): DecisionCard | null {
   const card: Card = {};
 
   const question = optionalText(raw["question"], MAX_REVIEW_QUESTION_LENGTH);

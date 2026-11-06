@@ -400,6 +400,8 @@ export {
   REVIEW_ATTACHMENT_KINDS,
   REVIEW_ATTACHMENT_PAIRS,
   normalizeReviewMetadata,
+  normalizeDecisionCard,
+  type DecisionCard,
   normalizeReviewComments,
   reviewCard,
   isInsideReviewRoot,
