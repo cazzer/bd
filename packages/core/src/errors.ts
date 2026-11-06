@@ -591,6 +591,25 @@ export class InboxDecisionConflictError extends KnowledgeStoreError {
   }
 }
 
+/**
+ * An inbox accept named an option the item's stored card does not offer, or
+ * named none on a card that now has options: an agent rewrote the card
+ * after the person opened it (unify-review-queues). Its wording carries the
+ * phrases the web's `isCardMovedRefusal` reads, like a review's.
+ */
+export class InboxCardChangedError extends KnowledgeStoreError {
+  constructor(
+    readonly nodeId: string,
+    readonly option: string | null,
+  ) {
+    super(
+      option === null
+        ? `inbox item ${nodeId} changed since it was opened and now asks to choose an option`
+        : `inbox item ${nodeId} does not offer option ${JSON.stringify(option)}; its card was rewritten after it was opened`,
+    );
+  }
+}
+
 /** The node a decision targets is not an `inbox_item`. */
 export class NotAnInboxItemError extends KnowledgeStoreError {
   constructor(

@@ -5,9 +5,14 @@
 //
 //   inbox request --key session:<slug> --title <t> [--action reply] [--priority 0-4]
 //                 [--url <u>] [--from <who>] [--source session] [--link 'label|url']...
+//                 [--read 'full|<ref>']...      (what you opened; 'skimmed|<ref>' for a partial read)
 //                 [--body-file <path>]          (else the body is read from stdin)
 //   inbox done <id> <what you did, with link>
 //   inbox list
+//
+// An item whose --url no --read covers is held as undigested, out of the
+// person's Needs me, until it is re-queued having read it (or released by
+// hand): read the artifact before asking the person about it.
 //
 // `request` records this session's herdr pane ($HERDR_PANE_ID, $HERDR_SOCKET_PATH),
 // so the person's decision is prompted straight back into this session.
@@ -53,6 +58,7 @@ try {
         from: { type: "string" },
         source: { type: "string" },
         link: { type: "string", multiple: true },
+        read: { type: "string", multiple: true },
         "body-file": { type: "string" },
       },
     });
@@ -63,12 +69,19 @@ try {
       if (i < 1) throw new Error(`--link must be 'label|url': ${l}`);
       return { label: l.slice(0, i).trim(), url: l.slice(i + 1).trim() };
     });
+    const read = (values.read ?? []).map((r) => {
+      const i = r.indexOf("|");
+      const depth = i < 0 ? "full" : r.slice(0, i).trim();
+      if (depth !== "full" && depth !== "skimmed") throw new Error(`--read must be 'full|<ref>' or 'skimmed|<ref>': ${r}`);
+      return { depth, ref: (i < 0 ? r : r.slice(i + 1)).trim() };
+    });
     const metadata = {
       source: values.source ?? "session",
       action: values.action ?? "decide",
       priority: values.priority === undefined ? 2 : Number(values.priority),
       occurred_at: new Date().toISOString(),
       links,
+      read,
       ...(values.url ? { url: values.url } : {}),
       ...(values.from ? { from: values.from } : {}),
       ...(process.env.HERDR_PANE_ID ? { pane: process.env.HERDR_PANE_ID } : {}),
@@ -76,6 +89,7 @@ try {
     };
     const r = await call("mutation", "inboxRequest", { key: values.key, title: values.title, content, metadata });
     console.log(`queued ${r.id} (${r.action}) → ${UI}/inbox?item=${r.id}`);
+    if (r.status === "undigested") console.error(`held as undigested: no --read covers --url ${values.url}. Read it, then re-run with --read 'full|${values.url}' (same --key) to put it in front of the person.`);
     if (!process.env.HERDR_PANE_ID) console.error("note: not in a herdr pane, so the decision won't be prompted back here; check the inbox");
   } else if (command === "done") {
     const [id, ...note] = rest;

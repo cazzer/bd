@@ -1,29 +1,52 @@
-// The inbox (inbox.ts in core; server/routers/inbox.ts): everything an agent
-// has triaged out of the person's sources, waiting on a decision. A list on
-// the left (batches carry their candidates), the selected item on the right:
-// what happened, the proposed action rendered as markdown, every signal that
-// folded into it, the decision history, and the decision bar.
+// The inbox (inbox.ts in core; server/routers/inbox.ts): everything waiting
+// on the person, in one place (unify-review-queues). A list on the left, the
+// selected item on the right.
 //
-// Deciding writes the decision and moves the item to the next turn — the
-// executor session picks up accepted items, the agent revises items sent
-// back with changes. This view only reads and records.
+// Tabs:
+//   Needs me   — pending inbox items and the open board reviews of every
+//                registered project (the shell's live review queue), merged
+//                by priority then age (lib/inboxRows.ts), with a source
+//                filter held in the address (`?source=`).
+//   Undigested — items whose agent did not declare reading their primary
+//                link; held out of Needs me (not counted there) until an
+//                ingest pass digests them, or the person releases one.
+//   With agent — being revised, carried out, or worked in a session.
+//   Closed     — done or dismissed.
 //
-// Keys (outside a text field): j / k move, a accepts, d dismisses, c focuses
-// the change request box, o opens the item in an interactive Claude session
-// (a new herdr tab; the session re-queues its draft here for approval).
+// Every decision goes through the same card (DecisionCard.tsx): an inbox
+// item's question, options, on-accept steps, and its content as evidence,
+// decided through `inboxDecision` (with Dismiss); a review through the board's
+// own panel (ReviewItemPanel.tsx), decided through `reviewDecision`, which
+// notifies the requesting agent as the drawer does. This view only reads and
+// records; nothing here calls a model.
+//
+// Keys (outside a text field): j / k move, a accepts (the recommended option
+// on a card), d dismisses, c focuses the message box, o opens the item in an
+// interactive Claude session. Ctrl/Cmd+Enter accepts and Ctrl/Cmd+Shift+Enter
+// requests changes, as in the board's run.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { filterBySource, needsMeRows, REVIEW_SOURCE, sourcesOf, type NeedsMeRow } from "../lib/inboxRows.js";
 import { navigate } from "../lib/navigate.js";
+import { CARD_MOVED_TEXT, cardActions, chosenOption, describeChosen, isCardMovedRefusal, type CardOption } from "../lib/reviewCard.js";
+import { decisionBlocked } from "../lib/reviewDrawer.js";
 import { trpc } from "../trpc.js";
+import { cardShortcut, DecisionCardBody, DecisionFooter, type CardOutcome, type DecisionCardData, type Refusal } from "./DecisionCard.js";
 import { EvidenceView } from "./EvidenceView.js";
-import { ReviewQueuePill } from "./ReviewQueue.js";
+import { ReviewItemPanel } from "./ReviewItemPanel.js";
+import { ReviewQueuePill, storeDraft, useReviewQueue, useShellDrawer } from "./ReviewQueue.js";
+import { SessionLinks, type SessionLinkResult } from "./SessionLinks.js";
 
 type InboxResult = Awaited<ReturnType<typeof trpc.inbox.query>>;
 type Item = InboxResult["items"][number];
-type Tab = "mine" | "agent" | "closed";
+type Review = ReturnType<typeof useReviewQueue>["reviews"][number];
+type Row = NeedsMeRow<Item, Review>;
+type Tab = "mine" | "undigested" | "agent" | "closed";
+type Decision = "accept" | "changes" | "dismiss";
 
 const TABS: { key: Tab; label: string; statuses: Item["status"][] }[] = [
   { key: "mine", label: "Needs me", statuses: ["pending"] },
+  { key: "undigested", label: "Undigested", statuses: ["undigested"] },
   { key: "agent", label: "With agent", statuses: ["changes", "accepted", "session"] },
   { key: "closed", label: "Closed", statuses: ["done", "dismissed"] },
 ];
@@ -39,6 +62,7 @@ const SOURCE_LABEL: Record<string, string> = {
   github: "GitHub",
   fathom: "Fathom",
   session: "Claude session",
+  [REVIEW_SOURCE]: "Reviews",
 };
 
 const STATUS_LABEL: Record<Item["status"], string> = {
@@ -46,8 +70,17 @@ const STATUS_LABEL: Record<Item["status"], string> = {
   changes: "agent revising",
   accepted: "agent executing",
   session: "in your session",
+  undigested: "not yet read by its agent",
   dismissed: "dismissed",
   done: "done",
+};
+
+const FEEDBACK_LABEL: Record<Item["feedback"][number]["decision"], string> = {
+  accept: "Accepted",
+  changes: "Changes requested",
+  dismiss: "Dismissed",
+  session: "Opened in a session",
+  release: "Released to Needs me unread",
 };
 
 function ago(iso: string, now: number): string {
@@ -64,28 +97,43 @@ function isTextField(target: EventTarget | null): boolean {
   return target instanceof HTMLElement && (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName));
 }
 
-export function InboxView({ item: selectedId }: { item: string | null }) {
+function messageOf(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/** An inbox item as a card; null when it carries none (it shows as before: title, content). */
+function cardOf(item: Item): DecisionCardData | null {
+  if (item.question === null && item.options.length === 0) return null;
+  return { question: item.question ?? item.title, options: item.options, recommend: item.recommend, onAccept: item.onAccept };
+}
+
+/** What the detail pane shows: a review by `<project>/<bead>`, or an inbox item by id. */
+interface Shown {
+  kind: "inbox" | "review";
+  key: string;
+}
+
+export function InboxView({ item: selectedKey, source }: { item: string | null; source: string | null }) {
   const [tab, setTab] = useState<Tab>("mine");
   const [data, setData] = useState<InboxResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const generation = useRef(0);
-
-  const statuses = TABS.find((t) => t.key === tab)!.statuses;
+  const queue = useReviewQueue();
 
   const load = useCallback(async () => {
     const mine = ++generation.current;
     try {
       // Batches are listed by their own status; their candidates come along
       // whatever theirs is, so a batch always shows every candidate.
-      const result = await trpc.inbox.query({ statuses: tab === "closed" ? ["done", "dismissed"] : ["pending", "changes", "accepted", "session", "done", "dismissed"] });
+      const result = await trpc.inbox.query({ statuses: tab === "closed" ? ["done", "dismissed"] : ["pending", "changes", "accepted", "session", "undigested", "done", "dismissed"] });
       if (mine !== generation.current) return;
       setData(result);
       setError(null);
       setNow(Date.now());
     } catch (err) {
       if (mine !== generation.current) return;
-      setError(err instanceof Error ? err.message : String(err));
+      setError(messageOf(err));
     }
   }, [tab]);
 
@@ -107,68 +155,103 @@ export function InboxView({ item: selectedId }: { item: string | null }) {
   }, [all]);
   const byId = useMemo(() => new Map(all.map((i) => [i.id, i])), [all]);
 
-  // Top-level rows: items without a parent whose own status is in this tab.
-  const rows = useMemo(() => all.filter((i) => i.parentId === null && statuses.includes(i.status)), [all, statuses]);
+  const needsMe = useMemo(() => needsMeRows(all, queue.reviews), [all, queue.reviews]);
+  const sources = useMemo(() => sourcesOf(needsMe), [needsMe]);
+  const activeSource = tab === "mine" ? source : null;
+
+  // The rows of the tab: Needs me merged and filtered; the others, inbox items by status.
+  const rows: Row[] = useMemo(() => {
+    if (tab === "mine") return filterBySource(needsMe, activeSource);
+    const statuses = TABS.find((t) => t.key === tab)!.statuses;
+    return all
+      .filter((i) => i.parentId === null && statuses.includes(i.status))
+      .map((item): Row => ({ kind: "inbox", key: item.id, priority: item.priority, at: item.receivedAt, source: item.source, item }));
+  }, [tab, needsMe, activeSource, all]);
+
   const counts = useMemo(() => {
-    const c: Record<Tab, number> = { mine: 0, agent: 0, closed: 0 };
+    const c: Record<Tab, number> = { mine: needsMe.length, undigested: 0, agent: 0, closed: 0 };
     for (const i of all) {
       if (i.parentId !== null) continue;
-      for (const t of TABS) if (t.statuses.includes(i.status)) c[t.key] += 1;
+      for (const t of TABS) if (t.key !== "mine" && t.statuses.includes(i.status)) c[t.key] += 1;
     }
     return c;
-  }, [all]);
+  }, [all, needsMe]);
 
-  const selected = (selectedId !== null ? byId.get(selectedId) : undefined) ?? rows[0] ?? null;
+  // What the address names: a review (`<project>/<bead>`), an inbox item (a candidate shows inside its batch), else the first row.
+  const shown: Shown | null = useMemo(() => {
+    if (selectedKey !== null) {
+      if (selectedKey.includes("/")) return { kind: "review", key: selectedKey };
+      if (byId.has(selectedKey)) return { kind: "inbox", key: selectedKey };
+    }
+    const first = rows[0];
+    return first === undefined ? null : { kind: first.kind, key: first.key };
+  }, [selectedKey, byId, rows]);
+  const selectedItem = shown?.kind === "inbox" ? (byId.get(shown.key) ?? null) : null;
+  const selectedReview = shown?.kind === "review" ? (queue.reviews.find((r) => `${r.project}/${r.externalId}` === shown.key) ?? null) : null;
+  const selectedRowKey = selectedItem !== null ? (selectedItem.parentId ?? selectedItem.id) : (shown?.key ?? null);
 
-  const select = useCallback((id: string | null) => navigate({ view: "inbox", item: id }, "replace"), []);
+  // An address naming an inbox item in another tab (a link to a held item, a
+  // decision moving the item on) brings that tab up, so the list and the
+  // detail agree. A candidate goes by its batch.
+  const addressed = selectedKey !== null ? (byId.get(selectedKey) ?? null) : null;
+  const addressedStatus = addressed === null ? null : ((addressed.parentId !== null ? byId.get(addressed.parentId) : undefined) ?? addressed).status;
+  useEffect(() => {
+    if (addressedStatus === null) return;
+    const home = TABS.find((t) => t.statuses.includes(addressedStatus))?.key;
+    if (home !== undefined) setTab((current) => (TABS.find((t) => t.key === current)!.statuses.includes(addressedStatus) ? current : home));
+  }, [selectedKey, addressedStatus]);
+
+  const go = useCallback((item: string | null, nextSource: string | null = source) => navigate({ view: "inbox", item, source: nextSource }, "replace"), [source]);
 
   const move = useCallback(
     (delta: number) => {
       if (rows.length === 0) return;
-      const index = selected === null ? -1 : rows.findIndex((r) => r.id === (selected.parentId ?? selected.id));
+      const index = rows.findIndex((r) => r.key === selectedRowKey);
       const next = rows[Math.min(rows.length - 1, Math.max(0, index + delta))];
-      if (next) select(next.id);
+      if (next) go(next.key);
     },
-    [rows, selected, select],
+    [rows, selectedRowKey, go],
+  );
+
+  /** After a decision on the row at `key`: the next row, the way a mail client moves on. */
+  const moveOnFrom = useCallback(
+    (key: string) => {
+      const index = rows.findIndex((r) => r.key === key);
+      if (index === -1) return;
+      const next = rows[index + 1] ?? rows[index - 1] ?? null;
+      go(next?.key ?? null);
+    },
+    [rows, go],
   );
 
   const decide = useCallback(
-    async (item: Item, decision: "accept" | "changes" | "dismiss", message = "") => {
-      const index = rows.findIndex((r) => r.id === item.id);
-      await trpc.inboxDecision.mutate({ id: item.id, decision, message });
-      // Move on to the next item in the list, the way a mail client does.
-      if (item.parentId === null && index !== -1) {
-        const next = rows[index + 1] ?? rows[index - 1] ?? null;
-        select(next?.id ?? null);
-      }
+    async (item: Item, decision: Decision, message = "", option?: string) => {
+      await trpc.inboxDecision.mutate({ id: item.id, decision, message, ...(option === undefined ? {} : { option }) });
+      if (item.parentId === null) moveOnFrom(item.id);
       await load();
     },
-    [rows, select, load],
+    [moveOnFrom, load],
   );
 
-  const [sessionError, setSessionError] = useState<string | null>(null);
-  const openSession = useCallback(
+  const release = useCallback(
     async (item: Item) => {
-      setSessionError(null);
-      try {
-        await trpc.inboxOpenSession.mutate({ id: item.id });
-        await load();
-      } catch (err) {
-        setSessionError(err instanceof Error ? err.message : String(err));
-      }
+      await trpc.inboxRelease.mutate({ id: item.id });
+      await load();
     },
     [load],
   );
-  const focusSession = useCallback(async (item: Item) => {
-    setSessionError(null);
-    try {
-      await trpc.inboxFocusSession.mutate({ id: item.id });
-    } catch (err) {
-      setSessionError(err instanceof Error ? err.message : String(err));
-    }
-  }, []);
 
-  const changesBox = useRef<HTMLTextAreaElement | null>(null);
+  const openSession = useCallback(
+    async (item: Item): Promise<SessionLinkResult> => {
+      const r = await trpc.inboxOpenSession.mutate({ id: item.id });
+      await load();
+      return { ok: true, tab: r.tab };
+    },
+    [load],
+  );
+
+  const message = useRef<HTMLTextAreaElement | null>(null);
+  const keyed = useRef<{ accept: () => void } | null>(null);
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -177,16 +260,25 @@ export function InboxView({ item: selectedId }: { item: string | null }) {
       else if (e.key === "k") move(-1);
       else if (e.key === "c") {
         e.preventDefault();
-        changesBox.current?.focus();
-      } else if (e.key === "o" && selected !== null && ["pending", "changes", "session"].includes(selected.status)) {
-        void openSession(selected);
-      } else if (selected !== null && selected.status === "pending" && (e.key === "a" || e.key === "d")) {
-        void decide(selected, e.key === "a" ? "accept" : "dismiss");
+        message.current?.focus();
+      } else if (selectedItem === null) {
+        return;
+      } else if (e.key === "o" && ["pending", "changes", "session", "undigested"].includes(selectedItem.status)) {
+        void openSession(selectedItem).catch(() => {});
+      } else if (e.key === "a" && selectedItem.status === "pending") {
+        keyed.current?.accept();
+      } else if (e.key === "d" && ["pending", "undigested"].includes(selectedItem.status)) {
+        void decide(selectedItem, "dismiss");
       }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [move, decide, selected, openSession]);
+  }, [move, decide, selectedItem, openSession]);
+
+  function pickTab(next: Tab) {
+    setTab(next);
+    go(null, next === "mine" ? source : null);
+  }
 
   return (
     <main className="flex h-dvh w-screen flex-col overflow-hidden">
@@ -199,7 +291,7 @@ export function InboxView({ item: selectedId }: { item: string | null }) {
               <button
                 key={t.key}
                 type="button"
-                onClick={() => setTab(t.key)}
+                onClick={() => pickTab(t.key)}
                 aria-pressed={tab === t.key}
                 className={`rounded-lg px-3 py-1 text-xs font-medium focus:outline-none focus:ring-2 focus:ring-accent ${tab === t.key ? "bg-surface-strong text-fg" : "text-fg-muted hover:text-fg"}`}
               >
@@ -209,20 +301,15 @@ export function InboxView({ item: selectedId }: { item: string | null }) {
           </nav>
         </div>
         <div className="flex items-center gap-3">
-        <p className="hidden text-xs text-fg-muted lg:block">
-          <kbd className="rounded border border-hairline px-1">j</kbd>/<kbd className="rounded border border-hairline px-1">k</kbd> move ·{" "}
-          <kbd className="rounded border border-hairline px-1">a</kbd> accept · <kbd className="rounded border border-hairline px-1">c</kbd> request changes ·{" "}
-          <kbd className="rounded border border-hairline px-1">d</kbd> dismiss · <kbd className="rounded border border-hairline px-1">o</kbd> open session
-        </p>
-        <ReviewQueuePill />
+          <p className="hidden text-xs text-fg-muted lg:block">
+            <kbd className="rounded border border-hairline px-1">j</kbd>/<kbd className="rounded border border-hairline px-1">k</kbd> move ·{" "}
+            <kbd className="rounded border border-hairline px-1">a</kbd> accept · <kbd className="rounded border border-hairline px-1">c</kbd> message ·{" "}
+            <kbd className="rounded border border-hairline px-1">d</kbd> dismiss · <kbd className="rounded border border-hairline px-1">o</kbd> open session
+          </p>
+          <ReviewQueuePill />
         </div>
       </header>
 
-      {sessionError !== null && (
-        <p role="alert" className="mx-4 mt-3 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-2 text-sm text-red-300">
-          {sessionError}
-        </p>
-      )}
       {error !== null && (
         <p role="alert" className="mx-4 mt-3 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-2 text-sm text-red-300">
           {error}
@@ -230,108 +317,243 @@ export function InboxView({ item: selectedId }: { item: string | null }) {
       )}
 
       <div className="flex min-h-0 flex-1 flex-col md:flex-row">
-        <ul aria-label="Inbox items" className="max-h-[40dvh] shrink-0 overflow-y-auto border-b border-hairline md:max-h-none md:w-[380px] md:border-b-0 md:border-r">
-          {data === null && <li className="p-4 text-sm text-fg-muted">Loading…</li>}
-          {data !== null && rows.length === 0 && <li className="p-4 text-sm text-fg-muted">{tab === "mine" ? "Nothing needs you right now." : "Nothing here."}</li>}
-          {rows.map((r) => {
-            const kids = childrenOf.get(r.id) ?? [];
-            const active = selected !== null && (selected.id === r.id || selected.parentId === r.id);
-            return (
-              <li key={r.id}>
+        <div className="flex max-h-[40dvh] shrink-0 flex-col border-b border-hairline md:max-h-none md:w-[380px] md:border-b-0 md:border-r">
+          {tab === "mine" && sources.length > 1 && (
+            <div role="group" aria-label="Filter by source" className="flex flex-wrap gap-1 border-b border-hairline px-3 py-2">
+              {[null, ...sources].map((s) => (
                 <button
+                  key={s ?? "all"}
                   type="button"
-                  onClick={() => select(r.id)}
-                  aria-current={active ? "true" : undefined}
-                  className={`block w-full border-l-2 px-4 py-3 text-left focus:outline-none focus:ring-2 focus:ring-inset focus:ring-accent ${active ? "border-accent bg-surface-strong" : "border-transparent hover:bg-surface"}`}
+                  onClick={() => go(null, s)}
+                  aria-pressed={activeSource === s}
+                  className={`rounded-full border px-2.5 py-0.5 text-[11px] focus:outline-none focus:ring-2 focus:ring-accent ${activeSource === s ? "border-accent/60 bg-accent/15 text-fg" : "border-hairline text-fg-muted hover:text-fg"}`}
                 >
-                  <span className="flex items-center gap-2 text-[11px] text-fg-muted">
-                    <span className="rounded-full border border-hairline px-2 py-0.5">{SOURCE_LABEL[r.source] ?? r.source}</span>
-                    {r.priority <= 1 && <span className="rounded-full bg-red-500/15 px-2 py-0.5 text-red-300">P{r.priority}</span>}
-                    {kids.length > 0 && <span>{kids.length} candidates</span>}
-                    <span className="ml-auto">{ago(r.receivedAt, now)}</span>
-                  </span>
-                  <span className="mt-1 block truncate text-sm font-medium text-fg">{r.title || "(untitled)"}</span>
-                  <span className="mt-0.5 block truncate text-xs text-fg-muted">
-                    {r.from !== null ? `${r.from} · ` : ""}
-                    {r.action !== "none" ? `proposes: ${r.action.replaceAll("_", " ")}` : STATUS_LABEL[r.status]}
-                  </span>
+                  {s === null ? "All" : (SOURCE_LABEL[s] ?? s)} <span className="tabular-nums">{s === null ? needsMe.length : needsMe.filter((r) => r.source === s).length}</span>
                 </button>
-              </li>
-            );
-          })}
-        </ul>
-
-        <section aria-label="Selected item" className="min-h-0 flex-1 overflow-y-auto">
-          {selected === null ? (
-            <p className="p-6 text-sm text-fg-muted">Pick an item.</p>
-          ) : (
-            <Detail
-              key={selected.id}
-              item={selected}
-              parent={selected.parentId !== null ? (byId.get(selected.parentId) ?? null) : null}
-              candidates={childrenOf.get(selected.id) ?? []}
-              now={now}
-              changesBox={changesBox}
-              onDecide={decide}
-              onSelect={select}
-              onOpenSession={openSession}
-              onFocusSession={focusSession}
-            />
+              ))}
+            </div>
           )}
-        </section>
+          <ul aria-label="Inbox items" className="min-h-0 flex-1 overflow-y-auto">
+            {data === null && <li className="p-4 text-sm text-fg-muted">Loading…</li>}
+            {data !== null && rows.length === 0 && (
+              <li className="p-4 text-sm text-fg-muted">
+                {tab === "mine" ? "Nothing needs you right now." : tab === "undigested" ? "Nothing held: every item's agent read what it was about." : "Nothing here."}
+              </li>
+            )}
+            {rows.map((r) => (
+              <li key={r.key}>
+                <RowButton row={r} active={r.key === selectedRowKey} now={now} candidates={r.kind === "inbox" ? (childrenOf.get(r.item.id)?.length ?? 0) : 0} onPick={() => go(r.key)} />
+              </li>
+            ))}
+          </ul>
+        </div>
+
+        {selectedReview !== null ? (
+          <section aria-label="Selected review" className="flex min-h-0 flex-1 flex-col">
+            <ReviewPane key={`${selectedReview.project}/${selectedReview.externalId}`} review={selectedReview} queueLoaded={queue.loaded} queueVersion={queue.version} onWritten={() => moveOnFrom(`${selectedReview.project}/${selectedReview.externalId}`)} />
+          </section>
+        ) : (
+          <section aria-label="Selected item" className="min-h-0 flex-1 overflow-y-auto">
+            {selectedItem === null ? (
+              <p className="p-6 text-sm text-fg-muted">{shown?.kind === "review" ? "That review was decided or closed." : "Pick an item."}</p>
+            ) : (
+              <InboxDetail
+                key={selectedItem.id}
+                item={selectedItem}
+                parent={selectedItem.parentId !== null ? (byId.get(selectedItem.parentId) ?? null) : null}
+                candidates={childrenOf.get(selectedItem.id) ?? []}
+                now={now}
+                messageRef={message}
+                keyed={keyed}
+                onDecide={decide}
+                onRelease={release}
+                onSelect={(id) => go(id)}
+                onOpenSession={openSession}
+                onReload={load}
+              />
+            )}
+          </section>
+        )}
       </div>
     </main>
   );
 }
 
-interface DetailProps {
+function RowButton({ row, active, now, candidates, onPick }: { row: Row; active: boolean; now: number; candidates: number; onPick: () => void }) {
+  const title = row.kind === "inbox" ? row.item.title : row.review.title.replace(/^Review:\s*/, "");
+  const line = row.kind === "inbox" ? `${row.item.from !== null ? `${row.item.from} · ` : ""}${row.item.question ?? (row.item.action !== "none" ? `proposes: ${row.item.action.replaceAll("_", " ")}` : STATUS_LABEL[row.item.status])}` : row.review.summaryLine;
+  return (
+    <button
+      type="button"
+      onClick={onPick}
+      aria-current={active ? "true" : undefined}
+      className={`block w-full border-l-2 px-4 py-3 text-left focus:outline-none focus:ring-2 focus:ring-inset focus:ring-accent ${active ? "border-accent bg-surface-strong" : "border-transparent hover:bg-surface"}`}
+    >
+      <span className="flex items-center gap-2 text-[11px] text-fg-muted">
+        {row.kind === "review" ? (
+          <>
+            <span className="rounded-full border border-accent/60 bg-accent/15 px-2 py-0.5 text-fg">review</span>
+            <span className="rounded-full border border-hairline px-2 py-0.5">{row.review.project}</span>
+          </>
+        ) : (
+          <span className="rounded-full border border-hairline px-2 py-0.5">{SOURCE_LABEL[row.item.source] ?? row.item.source}</span>
+        )}
+        {row.priority <= 1 && row.kind === "inbox" && <span className="rounded-full bg-red-500/15 px-2 py-0.5 text-red-300">P{row.priority}</span>}
+        {row.kind === "inbox" && row.item.options.length > 0 && <span>{row.item.options.length} options</span>}
+        {candidates > 0 && <span>{candidates} candidates</span>}
+        <span className="ml-auto">{ago(row.at, now)}</span>
+      </span>
+      <span className="mt-1 block truncate text-sm font-medium text-fg">{title || "(untitled)"}</span>
+      <span className="mt-0.5 block truncate text-xs text-fg-muted">{line}</span>
+    </button>
+  );
+}
+
+/** A board review in the detail pane: the board's own panel, deciding through `reviewDecision` as the drawer does. */
+function ReviewPane({ review, queueLoaded, queueVersion, onWritten }: { review: Review; queueLoaded: boolean; queueVersion: number; onWritten: () => void }) {
+  const { drafts } = useShellDrawer();
+  const titleId = useId();
+  return (
+    <ReviewItemPanel
+      project={review.project}
+      item={review.externalId}
+      boardLoaded={queueLoaded}
+      boardVersion={queueVersion}
+      initialDraft={drafts.get(review.externalId) ?? ""}
+      onDraftChange={(draft) => storeDraft(drafts, review.externalId, draft)}
+      onDecided={() => {}}
+      onProjectConfirmed={() => {}}
+      onEscape={() => {}}
+      titleId={titleId}
+      compactHeader
+      decisions={{ acceptLabel: "Accept", changesLabel: "Request changes", shortcuts: true, onWritten: () => onWritten() }}
+    />
+  );
+}
+
+interface InboxDetailProps {
   item: Item;
   parent: Item | null;
   candidates: Item[];
   now: number;
-  changesBox: React.RefObject<HTMLTextAreaElement | null>;
-  onDecide: (item: Item, decision: "accept" | "changes" | "dismiss", message?: string) => Promise<void>;
+  messageRef: React.RefObject<HTMLTextAreaElement | null>;
+  /** Where the view's `a` key reaches this item's accept. */
+  keyed: React.RefObject<{ accept: () => void } | null>;
+  onDecide: (item: Item, decision: Decision, message?: string, option?: string) => Promise<void>;
+  onRelease: (item: Item) => Promise<void>;
   onSelect: (id: string) => void;
-  onOpenSession: (item: Item) => Promise<void>;
-  onFocusSession: (item: Item) => Promise<void>;
+  onOpenSession: (item: Item) => Promise<SessionLinkResult>;
+  onReload: () => Promise<void>;
 }
 
-function Detail({ item, parent, candidates, now, changesBox, onDecide, onSelect, onOpenSession, onFocusSession }: DetailProps) {
-  const [message, setMessage] = useState("");
+function InboxDetail({ item, parent, candidates, now, messageRef, keyed, onDecide, onRelease, onSelect, onOpenSession, onReload }: InboxDetailProps) {
+  const [message, setMessageState] = useState("");
+  const [pending, setPending] = useState<"accept" | "changes" | null>(null);
+  const [pendingOption, setPendingOption] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [needsMessage, setNeedsMessage] = useState(false);
+  const [outcome, setOutcome] = useState<CardOutcome | null>(null);
+  const [refusal, setRefusal] = useState<Refusal | null>(null);
+  const [focusedOption, setFocusedOption] = useState<string | null>(null);
+  const optionPrefix = useId();
+  const optionDescId = (id: string) => `${optionPrefix}-option-${id}`;
 
-  async function run(decision: "accept" | "changes" | "dismiss", target: Item = item) {
-    if (decision === "changes" && message.trim() === "") {
-      setError("Say what needs to change.");
-      changesBox.current?.focus();
-      return;
-    }
-    setBusy(true);
-    setError(null);
+  const card = cardOf(item);
+  const actions = card === null ? null : cardActions(card);
+  const open = item.status === "pending";
+
+  function setMessage(next: string) {
+    setMessageState(next);
+    if (next.trim() !== "") setNeedsMessage(false);
+  }
+
+  async function decide(decision: "accept" | "changes", option?: CardOption) {
+    if (!open || decisionBlocked(decision, message, pending !== null || busy)) return;
+    setPending(decision);
+    setPendingOption(option?.id ?? null);
+    setOutcome(null);
+    setRefusal(null);
     try {
-      await onDecide(target, decision, target === item ? message : "");
-      if (target === item) setMessage("");
+      await onDecide(item, decision, message, option?.id);
+      const chosen = option !== undefined && card !== null ? ` ${describeChosen(chosenOption(card, option))}` : "";
+      setOutcome({ tone: "ok", text: decision === "accept" ? `Accepted.${chosen}` : "Sent back to the agent.", keepMessage: false, notified: null });
+      setMessage("");
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      const text = messageOf(err);
+      const moved = isCardMovedRefusal(text);
+      setRefusal(moved ? { text: CARD_MOVED_TEXT, detail: text } : { text, detail: null });
+      if (moved) await onReload();
+    } finally {
+      setPending(null);
+      setPendingOption(null);
+    }
+  }
+
+  async function act(fn: () => Promise<void>) {
+    setBusy(true);
+    setRefusal(null);
+    try {
+      await fn();
+    } catch (err) {
+      setRefusal({ text: messageOf(err), detail: null });
     } finally {
       setBusy(false);
     }
   }
 
+  // The view's `a`: the recommended option on a card, plain Accept otherwise; nothing on a card that recommends none.
+  useEffect(() => {
+    keyed.current = {
+      accept: () => {
+        if (actions === null) void decide("accept");
+        else if (actions.accept !== null) void decide("accept", actions.accept);
+      },
+    };
+    return () => {
+      keyed.current = null;
+    };
+  });
+
+  function onKeyDown(e: React.KeyboardEvent<HTMLElement>) {
+    if (!open || e.defaultPrevented) return;
+    const shortcut = cardShortcut(e, card, message);
+    if (shortcut === null) return;
+    e.preventDefault();
+    if (e.repeat) return;
+    if (shortcut.kind === "needs-message") {
+      setNeedsMessage(true);
+      messageRef.current?.focus();
+    } else if (shortcut.kind === "changes") void decide("changes");
+    else if (shortcut.kind === "accept") void decide("accept", shortcut.option);
+  }
+
+  const sessionLinks = (
+    <SessionLinks
+      canFocus={item.sessionTab !== null}
+      focusLabel="Go to session"
+      focus={async () => {
+        await trpc.inboxFocusSession.mutate({ id: item.id });
+        return { ok: true, tab: item.sessionTab ?? "" };
+      }}
+      open={() => onOpenSession(item)}
+    />
+  );
+
+  const recipient =
+    item.pane !== null ? `Will prompt the session that queued it (pane ${item.pane}).` : "Accepted items are carried out by the inbox watcher (or /inbox-execute).";
   const pendingIgnores = candidates.filter((c) => c.status === "pending" && (c.action === "ignore" || c.action === "none"));
 
   return (
-    <article className="mx-auto max-w-3xl space-y-5 p-4 md:p-6">
+    <article onKeyDown={onKeyDown} className="mx-auto flex min-h-full max-w-3xl flex-col gap-5 p-4 md:p-6">
       {parent !== null && (
-        <button type="button" onClick={() => onSelect(parent.id)} className="text-xs text-accent hover:underline">
+        <button type="button" onClick={() => onSelect(parent.id)} className="self-start text-xs text-accent hover:underline">
           ← {parent.title}
         </button>
       )}
       <header className="space-y-2">
         <div className="flex flex-wrap items-center gap-2 text-[11px] text-fg-muted">
           <span className="rounded-full border border-hairline px-2 py-0.5">{SOURCE_LABEL[item.source] ?? item.source}</span>
-          <span className="rounded-full border border-hairline px-2 py-0.5">{STATUS_LABEL[item.status]}</span>
+          <span className={`rounded-full border px-2 py-0.5 ${item.status === "undigested" ? "border-amber-400/50 bg-amber-400/10 text-amber-200" : "border-hairline"}`}>{STATUS_LABEL[item.status]}</span>
           {item.verdict !== null && <span className="rounded-full border border-hairline px-2 py-0.5">verdict: {item.verdict.replaceAll("_", " ")}</span>}
           <span>{ago(item.receivedAt, now)}</span>
           {item.from !== null && <span>from {item.from}</span>}
@@ -344,12 +566,35 @@ function Detail({ item, parent, candidates, now, changesBox, onDecide, onSelect,
         )}
       </header>
 
-      {item.content.trim() !== "" && (
-        <div className="glass p-4 text-sm">
-          {/* The review cards' read-only renderer: GFM tables, mermaid diagrams, and diffs in a draft render as such. */}
-          <EvidenceView key={`${item.id}:${item.updatedAt}`} markdown={item.content} />
-        </div>
+      {item.status === "undigested" && (
+        <section aria-label="Undigested" className="space-y-2 rounded-xl border border-amber-400/40 bg-amber-400/10 p-3 text-sm text-amber-100">
+          <p>
+            Its agent didn't declare reading {item.url !== null ? <a href={item.url} target="_blank" rel="noreferrer" className="underline">the linked artifact</a> : "the linked artifact"}, so it is held out of Needs me. The next inbox
+            ingest pass reads it and puts it in front of you.
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <button type="button" disabled={busy} onClick={() => void act(() => onRelease(item))} className="rounded-lg border border-amber-400/50 px-3 py-1 text-xs text-fg hover:bg-amber-400/20 disabled:opacity-60">
+              Release to Needs me unread
+            </button>
+            <button type="button" disabled={busy} onClick={() => void act(() => onDecide(item, "dismiss"))} className="rounded-lg px-3 py-1 text-xs text-fg-muted hover:text-fg disabled:opacity-60">
+              Dismiss
+            </button>
+          </div>
+        </section>
       )}
+
+      <div className="space-y-5">
+        {card !== null ? (
+          <DecisionCardBody key={item.updatedAt} card={card} evidence={item.content} focusedOption={focusedOption} optionDescId={optionDescId} />
+        ) : (
+          item.content.trim() !== "" && (
+            <div className="glass p-4 text-sm">
+              {/* The review cards' read-only renderer: GFM tables, mermaid diagrams, and diffs in a draft render as such. */}
+              <EvidenceView key={item.updatedAt} markdown={item.content} />
+            </div>
+          )
+        )}
+      </div>
 
       {candidates.length > 0 && (
         <section aria-label="Candidates" className="space-y-2">
@@ -359,17 +604,14 @@ function Detail({ item, parent, candidates, now, changesBox, onDecide, onSelect,
               <button
                 type="button"
                 disabled={busy}
-                onClick={async () => {
-                  setBusy(true);
-                  try {
+                onClick={() =>
+                  void act(async () => {
                     for (const c of pendingIgnores) await onDecide(c, "dismiss");
                     // Nothing actionable left in the batch: the batch itself is settled too.
                     const remaining = candidates.filter((c) => c.status === "pending" && !pendingIgnores.includes(c));
                     if (remaining.length === 0 && item.status === "pending") await onDecide(item, "dismiss", "verdicts confirmed");
-                  } finally {
-                    setBusy(false);
-                  }
-                }}
+                  })
+                }
                 className="rounded-lg border border-hairline px-3 py-1 text-xs text-fg hover:bg-surface-strong disabled:opacity-60"
               >
                 Agree with {pendingIgnores.length} ignore verdict{pendingIgnores.length === 1 ? "" : "s"}
@@ -380,9 +622,7 @@ function Detail({ item, parent, candidates, now, changesBox, onDecide, onSelect,
           <ul className="divide-y divide-hairline rounded-xl border border-hairline">
             {candidates.map((c) => (
               <li key={c.id} className="flex items-center gap-3 px-3 py-2">
-                <span
-                  className={`w-20 shrink-0 text-[11px] font-medium uppercase ${c.action === "ignore" || c.action === "none" ? "text-fg-muted" : "text-accent"}`}
-                >
+                <span className={`w-20 shrink-0 text-[11px] font-medium uppercase ${c.action === "ignore" || c.action === "none" ? "text-fg-muted" : "text-accent"}`}>
                   {c.action === "ignore" || c.action === "none" ? "ignore" : "action"}
                 </span>
                 <button type="button" onClick={() => onSelect(c.id)} className="min-w-0 flex-1 text-left">
@@ -391,12 +631,12 @@ function Detail({ item, parent, candidates, now, changesBox, onDecide, onSelect,
                     {c.verdict !== null ? c.verdict.replaceAll("_", " ") : c.action.replaceAll("_", " ")} · {STATUS_LABEL[c.status]}
                   </span>
                 </button>
-                {c.status === "pending" && (
+                {c.status === "pending" && c.options.length === 0 && (
                   <span className="flex shrink-0 gap-1">
-                    <button type="button" disabled={busy} onClick={() => void run("accept", c)} className="rounded-md bg-accent/20 px-2 py-1 text-xs text-fg hover:bg-accent/30 disabled:opacity-60">
+                    <button type="button" disabled={busy} onClick={() => void act(() => onDecide(c, "accept"))} className="rounded-md bg-accent/20 px-2 py-1 text-xs text-fg hover:bg-accent/30 disabled:opacity-60">
                       Accept
                     </button>
-                    <button type="button" disabled={busy} onClick={() => void run("dismiss", c)} className="rounded-md border border-hairline px-2 py-1 text-xs text-fg-muted hover:text-fg disabled:opacity-60">
+                    <button type="button" disabled={busy} onClick={() => void act(() => onDecide(c, "dismiss"))} className="rounded-md border border-hairline px-2 py-1 text-xs text-fg-muted hover:text-fg disabled:opacity-60">
                       Dismiss
                     </button>
                   </span>
@@ -407,8 +647,8 @@ function Detail({ item, parent, candidates, now, changesBox, onDecide, onSelect,
         </section>
       )}
 
-      {(item.links.length > 0 || item.url !== null) && (
-        <section aria-label="Sources" className="space-y-1">
+      {(item.links.length > 0 || item.url !== null || item.read.length > 0) && (
+        <section aria-label="Sources" className="space-y-2">
           <h3 className="text-sm font-semibold text-fg">Sources</h3>
           <ul className="flex flex-wrap gap-2">
             {item.url !== null && !item.links.some((l) => l.url === item.url) && (
@@ -426,6 +666,18 @@ function Detail({ item, parent, candidates, now, changesBox, onDecide, onSelect,
               </li>
             ))}
           </ul>
+          {item.read.length > 0 && (
+            <p className="text-xs text-fg-muted">
+              The agent read:{" "}
+              {item.read.map((r, i) => (
+                <span key={r.ref}>
+                  {i > 0 && ", "}
+                  <span className="break-all text-fg">{r.ref.replace(/^https?:\/\//, "")}</span>
+                  {r.depth === "skimmed" && " (skimmed)"}
+                </span>
+              ))}
+            </p>
+          )}
         </section>
       )}
 
@@ -436,8 +688,10 @@ function Detail({ item, parent, candidates, now, changesBox, onDecide, onSelect,
             {item.feedback.map((f, i) => (
               <li key={i}>
                 <span className="text-fg">
-                  {f.decision === "changes" ? "Changes requested" : f.decision === "accept" ? "Accepted" : f.decision === "session" ? "Opened in a session" : "Dismissed"}
-                </span> · {ago(f.at, now)}
+                  {FEEDBACK_LABEL[f.decision]}
+                  {f.option !== undefined && ` option ${f.option}`}
+                </span>{" "}
+                · {ago(f.at, now)}
                 {f.message !== "" && <span className="mt-0.5 block whitespace-pre-wrap text-fg">{f.message}</span>}
               </li>
             ))}
@@ -445,84 +699,65 @@ function Detail({ item, parent, candidates, now, changesBox, onDecide, onSelect,
         </section>
       )}
 
-      {item.status === "pending" ? (
-        <section aria-label="Decision" className="glass sticky bottom-0 space-y-2 p-3">
-          <textarea
-            ref={changesBox}
-            value={message}
-            onChange={(e) => setMessage(e.target.value)}
-            rows={2}
-            placeholder="What should change? (required for Request changes, optional note otherwise)"
-            className="w-full resize-y rounded-lg border border-hairline bg-transparent px-3 py-2 text-sm text-fg placeholder:text-fg-muted focus:outline-none focus:ring-2 focus:ring-accent"
-          />
-          <div className="flex flex-wrap items-center gap-2">
-            <button type="button" disabled={busy} onClick={() => void run("accept")} className="rounded-lg bg-accent px-4 py-1.5 text-sm font-medium text-ground hover:opacity-90 disabled:opacity-60">
-              Accept
-            </button>
-            <button type="button" disabled={busy} onClick={() => void run("changes")} className="rounded-lg border border-hairline px-4 py-1.5 text-sm text-fg hover:bg-surface-strong disabled:opacity-60">
-              Request changes
-            </button>
-            <button type="button" disabled={busy} onClick={() => void run("dismiss")} className="rounded-lg px-4 py-1.5 text-sm text-fg-muted hover:text-fg disabled:opacity-60">
-              Dismiss
-            </button>
-            <span className="ml-auto flex gap-2">
-              {item.sessionTab !== null && (
-                <button type="button" onClick={() => void onFocusSession(item)} className="rounded-lg px-3 py-1.5 text-sm text-accent hover:underline">
-                  Go to session
-                </button>
-              )}
-              <button
-                type="button"
-                disabled={busy}
-                onClick={async () => {
-                  setBusy(true);
-                  try {
-                    await onOpenSession(item);
-                  } finally {
-                    setBusy(false);
-                  }
-                }}
-                title="Open a new herdr tab with Claude working on this item (o)"
-                className="rounded-lg border border-accent/50 px-4 py-1.5 text-sm text-fg hover:bg-surface-strong disabled:opacity-60"
-              >
-                Open session ↗
-              </button>
-            </span>
-            {error !== null && (
-              <span role="alert" className="text-xs text-red-300">
-                {error}
-              </span>
-            )}
+      <div className="mt-auto">
+        {open || outcome !== null || refusal !== null ? (
+          <div className="sticky bottom-0 overflow-hidden rounded-xl border border-hairline">
+            <DecisionFooter
+              open={open}
+              recipient={recipient}
+              sessionLinks={sessionLinks}
+              labels={{
+                acceptLabel: "Accept",
+                changesLabel: "Request changes",
+                shortcuts: true,
+                extra: ({ busy: writing }) =>
+                  open && (
+                    <button type="button" disabled={writing || busy} onClick={() => void act(() => onDecide(item, "dismiss"))} className="min-h-11 rounded-lg px-4 text-sm text-fg-muted hover:text-fg disabled:opacity-60 sm:min-h-10">
+                      Dismiss
+                    </button>
+                  ),
+              }}
+              messageLabel="Note to the agent (required for Request changes)"
+              actions={actions}
+              message={message}
+              setMessage={setMessage}
+              messageRef={messageRef}
+              needsMessage={needsMessage}
+              pending={pending}
+              pendingOption={pendingOption}
+              onOptionFocus={setFocusedOption}
+              optionDescId={optionDescId}
+              outcome={outcome}
+              refusal={refusal}
+              decide={(d, option) => void decide(d, option)}
+            />
           </div>
-        </section>
-      ) : item.status === "session" || item.status === "changes" ? (
-        <section aria-label="Session" className="flex flex-wrap items-center gap-2 text-xs text-fg-muted">
-          <span>
-            {item.status === "session"
-              ? "In an interactive session. It will send a draft back here for approval, or close the item when the work is done there."
-              : "Sent back. The agent will revise it and return it to you."}
-          </span>
-          {item.sessionTab !== null && (
-            <button type="button" onClick={() => void onFocusSession(item)} className="rounded-lg border border-hairline px-3 py-1 text-fg hover:bg-surface-strong">
-              Go to session
-            </button>
-          )}
-          <button type="button" onClick={() => void onOpenSession(item)} className="rounded-lg border border-hairline px-3 py-1 text-fg hover:bg-surface-strong">
-            {item.status === "session" ? "Open a new session" : "Open session ↗"}
-          </button>
-          <button type="button" onClick={() => void onDecide(item, "dismiss")} className="rounded-lg px-3 py-1 hover:text-fg">
-            Dismiss
-          </button>
-        </section>
-      ) : (
-        <p className="text-xs text-fg-muted">
-          {item.status === "accepted"
-            ? item.sessionTab !== null
-              ? "Accepted. The session that drafted it is carrying it out."
-              : "Accepted. The inbox watcher (or /inbox-execute) will carry it out and mark it done."
-            : "Closed."}
-        </p>
-      )}
+        ) : item.status === "session" || item.status === "changes" || item.status === "undigested" ? (
+          <section aria-label="Session" className="space-y-2 text-xs text-fg-muted">
+            {item.status !== "undigested" && (
+              <div className="flex flex-wrap items-center gap-2">
+                <span>
+                  {item.status === "session"
+                    ? "In an interactive session. It will send a draft back here for approval, or close the item when the work is done there."
+                    : "Sent back. The agent will revise it and return it to you."}
+                </span>
+                <button type="button" disabled={busy} onClick={() => void act(() => onDecide(item, "dismiss"))} className="rounded-lg px-3 py-1 hover:text-fg disabled:opacity-60">
+                  Dismiss
+                </button>
+              </div>
+            )}
+            {sessionLinks}
+          </section>
+        ) : (
+          <p className="text-xs text-fg-muted">
+            {item.status === "accepted"
+              ? item.sessionTab !== null
+                ? "Accepted. The session that drafted it is carrying it out."
+                : "Accepted. The inbox watcher (or /inbox-execute) will carry it out and mark it done."
+              : "Closed."}
+          </p>
+        )}
+      </div>
     </article>
   );
 }

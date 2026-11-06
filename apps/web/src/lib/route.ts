@@ -106,10 +106,16 @@ export interface BoardRoute {
   item: string | null;
 }
 
-/** The inbox: the id of the selected item, or `null` for the first one. */
+/**
+ * The inbox: the selected item — an inbox item's id, or `<project>/<bead>`
+ * for a board review listed in Needs me — or `null` for the first one; and
+ * the source filter (`review`, or an inbox source such as `gmail`), or
+ * `null` for all (unify-review-queues).
+ */
 export interface InboxRoute {
   view: "inbox";
   item: string | null;
+  source?: string | null;
 }
 
 /** Every addressable view. A future view widens this union. */
@@ -230,7 +236,9 @@ export function parseRoute(pathname: string, search: string): Route | null {
     return boardRouteFromSearch(search);
   }
   if (path === INBOX_VIEW_PATH) {
-    return { view: "inbox", item: nonEmpty(new URLSearchParams(search).get("item")) };
+    const params = new URLSearchParams(search);
+    const source = nonEmpty(params.get("source"));
+    return source === null ? { view: "inbox", item: nonEmpty(params.get("item")) } : { view: "inbox", item: nonEmpty(params.get("item")), source };
   }
   return null;
 }
@@ -257,8 +265,13 @@ export function formatRoute(route: Route): string {
       return formatTimelineRoute(route);
     case "board":
       return formatBoardRoute(route);
-    case "inbox":
-      return route.item === null ? INBOX_VIEW_PATH : `${INBOX_VIEW_PATH}?${new URLSearchParams({ item: route.item }).toString()}`;
+    case "inbox": {
+      const params = new URLSearchParams();
+      if (route.item !== null) params.set("item", route.item);
+      if (route.source != null) params.set("source", route.source);
+      const query = params.toString();
+      return query === "" ? INBOX_VIEW_PATH : `${INBOX_VIEW_PATH}?${query}`;
+    }
   }
 }
 

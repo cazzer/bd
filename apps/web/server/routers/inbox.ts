@@ -18,6 +18,8 @@ import {
   listInbox,
   MAX_INBOX_FEEDBACK_LENGTH,
   REVIEW_PANE_PATTERN,
+  releaseInboxItem,
+  REVIEW_OPTION_ID_PATTERN,
   requestInboxItem,
   type DecideInboxItemResult,
   type InboxItem,
@@ -63,14 +65,16 @@ export const inboxDecisionInputSchema = z.object({
     .refine((m) => !REFUSED_MESSAGE_CHARS.test(m), "must not contain control characters (other than newline and tab) or bidirectional override characters")
     .max(MAX_INBOX_FEEDBACK_LENGTH)
     .default(""),
+  /** For an accept on a card with options: the option chosen (the server checks the stored card offers it). */
+  option: z.string().regex(REVIEW_OPTION_ID_PATTERN).optional(),
 });
 
 /** What the live session that queued the item is told: the decision, the note, and the one command that closes the loop. */
-export function inboxNotifyText(result: DecideInboxItemResult, message: string): string {
+export function inboxNotifyText(result: DecideInboxItemResult, message: string, option?: string): string {
   const note = message.trim() === "" ? "" : ` Note: ${message.trim()}`;
   switch (result.after) {
     case "accepted":
-      return `[inbox] Accepted: "${result.title}".${note} Carry it out now, then run: inbox done ${result.id} "<what you did, with link>"`;
+      return `[inbox] Accepted${option === undefined ? "" : ` option ${option}`}: "${result.title}".${note} Carry it out now, then run: inbox done ${result.id} "<what you did, with link>"`;
     case "changes":
       return `[inbox] Changes requested on "${result.title}":${note} Revise the draft and re-queue it with the same --key (inbox request).`;
     default:
@@ -86,7 +90,7 @@ const inboxDecisionProcedure = publicProcedure.input(inboxDecisionInputSchema).m
   }
   let result: DecideInboxItemResult;
   try {
-    result = await decideInboxItem(ctx.db, input.id, { decision: input.decision, message: input.message });
+    result = await decideInboxItem(ctx.db, input.id, { decision: input.decision, message: input.message, ...(input.option === undefined ? {} : { option: input.option }) });
   } catch (err) {
     throw mapCoreError("inboxDecision", err);
   }
@@ -94,13 +98,26 @@ const inboxDecisionProcedure = publicProcedure.input(inboxDecisionInputSchema).m
   let notified: Notified = { ok: false, reason: "the item was not queued from a live session" };
   if (result.pane !== null && REVIEW_PANE_PATTERN.test(result.pane) && result.socket !== null && isReviewSocketPath(result.socket) && ctx.runHerdr !== undefined) {
     try {
-      await ctx.runHerdr(["agent", "prompt", result.pane, inboxNotifyText(result, input.message)], result.socket);
+      await ctx.runHerdr(["agent", "prompt", result.pane, inboxNotifyText(result, input.message, input.option)], result.socket);
       notified = { ok: true, pane: result.pane };
     } catch (err) {
       notified = { ok: false, reason: err instanceof Error && err.message !== "" ? err.message : "herdr failed" };
     }
   }
   return { ...result, notified };
+});
+
+/** Moves an undigested item to Needs me as it is (the person will decide without the agent's reading); recorded as `release`. */
+const inboxReleaseProcedure = publicProcedure.input(z.object({ id: z.string().uuid() })).mutation(async ({ ctx, input }) => {
+  if (ctx.readOnly) {
+    throw new TRPCError({ code: "FORBIDDEN", message: "The server is read-only (BRAIN_READ_ONLY); releasing an item is refused." });
+  }
+  try {
+    const result = await releaseInboxItem(ctx.db, input.id);
+    return { id: result.id, before: result.before, after: result.after };
+  } catch (err) {
+    throw mapCoreError("inboxRelease", err);
+  }
 });
 
 export const inboxRequestInputSchema = z.object({
@@ -183,6 +200,7 @@ export const inboxRouter = router({
   inboxFocusSession: inboxFocusSessionProcedure,
   inbox: inboxProcedure,
   inboxDecision: inboxDecisionProcedure,
+  inboxRelease: inboxReleaseProcedure,
   inboxRequest: inboxRequestProcedure,
   inboxComplete: inboxCompleteProcedure,
 });

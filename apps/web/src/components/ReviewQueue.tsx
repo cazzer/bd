@@ -126,6 +126,11 @@ function useReviewQueueContext(): ReviewQueueContextValue {
   return value;
 }
 
+/** The shell's live review queue, for a view that lists reviews itself (the inbox's Needs me). */
+export function useReviewQueue(): ReviewQueueState {
+  return useReviewQueueContext().queue;
+}
+
 export interface ShellDrawerState {
   /** Whether the shell's queue drawer is open; a view pads itself clear of it from `sm` up. */
   open: boolean;

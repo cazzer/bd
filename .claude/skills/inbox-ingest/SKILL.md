@@ -17,13 +17,13 @@ If the person named specific sources ("just Asana"), ingest only those.
 
 ## Steps
 
-1. **Load what's already there.** `brain_list` with `nodeTypes: ["inbox_item"]` and `where: [{ key: "status", op: "oneOf", values: ["pending", "changes", "accepted"] }]` (page through with the cursor). Keep a map of `externalId → {id, status, feedback}`. Items with status `changes` need revising (step 5), not re-triaging. Items with status `session` are with an interactive session the person opened: leave them alone (don't re-triage, don't close them), and skip any `changes` item that has a `pane`, since its session revises it.
+1. **Load what's already there.** `brain_list` with `nodeTypes: ["inbox_item"]` and `where: [{ key: "status", op: "oneOf", values: ["pending", "changes", "accepted", "undigested"] }]` (page through with the cursor). Keep a map of `externalId → {id, status, feedback}`. Items with status `changes` need revising (step 5), not re-triaging. Items with status `undigested` are held because no one read their artifact yet: digest them first (step 4, "Digest before you write"). Items with status `session` are with an interactive session the person opened: leave them alone (don't re-triage, don't close them), and skip any `changes` item that has a `pane`, since its session revises it.
 2. **Pull each source** per its `enter` rule, through its connector. Keep it bounded: the last 14 days, at most ~50 signals per source.
 3. **Resolve each signal to its artifact key** (the dedupe):
    - A notification email from GitHub, Asana, Notion, or Google Docs is about that artifact. Key it as the artifact (`github:<owner>/<repo>#<n>`, `asana:task/<gid>`, `notion:page/<id>#discussion/<id>`, `gdoc:<fileId>#comment/<id>`), not as `gmail:thread/...`, and add the email to `links`.
    - Two signals with the same key are one item. Fold both into `links`.
    - A Fathom action item that matches an Asana task or PR already in the inbox (or in Asana) is `already_tracked`. Link it, don't create a duplicate.
-4. **Triage and write.** For each artifact that needs the person, `brain_write` one item (batch them, up to 50 per call):
+4. **Digest before you write.** Before writing an item, open its primary artifact through the connector and read it: the PR's diff (not just its description), the doc's body, the full thread, the meeting's transcript (not just the recap). Record each thing you opened in `metadata.read` as `{ ref: <url>, depth: "full" | "skimmed" }`. An item whose `url` no `read` entry covers is stored as **undigested** and kept out of the person's Needs me, so "I haven't read the diff" never reaches them. If you can't open it (access denied, attachment), say why in one line of Context and list what you could see at depth `skimmed`. Then **triage and write.** For each artifact that needs the person, `brain_write` one item (batch them, up to 50 per call):
    - `nodeType: "inbox_item"`, `sourceSystem: "inbox"`, `externalId`: the artifact key.
    - `title`: short and specific, what the decision is about ("Reply to Todd on Chromebox alpha devices", not "Slack message").
    - `content`: markdown in this shape:
@@ -39,7 +39,8 @@ If the person named specific sources ("just Asana"), ingest only those.
      <only what the person needs to decide: quotes, related tickets, open questions>
      ```
      Write drafts in the person's voice (their `writing-style.md`/CLAUDE.md voice guide if loaded). Name anything you couldn't confirm.
-   - `metadata`: `source`, `url` (the artifact), `from`, `action` (`reply`, `create_task`, `comment`, `review`, `update`, `decide`, `ignore`), `priority` (0 urgent … 4 whenever; due today or blocking someone = 1), `links` (every signal, `{label, url}`), `occurred_at` (when the signal arrived). Carry `status` and `feedback` forward unchanged for existing items. The write tool also protects them, but don't rely on it.
+   - `metadata`: `source`, `url` (the artifact), `read` (what you opened, see above), `from`, `action` (`reply`, `create_task`, `comment`, `review`, `update`, `decide`, `ignore`), `priority` (0 urgent … 4 whenever; due today or blocking someone = 1), `links` (every signal, `{label, url}`), `occurred_at` (when the signal arrived). Carry `status` and `feedback` forward unchanged for existing items. The write tool also protects them, but don't rely on it.
+   - **A card when there's a real choice.** A batch, or a decision with two to six distinct ways to go, also gets the decision card keys: `question` (≤140 chars, decision-shaped), `options` (`[{ id, label, what?, risk? }]`, ids like `track`/`ignore`), `recommend` (one option id), and `on_accept` (the steps you'll take). The person then accepts an option by name, and the executor gets it in the feedback. A reply draft or a single proposed action stays a plain item: no card.
    - Nothing worth doing (FYI, newsletters, automated noise)? Don't write it.
 5. **Revise items sent back.** For each item with status `changes`, read the latest `feedback` message, rewrite `content` (and `action` if needed) to address it, and write it with `status: "pending"`, keeping `feedback` as is.
 6. **Close what resolved at the source.** For an open item whose `exit` rule now holds (email archived, task completed, thread resolved, PR reviewed), write it with `status: "done"`.
@@ -49,7 +50,7 @@ If the person named specific sources ("just Asana"), ingest only those.
 
 Fathom recaps over-report. They call discussion a "decision" and raise things already tracked. For each recent meeting the person attended:
 
-1. Write one **batch** item: `externalId: "fathom:<recordingId>"`, `action: "decide"`, content = a two-line meeting summary.
+1. Fetch the meeting's **transcript**, not only the recap, and list it in `read` (`{ ref: <fathom call url>, depth: "full" }`). Then write one **batch** item: `externalId: "fathom:<recordingId>"`, `action: "decide"`, content = a two-line meeting summary, and a card: `question: "Track or ignore <n> action items from <meeting>?"`, options `track` / `ignore`, recommending what the verdicts say.
 2. For each recap action item or decision, write a **candidate** (`externalId: "fathom:<recordingId>#<n>"`) with a `verdict`:
    - `already_tracked`: put the existing Asana task, PR, or thread in `links`. `action: "ignore"`.
    - `not_actionable`: discussion, not a commitment. `action: "ignore"`.

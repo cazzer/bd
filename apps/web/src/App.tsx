@@ -151,7 +151,7 @@ function renderView(route: Route) {
     case "inbox":
       return (
         <Suspense fallback={LOADING_VIEW}>
-          <InboxView key="inbox" item={route.item} />
+          <InboxView key="inbox" item={route.item} source={route.source ?? null} />
         </Suspense>
       );
   }

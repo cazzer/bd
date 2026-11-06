@@ -23,7 +23,7 @@
 // own stderr via `console.error` below, for whoever is running this
 // locally to read — never sent to the client.
 
-import { InboxDecisionConflictError, InvalidInboxItemError, NotAnInboxItemError } from "@breakdown/core";
+import { InboxCardChangedError, InboxDecisionConflictError, InvalidInboxItemError, NotAnInboxItemError } from "@breakdown/core";
 import {
   asPgError,
   ContentTooLargeError,
@@ -146,6 +146,9 @@ export function mapCoreError(procedureName: string, err: unknown): TRPCError {
   }
   if (err instanceof InvalidInboxItemError) {
     return actionable("BAD_REQUEST", err, "Fix that field and retry.");
+  }
+  if (err instanceof InboxCardChangedError) {
+    return actionable("CONFLICT", err, "Read the current card and decide again.");
   }
   if (err instanceof InboxDecisionConflictError) {
     return actionable("CONFLICT", err, "Reload the inbox; the item has moved on.");

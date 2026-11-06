@@ -22,6 +22,10 @@
 //   session   — handed to an interactive Claude session the person opened on
 //               it (herdr tab); the session re-queues a draft as pending, or
 //               closes it done itself
+//   undigested — held back from the person: the item has a primary `url`
+//               its agent did not declare reading (`read`); the next ingest
+//               pass digests it, or the person releases or dismisses it
+//               (unify-review-queues, inbox-digestion)
 //   dismissed — closed by the person, nothing to do
 //   done      — closed: the action ran (or the source resolved on its own)
 //
@@ -29,6 +33,14 @@
 // its candidates linked `child_of` it, the containment relation every other
 // hierarchy in the store uses. The queue lists top-level items; a parent's
 // candidates come with it.
+//
+// An item may carry a decision card (`question`, `options`, `recommend`,
+// `on_accept`) under the review card's rules (reviews.ts
+// `normalizeDecisionCard`); accepting a card with options names one, and
+// the feedback entry records it. `read` lists what the agent opened, each
+// `{ ref, depth: full | skimmed }`; it is declared, not verified — the app
+// cannot judge a reading — but an item whose `url` it does not cover is
+// written `undigested` instead of `pending` (carryForwardInboxDecisions).
 //
 // The app makes no model call: deciding is a pure Postgres write that
 // records the decision and flips the status. Carrying out an accepted action
@@ -38,6 +50,7 @@
 import { sql } from "drizzle-orm";
 import type { Database } from "@breakdown/db";
 import {
+  InboxCardChangedError,
   InboxDecisionConflictError,
   InvalidInboxItemError,
   InvalidLookupIdError,
@@ -48,6 +61,7 @@ import {
   NotAnInboxItemError,
 } from "./errors.js";
 import { normalizeOccurredAt } from "./event-time.js";
+import { normalizeDecisionCard, REVIEW_OPTION_ID_PATTERN, type ReviewOption } from "./reviews.js";
 import { closeIngestRun, openIngestRun } from "./ingest-runs.js";
 import {
   DEFAULT_MAX_CONTENT_LENGTH,
@@ -64,22 +78,35 @@ import { asPgError, formatPgInfo, sqlArray } from "./sql-helpers.js";
 
 export const INBOX_ITEM_NODE_TYPE = "inbox_item";
 export const INBOX_SOURCE_SYSTEM = "inbox";
-export const INBOX_STATUSES = ["pending", "changes", "accepted", "session", "dismissed", "done"] as const;
+export const INBOX_STATUSES = ["pending", "changes", "accepted", "session", "undigested", "dismissed", "done"] as const;
 export type InboxStatus = (typeof INBOX_STATUSES)[number];
 export const OPEN_INBOX_STATUSES: readonly InboxStatus[] = ["pending", "changes", "accepted", "session"];
 export const INBOX_DECISIONS = ["accept", "changes", "dismiss"] as const;
 export type InboxDecision = (typeof INBOX_DECISIONS)[number];
-/** What a feedback entry can record: the person's decisions, plus handing the item to an interactive session. */
-export const INBOX_FEEDBACK_KINDS = [...INBOX_DECISIONS, "session"] as const;
+/** What a feedback entry can record: the person's decisions, handing the item to an interactive session, and releasing an undigested item by hand. */
+export const INBOX_FEEDBACK_KINDS = [...INBOX_DECISIONS, "session", "release"] as const;
 export type InboxFeedbackKind = (typeof INBOX_FEEDBACK_KINDS)[number];
 /** Statuses an item can be handed to an interactive session from (session again: the earlier one was closed). */
-export const INBOX_HANDOFF_STATUSES: readonly InboxStatus[] = ["pending", "changes", "session"];
+export const INBOX_HANDOFF_STATUSES: readonly InboxStatus[] = ["pending", "changes", "session", "undigested"];
+/** Statuses the person can dismiss from: every open one, and an item held undigested. */
+export const INBOX_DISMISSABLE_STATUSES: readonly InboxStatus[] = [...OPEN_INBOX_STATUSES, "undigested"];
 
 export const MAX_INBOX_LINKS = 20;
 export const MAX_INBOX_FEEDBACK = 50;
 export const MAX_INBOX_FEEDBACK_LENGTH = 4000;
 export const MAX_INBOX_SHORT_TEXT = 200;
 export const MAX_INBOX_URL_LENGTH = 2000;
+export const MAX_INBOX_READ = 20;
+export const MAX_INBOX_READ_REF_LENGTH = 500;
+export const INBOX_READ_DEPTHS = ["full", "skimmed"] as const;
+export type InboxReadDepth = (typeof INBOX_READ_DEPTHS)[number];
+
+/** One artifact the agent declares it opened before writing the item. */
+export interface InboxRead {
+  /** A URL or a canonical key. */
+  ref: string;
+  depth: InboxReadDepth;
+}
 
 export interface InboxLink {
   label: string;
@@ -91,6 +118,8 @@ export interface InboxFeedback {
   message: string;
   /** `toISOString()` form. */
   at: string;
+  /** The card option an accept chose; present only then. */
+  option?: string;
 }
 
 export interface InboxItemFields {
@@ -115,6 +144,13 @@ export interface InboxItemFields {
   sessionTab: string | null;
   /** The herdr pane of the live session that owns the item (queued it, or was opened on it); such items are that session's to carry out. */
   pane: string | null;
+  /** The decision card's question; null when the item carries none (it reads as its title). */
+  question: string | null;
+  options: ReviewOption[];
+  recommend: string | null;
+  onAccept: string[];
+  /** What the agent declared it opened. */
+  read: InboxRead[];
 }
 
 const CONTROL_CHAR = /[\u0000-\u0008\u000b-\u001f\u007f]/;
@@ -199,6 +235,21 @@ export function normalizeInboxItemMetadata(raw: Record<string, unknown> | undefi
     };
   });
 
+  normalizeInboxCard(metadata, itemLabel);
+
+  const rawRead = metadata["read"] ?? [];
+  if (!Array.isArray(rawRead) || rawRead.length > MAX_INBOX_READ) {
+    throw new InvalidInboxItemError("read", rawRead, `must be an array of at most ${MAX_INBOX_READ} {ref, depth} objects`, itemLabel);
+  }
+  metadata["read"] = rawRead.map((entry, i): InboxRead => {
+    if (!isPlainObject(entry)) throw new InvalidInboxItemError(`read[${i}]`, entry, "must be a {ref, depth} object", itemLabel);
+    const depth = entry["depth"];
+    if (typeof depth !== "string" || !(INBOX_READ_DEPTHS as readonly string[]).includes(depth)) {
+      throw new InvalidInboxItemError(`read[${i}].depth`, depth, `must be one of ${INBOX_READ_DEPTHS.join(", ")}`, itemLabel);
+    }
+    return { ref: shortText(entry["ref"], `read[${i}].ref`, itemLabel, { required: true, max: MAX_INBOX_READ_REF_LENGTH })!, depth: depth as InboxReadDepth };
+  });
+
   const rawFeedback = metadata["feedback"] ?? [];
   if (!Array.isArray(rawFeedback)) {
     throw new InvalidInboxItemError("feedback", rawFeedback, "must be an array", itemLabel);
@@ -217,10 +268,59 @@ export function normalizeInboxItemMetadata(raw: Record<string, unknown> | undefi
     if (at === null || Number.isNaN(at.getTime())) {
       throw new InvalidInboxItemError(`feedback[${i}].at`, entry["at"], "must be an ISO-8601 timestamp", itemLabel);
     }
-    return { decision: decision as InboxFeedbackKind, message, at: at.toISOString() };
+    const option = entry["option"];
+    if (option !== undefined && option !== null && (typeof option !== "string" || !REVIEW_OPTION_ID_PATTERN.test(option))) {
+      throw new InvalidInboxItemError(`feedback[${i}].option`, option, `must be an option id matching ${REVIEW_OPTION_ID_PATTERN}`, itemLabel);
+    }
+    const base = { decision: decision as InboxFeedbackKind, message, at: at.toISOString() };
+    return typeof option === "string" ? { ...base, option } : base;
   });
 
   return metadata;
+}
+
+const CARD_KEYS = ["question", "options", "recommend", "on_accept"] as const;
+
+const CARD_KEY_REASON: Record<(typeof CARD_KEYS)[number], string> = {
+  question: "must be a string",
+  options: `must be 2 to 6 {id, label, what?, risk?} objects with unique ids matching ${REVIEW_OPTION_ID_PATTERN}`,
+  recommend: "must be the id of one of the item's options",
+  on_accept: "must be a list of at most 8 strings",
+};
+
+/** The card keys, through the review card's normalizer (in place); refused naming the first key that breaks it. Attachments are not an inbox card's. */
+function normalizeInboxCard(metadata: Record<string, unknown>, itemLabel: string | undefined): void {
+  const raw: Record<string, unknown> = {};
+  for (const key of CARD_KEYS) if (metadata[key] !== undefined) raw[key] = metadata[key];
+  const card = normalizeDecisionCard(raw);
+  if (card === null) {
+    const field = (["question", "options", "on_accept"] as const).find((k) => normalizeDecisionCard({ [k]: raw[k] }) === null) ?? "recommend";
+    throw new InvalidInboxItemError(field, raw[field], CARD_KEY_REASON[field], itemLabel);
+  }
+  for (const key of CARD_KEYS) {
+    if (card[key] === undefined) delete metadata[key];
+    else metadata[key] = card[key];
+  }
+}
+
+function withoutTrailingSlash(u: string): string {
+  return u.endsWith("/") ? u.slice(0, -1) : u;
+}
+
+/**
+ * Whether the item's declared reads cover its primary `url`: a `ref` equal
+ * to it, or under it (a PR's `/files`, a doc's `#heading`, a `?tab=`). An
+ * item without a `url` has nothing to cover. Normalized metadata.
+ */
+export function inboxItemDigested(metadata: Record<string, unknown>): boolean {
+  const primary = metadata["url"];
+  if (typeof primary !== "string") return true;
+  const base = withoutTrailingSlash(primary);
+  const read = (metadata["read"] as InboxRead[] | undefined) ?? [];
+  return read.some((r) => {
+    const ref = withoutTrailingSlash(r.ref);
+    return ref === base || ref.startsWith(`${base}/`) || ref.startsWith(`${base}#`) || ref.startsWith(`${base}?`);
+  });
 }
 
 /** The contract's fields read off already-normalized metadata. */
@@ -237,6 +337,11 @@ export function readInboxItemFields(metadata: Record<string, unknown>): InboxIte
     feedback: metadata["feedback"] as InboxFeedback[],
     sessionTab: typeof metadata["session_tab"] === "string" ? metadata["session_tab"] : null,
     pane: typeof metadata["pane"] === "string" ? metadata["pane"] : null,
+    question: (metadata["question"] as string | undefined) ?? null,
+    options: (metadata["options"] as ReviewOption[] | undefined) ?? [],
+    recommend: (metadata["recommend"] as string | undefined) ?? null,
+    onAccept: (metadata["on_accept"] as string[] | undefined) ?? [],
+    read: (metadata["read"] as InboxRead[] | undefined) ?? [],
   };
 }
 
@@ -359,6 +464,8 @@ export interface DecideInboxItemInput {
   decision: InboxDecision;
   /** Required for `changes`; optional otherwise. */
   message?: string;
+  /** For an accept: the card option chosen. Required when the stored card has options; refused when it does not offer it. */
+  option?: string;
   /** The decision's timestamp; defaults to now (tests pin it). */
   now?: Date;
 }
@@ -374,24 +481,43 @@ export interface DecideInboxItemResult {
   socket: string | null;
 }
 
-const NEXT_STATUS: Record<InboxDecision, InboxStatus> = { accept: "accepted", changes: "changes", dismiss: "dismissed" };
-
 /**
  * Records the person's decision on an inbox item and moves it to the next
  * turn: accept → accepted, changes → changes, dismiss → dismissed. Only a
  * `pending` item takes accept or changes; dismiss is taken from any open
- * status (the person can drop something an agent is still working on).
+ * status (the person can drop something an agent is still working on) and
+ * from undigested. An accept of an item whose card has options must name
+ * one the stored card offers (`InboxCardChangedError` otherwise: an agent
+ * rewrote the card after it was opened); the feedback entry records it.
  * Row-locked, written through the upsert path under a `human` ingest run,
  * so the revision trigger keeps the history. Pure Postgres.
  */
 export async function decideInboxItem(db: Database, id: string, input: DecideInboxItemInput): Promise<DecideInboxItemResult> {
-  const requestedId = typeof id === "string" ? id.trim() : "";
-  if (!UUID_RE.test(requestedId)) throw new InvalidLookupIdError(id, "must be a valid uuid");
   if (!(INBOX_DECISIONS as readonly string[]).includes(input.decision)) {
     throw new InvalidInboxItemError("decision", input.decision, `must be one of ${INBOX_DECISIONS.join(", ")}`);
   }
+  if (input.option !== undefined && input.decision !== "accept") {
+    throw new InvalidInboxItemError("option", input.option, "is taken only with accept");
+  }
+  return writeInboxFeedback(db, id, input.decision, input);
+}
+
+/**
+ * Moves an undigested item to pending as it is, on the person's say-so (the
+ * agent could not open its artifact, and the person will decide anyway),
+ * recording a `release` feedback entry. Refuses any other status.
+ */
+export async function releaseInboxItem(db: Database, id: string, input: { message?: string; now?: Date } = {}): Promise<DecideInboxItemResult> {
+  return writeInboxFeedback(db, id, "release", input);
+}
+
+const NEXT_AFTER: Record<InboxDecision | "release", InboxStatus> = { ...{ accept: "accepted", changes: "changes", dismiss: "dismissed" }, release: "pending" };
+
+async function writeInboxFeedback(db: Database, id: string, kind: InboxDecision | "release", input: { message?: string; option?: string; now?: Date }): Promise<DecideInboxItemResult> {
+  const requestedId = typeof id === "string" ? id.trim() : "";
+  if (!UUID_RE.test(requestedId)) throw new InvalidLookupIdError(id, "must be a valid uuid");
   const message = (input.message ?? "").trim();
-  if (input.decision === "changes" && message === "") {
+  if (kind === "changes" && message === "") {
     throw new InvalidInboxItemError("message", input.message, "is required when requesting changes — say what needs to change");
   }
   if (message.length > MAX_INBOX_FEEDBACK_LENGTH) {
@@ -417,11 +543,18 @@ export async function decideInboxItem(db: Database, id: string, input: DecideInb
 
       const current = normalizeInboxItemMetadata(normalizeOccurredAt(existing.metadata));
       const before = current["status"] as InboxStatus;
-      const allowed = input.decision === "dismiss" ? OPEN_INBOX_STATUSES.includes(before) : before === "pending";
+      const allowed = kind === "dismiss" ? INBOX_DISMISSABLE_STATUSES.includes(before) : kind === "release" ? before === "undigested" : before === "pending";
       if (!allowed) throw new InboxDecisionConflictError(existing.id, before);
+      if (kind === "accept") {
+        const offered = (current["options"] as ReviewOption[] | undefined) ?? [];
+        if (input.option === undefined ? offered.length > 0 : !offered.some((o) => o.id === input.option)) {
+          throw new InboxCardChangedError(existing.id, input.option ?? null);
+        }
+      }
 
-      const after = NEXT_STATUS[input.decision];
-      const feedback = [...(current["feedback"] as InboxFeedback[]), { decision: input.decision, message, at: (input.now ?? new Date()).toISOString() }];
+      const after = NEXT_AFTER[kind];
+      const entry: InboxFeedback = { decision: kind, message, at: (input.now ?? new Date()).toISOString(), ...(input.option === undefined ? {} : { option: input.option }) };
+      const feedback = [...(current["feedback"] as InboxFeedback[]), entry];
       const { needs_you: _handedBack, ...rest } = current;
       const metadata = normalizeInboxItemMetadata({ ...rest, status: after, feedback });
 
@@ -464,7 +597,7 @@ const SETTLED_BY_PERSON: readonly InboxStatus[] = ["accepted", "dismissed", "don
  * executing) is the agent's to set. Pure; both inputs normalized.
  */
 export function carryForwardInboxDecisions(incoming: Record<string, unknown>, stored: Record<string, unknown> | null): Record<string, unknown> {
-  if (stored === null) return incoming;
+  if (stored === null) return withDigestion({ ...incoming });
   const merged = { ...incoming };
   const storedFeedback = (stored["feedback"] as InboxFeedback[] | undefined) ?? [];
   if (((incoming["feedback"] as InboxFeedback[] | undefined) ?? []).length < storedFeedback.length) merged["feedback"] = storedFeedback;
@@ -483,7 +616,16 @@ export function carryForwardInboxDecisions(incoming: Record<string, unknown>, st
     }
     if (merged["session_tab"] === undefined && stored["session_tab"] !== undefined) merged["session_tab"] = stored["session_tab"];
   }
-  return merged;
+  // A new item, or one still held, is pending only once digested; a stored
+  // item the person already has (pending, or further on) is never pulled
+  // back to undigested by a re-write.
+  return stored["status"] === "undigested" ? withDigestion(merged) : merged;
+}
+
+/** pending ↔ undigested by whether the declared reads cover the item's `url`; any other status as written. */
+function withDigestion(metadata: Record<string, unknown>): Record<string, unknown> {
+  if (metadata["status"] === "pending" || metadata["status"] === "undigested") metadata["status"] = inboxItemDigested(metadata) ? "pending" : "undigested";
+  return metadata;
 }
 
 /** Stored metadata of the inbox items these (source system, external id) pairs name, keyed `${sourceSystem}\u0000${externalId}`; contract-breaking rows are skipped. */
@@ -532,7 +674,7 @@ export interface RequestInboxItemInput {
  * contract and same re-ingest protection as brain_write; attributed to an
  * `agent` ingest run so the write is identifiable and revertible.
  */
-export async function requestInboxItem(db: Database, input: RequestInboxItemInput): Promise<{ id: string; action: string; ingestRunId: string }> {
+export async function requestInboxItem(db: Database, input: RequestInboxItemInput): Promise<{ id: string; action: string; ingestRunId: string; status: InboxStatus }> {
   const itemLabel = `(${INBOX_SOURCE_SYSTEM}/${input.externalId})`;
   const incoming = normalizeInboxItemMetadata(normalizeOccurredAt(input.metadata, { itemLabel }), { itemLabel });
   const stored = await loadStoredInboxMetadata(db, [{ sourceSystem: INBOX_SOURCE_SYSTEM, externalId: input.externalId }]);
@@ -550,7 +692,7 @@ export async function requestInboxItem(db: Database, input: RequestInboxItemInpu
     }
     const row = written.rows[0];
     if (!row) throw new NodeUpsertFailedError(`requestInboxItem: upsert returned no row for ${input.externalId}`, 0, 0);
-    return { id: row.id, action: row.action, ingestRunId: run.id };
+    return { id: row.id, action: row.action, ingestRunId: run.id, status: metadata["status"] as InboxStatus };
   } finally {
     await closeIngestRun(db, run);
   }

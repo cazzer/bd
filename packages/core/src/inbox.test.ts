@@ -2,8 +2,20 @@ import { sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Database } from "@breakdown/db";
 import { upsertEdges } from "./edges.js";
-import { InboxDecisionConflictError, InvalidInboxItemError, NotAnInboxItemError } from "./errors.js";
-import { carryForwardInboxDecisions, completeInboxItem, decideInboxItem, handOffInboxItem, requestInboxItem, INBOX_ITEM_NODE_TYPE, listInbox, loadStoredInboxMetadata, normalizeInboxItemMetadata } from "./inbox.js";
+import { InboxCardChangedError, InboxDecisionConflictError, InvalidInboxItemError, NotAnInboxItemError } from "./errors.js";
+import {
+  carryForwardInboxDecisions,
+  completeInboxItem,
+  decideInboxItem,
+  handOffInboxItem,
+  inboxItemDigested,
+  releaseInboxItem,
+  requestInboxItem,
+  INBOX_ITEM_NODE_TYPE,
+  listInbox,
+  loadStoredInboxMetadata,
+  normalizeInboxItemMetadata,
+} from "./inbox.js";
 import { closeIngestRun, openIngestRun, type IngestRunHandle } from "./ingest-runs.js";
 import { upsertNodes } from "./nodes.js";
 import { connectTestDb, type TestPool, uniqueSuffix } from "./test-helpers.js";
@@ -40,7 +52,7 @@ afterAll(async () => {
 
 describe("normalizeInboxItemMetadata", () => {
   it("defaults status, action, priority, links, and feedback", () => {
-    expect(normalizeInboxItemMetadata({ source: "Gmail" })).toEqual({ source: "gmail", status: "pending", action: "none", priority: 2, links: [], feedback: [] });
+    expect(normalizeInboxItemMetadata({ source: "Gmail" })).toEqual({ source: "gmail", status: "pending", action: "none", priority: 2, links: [], read: [], feedback: [] });
   });
 
   it("keeps unknown keys and is idempotent", () => {
@@ -186,5 +198,108 @@ describe("handing an item to an interactive session", () => {
     await handOffInboxItem(db, open, { pane: "w9:p2", socket: "/tmp/herdr.sock", tab: "w9:t2" });
     await completeInboxItem(db, open, "answered in the session");
     expect((await mine()).find((i) => i.id === open)?.status).toBe("done");
+  });
+});
+
+const PR = "https://github.com/acme/app/pull/971";
+const CARD = {
+  question: "Track or ignore these action items?",
+  options: [
+    { id: "track", label: "Track them" },
+    { id: "ignore", label: "Ignore", risk: "lose a real ask" },
+  ],
+  recommend: "ignore",
+  on_accept: ["close the batch"],
+};
+
+describe("inbox decision cards", () => {
+  it("normalizes a card through the review card rules and reads it as fields", () => {
+    const meta = normalizeInboxItemMetadata({ source: "fathom", ...CARD, question: "  Track or ignore these action items?  " });
+    expect(meta).toMatchObject(CARD);
+    expect(normalizeInboxItemMetadata(meta)).toEqual(meta);
+  });
+
+  it("refuses a broken card naming the field", () => {
+    expect(() => normalizeInboxItemMetadata({ source: "x", ...CARD, recommend: "C" }, { itemLabel: "(inbox/k)" })).toThrow(/\(inbox\/k\): recommend/);
+    expect(() => normalizeInboxItemMetadata({ source: "x", options: [{ id: "A", label: "a" }] })).toThrow(/: options/);
+    expect(() => normalizeInboxItemMetadata({ source: "x", on_accept: "do it" })).toThrow(/: on_accept/);
+    expect(() => normalizeInboxItemMetadata({ source: "x", question: 4 })).toThrow(/: question/);
+  });
+
+  it("accepts with an offered option, records it, and refuses one the card does not offer", async () => {
+    const id = await write("fathom:card/1", { source: "fathom", ...CARD });
+    await expect(decideInboxItem(db, id, { decision: "accept" })).rejects.toThrow(InboxCardChangedError);
+    await expect(decideInboxItem(db, id, { decision: "accept", option: "B" })).rejects.toThrow(/does not offer option "B"/);
+    await expect(decideInboxItem(db, id, { decision: "changes", message: "x", option: "track" })).rejects.toThrow(/only with accept/);
+    expect(await decideInboxItem(db, id, { decision: "accept", option: "track" })).toMatchObject({ after: "accepted" });
+    const item = (await mine()).find((i) => i.id === id)!;
+    expect(item.feedback.at(-1)).toMatchObject({ decision: "accept", option: "track" });
+    expect(item).toMatchObject({ question: CARD.question, recommend: "ignore", onAccept: ["close the batch"] });
+  });
+
+  it("keeps a plain item's accept as before, and refuses an option on it", async () => {
+    const id = await write("gmail:card/2", { source: "gmail" });
+    await expect(decideInboxItem(db, id, { decision: "accept", option: "A" })).rejects.toThrow(/changed since it was opened|does not offer/);
+    expect(await decideInboxItem(db, id, { decision: "accept" })).toMatchObject({ after: "accepted" });
+    const item = (await mine()).find((i) => i.id === id)!;
+    expect(item.feedback.at(-1)!.option).toBeUndefined();
+    expect(item).toMatchObject({ question: null, options: [], recommend: null, onAccept: [] });
+  });
+});
+
+describe("inbox digestion", () => {
+  it("normalizes read and refuses a bad entry", () => {
+    expect(normalizeInboxItemMetadata({ source: "github", read: [{ ref: `${PR}/files`, depth: "full" }] })["read"]).toEqual([{ ref: `${PR}/files`, depth: "full" }]);
+    expect(() => normalizeInboxItemMetadata({ source: "github", read: [{ ref: PR, depth: "glanced" }] })).toThrow(/read\[0\]\.depth/);
+    expect(() => normalizeInboxItemMetadata({ source: "github", read: [{ depth: "full" }] })).toThrow(/read\[0\]\.ref/);
+  });
+
+  it("covers the url by an equal ref or one under it, not a sibling", () => {
+    const meta = (read: string[]) => normalizeInboxItemMetadata({ source: "github", url: PR, read: read.map((ref) => ({ ref, depth: "full" })) });
+    expect(inboxItemDigested(meta([PR]))).toBe(true);
+    expect(inboxItemDigested(meta([`${PR}/files`]))).toBe(true);
+    expect(inboxItemDigested(meta([`${PR}/`]))).toBe(true);
+    expect(inboxItemDigested(meta([`${PR}0`]))).toBe(false);
+    expect(inboxItemDigested(meta([]))).toBe(false);
+    expect(inboxItemDigested(normalizeInboxItemMetadata({ source: "session" }))).toBe(true);
+  });
+
+  it("holds a new item that skipped its url, releases it on a covering re-write, and never pulls a pending one back", () => {
+    const skipped = normalizeInboxItemMetadata({ source: "github", url: PR });
+    const read = normalizeInboxItemMetadata({ source: "github", url: PR, read: [{ ref: `${PR}/files`, depth: "full" }] });
+    expect(carryForwardInboxDecisions(skipped, null)["status"]).toBe("undigested");
+    expect(carryForwardInboxDecisions(read, null)["status"]).toBe("pending");
+    const held = { ...skipped, status: "undigested" };
+    expect(carryForwardInboxDecisions(skipped, held)["status"]).toBe("undigested");
+    expect(carryForwardInboxDecisions(read, held)["status"]).toBe("pending");
+    expect(carryForwardInboxDecisions(skipped, read)["status"]).toBe("pending");
+    expect(carryForwardInboxDecisions({ ...skipped, status: "changes" }, null)["status"]).toBe("changes");
+  });
+
+  it("holds a session-queued PR it did not read, lists it only on request, and lets the person release or dismiss it", async () => {
+    const key = `session:digest-${SRC}`;
+    const queued = await requestInboxItem(db, { externalId: key, title: "Review #971", content: "I haven't read the diff.", metadata: { source: "github", url: PR, action: "review" } });
+    try {
+      expect((await listInbox(db, { ids: [queued.id] })).items).toHaveLength(0);
+      const [held] = (await listInbox(db, { ids: [queued.id], statuses: ["undigested"] })).items;
+      expect(held!.status).toBe("undigested");
+      await expect(decideInboxItem(db, queued.id, { decision: "accept" })).rejects.toThrow(InboxDecisionConflictError);
+      expect(await releaseInboxItem(db, queued.id)).toMatchObject({ before: "undigested", after: "pending" });
+      const [released] = (await listInbox(db, { ids: [queued.id] })).items;
+      expect(released!.feedback.at(-1)!.decision).toBe("release");
+      await expect(releaseInboxItem(db, queued.id)).rejects.toThrow(InboxDecisionConflictError);
+
+      const again = await requestInboxItem(db, { externalId: `${key}-2`, title: "Review #972", content: "x", metadata: { source: "github", url: `${PR}2` } });
+      expect(await decideInboxItem(db, again.id, { decision: "dismiss" })).toMatchObject({ before: "undigested", after: "dismissed" });
+      const digested = await requestInboxItem(db, {
+        externalId: `${key}-2`,
+        title: "Review #972",
+        content: "Read the diff: two issues.",
+        metadata: { source: "github", url: `${PR}2`, read: [{ ref: `${PR}2/files`, depth: "full" }] },
+      });
+      expect((await listInbox(db, { ids: [digested.id], statuses: ["dismissed"] })).items).toHaveLength(1);
+    } finally {
+      await db.execute(sql`DELETE FROM nodes WHERE source_system = 'inbox' AND external_id IN (${key}, ${`${key}-2`})`);
+    }
   });
 });
