@@ -5,7 +5,7 @@
 
 import type { Database } from "@breakdown/db";
 import type { BeadsWatcher } from "./beads-watcher.js";
-import type { RunHerdrJson } from "./inbox-session.js";
+import type { RunHerdrJson } from "./herdr-session.js";
 import type { ReviewWriter, RunHerdr } from "./review-writer.js";
 
 export interface Context {

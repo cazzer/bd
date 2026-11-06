@@ -2,7 +2,8 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { openInboxSession, resolveHerdrSocket, resolveSessionCwd, sessionPromptText, type RunHerdrJson, type SessionItem } from "./inbox-session.js";
+import { resolveHerdrSocket, type RunHerdrJson } from "./herdr-session.js";
+import { openInboxSession, resolveSessionCwd, sessionPromptText, type SessionItem } from "./inbox-session.js";
 
 const item: SessionItem = {
   id: "9d4b4417-590f-4624-9481-61de549bf20f",

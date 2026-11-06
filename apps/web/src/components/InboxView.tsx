@@ -15,8 +15,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { navigate } from "../lib/navigate.js";
 import { trpc } from "../trpc.js";
-import { MarkdownEditor } from "./MarkdownEditor.js";
-import { MarkdownRenderBoundary } from "./MarkdownRenderBoundary.js";
+import { EvidenceView } from "./EvidenceView.js";
 import { ReviewQueuePill } from "./ReviewQueue.js";
 
 type InboxResult = Awaited<ReturnType<typeof trpc.inbox.query>>;
@@ -347,9 +346,8 @@ function Detail({ item, parent, candidates, now, changesBox, onDecide, onSelect,
 
       {item.content.trim() !== "" && (
         <div className="glass p-4 text-sm">
-          <MarkdownRenderBoundary rawContent={item.content}>
-            <MarkdownEditor key={`${item.id}:${item.updatedAt}`} initialContent={item.content} editable={false} ariaLabel={`${item.title} details`} />
-          </MarkdownRenderBoundary>
+          {/* The review cards' read-only renderer: GFM tables, mermaid diagrams, and diffs in a draft render as such. */}
+          <EvidenceView key={`${item.id}:${item.updatedAt}`} markdown={item.content} />
         </div>
       )}
 

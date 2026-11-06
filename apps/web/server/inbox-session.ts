@@ -9,65 +9,12 @@
 // between the person and that session; it reports back through `inbox
 // request` (a draft for approval) or `inbox done`.
 
-import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
-import { randomBytes } from "node:crypto";
+import { openAgentSession, type OpenedSession, type RunHerdrJson } from "./herdr-session.js";
 
-/** Runs one herdr command against a server socket and returns its parsed JSON `result`. */
-export type RunHerdrJson = (args: readonly string[], socket: string, timeoutMs?: number) => Promise<Record<string, unknown>>;
-
-const DEFAULT_TIMEOUT_MS = 15_000;
-/** `agent start` waits until Claude is ready for input; herdr's own default is 30 s. */
-export const AGENT_START_TIMEOUT_MS = 45_000;
 export const SESSION_WORKSPACE_LABEL = "inbox";
-const SHELL_READY_ATTEMPTS = 20;
-const SHELL_READY_DELAY_MS = 500;
-
-function herdrError(stderr: string, stdout: string): string | null {
-  for (const text of [stderr, stdout]) {
-    for (const line of text.split("\n").reverse()) {
-      try {
-        const parsed = JSON.parse(line) as { error?: { message?: unknown; code?: unknown } };
-        const message = parsed.error?.message;
-        if (typeof message === "string" && message.trim() !== "") return message.trim();
-      } catch {
-        // not JSON
-      }
-    }
-  }
-  const said = stderr.trim();
-  return said === "" ? null : said.slice(0, 300);
-}
-
-export function createHerdrJsonRunner(command = "herdr"): RunHerdrJson {
-  return (args, socket, timeoutMs = DEFAULT_TIMEOUT_MS) =>
-    new Promise((resolve, reject) => {
-      execFile(command, [...args], { env: { ...process.env, HERDR_SOCKET_PATH: socket }, timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024, encoding: "utf8" }, (err, stdout, stderr) => {
-        if (err) {
-          const e = err as NodeJS.ErrnoException & { killed?: boolean };
-          if (e.code === "ENOENT") return reject(new Error("herdr not found on PATH"));
-          if (e.killed) return reject(new Error(`herdr ${args[0]} ${args[1] ?? ""} timed out`));
-          return reject(new Error(herdrError(stderr, stdout) ?? `herdr ${args[0]} ${args[1] ?? ""} failed`));
-        }
-        try {
-          const parsed = JSON.parse(stdout) as { result?: unknown };
-          resolve(typeof parsed.result === "object" && parsed.result !== null ? (parsed.result as Record<string, unknown>) : {});
-        } catch {
-          resolve({});
-        }
-      });
-    });
-}
-
-/** The herdr server socket: the one the web server was started under, else herdr's default path when it exists. */
-export function resolveHerdrSocket(env: NodeJS.ProcessEnv = process.env, home = homedir()): string | null {
-  const fromEnv = env["HERDR_SOCKET_PATH"];
-  if (typeof fromEnv === "string" && path.isAbsolute(fromEnv)) return fromEnv;
-  const fallback = path.join(home, ".config", "herdr", "herdr.sock");
-  return existsSync(fallback) ? fallback : null;
-}
 
 /** Where sessions start: the directory holding the breakdown checkout (where a person keeps their repos), else home. */
 export function resolveSessionCwd(start = process.cwd(), home = homedir()): string {
@@ -107,70 +54,19 @@ export function sessionPromptText(item: SessionItem): string {
   ].join("\n");
 }
 
-function tabLabel(title: string): string {
-  const t = title.replace(/\s+/g, " ").trim();
-  return t.length > 28 ? `${t.slice(0, 27)}…` : t || "inbox item";
-}
-
-function str(value: unknown, at: string): string {
-  if (typeof value !== "string" || value === "") throw new Error(`herdr returned no ${at}`);
-  return value;
-}
-
-function obj(value: unknown): Record<string, unknown> {
-  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
-}
-
-export interface OpenedSession {
-  workspace: string;
-  tab: string;
-  pane: string;
-  agent: string;
-}
-
 /**
- * Opens a tab for the item in the "inbox" workspace (creating the workspace
- * the first time), starts Claude in it, gives it the item, and focuses it.
+ * Opens a tab for the item in the "inbox" workspace (created the first
+ * time), starts Claude in it, gives it the item, and focuses it
+ * (herdr-session.ts does the herdr side).
  */
 export async function openInboxSession(run: RunHerdrJson, socket: string, item: SessionItem, options: { cwd: string; kind?: string; retryDelayMs?: number }): Promise<OpenedSession> {
-  const listed = await run(["workspace", "list"], socket);
-  const workspaces = Array.isArray(listed["workspaces"]) ? (listed["workspaces"] as Record<string, unknown>[]) : [];
-  const existing = workspaces.find((w) => w["label"] === SESSION_WORKSPACE_LABEL);
-
-  let workspace: string;
-  let tab: string;
-  let pane: string;
-  if (existing === undefined) {
-    const created = await run(["workspace", "create", "--label", SESSION_WORKSPACE_LABEL, "--cwd", options.cwd, "--focus"], socket);
-    workspace = str(obj(created["workspace"])["workspace_id"], "workspace id");
-    tab = str(obj(created["tab"])["tab_id"], "tab id");
-    pane = str(obj(created["root_pane"])["pane_id"], "pane id");
-    await run(["tab", "rename", tab, tabLabel(item.title)], socket).catch(() => {});
-  } else {
-    workspace = str(existing["workspace_id"], "workspace id");
-    const created = await run(["tab", "create", "--workspace", workspace, "--cwd", options.cwd, "--label", tabLabel(item.title), "--focus"], socket);
-    tab = str(obj(created["tab"])["tab_id"], "tab id");
-    pane = str(obj(created["root_pane"])["pane_id"], "pane id");
-  }
-
-  const agent = `inbox-${item.id.slice(0, 8)}-${randomBytes(2).toString("hex")}`;
-  try {
-    // A fresh tab's shell takes a moment to reach its prompt; herdr refuses
-    // to start an agent in it until then ("not an available shell").
-    for (let attempt = 1; ; attempt++) {
-      try {
-        await run(["agent", "start", agent, "--kind", options.kind ?? "claude", "--pane", pane], socket, AGENT_START_TIMEOUT_MS);
-        break;
-      } catch (err) {
-        if (attempt >= SHELL_READY_ATTEMPTS || !(err instanceof Error && /not an available shell/i.test(err.message))) throw err;
-        await new Promise((r) => setTimeout(r, options.retryDelayMs ?? SHELL_READY_DELAY_MS));
-      }
-    }
-    await run(["agent", "prompt", pane, sessionPromptText(item)], socket);
-  } catch (err) {
-    await run(["tab", "close", tab], socket).catch(() => {});
-    throw err;
-  }
-  await run(["tab", "focus", tab], socket).catch(() => {});
-  return { workspace, tab, pane, agent };
+  return openAgentSession(run, socket, {
+    workspaceLabel: SESSION_WORKSPACE_LABEL,
+    title: item.title,
+    cwd: options.cwd,
+    prompt: sessionPromptText(item),
+    namePrefix: `inbox-${item.id.slice(0, 8)}`,
+    ...(options.kind !== undefined ? { kind: options.kind } : {}),
+    ...(options.retryDelayMs !== undefined ? { retryDelayMs: options.retryDelayMs } : {}),
+  });
 }
