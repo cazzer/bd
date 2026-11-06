@@ -98,7 +98,7 @@ describe("reviewSession open", () => {
     const { caller, calls } = setup();
     expect(await caller.reviewSession({ project: PROJECT, item: id("card"), mode: "open" })).toEqual({ ok: true, mode: "open", tab: "w5:t2", pane: "w5:p2" });
     expect(calls[1]!.args.slice(0, 6)).toEqual(["tab", "create", "--workspace", "w5", "--cwd", checkout]);
-    const prompt = calls.find((c) => c.args[1] === "prompt")!.args[3]!;
+    const prompt = calls.find((c) => c.args[1] === "start")!.args.at(-1)!;
     expect(prompt).toContain("Question: Which migration?");
     expect(prompt).toContain("- A: Keep (recommended) Risk: slow");
     expect(prompt).toContain(`bd show ${id("card")}`);
