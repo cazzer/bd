@@ -13,7 +13,7 @@
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, writeFile } from "node:fs/promises";
+import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 
@@ -176,6 +176,7 @@ export async function openAgentSession(run: RunHerdrJson, socket: string, input:
     if (startArgs.length === 0) await run(["agent", "prompt", pane, input.prompt], socket);
   } catch (err) {
     await run(["tab", "close", tab], socket).catch(() => {});
+    if (promptFile !== null) await rm(promptFile, { force: true }).catch(() => {});
     throw err;
   }
   await run(["tab", "focus", tab], socket).catch(() => {});
