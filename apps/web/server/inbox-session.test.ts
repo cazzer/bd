@@ -36,9 +36,9 @@ describe("openInboxSession", () => {
     expect(opened).toMatchObject({ workspace: "w9", tab: "w9:t1", pane: "w9:p1" });
     expect(calls[1]).toEqual(["workspace", "create", "--label", "inbox", "--cwd", "/Users/x/dev", "--focus"]);
     const start = calls.find((c) => c[0] === "agent" && c[1] === "start")!;
-    expect(start.slice(3)).toEqual(["--kind", "claude", "--pane", "w9:p1"]);
+    expect(start.slice(3, 7)).toEqual(["--kind", "claude", "--pane", "w9:p1"]);
     expect(start[2]).toMatch(/^inbox-9d4b4417-[0-9a-f]{4}$/);
-    expect(calls.find((c) => c[0] === "agent" && c[1] === "prompt")?.slice(0, 3)).toEqual(["agent", "prompt", "w9:p1"]);
+    expect(start.at(-1)).toContain("the RFP landed");
     expect(calls.at(-1)).toEqual(["tab", "focus", "w9:t1"]);
   });
 
