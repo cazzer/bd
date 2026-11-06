@@ -13,7 +13,8 @@
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
-import { homedir } from "node:os";
+import { chmod, mkdir, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 
 /** Runs one herdr command against a server socket and returns its JSON `result` (an empty object when there is none). */
@@ -83,6 +84,20 @@ function id(value: unknown, what: string): string {
   return value;
 }
 
+/** Where opening prompts go: one private directory under the system temp dir. */
+export function defaultPromptDir(): string {
+  return path.join(tmpdir(), "breakdown-sessions");
+}
+
+/** Writes an opening prompt to a fresh owner-only file and returns its path, which holds only safe characters. */
+export async function writePromptFile(prompt: string, dir = defaultPromptDir()): Promise<string> {
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+  await chmod(dir, 0o700);
+  const file = path.join(dir, `prompt-${Date.now()}-${randomBytes(4).toString("hex")}.md`);
+  await writeFile(file, prompt, { mode: 0o600, flag: "wx" });
+  return file;
+}
+
 /** A tab label herdr shows in its sidebar: one line, at most 28 characters. */
 export function tabLabel(title: string): string {
   const t = title.replace(/\s+/g, " ").trim();
@@ -100,6 +115,8 @@ export interface OpenAgentSessionInput {
   namePrefix: string;
   kind?: string;
   retryDelayMs?: number;
+  /** Where a Claude session's opening prompt file is written; a private temp directory by default. */
+  promptDir?: string;
 }
 
 export interface OpenedSession {
@@ -140,8 +157,12 @@ export async function openAgentSession(run: RunHerdrJson, socket: string, input:
   // Claude takes the opening prompt as its startup argument. Typing it
   // instead races whatever Claude shows first: in a folder it has not been
   // told to trust, the trust question takes the prompt's Enter as "No,
-  // exit". As an argument, the prompt waits behind that question.
-  const startArgs = kind === "claude" ? ["--", input.prompt] : [];
+  // exit". As an argument, the prompt waits behind that question. herdr
+  // passes only a single-line argument through the shell, so the prompt
+  // goes in a private file and the argument points at it.
+  let promptFile: string | null = null;
+  if (kind === "claude") promptFile = await writePromptFile(input.prompt, input.promptDir);
+  const startArgs = promptFile !== null ? ["--", `Read ${promptFile} and do what it says.`] : [];
   try {
     for (let attempt = 1; ; attempt++) {
       try {

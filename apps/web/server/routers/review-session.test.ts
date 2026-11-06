@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { closeIngestRun, openIngestRun, upsertNodes, type IngestRunHandle } from "@breakdown/core";
@@ -98,7 +98,8 @@ describe("reviewSession open", () => {
     const { caller, calls } = setup();
     expect(await caller.reviewSession({ project: PROJECT, item: id("card"), mode: "open" })).toEqual({ ok: true, mode: "open", tab: "w5:t2", pane: "w5:p2" });
     expect(calls[1]!.args.slice(0, 6)).toEqual(["tab", "create", "--workspace", "w5", "--cwd", checkout]);
-    const prompt = calls.find((c) => c.args[1] === "start")!.args.at(-1)!;
+    const file = /^Read (\S+) and do/.exec(calls.find((c) => c.args[1] === "start")!.args.at(-1)!)![1]!;
+    const prompt = readFileSync(file, "utf8");
     expect(prompt).toContain("Question: Which migration?");
     expect(prompt).toContain("- A: Keep (recommended) Risk: slow");
     expect(prompt).toContain(`bd show ${id("card")}`);
