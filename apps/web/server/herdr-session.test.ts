@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { focusPane, openAgentSession, resolveHerdrSocket, tabLabel, type RunHerdrJson } from "./herdr-session.js";
 
 const promptDir = mkdtempSync(path.join(tmpdir(), "herdr-prompts-"));
-const input = { promptDir, workspaceLabel: "reviews", title: "bd-4zn.2 Review the Globex RFP security questionnaire", cwd: "/repo", prompt: "think with me", namePrefix: "review-bd-4zn-2", retryDelayMs: 1 };
+const input = { promptDir, workspaceLabel: "reviews", title: "bd-4zn.2 Review the storage migration options", cwd: "/repo", prompt: "think with me", namePrefix: "review-bd-4zn-2", retryDelayMs: 1 };
 
 function fakeHerdr(workspaces: Record<string, unknown>[], fail?: (args: readonly string[]) => Error | undefined) {
   const calls: string[][] = [];
@@ -43,7 +43,7 @@ describe("openAgentSession", () => {
   it("adds a labelled tab to an existing workspace", async () => {
     const { run, calls } = fakeHerdr([{ workspace_id: "w4", label: "reviews" }]);
     expect(await openAgentSession(run, "/s", input)).toMatchObject({ workspace: "w4", tab: "w9:t2", pane: "w9:p2" });
-    expect(calls[1]).toEqual(["tab", "create", "--workspace", "w4", "--cwd", "/repo", "--label", "bd-4zn.2 Review the Globex …", "--focus"]);
+    expect(calls[1]).toEqual(["tab", "create", "--workspace", "w4", "--cwd", "/repo", "--label", "bd-4zn.2 Review the storage…", "--focus"]);
   });
 
   it("waits for the new tab's shell", async () => {
