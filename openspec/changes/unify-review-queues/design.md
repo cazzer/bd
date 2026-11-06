@@ -77,7 +77,26 @@ Picking a review sets `?item=<project>/<bead>`. The detail pane then renders `Re
 
 `ReviewSessionLinks` becomes `SessionLinks({ canFocus, focus(), open() })`, with the same text and status line. The review panel passes `reviewSession` calls and the inbox passes `inboxFocusSession` / `inboxOpenSession`. Inbox labels follow the review ones: "Go to session" for an item already in a session, "Talk it through ↗" to open one.
 
-### 6. Upstream split
+### 6. Digestion is a declared `read` list, checked structurally
+
+`normalizeInboxItemMetadata` normalizes `read`. The status decision lives in the upsert path that already sets `pending` for new items (`carryForwardInboxDecisions`):
+- A new item, or a stored `undigested` one, whose `url` is not covered by `read` is written as `undigested`.
+- A stored `undigested` item that is now covered becomes `pending`.
+- Any other stored status is carried forward as today.
+
+"Covered" means a `ref` equals the `url` or starts with it. That way a PR's `/files` or a doc's `#heading` counts as the artifact.
+
+`undigested` joins `INBOX_STATUSES`. It is not in `OPEN_INBOX_STATUSES` for counting, and it gets its own tab after Needs me. `release` joins the feedback kinds: a human run sets `pending` and records the entry, under the same row lock `decideInboxItem` takes.
+
+The server checks only that a read was declared. Whether the reading was any good stays between the person and the agent, through Request changes. That is the rule for an app with no model call.
+
+*Alternative:* a `digested: true` flag. Rejected because one boolean is trivially set. A list of refs names what was opened, can be checked against `url`, and shows up in the item's context.
+
+*Alternative:* scan the content for "haven't read". Rejected (see the proposal).
+
+`bin/inbox request` gains `--read 'full|<ref>'`. The `inbox-queue` skill (outside the repo, `~/.claude/skills/inbox-queue`) is updated to pass it, so session-queued items are held too.
+
+### 7. Upstream split
 
 `DecisionCard`, `SessionLinks`, and the exported normalizer touch only upstream code. They land as their own commits first, so they can be offered upstream without the inbox. Everything inbox-shaped comes after.
 
@@ -85,6 +104,8 @@ Picking a review sets `?item=<project>/<bead>`. The detail pane then renders `Re
 
 - **The ReviewItemPanel extraction regresses the drawer or Review all** (keys, arming delay, hint portal). → Mitigation: keep `ReviewItemPanel.test.ts` and `ReviewRunModal.test.ts` green unchanged before the inbox uses the component. Re-check the drawer and the run live.
 - **The two reads update at different speeds** (reviews live, inbox every 15 s), so the merged list can reorder under the cursor. → Mitigation: keep the selected id stable across reads, as the inbox already does, and never move the cursor on a poll.
+- **Agents game `read`** by listing the URL without opening it. → Mitigation: the skill says to list only what was opened, and the person still sees the context. A thin context is a Request changes away. The check stops honest omissions, not dishonesty, and the honest omissions are what the 11/6 inbox shows.
+- **Items with a `url` that can't be read** (a paywalled doc, an attachment) are held forever. → Mitigation: the agent lists it at depth `skimmed` with what it could see, or the person releases the item by hand.
 - **Agents writing cards for every inbox item** would add noise. → Mitigation: the `inbox-ingest` skill asks for a card only for batches and multi-way choices. A reply draft stays a plain item with Accept.
 
 ## Migration Plan
