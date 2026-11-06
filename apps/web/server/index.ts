@@ -27,6 +27,7 @@ import { parseReadOnly } from "./config.js";
 import { createContextFactory } from "./context.js";
 import { createRequestDispatcher } from "./dispatch.js";
 import { createReviewImageHandler } from "./review-images.js";
+import { createHerdrJsonRunner, resolveHerdrSocket } from "./herdr-session.js";
 import { createReviewWriter } from "./review-writer.js";
 import { appRouter } from "./router.js";
 import { describeConnectionError, describeConnectionTarget, verifyDatabaseConnection } from "./startup.js";
@@ -83,7 +84,7 @@ async function main(): Promise<void> {
   const port = Number(process.env["WEB_SERVER_PORT"] ?? DEFAULT_PORT);
   const trpcHandler = createHTTPHandler({
     router: appRouter,
-    createContext: createContextFactory(db, { watcher, shutdownSignal: shutdown.signal, readOnly, reviewWriter }),
+    createContext: createContextFactory(db, { watcher, shutdownSignal: shutdown.signal, readOnly, reviewWriter, herdrJson: createHerdrJsonRunner(), herdrSocket: resolveHerdrSocket() }),
     basePath: "/trpc/",
   });
   const server = createServer(createRequestDispatcher({ port, reviewImages: createReviewImageHandler(), trpc: trpcHandler }));

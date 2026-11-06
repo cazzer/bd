@@ -100,6 +100,7 @@ import { canDecide, decisionBlocked, decisionEffects, describeNotified, describe
 import { formatRoute, type GraphRoute } from "../lib/route.js";
 import { HttpStatusError, trpc } from "../trpc.js";
 import { ReviewAttachments, SectionTitle, type AttachmentLayout, type AttachmentSlot } from "./ReviewAttachments.js";
+import { ReviewSessionLinks } from "./ReviewSessionLinks.js";
 import { CardEvidence, CardOnAccept, CardOptions, CardQuestion, InlineText } from "./ReviewCardBody.js";
 
 type BoardItem = NonNullable<Awaited<ReturnType<typeof trpc.boardItem.query>>["item"]>;
@@ -444,6 +445,11 @@ export function ReviewItemPanel({
     <DecisionFooter
       open={decidable}
       recipient={loaded?.isReview ? describeRecipient(loaded.review) : ""}
+      sessionLinks={
+        loaded?.isReview && project !== null && loaded.review !== null && !("invalid" in loaded.review) ? (
+          <ReviewSessionLinks project={project} item={loaded.externalId} hasRequester={loaded.review.pane !== null && loaded.review.socket !== undefined} />
+        ) : null
+      }
       labels={decisions}
       actions={actions}
       message={message}
@@ -693,6 +699,7 @@ function PlainBody({ item }: { item: BoardItem }) {
 function DecisionFooter({
   open,
   recipient,
+  sessionLinks,
   labels,
   actions,
   message,
@@ -710,6 +717,8 @@ function DecisionFooter({
   open: boolean;
   /** Who the decision will be pushed to (describeRecipient). */
   recipient: string;
+  /** Go to the requesting agent / open a session on the review (ReviewSessionLinks); null when the review can't be read. */
+  sessionLinks: ReactNode;
   labels: PanelDecisions;
   /** A card's option actions (lib/reviewCard.ts `cardActions`); null keeps plain Accept / Request changes. */
   actions: CardActions | null;
@@ -878,6 +887,7 @@ function DecisionFooter({
           {recipient}
         </span>
       )}
+      {open && sessionLinks}
       {open && labels.hintTarget && createPortal(hint, labels.hintTarget)}
       <div ref={reportRef} tabIndex={-1} className="focus:outline-none">
         {failure !== null ? (
