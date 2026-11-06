@@ -136,17 +136,23 @@ export async function openAgentSession(run: RunHerdrJson, socket: string, input:
   }
 
   const agent = `${input.namePrefix}-${randomBytes(2).toString("hex")}`;
+  const kind = input.kind ?? "claude";
+  // Claude takes the opening prompt as its startup argument. Typing it
+  // instead races whatever Claude shows first: in a folder it has not been
+  // told to trust, the trust question takes the prompt's Enter as "No,
+  // exit". As an argument, the prompt waits behind that question.
+  const startArgs = kind === "claude" ? ["--", input.prompt] : [];
   try {
     for (let attempt = 1; ; attempt++) {
       try {
-        await run(["agent", "start", agent, "--kind", input.kind ?? "claude", "--pane", pane], socket, AGENT_START_TIMEOUT_MS);
+        await run(["agent", "start", agent, "--kind", kind, "--pane", pane, ...startArgs], socket, AGENT_START_TIMEOUT_MS);
         break;
       } catch (err) {
         if (attempt >= SHELL_READY_ATTEMPTS || !(err instanceof Error && /not an available shell/i.test(err.message))) throw err;
         await new Promise((r) => setTimeout(r, input.retryDelayMs ?? SHELL_READY_DELAY_MS));
       }
     }
-    await run(["agent", "prompt", pane, input.prompt], socket);
+    if (startArgs.length === 0) await run(["agent", "prompt", pane, input.prompt], socket);
   } catch (err) {
     await run(["tab", "close", tab], socket).catch(() => {});
     throw err;

@@ -29,8 +29,9 @@ describe("openAgentSession", () => {
     expect(calls[1]).toEqual(["workspace", "create", "--label", "reviews", "--cwd", "/repo", "--focus"]);
     const start = calls.find((c) => c[1] === "start")!;
     expect(start[2]).toMatch(/^review-bd-4zn-2-[0-9a-f]{4}$/);
-    expect(start.slice(3)).toEqual(["--kind", "claude", "--pane", "w9:p1"]);
-    expect(calls.find((c) => c[1] === "prompt")).toEqual(["agent", "prompt", "w9:p1", "think with me"]);
+    // Claude gets the prompt as its startup argument, so a trust question can't swallow it.
+    expect(start.slice(3)).toEqual(["--kind", "claude", "--pane", "w9:p1", "--", "think with me"]);
+    expect(calls.some((c) => c[1] === "prompt")).toBe(false);
     expect(calls.at(-1)).toEqual(["tab", "focus", "w9:t1"]);
   });
 
@@ -51,6 +52,15 @@ describe("openAgentSession", () => {
     const { run, calls } = fakeHerdr([{ workspace_id: "w4", label: "reviews" }], (a) => (a[1] === "start" ? new Error("unknown agent kind") : undefined));
     await expect(openAgentSession(run, "/s", input)).rejects.toThrow("unknown agent kind");
     expect(calls.at(-1)).toEqual(["tab", "close", "w9:t2"]);
+  });
+});
+
+describe("other agent kinds", () => {
+  it("types the prompt once the agent is ready", async () => {
+    const { run, calls } = fakeHerdr([{ workspace_id: "w4", label: "reviews" }]);
+    await openAgentSession(run, "/s", { ...input, kind: "codex" });
+    expect(calls.find((c) => c[1] === "start")!.slice(3)).toEqual(["--kind", "codex", "--pane", "w9:p2"]);
+    expect(calls.find((c) => c[1] === "prompt")).toEqual(["agent", "prompt", "w9:p2", "think with me"]);
   });
 });
 

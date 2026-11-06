@@ -20,7 +20,7 @@ The pane may have closed since the review was filed; the agent may fail to start
 
 ### 3. Opening a session
 
-The tab goes in a workspace labelled `reviews` (found by label, created the first time) so sessions don't pile up in whatever the person had focused. A fresh tab's shell refuses an agent until its prompt is up ("not an available shell"), so `agent start` is retried for up to 10 s. If the agent can't start or take the prompt, the tab is closed again. The agent name is `review-<bead id, 18 chars>-<4 hex>`, unique among live agents.
+The tab goes in a workspace labelled `reviews` (found by label, created the first time) so sessions don't pile up in whatever the person had focused. A fresh tab's shell refuses an agent until its prompt is up ("not an available shell"), so `agent start` is retried for up to 10 s. If the agent can't start or take the prompt, the tab is closed again. The agent name is `review-<bead id, 18 chars>-<4 hex>`, unique among live agents. Claude gets the opening prompt as its startup argument rather than typed into the pane: in a folder Claude has not been told to trust, its trust question would take a typed prompt's Enter as "No, exit". As an argument, the prompt waits behind the question. Other agent kinds get it typed once herdr reports them ready.
 
 ### 4. The prompt
 
