@@ -13,7 +13,7 @@
 
 - [x] 3.1 `ReviewSessionLinks`: "Go to agent" when a pane and session are recorded, "Talk it through ↗", busy and one-line result
 - [x] 3.2 Rendered under the decision buttons in `ReviewItemPanel` while the review is open (drawer and Review all run)
-- [ ] 3.3 Live check: a review filed from a herdr pane, both links, a screenshot of the footer
+- [x] 3.3 Live check: a review filed from a herdr pane, both links, a screenshot of the footer
 
 ## 4. Close
 
