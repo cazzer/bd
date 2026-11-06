@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -54,9 +54,11 @@ describe("openAgentSession", () => {
   });
 
   it("closes the tab it made when the agent can't start", async () => {
+    const promptsBefore = readdirSync(promptDir).length;
     const { run, calls } = fakeHerdr([{ workspace_id: "w4", label: "reviews" }], (a) => (a[1] === "start" ? new Error("unknown agent kind") : undefined));
     await expect(openAgentSession(run, "/s", input)).rejects.toThrow("unknown agent kind");
     expect(calls.at(-1)).toEqual(["tab", "close", "w9:t2"]);
+    expect(readdirSync(promptDir).filter((f) => f.startsWith("prompt-"))).toHaveLength(promptsBefore);
   });
 });
 
