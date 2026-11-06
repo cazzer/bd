@@ -1,10 +1,11 @@
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { focusPane, openAgentSession, resolveHerdrSocket, tabLabel, type RunHerdrJson } from "./herdr-session.js";
 
-const input = { workspaceLabel: "reviews", title: "bd-4zn.2 Review the Globex RFP security questionnaire", cwd: "/repo", prompt: "think with me", namePrefix: "review-bd-4zn-2", retryDelayMs: 1 };
+const promptDir = mkdtempSync(path.join(tmpdir(), "herdr-prompts-"));
+const input = { promptDir, workspaceLabel: "reviews", title: "bd-4zn.2 Review the Globex RFP security questionnaire", cwd: "/repo", prompt: "think with me", namePrefix: "review-bd-4zn-2", retryDelayMs: 1 };
 
 function fakeHerdr(workspaces: Record<string, unknown>[], fail?: (args: readonly string[]) => Error | undefined) {
   const calls: string[][] = [];
@@ -29,8 +30,12 @@ describe("openAgentSession", () => {
     expect(calls[1]).toEqual(["workspace", "create", "--label", "reviews", "--cwd", "/repo", "--focus"]);
     const start = calls.find((c) => c[1] === "start")!;
     expect(start[2]).toMatch(/^review-bd-4zn-2-[0-9a-f]{4}$/);
-    // Claude gets the prompt as its startup argument, so a trust question can't swallow it.
-    expect(start.slice(3)).toEqual(["--kind", "claude", "--pane", "w9:p1", "--", "think with me"]);
+    // Claude gets the prompt as a one-line startup argument pointing at a private file, so a trust question can't swallow it.
+    expect(start.slice(3, 8)).toEqual(["--kind", "claude", "--pane", "w9:p1", "--"]);
+    const file = /^Read (\S+) and do what it says\.$/.exec(start[8]!)![1]!;
+    expect(file.startsWith(promptDir)).toBe(true);
+    expect(readFileSync(file, "utf8")).toBe("think with me");
+    expect(statSync(file).mode & 0o777).toBe(0o600);
     expect(calls.some((c) => c[1] === "prompt")).toBe(false);
     expect(calls.at(-1)).toEqual(["tab", "focus", "w9:t1"]);
   });
