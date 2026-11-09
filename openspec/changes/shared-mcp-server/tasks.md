@@ -34,7 +34,7 @@
 
   install is `bootout` (ignored if absent), write, `bootstrap gui/$UID`. uninstall removes the plist and `brain.installed-commit` only. status prints loaded/not loaded, `/healthz`, and the running commit against `HEAD` (design.md decision 7).
 - [x] 3.2 Tests in `bin/mcp-service.test.mjs` with an injected `launchctl` runner and a temp home: the generated plist content, install twice gives one plist and a bootout-then-bootstrap sequence, uninstall leaves logs alone, and `--port` is passed through.
-- [ ] 3.3 On this machine:
+- [x] 3.3 On this machine (2026-11-09; also verified: DB down at service start → crash-loop (`last exit code = 1`) → serving 3s after postgres came up):
   - `pnpm mcp:service install`, then `curl 127.0.0.1:5320/healthz` returns 200
   - `docker compose stop postgres`: `/healthz` returns 503 and the process stays up
   - `docker compose start postgres`: `/healthz` returns 200 again
