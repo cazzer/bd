@@ -4,13 +4,14 @@ import fs from "node:fs/promises";
 import { realpathSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { after, describe, it } from "node:test";
+import { after, before, describe, it } from "node:test";
 import {
   DEFAULT_PORT,
   LABEL,
   USAGE,
+  entryPath,
   parseArgs,
-  plistPort,
+  readPlist,
   renderPlist,
   runService,
   serviceDetails,
@@ -19,47 +20,88 @@ import {
 } from "./mcp-service-lib.mjs";
 
 const UID = 501;
-const NODE = "/Users/me/.nvm/versions/node/v22.23.1/bin/node";
-const REPO = "/Users/me/dev/bd";
 const HEAD = "a".repeat(40);
 const OLD = "b".repeat(40);
 const TARGET = `gui/${UID}/${LABEL}`;
+// install and status check the plist's node and entrypoint exist, so these are real paths.
+const NODE = process.execPath;
+let REPO;
 
 const tempDirs = [];
-after(async () => {
-  await Promise.all(tempDirs.map((dir) => fs.rm(dir, { recursive: true, force: true })));
-});
-async function tempHome() {
-  const dir = realpathSync(await fs.mkdtemp(path.join(os.tmpdir(), "mcp-service-test-")));
+async function tempDir(prefix = "mcp-service-test-") {
+  const dir = realpathSync(await fs.mkdtemp(path.join(os.tmpdir(), prefix)));
   tempDirs.push(dir);
   return dir;
 }
-
-const PRINT_LOADED = `${TARGET} = {
-\tactive count = 1
-\tpath = /Users/me/Library/LaunchAgents/${LABEL}.plist
-\ttype = LaunchAgent
-\tstate = running
-
-\tprogram = ${NODE}
-\tpid = 4242
-\tlast exit code = (never exited)
+async function fakeRepo() {
+  const repo = await tempDir("mcp-service-repo-");
+  await fs.mkdir(path.dirname(entryPath(repo)), { recursive: true });
+  await fs.writeFile(entryPath(repo), "");
+  return repo;
 }
-`;
+before(async () => {
+  REPO = await fakeRepo();
+});
+after(async () => {
+  await Promise.all(tempDirs.map((dir) => fs.rm(dir, { recursive: true, force: true })));
+});
+
+const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+function printOutput({ state, pid, lastExit }) {
+  return [
+    `${TARGET} = {`,
+    "\tactive count = 1",
+    `\tpath = /Users/me/Library/LaunchAgents/${LABEL}.plist`,
+    "\ttype = LaunchAgent",
+    `\tstate = ${state}`,
+    "",
+    `\tprogram = ${NODE}`,
+    pid ? `\tpid = ${pid}` : null,
+    `\tlast exit code = ${lastExit}`,
+    "}",
+    "",
+  ]
+    .filter((line) => line !== null)
+    .join("\n");
+}
+const RUNNING = { state: "running", pid: "4242", lastExit: "(never exited)" };
+const CRASH_LOOP = { state: "spawn scheduled", pid: null, lastExit: "1" };
+
+/** `ps -o lstart=` in the C locale: "Mon Nov  9 00:37:38 2026", local time. */
+function lstart(date) {
+  const day = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][date.getDay()];
+  const month = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][date.getMonth()];
+  const time = [date.getHours(), date.getMinutes(), date.getSeconds()].map((n) => String(n).padStart(2, "0")).join(":");
+  return `${day} ${month} ${String(date.getDate()).padStart(2, " ")} ${time} ${date.getFullYear()}    \n`;
+}
 
 /**
- * A stand-in for launchctl and git. launchd state is one boolean; every call
- * is logged as "launchctl <verb>" or "git <verb>".
+ * A stand-in for launchctl, git, and ps. launchd state is one boolean plus
+ * the print fields of the loaded job; every call is logged as "<cmd> <verb>".
+ * After a successful bootout, `print` still reports the job loaded for
+ * `stillLoadedPolls` calls. `bootoutResult` replaces bootout's answer.
  */
-function fakeSystem({ loaded = false, head = HEAD, behind = 0, health = [{ status: 200, body: '{"ready":true}' }] } = {}) {
-  const state = { loaded, calls: [], fetches: [] };
+function fakeSystem({
+  loaded = false,
+  job = RUNNING,
+  head = HEAD,
+  behind = 0,
+  health = [{ status: 200, body: '{"ready":true}' }],
+  stillLoadedPolls = 0,
+  bootoutResult = null,
+  startedAt = new Date(Date.now() - 3_600_000),
+} = {}) {
+  const state = { loaded, calls: [], fetches: [], lingering: 0 };
   const run = async (cmd, args) => {
     state.calls.push(`${cmd} ${args[0]}`);
     if (cmd === "launchctl") {
       const [verb] = args;
       if (verb === "bootout") {
+        if (bootoutResult) return bootoutResult;
         if (!state.loaded) return { code: 3, stdout: "", stderr: "Boot-out failed: 3: No such process\n" };
         state.loaded = false;
+        state.lingering = stillLoadedPolls;
         return { code: 0, stdout: "", stderr: "" };
       }
       if (verb === "bootstrap") {
@@ -68,13 +110,21 @@ function fakeSystem({ loaded = false, head = HEAD, behind = 0, health = [{ statu
         return { code: 0, stdout: "", stderr: "" };
       }
       if (verb === "print") {
+        if (state.lingering > 0) {
+          state.lingering--;
+          return { code: 0, stdout: printOutput(RUNNING), stderr: "" };
+        }
         return state.loaded
-          ? { code: 0, stdout: PRINT_LOADED, stderr: "" }
+          ? { code: 0, stdout: printOutput(job), stderr: "" }
           : { code: 113, stdout: "", stderr: `Bad request.\nCould not find service "${LABEL}" in domain for user gui: ${UID}\n` };
       }
     }
     if (cmd === "git" && args[0] === "rev-parse") return head ? { code: 0, stdout: `${head}\n`, stderr: "" } : { code: 128, stdout: "", stderr: "fatal" };
-    if (cmd === "git" && args[0] === "rev-list") return { code: 0, stdout: `${behind}\n`, stderr: "" };
+    if (cmd === "git" && args[0] === "rev-list") {
+      assert.equal(args[2], "--end-of-options");
+      return { code: 0, stdout: `${behind}\n`, stderr: "" };
+    }
+    if (cmd === "ps") return startedAt ? { code: 0, stdout: lstart(startedAt), stderr: "" } : { code: 1, stdout: "", stderr: "" };
     throw new Error(`unexpected command: ${cmd} ${args.join(" ")}`);
   };
   let attempt = 0;
@@ -87,33 +137,28 @@ function fakeSystem({ loaded = false, head = HEAD, behind = 0, health = [{ statu
   return { state, run, fetch };
 }
 
-function deps(home, sys, argv, overrides = {}) {
+async function service(home, sys, argv, overrides = {}) {
   const out = [];
   const warn = [];
-  return {
-    out,
-    warn,
-    deps: {
-      argv,
-      platform: "darwin",
-      homedir: home,
-      uid: UID,
-      execPath: NODE,
-      repoRoot: REPO,
-      run: sys.run,
-      fetch: sys.fetch,
-      sleep: async () => {},
-      out: (line) => out.push(line),
-      warn: (line) => warn.push(line),
-      ...overrides,
+  let clock = 1_000_000;
+  const { exitCode } = await runService({
+    argv,
+    platform: "darwin",
+    homedir: home,
+    uid: UID,
+    execPath: NODE,
+    repoRoot: REPO,
+    run: sys.run,
+    fetch: sys.fetch,
+    sleep: async (ms) => {
+      clock += ms;
     },
-  };
-}
-
-async function service(home, sys, argv, overrides) {
-  const d = deps(home, sys, argv, overrides);
-  const { exitCode } = await runService(d.deps);
-  return { exitCode, out: d.out.join("\n"), warn: d.warn.join("\n") };
+    now: () => clock,
+    out: (line) => out.push(line),
+    warn: (line) => warn.push(line),
+    ...overrides,
+  });
+  return { exitCode, out: out.join("\n"), warn: warn.join("\n") };
 }
 
 const exists = (file) => fs.access(file).then(() => true, () => false);
@@ -146,8 +191,10 @@ describe("parseArgs", () => {
 });
 
 describe("renderPlist", () => {
+  const node = "/Users/me/.nvm/versions/node/v22.23.1/bin/node";
+  const repo = "/Users/me/dev/bd";
   const paths = servicePaths("/Users/me");
-  const xml = renderPlist({ execPath: NODE, repoRoot: REPO, port: 5320, paths });
+  const xml = renderPlist({ execPath: node, repoRoot: repo, port: 5320, paths });
 
   it("runs one node process with tsx as a loader and the HTTP entrypoint", () => {
     assert.match(
@@ -156,10 +203,10 @@ describe("renderPlist", () => {
         [
           "<key>ProgramArguments</key>",
           "<array>",
-          `<string>${NODE}</string>`,
+          `<string>${node}</string>`,
           "<string>--import</string>",
           "<string>tsx</string>",
-          `<string>${REPO}/apps/mcp/src/http.ts</string>`,
+          `<string>${repo}/apps/mcp/src/http.ts</string>`,
           "<string>--port</string>",
           "<string>5320</string>",
           "</array>",
@@ -170,10 +217,11 @@ describe("renderPlist", () => {
   it("sets the label, working directory, supervision keys, and log paths", () => {
     const keyed = (key, value) => assert.match(xml, new RegExp(`<key>${key}</key>\\s*${value}`), key);
     keyed("Label", `<string>${LABEL}</string>`);
-    keyed("WorkingDirectory", `<string>${REPO}/apps/mcp</string>`);
+    keyed("WorkingDirectory", `<string>${repo}/apps/mcp</string>`);
     keyed("RunAtLoad", "<true/>");
     keyed("KeepAlive", "<true/>");
     keyed("ThrottleInterval", "<integer>10</integer>");
+    keyed("ExitTimeOut", "<integer>15</integer>");
     keyed("StandardErrorPath", "<string>/Users/me/Library/Logs/breakdown/brain.err.log</string>");
     keyed("StandardOutPath", "<string>/Users/me/Library/Logs/breakdown/brain.out.log</string>");
   });
@@ -187,16 +235,22 @@ describe("renderPlist", () => {
     assert.match(odd, /<string>\/Users\/a&amp;b\/Library\/Logs\/breakdown\/brain.err.log<\/string>/);
     assert.doesNotMatch(odd, /&(?!amp;|lt;|gt;|quot;|apos;)/);
     assert.equal(xmlEscape(`&<>"'`), "&amp;&lt;&gt;&quot;&apos;");
+    assert.deepEqual(readPlist(odd), { node: "/opt/n&de/<bin>/node", entry: "/Users/me/R&D 'x' \"y\"/apps/mcp/src/http.ts", port: 5320, badPort: null });
   });
-  it("reads its own port back", () => {
-    assert.equal(plistPort(xml), 5320);
-    assert.equal(plistPort(renderPlist({ execPath: NODE, repoRoot: REPO, port: 6001, paths })), 6001);
-    assert.equal(plistPort("<plist/>"), null);
+  it("reads its own node, entrypoint, and port back", () => {
+    assert.deepEqual(readPlist(xml), { node, entry: `${repo}/apps/mcp/src/http.ts`, port: 5320, badPort: null });
+    assert.equal(readPlist(renderPlist({ execPath: node, repoRoot: repo, port: 6001, paths })).port, 6001);
+    assert.deepEqual(readPlist("<plist/>"), { node: null, entry: null, port: null, badPort: null });
+  });
+  it("reads an out-of-range port as absent, and reports it", () => {
+    for (const bad of ["0", "70000"]) {
+      const edited = xml.replace("<string>5320</string>", `<string>${bad}</string>`);
+      assert.deepEqual(readPlist(edited), { node, entry: `${repo}/apps/mcp/src/http.ts`, port: null, badPort: bad });
+    }
   });
   it("is a well-formed property list (plutil)", { skip: process.platform !== "darwin" }, async () => {
-    const dir = await tempHome();
-    const file = path.join(dir, "test.plist");
-    await fs.writeFile(file, renderPlist({ execPath: NODE, repoRoot: "/tmp/R&D <x>", port: 5320, paths }));
+    const file = path.join(await tempDir(), "test.plist");
+    await fs.writeFile(file, renderPlist({ execPath: node, repoRoot: "/tmp/R&D <x>", port: 5320, paths }));
     const result = await new Promise((resolve) => execFile("plutil", ["-lint", file], (err, stdout) => resolve({ err, stdout })));
     assert.equal(result.err, null, result.stdout);
   });
@@ -204,29 +258,32 @@ describe("renderPlist", () => {
 
 describe("serviceDetails", () => {
   it("keeps the state, pid, and last exit code lines", () => {
-    assert.equal(serviceDetails(PRINT_LOADED), "state = running, pid = 4242, last exit code = (never exited)");
+    assert.equal(serviceDetails(printOutput(RUNNING)), "state = running, pid = 4242, last exit code = (never exited)");
+    assert.equal(serviceDetails(printOutput(CRASH_LOOP)), "state = spawn scheduled, last exit code = 1");
   });
 });
 
 describe("install", () => {
-  it("writes the plist, logs dir, and installed commit, bootstraps, and reports health and the node path", async () => {
-    const home = await tempHome();
+  it("writes the plist, logs dir, and installed commit, bootstraps, and reports health, pid, and the node path", async () => {
+    const home = await tempDir();
     const sys = fakeSystem();
     const result = await service(home, sys, ["install"]);
     const paths = servicePaths(home);
     assert.equal(result.exitCode, 0, result.warn);
-    assert.equal(plistPort(await fs.readFile(paths.plist, "utf8")), DEFAULT_PORT);
-    assert.ok(await exists(paths.logsDir));
+    assert.equal(readPlist(await fs.readFile(paths.plist, "utf8")).port, DEFAULT_PORT);
+    assert.equal((await fs.stat(paths.logsDir)).mode & 0o777, 0o700);
+    assert.equal(await exists(`${paths.plist}.tmp`), false);
     assert.equal(await fs.readFile(paths.commitFile, "utf8"), `${HEAD}\n`);
     assert.deepEqual(launchd(sys.state.calls), ["launchctl bootout", "launchctl bootstrap"]);
     assert.ok(sys.state.loaded);
-    assert.match(result.out, new RegExp(`node\\s+${NODE}`));
+    assert.match(result.out, new RegExp(`node\\s+${escapeRegExp(NODE)}`));
     assert.match(result.out, /health\s+200 \{"ready":true\}/);
+    assert.match(result.out, /pid\s+4242/);
     assert.equal(sys.state.fetches[0], `http://127.0.0.1:${DEFAULT_PORT}/healthz`);
   });
 
   it("twice leaves one plist, with bootout then bootstrap each time", async () => {
-    const home = await tempHome();
+    const home = await tempDir();
     const sys = fakeSystem();
     assert.equal((await service(home, sys, ["install"])).exitCode, 0);
     const second = await service(home, sys, ["install"]);
@@ -234,10 +291,11 @@ describe("install", () => {
     assert.match(second.out, /^reloaded/);
     assert.deepEqual(launchd(sys.state.calls), ["launchctl bootout", "launchctl bootstrap", "launchctl bootout", "launchctl bootstrap"]);
     assert.deepEqual(await fs.readdir(path.join(home, "Library", "LaunchAgents")), [`${LABEL}.plist`]);
+    assert.doesNotMatch(second.out, / was /);
   });
 
   it("passes --port through to ProgramArguments, the health probe, and status", async () => {
-    const home = await tempHome();
+    const home = await tempDir();
     const sys = fakeSystem();
     assert.equal((await service(home, sys, ["install", "--port", "6123"])).exitCode, 0);
     const xml = await fs.readFile(servicePaths(home).plist, "utf8");
@@ -249,35 +307,77 @@ describe("install", () => {
   });
 
   it("restart without --port keeps the installed port", async () => {
-    const home = await tempHome();
+    const home = await tempDir();
     const sys = fakeSystem();
     await service(home, sys, ["install", "--port", "6123"]);
     assert.equal((await service(home, sys, ["restart"])).exitCode, 0);
-    assert.equal(plistPort(await fs.readFile(servicePaths(home).plist, "utf8")), 6123);
+    assert.equal(readPlist(await fs.readFile(servicePaths(home).plist, "utf8")).port, 6123);
+  });
+
+  it("an installed port outside 1–65535 is ignored with a warning", async () => {
+    const home = await tempDir();
+    const paths = servicePaths(home);
+    await fs.mkdir(path.dirname(paths.plist), { recursive: true });
+    await fs.writeFile(paths.plist, renderPlist({ execPath: NODE, repoRoot: REPO, port: 5320, paths }).replace("<string>5320</string>", "<string>99999</string>"));
+    const result = await service(home, fakeSystem(), ["restart"]);
+    assert.equal(result.exitCode, 0, result.warn);
+    assert.match(result.warn, /has --port 99999, outside 1–65535; ignoring it/);
+    assert.equal(readPlist(await fs.readFile(paths.plist, "utf8")).port, DEFAULT_PORT);
+  });
+
+  it("rewrites a plist from another node and checkout, saying what changed", async () => {
+    const home = await tempDir();
+    const paths = servicePaths(home);
+    await fs.mkdir(path.dirname(paths.plist), { recursive: true });
+    await fs.writeFile(paths.plist, renderPlist({ execPath: "/old/node", repoRoot: "/old/repo", port: 6001, paths }));
+    const sys = fakeSystem({ loaded: true });
+    const result = await service(home, sys, ["restart"]);
+    assert.equal(result.exitCode, 0, result.warn);
+    assert.deepEqual(readPlist(await fs.readFile(paths.plist, "utf8")), { node: NODE, entry: entryPath(REPO), port: 6001, badPort: null });
+    assert.ok(result.out.includes(`node was /old/node, now ${NODE}`), result.out);
+    assert.ok(result.out.includes(`repo was /old/repo, now ${REPO}`), result.out);
   });
 
   it("polls /healthz until it answers 200", async () => {
-    const home = await tempHome();
+    const home = await tempDir();
     const sys = fakeSystem({ health: ["refused", "refused", { status: 503, body: "{}" }, { status: 200, body: '{"ready":true}' }] });
     assert.equal((await service(home, sys, ["install"])).exitCode, 0);
     assert.equal(sys.state.fetches.length, 4);
   });
 
-  it("exits 1 naming the error log when the server never becomes healthy", async () => {
-    const home = await tempHome();
-    const sys = fakeSystem({ health: ["refused"] });
+  it("exits 1 after a 15s deadline, printing only what the error log gained since bootstrap", async () => {
+    const home = await tempDir();
     const paths = servicePaths(home);
     await fs.mkdir(paths.logsDir, { recursive: true });
-    await fs.writeFile(paths.errLog, "[breakdown-brain] cannot start: database unreachable\n");
+    await fs.writeFile(paths.errLog, "an old crash from last week\n");
+    const sys = fakeSystem({ health: ["refused"] });
+    const run = async (cmd, args, opts) => {
+      const result = await sys.run(cmd, args, opts);
+      if (cmd === "launchctl" && args[0] === "bootstrap") await fs.appendFile(paths.errLog, "[breakdown-brain] cannot start: database unreachable\n");
+      return result;
+    };
+    const result = await service(home, sys, ["install"], { run });
+    assert.equal(result.exitCode, 1);
+    assert.match(result.warn, /not healthy after 15s: no answer on 127\.0\.0\.1:5320 \(ECONNREFUSED\)/);
+    assert.match(result.warn, /cannot start: database unreachable/);
+    assert.doesNotMatch(result.warn, /old crash/);
+    assert.equal(sys.state.fetches.length, 31, "one probe at the start, then one per 500ms until 15s");
+    assert.ok(await exists(paths.plist), "the service stays installed for launchd to retry");
+    assert.equal(await fs.readFile(paths.commitFile, "utf8"), `${HEAD}\n`);
+  });
+
+  it("is not healthy when another process answers 200 while the job crash-loops", async () => {
+    const home = await tempDir();
+    const sys = fakeSystem({ job: CRASH_LOOP });
     const result = await service(home, sys, ["install"]);
     assert.equal(result.exitCode, 1);
-    assert.match(result.warn, /not healthy after ~15s: no answer on 127\.0\.0\.1:5320 \(ECONNREFUSED\)/);
-    assert.match(result.warn, /cannot start: database unreachable/);
-    assert.ok(await exists(paths.plist), "the service stays installed for launchd to retry");
+    assert.match(result.warn, /answered 200 \{"ready":true\}, but dev\.breakdown\.brain is not running \(state = spawn scheduled, last exit code = 1\)/);
+    assert.match(result.warn, /some other process is answering on that port/);
+    assert.doesNotMatch(result.out, /health\s+200/);
   });
 
   it("refuses when bootstrap fails", async () => {
-    const home = await tempHome();
+    const home = await tempDir();
     const sys = fakeSystem();
     const run = async (cmd, args, opts) =>
       cmd === "launchctl" && args[0] === "bootstrap" ? { code: 5, stdout: "", stderr: "Bootstrap failed: 5: Input/output error" } : sys.run(cmd, args, opts);
@@ -287,9 +387,55 @@ describe("install", () => {
   });
 });
 
+describe("bootout", () => {
+  it("waits until launchd has let the old job go before bootstrapping", async () => {
+    const home = await tempDir();
+    const sys = fakeSystem({ loaded: true, stillLoadedPolls: 5 });
+    const result = await service(home, sys, ["install"]);
+    assert.equal(result.exitCode, 0, result.warn);
+    const calls = sys.state.calls.filter((c) => c.startsWith("launchctl "));
+    const polls = calls.slice(calls.indexOf("launchctl bootout") + 1, calls.indexOf("launchctl bootstrap"));
+    assert.deepEqual(polls, Array(6).fill("launchctl print"), "five still loaded, then gone");
+  });
+
+  it("refuses when the job is still loaded after 20s", async () => {
+    const home = await tempDir();
+    const sys = fakeSystem({ loaded: true, stillLoadedPolls: Infinity });
+    const result = await service(home, sys, ["install"]);
+    assert.equal(result.exitCode, 1);
+    assert.match(result.warn, /gui\/501\/dev\.breakdown\.brain was still loaded 20s after bootout/);
+    assert.equal(launchd(sys.state.calls).includes("launchctl bootstrap"), false);
+  });
+
+  it("refuses an unexpected bootout failure, naming it", async () => {
+    const home = await tempDir();
+    const sys = fakeSystem({ bootoutResult: { code: 5, stdout: "", stderr: "Boot-out failed: 5: Input/output error\n" } });
+    const result = await service(home, sys, ["install"]);
+    assert.equal(result.exitCode, 1);
+    assert.match(result.warn, /launchctl bootout gui\/501\/dev\.breakdown\.brain failed \(exit 5\): Boot-out failed: 5: Input\/output error/);
+    assert.equal(await exists(servicePaths(home).plist), false);
+  });
+
+  it('treats 113 "Could not find specified service" as not loaded', async () => {
+    const home = await tempDir();
+    const sys = fakeSystem({ bootoutResult: { code: 113, stdout: "", stderr: "Boot-out failed: 113: Could not find specified service\n" } });
+    const result = await service(home, sys, ["install"]);
+    assert.equal(result.exitCode, 0, result.warn);
+    assert.match(result.out, /^loaded dev\.breakdown\.brain/);
+  });
+
+  it('refuses 112 "Could not find domain"', async () => {
+    const home = await tempDir();
+    const sys = fakeSystem({ bootoutResult: { code: 112, stdout: "", stderr: "Boot-out failed: 112: Could not find domain\n" } });
+    const result = await service(home, sys, ["uninstall"]);
+    assert.equal(result.exitCode, 1);
+    assert.match(result.warn, /failed \(exit 112\): Boot-out failed: 112: Could not find domain/);
+  });
+});
+
 describe("uninstall", () => {
   it("unloads, removes the plist and the commit file, and leaves the logs", async () => {
-    const home = await tempHome();
+    const home = await tempDir();
     const sys = fakeSystem();
     const paths = servicePaths(home);
     await service(home, sys, ["install"]);
@@ -306,7 +452,7 @@ describe("uninstall", () => {
   });
 
   it("succeeds when nothing is installed", async () => {
-    const home = await tempHome();
+    const home = await tempDir();
     const result = await service(home, fakeSystem(), ["uninstall"]);
     assert.equal(result.exitCode, 0, result.warn);
     assert.match(result.out, /was not loaded/);
@@ -315,7 +461,7 @@ describe("uninstall", () => {
 
 describe("status", () => {
   it("not loaded: exit 1", async () => {
-    const home = await tempHome();
+    const home = await tempDir();
     const result = await service(home, fakeSystem({ health: ["refused"] }), ["status"]);
     assert.equal(result.exitCode, 1);
     assert.match(result.out, /^service\s+dev\.breakdown\.brain: not loaded$/m);
@@ -324,21 +470,23 @@ describe("status", () => {
     assert.match(result.out, /^health\s+no answer on 127\.0\.0\.1:5320/m);
   });
 
-  it("loaded and healthy: exit 0, with pid, state, health, commit, and log paths", async () => {
-    const home = await tempHome();
+  it("loaded and healthy: exit 0, with pid, state, node, entry, health, commit, and log paths", async () => {
+    const home = await tempDir();
     const sys = fakeSystem();
     await service(home, sys, ["install"]);
     const result = await service(home, sys, ["status"]);
     const paths = servicePaths(home);
-    assert.equal(result.exitCode, 0, result.out);
+    assert.equal(result.exitCode, 0, result.out + result.warn);
+    assert.equal(result.warn, "");
     assert.match(result.out, /^service\s+dev\.breakdown\.brain: loaded \(state = running, pid = 4242/m);
+    assert.ok(result.out.includes(`node     ${NODE}`) && result.out.includes(`entry    ${entryPath(REPO)}`), result.out);
     assert.match(result.out, /^health\s+200 \{"ready":true\}$/m);
     assert.match(result.out, /^commit\s+installed a{12} = HEAD$/m);
     assert.ok(result.out.includes(paths.errLog) && result.out.includes(paths.outLog));
   });
 
   it("loaded but /healthz 503: exit 1 with the reason", async () => {
-    const home = await tempHome();
+    const home = await tempDir();
     const sys = fakeSystem({ health: [{ status: 200, body: "{}" }, { status: 503, body: '{"ready":false,"error":"connect ECONNREFUSED"}' }] });
     await service(home, sys, ["install"]);
     const result = await service(home, sys, ["status"]);
@@ -346,19 +494,61 @@ describe("status", () => {
     assert.match(result.out, /^health\s+503 \{"ready":false,"error":"connect ECONNREFUSED"\}$/m);
   });
 
+  it("200 from another process while the job crash-loops: exit 1 with the last exit code", async () => {
+    const home = await tempDir();
+    await service(home, fakeSystem(), ["install"]);
+    const result = await service(home, fakeSystem({ loaded: true, job: CRASH_LOOP }), ["status"]);
+    assert.equal(result.exitCode, 1);
+    assert.match(result.warn, /answered 200, but dev\.breakdown\.brain is not running \(state = spawn scheduled, last exit code = 1\)/);
+  });
+
   it("commit behind: says how many commits a restart picks up, still exit 0", async () => {
-    const home = await tempHome();
+    const home = await tempDir();
     await service(home, fakeSystem({ head: OLD }), ["install"]);
-    const sys = fakeSystem({ loaded: true, head: HEAD, behind: 3 });
-    const result = await service(home, sys, ["status"]);
+    const result = await service(home, fakeSystem({ loaded: true, head: HEAD, behind: 3 }), ["status"]);
     assert.equal(result.exitCode, 0, result.out);
     assert.match(result.out, /^commit\s+installed b{12}, HEAD a{12}: restart to pick up 3 newer commits \(pnpm mcp:service restart\)$/m);
+  });
+
+  it("restarted by launchd after install: names the restart time instead of a commit count", async () => {
+    const home = await tempDir();
+    await service(home, fakeSystem({ head: OLD }), ["install"]);
+    const startedAt = new Date(Date.now() + 120_000);
+    const sys = fakeSystem({ loaded: true, head: HEAD, behind: 3, startedAt });
+    const result = await service(home, sys, ["status"]);
+    assert.equal(result.exitCode, 0, result.out);
+    const when = lstart(startedAt).trim().replace(/\s+/g, " ");
+    assert.ok(result.out.includes(`launchd restarted it at ${when}; running code is the working tree as of then`), result.out);
+    assert.doesNotMatch(result.out, /newer commits/);
+    assert.equal(sys.state.calls.includes("git rev-list"), false);
+  });
+
+  it("an unreadable commit file is reported, not passed to git", async () => {
+    const home = await tempDir();
+    const sys = fakeSystem();
+    await service(home, sys, ["install"]);
+    await fs.writeFile(servicePaths(home).commitFile, "--output=/tmp/x\n");
+    const result = await service(home, sys, ["status"]);
+    assert.match(result.out, /^commit\s+installed unknown \(.*brain\.installed-commit is not a commit id\), HEAD a{12}$/m);
+    assert.equal(sys.state.calls.includes("git rev-list"), false);
+  });
+
+  it("warns when the plist's node or entrypoint is missing or not this checkout's", async () => {
+    const home = await tempDir();
+    const paths = servicePaths(home);
+    await fs.mkdir(path.dirname(paths.plist), { recursive: true });
+    const otherRepo = await fakeRepo();
+    await fs.writeFile(paths.plist, renderPlist({ execPath: "/gone/node", repoRoot: otherRepo, port: 5320, paths }));
+    const result = await service(home, fakeSystem({ loaded: true }), ["status"]);
+    assert.match(result.out, /^node\s+\/gone\/node$/m);
+    assert.match(result.warn, /the plist's node \/gone\/node no longer exists; run `pnpm mcp:service restart`/);
+    assert.ok(result.warn.includes(`the plist's entrypoint is ${entryPath(otherRepo)}, but this checkout's is ${entryPath(REPO)}; run \`pnpm mcp:service restart\``), result.warn);
   });
 });
 
 describe("runService", () => {
   it("refuses off macOS, pointing at the portable server command", async () => {
-    const home = await tempHome();
+    const home = await tempDir();
     const sys = fakeSystem();
     const result = await service(home, sys, ["install"], { platform: "linux" });
     assert.equal(result.exitCode, 1);
@@ -369,7 +559,7 @@ describe("runService", () => {
   });
 
   it("prints usage and exits 2 for an unknown subcommand", async () => {
-    const home = await tempHome();
+    const home = await tempDir();
     const sys = fakeSystem();
     const result = await service(home, sys, ["start"]);
     assert.equal(result.exitCode, 2);
@@ -378,7 +568,7 @@ describe("runService", () => {
   });
 
   it("prints usage and exits 0 for --help", async () => {
-    const result = await service(await tempHome(), fakeSystem(), ["--help"]);
+    const result = await service(await tempDir(), fakeSystem(), ["--help"]);
     assert.equal(result.exitCode, 0);
     assert.equal(result.out, USAGE);
   });

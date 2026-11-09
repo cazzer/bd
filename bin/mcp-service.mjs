@@ -7,9 +7,10 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { runService } from "./mcp-service-lib.mjs";
 
-const run = (cmd, args, { cwd }) =>
+const run = (cmd, args, { cwd, env }) =>
   new Promise((resolve) => {
-    execFile(cmd, args, { cwd, timeout: 30_000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
+    const options = { cwd, env: env ? { ...process.env, ...env } : undefined, timeout: 30_000, maxBuffer: 16 * 1024 * 1024 };
+    execFile(cmd, args, options, (err, stdout, stderr) => {
       if (!err) return resolve({ code: 0, stdout, stderr });
       if (err.code === "ENOENT") return resolve({ code: 127, stdout: "", stderr: err.message });
       const timedOut = err.killed ? `${cmd} timed out after 30 s` : "";
@@ -28,6 +29,7 @@ const { exitCode } = await runService({
   run,
   fetch: globalThis.fetch,
   sleep,
+  now: Date.now,
   out: console.log,
   warn: console.error,
 });

@@ -52,11 +52,11 @@ herdr tabs sit idle for hours waiting on reviews, so expiry has to be long. The 
 **7. launchd LaunchAgent, written by a repo script.**
 `pnpm mcp:service install|uninstall|status` is a Node script under `bin/`, matching `review-request`. It writes `~/Library/LaunchAgents/dev.breakdown.brain.plist`:
 - **`ProgramArguments`:** the absolute `node` path resolved at install time (`process.execPath`), then tsx's loader and `apps/mcp/src/http.ts`.
-- **`WorkingDirectory`:** the repo.
+- **`WorkingDirectory`:** `<repo>/apps/mcp`, where `tsx` is a devDependency, so `--import tsx` resolves.
 - **Restart and launch:** `KeepAlive: true`, `ThrottleInterval: 10`, `RunAtLoad: true`.
 - **Logs:** `StandardErrorPath`/`StandardOutPath` under `~/Library/Logs/breakdown/`.
 
-`DATABASE_URL` still comes from the workspace `.env` through `resolveDatabaseUrl`, so the plist carries no secret. install is `bootout` (ignored if absent), then write, then `bootstrap gui/$UID`, which makes it idempotent. The 10s throttle covers the database-after-login race: fail-fast exits are retried until docker is up.
+`DATABASE_URL` still comes from the workspace `.env` through `resolveDatabaseUrl`, so the plist carries no secret. install is `bootout` (ignored if absent), then write, then `bootstrap gui/$UID`, which makes it idempotent. uninstall is `bootout`, then removes the plist and `brain.installed-commit` only; the logs and the database stay. The 10s throttle covers the database-after-login race: fail-fast exits are retried until docker is up.
 *Alternative: a docker compose service.* Rejected for now. It is the likely shape on the cluster, but on the laptop it would need its own Node image and a container-to-host database URL, and it would hide logs inside docker. Revisit with the cluster change.
 *Alternative: run under `tsx` via pnpm.* Rejected. pnpm's PATH lookup and its stdout preamble are exactly what broke stdio before.
 

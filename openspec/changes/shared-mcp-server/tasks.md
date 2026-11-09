@@ -27,12 +27,12 @@
 
 - [x] 3.1 `bin/mcp-service.mjs` plus a `pnpm mcp:service` script, with `install [--port n]`, `uninstall`, `status`, and `restart`. The plist is `~/Library/LaunchAgents/dev.breakdown.brain.plist`:
   - absolute `process.execPath`, the tsx loader, and `apps/mcp/src/http.ts`
-  - `WorkingDirectory` set to the repo
+  - `WorkingDirectory` set to `<repo>/apps/mcp` (tsx resolves from there)
   - `KeepAlive`, `RunAtLoad`, `ThrottleInterval: 10`
   - logs under `~/Library/Logs/breakdown/`
   - no environment secrets
 
-  install is `bootout` (ignored if absent), write, `bootstrap gui/$UID`. uninstall removes only the plist. status prints loaded/not loaded, `/healthz`, and the running commit against `HEAD` (design.md decision 7).
+  install is `bootout` (ignored if absent), write, `bootstrap gui/$UID`. uninstall removes the plist and `brain.installed-commit` only. status prints loaded/not loaded, `/healthz`, and the running commit against `HEAD` (design.md decision 7).
 - [x] 3.2 Tests in `bin/mcp-service.test.mjs` with an injected `launchctl` runner and a temp home: the generated plist content, install twice gives one plist and a bootout-then-bootstrap sequence, uninstall leaves logs alone, and `--port` is passed through.
 - [ ] 3.3 On this machine:
   - `pnpm mcp:service install`, then `curl 127.0.0.1:5320/healthz` returns 200
