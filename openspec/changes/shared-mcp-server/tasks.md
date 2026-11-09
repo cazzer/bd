@@ -43,7 +43,7 @@
 
 ## 4. Clients and docs
 
-- [ ] 4.1 Remove `brain` from the repo `.mcp.json`. The README's MCP section covers:
+- [x] 4.1 Remove `brain` from the repo `.mcp.json`. The README's MCP section covers:
   - the HTTP URL
   - the three client commands (Claude Code user scope with `--transport http`, `codex mcp add brain --url`, and the desktop app's stdio entry with absolute paths)
   - the stdio fallback
@@ -56,4 +56,4 @@
   - a Codex session lists the `brain_*` tools
   - `mcp:service restart` while a Claude Code session is open, then a `brain_map` call from that session succeeds without `/mcp` (else record the reconnect step in the README, per design.md Risks)
   - `ps` shows one brain process with three sessions open
-- [ ] 4.4 `openspec validate shared-mcp-server --strict` passes
+- [x] 4.4 `openspec validate shared-mcp-server --strict` passes

@@ -89,12 +89,12 @@ pnpm monorepo, TypeScript, ESM, Node 22.
 
 - `packages/db` — schema (drizzle) and SQL migrations. Postgres 16; the pgvector image is used only to keep embeddings additive later.
 - `packages/core` — batch write path, full-text + graph retrieval.
-- `apps/mcp` — MCP server over stdio; the first client of the brain.
+- `apps/mcp` — MCP server: one shared Streamable HTTP server on loopback (`http.ts`, `127.0.0.1:5320/mcp`, a launchd service via `pnpm mcp:service`) that every session binds to, plus the stdio entrypoint (`index.ts`) as fallback. Both go through `bootstrap.ts`, and they differ only in transport.
 - `apps/web` — later; React editor writing to the node store.
 
 Data model: typed `nodes` joined by `edges` that carry provenance (source system, ingest run) and a confidence weight, because most edges are agent-asserted. Node title and content are indexed by a generated `tsvector` column. Retrieval is one SQL statement: full-text search picks seeds, a recursive CTE expands a bounded, score-decayed subgraph.
 
-**No model call anywhere in this codebase — not in the read path, not in the write path, not in a background job.** The app holds no model credential and takes no model dependency. The only environment variables it reads are `DATABASE_URL`, `BRAIN_READ_ONLY`, and `WEB_SERVER_PORT`; adding an API key of any kind is an architecture change, not a feature.
+**No model call anywhere in this codebase — not in the read path, not in the write path, not in a background job.** The app holds no model credential and takes no model dependency. The only environment variables it reads are `DATABASE_URL`, `BRAIN_READ_ONLY`, and `WEB_SERVER_PORT`; adding an API key of any kind is an architecture change, not a feature. The HTTP server's port and bind host are command-line flags (`--port`, `--host`), not environment variables. The host is loopback-only and enforced. Widening it is the cluster/funnel change, which must bring authentication.
 
 Intelligence enters exclusively through MCP, from a session the user is already paying for by subscription. The agent is the loading and linking mechanism, not a runtime dependency: it reads source material, decides what matters and what relates to what, and writes nodes and explicit edges through the `brain_*` tools. "Run a linking pass on the repo I just imported" is a request a person makes to their own Claude session — never a job this app runs on their behalf.
 

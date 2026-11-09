@@ -21,7 +21,7 @@ Postgres 16 (plain Docker container, not the Supabase CLI stack) · TypeScript, 
 ```
 packages/db     schema + migrations
 packages/core   batch writes, full-text + graph retrieval
-apps/mcp        MCP server (stdio)
+apps/mcp        MCP server (shared loopback HTTP + stdio)
 apps/web        later
 ```
 
@@ -60,22 +60,48 @@ pnpm db:seed
 
 Running it again reports `nodes: 0 created, 0 updated, 9 unchanged` and the same store totals (9 nodes, 16 edges) — edges have no `unchanged` state in the write path (an existing node/edge with no change still reports `updated`), but no row count grows.
 
-### 3. Register the MCP server
+### 3. Run the shared MCP server and point clients at it
 
-`.mcp.json` at the repo root already registers it for Claude Code:
+One long-running server on this machine serves every agent session, from any folder or herdr workspace, at `http://127.0.0.1:5320/mcp`. It listens on loopback only and refuses any other bind address. Each client gets its own MCP session, so writes are still attributed to the client that made them.
+
+Install it as a login service (macOS LaunchAgent: starts at login, restarted on any exit, retried every 10s until Postgres is up):
+
+```bash
+pnpm mcp:service install [--port 5320]   # also: status, restart, uninstall
+curl -s http://127.0.0.1:5320/healthz     # 200 {"ready":true,...} or 503 naming the failure
+```
+
+- **Logs:** `~/Library/Logs/breakdown/brain.err.log`.
+- **Running code:** the service runs whatever is checked out in the repo it was installed from, so run `pnpm mcp:service restart` after pulling. `status` reports the running process, its node and entrypoint, and whether it's behind `HEAD`.
+- **Other platforms:** off macOS, run `pnpm mcp:serve --port <n>` under any supervisor. The server reads no macOS-specific path, and the port and host are command-line flags, not environment variables.
+
+Then register it once per client, at user scope so every session sees it:
+
+```bash
+claude mcp add -s user --transport http brain http://127.0.0.1:5320/mcp
+codex mcp add brain --url http://127.0.0.1:5320/mcp
+```
+
+Sessions that were already running need one reconnect (`/mcp`, or `claude --resume <id>`). After that, a server restart costs a client at most one transparent re-initialize. If a client doesn't re-initialize, run `/mcp` to reconnect.
+
+**Stdio fallback.** For a client that can only launch a local process (the Claude desktop app's `claude_desktop_config.json`), or when the service is down, run the stdio entrypoint with absolute paths. GUI apps don't inherit the login shell's `PATH`, so the bare `pnpm`/`node` won't be found:
 
 ```json
 {
   "mcpServers": {
     "brain": {
-      "command": "pnpm",
-      "args": ["--filter", "@breakdown/mcp", "run", "start"]
+      "command": "/absolute/path/to/node",
+      "args": ["--import", "/path/to/bd/apps/mcp/node_modules/tsx/dist/loader.mjs", "/path/to/bd/apps/mcp/src/index.ts"]
     }
   }
 }
 ```
 
-Opening this repo in Claude Code picks this up automatically — no extra step. For another MCP client (e.g. Claude Desktop), add the same `command`/`args` (with `cwd` set to this repo) to that client's own server config. The server needs only `DATABASE_URL`; startup fails fast with an actionable message if the database is unreachable. Set `BRAIN_READ_ONLY=1` to disable `brain_write`/`brain_link`/`brain_merge`.
+Use `command -v node` for the first path. Stdio output carries only JSON-RPC, so never wrap it in plain `pnpm run`: its `> pkg@version` preamble breaks the connection.
+
+Either way, the server needs only `DATABASE_URL`, read from this repo's `.env`, and startup fails fast with an actionable message if the database is unreachable. Set `BRAIN_READ_ONLY=1` to disable `brain_write`/`brain_link`/`brain_merge`.
+
+**Rollback.** Run `pnpm mcp:service uninstall`, then `claude mcp remove -s user brain` and re-add the stdio form: `claude mcp add -s user brain -- pnpm --silent --dir /path/to/bd --filter @breakdown/mcp run start`.
 
 ### 4. First query
 
