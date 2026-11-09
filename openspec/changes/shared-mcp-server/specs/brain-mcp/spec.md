@@ -21,7 +21,7 @@ The server SHALL offer a Streamable HTTP mode in which one long-running process 
 
 ### Requirement: HTTP mode is local only
 
-In HTTP mode the server SHALL listen only on the loopback interface, SHALL implement no authentication, and SHALL refuse at startup any configuration that would bind another address. It SHALL refuse with HTTP 403, before any tool runs, a request whose `Host` header is not `127.0.0.1:<port>` or `localhost:<port>`, and a request carrying an `Origin` header that is not `http://localhost:<any port>` or `http://127.0.0.1:<any port>`. A request without `Origin` (a non-browser client) SHALL be allowed.
+In HTTP mode the server SHALL listen only on the loopback interface, SHALL implement no authentication, and SHALL refuse at startup any configuration that would bind another address. It SHALL refuse with HTTP 403, before any tool runs, a request whose `Host` header is not `127.0.0.1:<port>`, `localhost:<port>`, or `[::1]:<port>`, and a request of any method carrying an `Origin` header that is not `http://localhost:<any port>`, `http://127.0.0.1:<any port>`, or `http://[::1]:<any port>`. A request without `Origin` (a non-browser client) SHALL be allowed.
 
 #### Scenario: Another host on the network
 
