@@ -1,53 +1,25 @@
-// Entrypoint: fail-fast startup checks, then serve the eleven brain_* tools
-// over stdio (brain-mcp spec, "Fail fast on misconfiguration").
+// Stdio entrypoint: the shared fail-fast startup (bootstrap.ts), then the
+// eleven brain_* tools over stdio. Every startup step lives in bootstrap.ts
+// so this entrypoint and the HTTP one differ only in transport (design.md
+// decision 1).
 //
 // Nothing above main() reads the environment or opens a connection —
 // module scope only defines main() and calls it; every side effect
 // happens inside the function, at process startup, so this stays testable
 // (server.ts's createServer() takes a Database it's handed, never resolves
-// its own).
+// its own; bootstrap.ts likewise does nothing at import).
 
-import { createDb, createPool, DatabaseUrlNotSetError, resolveDatabaseUrl } from "@breakdown/db";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { parseReadOnly } from "./config.js";
+import { bootstrap } from "./bootstrap.js";
 import { createServer } from "./server.js";
-import { describeConnectionError, describeConnectionTarget, verifyDatabaseConnection } from "./startup.js";
 
 async function main(): Promise<void> {
-  let databaseUrl: string;
-  try {
-    // The only credential this server requires — see resolveDatabaseUrl,
-    // which also loads the workspace-root .env and already produces an
-    // actionable message (naming the .env path it looked for) when unset.
-    databaseUrl = resolveDatabaseUrl();
-  } catch (err) {
-    const message = err instanceof DatabaseUrlNotSetError ? err.message : String(err);
-    console.error(`[breakdown-brain] cannot start: ${message}`);
-    process.exit(1);
-  }
-
-  const readOnly = parseReadOnly(process.env["BRAIN_READ_ONLY"]);
-  const pool = createPool(databaseUrl);
-
-  try {
-    await verifyDatabaseConnection(pool);
-  } catch (err) {
-    const target = describeConnectionTarget(databaseUrl);
-    const detail = describeConnectionError(err);
-    console.error(
-      `[breakdown-brain] cannot start: database at ${target} is unreachable (${detail}). ` +
-        "Check that it is running and that DATABASE_URL is correct (see .env.example), then retry.",
-    );
-    await pool.end().catch(() => {});
-    process.exit(1);
-  }
-
-  const db = createDb(pool);
+  const { db, readOnly, target } = await bootstrap();
   const server = createServer(db, { readOnly });
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
-  console.error(`[breakdown-brain] ready on stdio${readOnly ? " (read-only)" : ""} — database ${describeConnectionTarget(databaseUrl)}`);
+  console.error(`[breakdown-brain] ready on stdio${readOnly ? " (read-only)" : ""} — database ${target}`);
 }
 
 main().catch((err) => {

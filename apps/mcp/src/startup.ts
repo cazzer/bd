@@ -1,6 +1,6 @@
 // Fail-fast startup checks (brain-mcp spec, "Fail fast on misconfiguration"):
 // the server validates its database connection before ever accepting a
-// tool call, and index.ts exits with a message naming the connection
+// tool call, and bootstrap.ts exits with a message naming the connection
 // target when it can't — rather than accepting the connection and failing
 // opaquely on the first tool call.
 
@@ -23,7 +23,7 @@ export function describeConnectionTarget(databaseUrl: string): string {
 
 /**
  * Throws if the database is unreachable or rejects a trivial query.
- * Never exits the process itself — index.ts owns that decision, so this
+ * Never exits the process itself — bootstrap.ts owns that decision, so this
  * stays testable as a plain function.
  */
 export async function verifyDatabaseConnection(pool: Pool): Promise<void> {

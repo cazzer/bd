@@ -1,7 +1,7 @@
 // Env parsing beyond DATABASE_URL (which @breakdown/db's
 // resolveDatabaseUrl already owns). Nothing here reads the environment at
 // module scope — parseReadOnly is a pure function of whatever string the
-// caller (index.ts, at startup) hands it.
+// caller (bootstrap.ts, at startup) hands it.
 
 const TRUTHY = new Set(["1", "true", "yes", "on"]);
 

@@ -1,7 +1,7 @@
 ## 1. Shared bootstrap, stdio unchanged
 
-- [ ] 1.1 Move the startup sequence out of `apps/mcp/src/index.ts` into `apps/mcp/src/bootstrap.ts`: resolve `DATABASE_URL`, parse `BRAIN_READ_ONLY`, create the pool, verify it, and exit fail-fast with the existing messages. It returns `{ db, pool, readOnly, target }`. `index.ts` becomes bootstrap plus `StdioServerTransport` with identical behavior (design.md decision 1).
-- [ ] 1.2 `startup.test.ts` still passes unchanged: the first stdout byte is `{` and `ready on stdio` goes to stderr. Add a test that stdio writes still record the client actor.
+- [x] 1.1 Move the startup sequence out of `apps/mcp/src/index.ts` into `apps/mcp/src/bootstrap.ts`: resolve `DATABASE_URL`, parse `BRAIN_READ_ONLY`, create the pool, verify it, and exit fail-fast with the existing messages. It returns `{ db, pool, readOnly, target }`. `index.ts` becomes bootstrap plus `StdioServerTransport` with identical behavior (design.md decision 1).
+- [x] 1.2 `startup.test.ts` still passes unchanged: the first stdout byte is `{` and `ready on stdio` goes to stderr. Add a test that stdio writes still record the client actor.
 - [ ] 1.3 `pnpm check` passes
 
 ## 2. HTTP mode
