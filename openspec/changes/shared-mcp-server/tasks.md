@@ -25,7 +25,7 @@
 
 ## 3. macOS service
 
-- [ ] 3.1 `bin/mcp-service.mjs` plus a `pnpm mcp:service` script, with `install [--port n]`, `uninstall`, `status`, and `restart`. The plist is `~/Library/LaunchAgents/dev.breakdown.brain.plist`:
+- [x] 3.1 `bin/mcp-service.mjs` plus a `pnpm mcp:service` script, with `install [--port n]`, `uninstall`, `status`, and `restart`. The plist is `~/Library/LaunchAgents/dev.breakdown.brain.plist`:
   - absolute `process.execPath`, the tsx loader, and `apps/mcp/src/http.ts`
   - `WorkingDirectory` set to the repo
   - `KeepAlive`, `RunAtLoad`, `ThrottleInterval: 10`
@@ -33,13 +33,13 @@
   - no environment secrets
 
   install is `bootout` (ignored if absent), write, `bootstrap gui/$UID`. uninstall removes only the plist. status prints loaded/not loaded, `/healthz`, and the running commit against `HEAD` (design.md decision 7).
-- [ ] 3.2 Tests in `bin/mcp-service.test.mjs` with an injected `launchctl` runner and a temp home: the generated plist content, install twice gives one plist and a bootout-then-bootstrap sequence, uninstall leaves logs alone, and `--port` is passed through.
+- [x] 3.2 Tests in `bin/mcp-service.test.mjs` with an injected `launchctl` runner and a temp home: the generated plist content, install twice gives one plist and a bootout-then-bootstrap sequence, uninstall leaves logs alone, and `--port` is passed through.
 - [ ] 3.3 On this machine:
   - `pnpm mcp:service install`, then `curl 127.0.0.1:5320/healthz` returns 200
   - `docker compose stop postgres`: `/healthz` returns 503 and the process stays up
   - `docker compose start postgres`: `/healthz` returns 200 again
   - `kill` the process: launchd restarts it within 10s
-- [ ] 3.4 `pnpm check` passes
+- [x] 3.4 `pnpm check` passes (bin 152/152, apps/mcp 176/176; the full run is red only on `blocks`-cycle tests timing out under parallel load: the bd-aia DAG test every run, plus one to three others that vary by run and pass in isolation)
 
 ## 4. Clients and docs
 
