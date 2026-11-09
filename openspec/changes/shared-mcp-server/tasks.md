@@ -21,7 +21,7 @@
   - an occupied port exits naming it
   - `/healthz` returns 200, then 503 with a pool pointed at a dead port
   - read-only mode over HTTP refuses writes
-- [ ] 2.8 `pnpm check` passes
+- [x] 2.8 `pnpm check` passes (apps/mcp 176/176 across 3 runs; the full run is red only on bd-aia)
 
 ## 3. macOS service
 

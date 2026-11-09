@@ -35,7 +35,11 @@
 // while the call is in flight (its cleanup only drops the pending entry),
 // so each session tracks its open POST responses and its close answers
 // them 404 "Session not found" — whether the close came from a DELETE,
-// eviction, the idle sweep, or shutdown.
+// eviction, the idle sweep, or shutdown. In the microtask gap after the SDK
+// has resolved a reply but before the node adapter calls writeHead, a close
+// wins: the client gets the 404 (and re-initializes; writes are idempotent
+// upserts) and the adapter logs an ERR_HTTP_HEADERS_SENT stack to stderr.
+// That trace is expected, not a bug.
 //
 // Session lifetime (decision 3) is a memory bound, not a correctness one:
 // an expired session costs its client one 404 and one re-initialize.
@@ -373,7 +377,7 @@ export async function startHttpServer(options: StartHttpServerOptions): Promise<
         return;
       }
       try {
-        parsedBody = JSON.parse(body.toString("utf8"));
+        parsedBody = JSON.parse(new TextDecoder().decode(body));
       } catch {
         sendJsonRpcError(res, 400, -32700, "Parse error: Invalid JSON");
         return;

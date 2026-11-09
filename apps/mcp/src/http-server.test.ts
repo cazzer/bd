@@ -98,7 +98,8 @@ async function start(overrides: { readOnly?: boolean; db?: Database; pool?: Pool
 
 /** Closes a server the test closed itself, so afterEach does not close it again. */
 async function stop(running: RunningHttpServer): Promise<void> {
-  servers.splice(servers.indexOf(running), 1);
+  const i = servers.indexOf(running);
+  if (i >= 0) servers.splice(i, 1);
   await running.close();
 }
 
