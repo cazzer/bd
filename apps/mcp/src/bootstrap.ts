@@ -6,11 +6,18 @@
 // message on stderr — never stdout, which is the stdio transport.
 //
 // Only startup is fail-fast. Once running, losing the database must not
-// take the process down: pg-pool emits 'error' when an idle client's
-// connection dies (Postgres stopped or restarted), and an EventEmitter
-// with no 'error' listener throws, crashing the server. The pool gets a
-// listener that logs and keeps running, so tool calls fail with their
-// usual errors until the database returns.
+// take the process down, and an EventEmitter with no 'error' listener
+// throws, crashing the server. A dead connection surfaces on one of two
+// paths, and attachPoolErrorLogger covers both:
+// - Idle client: pg-pool re-emits the client's error as the pool's
+//   'error' event. The pool listener logs it once to stderr.
+// - Checked-out client (every drizzle transaction, so every write tool):
+//   pg-pool removes its idle listener on checkout, so the error lands on
+//   the client itself. Each client gets a no-op listener at 'connect'.
+//   pg already fails the in-flight query and rejects later ones, so the
+//   tool returns its normal error; logging here too would print an idle
+//   failure twice.
+// Tool calls fail with their usual errors until the database returns.
 //
 // Nothing here runs at import: module scope only defines bootstrap(), so
 // an entrypoint decides when the environment is read and the connection
@@ -18,9 +25,7 @@
 
 import { createDb, createPool, DatabaseUrlNotSetError, resolveDatabaseUrl, type Database } from "@breakdown/db";
 import { parseReadOnly } from "./config.js";
-import { describeConnectionError, describeConnectionTarget, verifyDatabaseConnection } from "./startup.js";
-
-type Pool = ReturnType<typeof createPool>;
+import { describeConnectionError, describeConnectionTarget, verifyDatabaseConnection, type Pool } from "./startup.js";
 
 export interface Bootstrapped {
   db: Database;
@@ -30,10 +35,13 @@ export interface Bootstrapped {
   target: string;
 }
 
-/** Logs a lost idle connection to stderr instead of letting pg-pool's unhandled 'error' event crash the process. */
+/** Keeps a lost connection, idle or checked out, from crashing the process; see the module header for the two paths. */
 export function attachPoolErrorLogger(pool: Pool): void {
   pool.on("error", (err) => {
     console.error(`[breakdown-brain] database connection lost: ${describeConnectionError(err)} (server keeps running; calls fail until it returns)`);
+  });
+  pool.on("connect", (client) => {
+    client.on("error", () => {});
   });
 }
 

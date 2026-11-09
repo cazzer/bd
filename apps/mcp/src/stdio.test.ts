@@ -7,7 +7,9 @@
 //
 // The database is shared with live sessions, so the fixture is scoped to
 // a unique source system and external id and removed afterwards by the
-// ingest run that wrote it — never by a global sweep.
+// ingest run that wrote it, with the source system as a backstop in case
+// the response (and so the run id) never arrives — never by a global
+// sweep.
 
 import { randomUUID } from "node:crypto";
 import path from "node:path";
@@ -25,6 +27,8 @@ const entry = path.join(mcpRoot, "src", "index.ts");
 let pool: ReturnType<typeof createPool>;
 let db: Database;
 const runIds: string[] = [];
+const suffix = randomUUID().replace(/-/g, "");
+const sourceSystem = `mcp-stdio-${suffix}`;
 
 beforeAll(() => {
   pool = createPool(resolveDatabaseUrl());
@@ -32,6 +36,7 @@ beforeAll(() => {
 });
 
 afterAll(async () => {
+  await db.delete(nodes).where(eq(nodes.sourceSystem, sourceSystem));
   for (const id of runIds) {
     await db.delete(nodes).where(eq(nodes.ingestRunId, id));
     await db.delete(ingestRuns).where(eq(ingestRuns.id, id));
@@ -41,7 +46,6 @@ afterAll(async () => {
 
 describe("server process over stdio", () => {
   it("records the connecting client as the actor on a write's ingest run", async () => {
-    const suffix = randomUUID().replace(/-/g, "");
     const clientName = `stdio-actor-${suffix}`;
     const client = new Client({ name: clientName, version: "9.9.9" });
     const transport = new StdioClientTransport({
@@ -50,14 +54,21 @@ describe("server process over stdio", () => {
       env: process.env as Record<string, string>,
       stderr: "pipe",
     });
+    let stderr = "";
+    transport.stderr?.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+    });
 
     try {
-      await client.connect(transport);
+      await client.connect(transport).catch((err: unknown) => {
+        throw new Error(`connect failed: ${String(err)} — stderr=${stderr}`);
+      });
       const raw = await client.callTool({
         name: "brain_write",
-        arguments: { items: { nodeType: "doc", externalId: `stdio-actor-${suffix}`, sourceSystem: `mcp-stdio-${suffix}`, content: "c" } },
+        arguments: { items: { nodeType: "doc", externalId: `stdio-actor-${suffix}`, sourceSystem, content: "c" } },
       });
       const content = raw.content as { type: string; text: string }[];
+      expect(raw.isError, `brain_write failed: ${content[0]?.text} — stderr=${stderr}`).toBeFalsy();
       const result = JSON.parse(content[0]!.text) as { ingestRunId: string };
       runIds.push(result.ingestRunId);
 
@@ -65,7 +76,7 @@ describe("server process over stdio", () => {
         .select({ sourceSystem: ingestRuns.sourceSystem, actor: ingestRuns.actor })
         .from(ingestRuns)
         .where(eq(ingestRuns.id, result.ingestRunId));
-      expect(run).toEqual({ sourceSystem: "agent", actor: `${clientName} 9.9.9` });
+      expect(run, `stderr=${stderr}`).toEqual({ sourceSystem: "agent", actor: `${clientName} 9.9.9` });
     } finally {
       await client.close();
     }

@@ -123,8 +123,8 @@ describe("server process: fails fast on an unreachable database", () => {
     // `.message` is `""` — the spec's "names ... the failure" silently
     // failed for exactly this input, which is the only one a real user
     // hits (see describeConnectionError's own unit tests above for the
-    // isolated behavior this end-to-end test confirms index.ts actually
-    // wires up).
+    // isolated behavior this end-to-end test confirms bootstrap.ts
+    // actually wires up).
     const deadUrl = "postgres://breakdown:breakdown@localhost:1/breakdown";
 
     let stderr = "";
@@ -161,7 +161,7 @@ describe("server process: fails fast on an unreachable database", () => {
   // the real .env file, which would be invasive for a test. That path is
   // covered functionally by resolveDatabaseUrl's own DatabaseUrlNotSetError
   // (thrown, with an actionable message naming the .env path it looked
-  // for) and by index.ts's explicit catch around resolveDatabaseUrl(),
+  // for) and by bootstrap.ts's explicit catch around resolveDatabaseUrl(),
   // which reads and reports err.message the same way the dead-port path
   // does below.
 });
@@ -218,7 +218,9 @@ describe("server process: stdout carries only the JSON-RPC transport", () => {
       // Startup diagnostics are still expected — on stderr, where they belong.
       expect(stderr).toContain("[breakdown-brain] ready on stdio");
     } finally {
-      child.kill("SIGKILL");
+      // SIGTERM, not SIGKILL: tsx forwards it to the server process it
+      // spawned, so the real server child is not orphaned.
+      child.kill("SIGTERM");
     }
   }, 30_000);
 

@@ -8,7 +8,7 @@ import type { createPool } from "@breakdown/db";
 
 // Avoids a direct `pg` dependency for just this one type — same trick
 // packages/core/src/test-helpers.ts uses for TestPool.
-type Pool = ReturnType<typeof createPool>;
+export type Pool = ReturnType<typeof createPool>;
 
 /** `host:port/database`, with credentials and query-string params stripped — safe to put in a startup error message. */
 export function describeConnectionTarget(databaseUrl: string): string {

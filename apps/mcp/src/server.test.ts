@@ -27,6 +27,10 @@ const openRunIds: string[] = [];
 // which default sourceSystem to "agent" — cleaned up by ingest_run_id
 // instead, since "agent" is not a fixture-unique value we can bulk-delete.
 const toolRunIds: string[] = [];
+// Every actor a client in this file records ("name version" of its
+// clientInfo): connectClient's default and the claude-code identity the
+// attribution tests pass.
+const TEST_CLIENT_ACTORS = ["test-client 0.0.0", "claude-code 2.1.0"];
 
 beforeAll(() => {
   pool = createPool(resolveDatabaseUrl());
@@ -58,7 +62,13 @@ afterEach(async () => {
   // edge_count>0, so "agent" + both zero can only be a run that opened
   // and immediately failed. Swept up after every test rather than
   // per-test, since which test id produced it isn't otherwise knowable.
-  await db.delete(ingestRuns).where(and(eq(ingestRuns.sourceSystem, "agent"), eq(ingestRuns.nodeCount, 0), eq(ingestRuns.edgeCount, 0)));
+  // Scoped to the actors this file's clients introduce themselves as: an
+  // in-flight run also has both counts zero until it closes, and an
+  // unscoped sweep deletes one belonging to stdio.test.ts (running in
+  // parallel) or to a live session sharing the database.
+  await db
+    .delete(ingestRuns)
+    .where(and(eq(ingestRuns.sourceSystem, "agent"), inArray(ingestRuns.actor, TEST_CLIENT_ACTORS), eq(ingestRuns.nodeCount, 0), eq(ingestRuns.edgeCount, 0)));
 });
 
 afterAll(async () => {
