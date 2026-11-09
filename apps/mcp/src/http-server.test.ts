@@ -5,12 +5,15 @@
 // The database is shared with live sessions and with the other apps/mcp
 // test files running in parallel, so every fixture is scoped: nodes carry
 // this file's unique source system, and runs are removed by the ids the
-// writes returned. Client versions carry this file's suffix, so no other
-// file's actor-scoped sweep (server.test.ts deletes zero-count runs by
-// actor) can match a run of ours while it is still open.
+// writes returned. Client versions carry this file's suffix as a backstop
+// against any actor-scoped sweep elsewhere matching a run of ours.
+//
+// Calls that must stay in flight (a session closing under them) run
+// against a fake pool whose queries never answer.
 
 import { randomUUID } from "node:crypto";
 import { request as httpRequest } from "node:http";
+import { connect as netConnect } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -19,7 +22,8 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { createDb, createPool, ingestRuns, nodes, resolveDatabaseUrl, type Database } from "@breakdown/db";
 import { and, eq, inArray } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { createSessionRegistry, HEALTH_TIMEOUT_MS, probeDatabase, startHttpServer, type RunningHttpServer } from "./http-server.js";
+import type { LoopbackHost } from "./http-config.js";
+import { createDatabaseProbe, createSessionRegistry, HEALTH_TIMEOUT_MS, MAX_BODY_BYTES, startHttpServer, type RunningHttpServer } from "./http-server.js";
 import { describeConnectionTarget } from "./startup.js";
 
 const mcpRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -31,8 +35,8 @@ const sourceSystem = `mcp-http-${suffix}`;
 const runIds: string[] = [];
 
 let databaseUrl: string;
-let pool: ReturnType<typeof createPool>;
-let db: Database;
+let pool: ReturnType<typeof createPool> | undefined;
+let db: Database | undefined;
 let target: string;
 const servers: RunningHttpServer[] = [];
 const clients: Client[] = [];
@@ -50,19 +54,52 @@ afterEach(async () => {
 });
 
 afterAll(async () => {
-  await db.delete(nodes).where(eq(nodes.sourceSystem, sourceSystem));
-  if (runIds.length > 0) {
-    await db.delete(nodes).where(inArray(nodes.ingestRunId, runIds));
-    await db.delete(ingestRuns).where(inArray(ingestRuns.id, runIds));
+  if (db) {
+    await db.delete(nodes).where(eq(nodes.sourceSystem, sourceSystem));
+    if (runIds.length > 0) {
+      await db.delete(nodes).where(inArray(nodes.ingestRunId, runIds));
+      await db.delete(ingestRuns).where(inArray(ingestRuns.id, runIds));
+    }
   }
-  await pool.end();
+  await pool?.end();
 });
 
-async function start(overrides: { readOnly?: boolean; pool?: ReturnType<typeof createPool> } = {}): Promise<RunningHttpServer> {
-  const p = overrides.pool ?? pool;
-  const running = await startHttpServer({ db: createDb(p), pool: p, readOnly: overrides.readOnly ?? false, target, port: 0, host: "127.0.0.1" });
+type PoolLike = Parameters<typeof startHttpServer>[0]["pool"];
+
+/** A pool whose every query and checkout waits forever; `calls` counts attempts. */
+function hangingPool(): PoolLike & { calls: number; connect(): Promise<never> } {
+  const fake = {
+    calls: 0,
+    query: () => {
+      fake.calls++;
+      return new Promise<never>(() => {});
+    },
+    connect: () => {
+      fake.calls++;
+      return new Promise<never>(() => {});
+    },
+  };
+  return fake as unknown as PoolLike & { calls: number; connect(): Promise<never> };
+}
+
+async function start(overrides: { readOnly?: boolean; db?: Database; pool?: PoolLike; host?: LoopbackHost } = {}): Promise<RunningHttpServer> {
+  const p = overrides.pool ?? pool!;
+  const running = await startHttpServer({
+    db: overrides.db ?? createDb(p as ReturnType<typeof createPool>),
+    pool: p,
+    readOnly: overrides.readOnly ?? false,
+    target,
+    port: 0,
+    host: overrides.host ?? "127.0.0.1",
+  });
   servers.push(running);
   return running;
+}
+
+/** Closes a server the test closed itself, so afterEach does not close it again. */
+async function stop(running: RunningHttpServer): Promise<void> {
+  servers.splice(servers.indexOf(running), 1);
+  await running.close();
 }
 
 async function connect(url: string, name: string, version: string): Promise<{ client: Client; transport: StreamableHTTPClientTransport }> {
@@ -79,22 +116,52 @@ function textOf(raw: Awaited<ReturnType<Client["callTool"]>>): string {
 
 async function writeNode(client: Client, externalId: string): Promise<string> {
   const raw = await client.callTool({ name: "brain_write", arguments: { items: { nodeType: "doc", externalId, sourceSystem, content: "c" } } });
+  const parsed = raw.isError ? undefined : (JSON.parse(textOf(raw)) as { ingestRunId: string });
+  if (parsed) runIds.push(parsed.ingestRunId);
   expect(raw.isError, textOf(raw)).toBeFalsy();
-  const { ingestRunId } = JSON.parse(textOf(raw)) as { ingestRunId: string };
-  runIds.push(ingestRunId);
-  return ingestRunId;
+  return parsed!.ingestRunId;
 }
 
 async function nodeExists(externalId: string): Promise<boolean> {
-  const rows = await db
+  const rows = await db!
     .select({ id: nodes.id })
     .from(nodes)
     .where(and(eq(nodes.sourceSystem, sourceSystem), eq(nodes.externalId, externalId)));
   return rows.length > 0;
 }
 
+async function until(condition: () => boolean, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error("condition not met in time");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+function sessionHeaders(transport: StreamableHTTPClientTransport): Record<string, string> {
+  return {
+    "content-type": "application/json",
+    accept: "application/json, text/event-stream",
+    "mcp-session-id": transport.sessionId!,
+    "mcp-protocol-version": transport.protocolVersion ?? "2025-06-18",
+  };
+}
+
+function brainWriteCall(externalId: string): string {
+  return JSON.stringify({
+    jsonrpc: "2.0",
+    id: 7,
+    method: "tools/call",
+    params: { name: "brain_write", arguments: { items: { nodeType: "doc", externalId, sourceSystem, content: "c" } } },
+  });
+}
+
+const BRAIN_MAP_CALL = JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "brain_map", arguments: {} } });
+const SESSION_NOT_FOUND = { jsonrpc: "2.0", error: { code: -32001, message: "Session not found" }, id: null };
+
 interface RawResponse {
   status: number;
+  headers: Record<string, string | string[] | undefined>;
   body: string;
 }
 
@@ -105,10 +172,22 @@ function rawRequest(url: string, options: { method: string; headers: Record<stri
       let body = "";
       res.setEncoding("utf8");
       res.on("data", (chunk: string) => (body += chunk));
-      res.on("end", () => resolve({ status: res.statusCode ?? 0, body }));
+      res.on("end", () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body }));
     });
     req.on("error", reject);
     req.end(options.body);
+  });
+}
+
+/** Raw bytes over a socket: a declared Content-Length with no body behind it. */
+function rawSocketRequest(port: number, head: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const socket = netConnect(port, "127.0.0.1", () => socket.write(head));
+    let received = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => (received += chunk));
+    socket.on("close", () => resolve(received));
+    socket.on("error", reject);
   });
 }
 
@@ -121,7 +200,7 @@ describe("sessions over Streamable HTTP", () => {
     const claudeRun = await writeNode(claude.client, `claude-${suffix}`);
     const codexRun = await writeNode(codex.client, `codex-${suffix}`);
 
-    const runs = await db.select({ id: ingestRuns.id, sourceSystem: ingestRuns.sourceSystem, actor: ingestRuns.actor }).from(ingestRuns).where(inArray(ingestRuns.id, [claudeRun, codexRun]));
+    const runs = await db!.select({ id: ingestRuns.id, sourceSystem: ingestRuns.sourceSystem, actor: ingestRuns.actor }).from(ingestRuns).where(inArray(ingestRuns.id, [claudeRun, codexRun]));
     const byId = new Map(runs.map((r) => [r.id, r]));
     expect(byId.get(claudeRun)).toMatchObject({ sourceSystem: "agent", actor: `claude-code 2.1.0+${suffix}` });
     expect(byId.get(codexRun)).toMatchObject({ sourceSystem: "agent", actor: `codex 0.164.0+${suffix}` });
@@ -157,8 +236,7 @@ describe("sessions over Streamable HTTP", () => {
     const staleId = transport.sessionId;
     expect(staleId).toBeTruthy();
     await client.close();
-    await first.close();
-    servers.splice(servers.indexOf(first), 1);
+    await stop(first);
 
     const second = await start();
     const res = await fetch(second.url, {
@@ -167,10 +245,51 @@ describe("sessions over Streamable HTTP", () => {
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
     });
     expect(res.status).toBe(404);
-    expect(await res.json()).toEqual({ jsonrpc: "2.0", error: { code: -32001, message: "Session not found" }, id: null });
+    expect(await res.json()).toEqual(SESSION_NOT_FOUND);
 
     const fresh = await connect(second.url, "restart-client", suffix);
     expect((await fresh.client.listTools()).tools.length).toBeGreaterThan(0);
+  }, 30_000);
+
+  it("forgets a session its client DELETEs: the id then gets 404", async () => {
+    const running = await start();
+    const { transport } = await connect(running.url, "delete-client", suffix);
+    const headers = sessionHeaders(transport);
+    await transport.terminateSession();
+
+    const res = await fetch(running.url, { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }) });
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual(SESSION_NOT_FOUND);
+  });
+
+  it("answers 404 to a call in flight when a DELETE closes its session", async () => {
+    const hung = hangingPool();
+    const running = await start({ db: createDb(hung as unknown as ReturnType<typeof createPool>) });
+    const { transport } = await connect(running.url, "race-client", suffix);
+    const headers = sessionHeaders(transport);
+
+    const call = fetch(running.url, { method: "POST", headers, body: BRAIN_MAP_CALL });
+    await until(() => hung.calls > 0);
+    const deleted = await fetch(running.url, { method: "DELETE", headers });
+    expect(deleted.status).toBe(200);
+
+    const res = await call;
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual(SESSION_NOT_FOUND);
+  }, 30_000);
+
+  it("on shutdown, ends each session under its waiting client with Session not found", async () => {
+    const hung = hangingPool();
+    const running = await start({ db: createDb(hung as unknown as ReturnType<typeof createPool>) });
+    const { client } = await connect(running.url, "shutdown-client", suffix);
+
+    const outcome = client.callTool({ name: "brain_map", arguments: {} }).then(
+      () => "resolved",
+      (err: unknown) => String(err),
+    );
+    await until(() => hung.calls > 0);
+    await stop(running);
+    expect(await outcome).toMatch(/404.*Session not found|Session not found/);
   }, 30_000);
 
   it("refuses with 400 a GET or DELETE on /mcp with no session id", async () => {
@@ -180,31 +299,28 @@ describe("sessions over Streamable HTTP", () => {
       expect(res.status, method).toBe(400);
     }
   });
+
+  it("refuses PUT and PATCH on /mcp with 405 naming the allowed methods", async () => {
+    const running = await start();
+    for (const method of ["PUT", "PATCH"]) {
+      const res = await fetch(running.url, { method, body: "{}" });
+      expect(res.status, method).toBe(405);
+      expect(res.headers.get("allow")).toBe("GET, POST, DELETE");
+    }
+  });
 });
 
 describe("local-only guard", () => {
   it("refuses a foreign Host and a foreign Origin with 403, writing nothing", async () => {
     const running = await start();
     const { transport } = await connect(running.url, "guard-client", suffix);
-    const sessionId = transport.sessionId!;
     const externalId = `guard-${suffix}`;
-    const writeBody = JSON.stringify({
-      jsonrpc: "2.0",
-      id: 7,
-      method: "tools/call",
-      params: { name: "brain_write", arguments: { items: { nodeType: "doc", externalId, sourceSystem, content: "c" } } },
-    });
-    const mcpHeaders = {
-      "content-type": "application/json",
-      accept: "application/json, text/event-stream",
-      "mcp-session-id": sessionId,
-      "mcp-protocol-version": transport.protocolVersion ?? "2025-06-18",
-    };
+    const mcpHeaders = sessionHeaders(transport);
 
-    const foreignOrigin = await rawRequest(running.url, { method: "POST", headers: { ...mcpHeaders, host: `127.0.0.1:${running.port}`, origin: "https://evil.example" }, body: writeBody });
+    const foreignOrigin = await rawRequest(running.url, { method: "POST", headers: { ...mcpHeaders, host: `127.0.0.1:${running.port}`, origin: "https://evil.example" }, body: brainWriteCall(externalId) });
     expect(foreignOrigin.status).toBe(403);
 
-    const foreignHost = await rawRequest(running.url, { method: "POST", headers: { ...mcpHeaders, host: `evil.example:${running.port}` }, body: writeBody });
+    const foreignHost = await rawRequest(running.url, { method: "POST", headers: { ...mcpHeaders, host: `evil.example:${running.port}` }, body: brainWriteCall(externalId) });
     expect(foreignHost.status).toBe(403);
 
     const foreignOriginGet = await rawRequest(running.url, { method: "GET", headers: { ...mcpHeaders, accept: "text/event-stream", host: `127.0.0.1:${running.port}`, origin: "https://evil.example" } });
@@ -214,6 +330,69 @@ describe("local-only guard", () => {
     expect(healthzForeignHost.status).toBe(403);
 
     expect(await nodeExists(externalId)).toBe(false);
+  }, 30_000);
+
+  it("writes nothing for a text/plain POST from a local origin (the SDK's media-type check)", async () => {
+    const running = await start();
+    const { transport } = await connect(running.url, "plain-client", suffix);
+    const externalId = `plain-${suffix}`;
+    const res = await fetch(running.url, {
+      method: "POST",
+      headers: { ...sessionHeaders(transport), "content-type": "text/plain", origin: "http://localhost:5173" },
+      body: brainWriteCall(externalId),
+    });
+    expect(res.status).toBe(415);
+    expect(await nodeExists(externalId)).toBe(false);
+  }, 30_000);
+
+  it("refuses to serve when the bound address is not loopback", async () => {
+    // The type forbids it; a cast stands in for a later change that widens the bind.
+    await expect(start({ host: "0.0.0.0" as LoopbackHost })).rejects.toThrow(/refusing to serve on 0\.0\.0\.0/);
+  });
+});
+
+describe("request body cap", () => {
+  it("refuses a declared Content-Length over the cap with 413, before reading it", async () => {
+    const running = await start();
+    const head =
+      `POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:${running.port}\r\nContent-Type: application/json\r\n` +
+      `Accept: application/json, text/event-stream\r\nContent-Length: ${MAX_BODY_BYTES + 1}\r\n\r\n`;
+    const response = await rawSocketRequest(running.port, head);
+    expect(response).toMatch(/^HTTP\/1\.1 413 /);
+    expect(response).toContain("Payload Too Large");
+  });
+
+  it("refuses a chunked body once it passes the cap", async () => {
+    const running = await start();
+    const chunk = Buffer.alloc(1024 * 1024, 0x20);
+    const status = await new Promise<number>((resolve, reject) => {
+      let answered = false;
+      const req = httpRequest(running.url, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream" } }, (res) => {
+        answered = true;
+        res.resume();
+        resolve(res.statusCode ?? 0);
+      });
+      // Once answered, the server dropping the connection is expected.
+      req.on("error", (err) => {
+        if (!answered) reject(err);
+      });
+      let sent = 0;
+      const pump = (): void => {
+        while (sent <= MAX_BODY_BYTES && !answered) {
+          sent += chunk.length;
+          if (!req.write(chunk)) {
+            req.once("drain", pump);
+            return;
+          }
+        }
+        req.end();
+      };
+      pump();
+    }).catch((err: unknown) => {
+      // The server may drop the socket while the client is still writing.
+      throw new Error(`chunked upload failed before a response: ${String(err)}`);
+    });
+    expect(status).toBe(413);
   }, 30_000);
 });
 
@@ -249,18 +428,43 @@ describe("/healthz", () => {
     }
   });
 
+  it("shares one query among concurrent probes of a hung database", async () => {
+    const hung = hangingPool();
+    const running = await start({ pool: hung, db: db! });
+    const healthz = running.url.replace("/mcp", "/healthz");
+    const responses = await Promise.all([fetch(healthz), fetch(healthz), fetch(healthz)]);
+    for (const res of responses) {
+      expect(res.status).toBe(503);
+      expect(((await res.json()) as { error: string }).error).toBe(`database did not answer within ${HEALTH_TIMEOUT_MS}ms`);
+    }
+    expect(hung.calls).toBe(1);
+  }, 15_000);
+
   it("refuses a method other than GET with 405", async () => {
     const running = await start();
     const res = await fetch(running.url.replace("/mcp", "/healthz"), { method: "POST" });
     expect(res.status).toBe(405);
   });
+});
 
-  it("probeDatabase gives up on a database that never answers", async () => {
-    const hanging = { query: () => new Promise<never>(() => {}) } as unknown as Parameters<typeof probeDatabase>[0];
+describe("createDatabaseProbe", () => {
+  it("gives up on a database that never answers, without issuing a second query", async () => {
+    const hung = hangingPool();
+    const probe = createDatabaseProbe(hung, 50);
     const startedAt = Date.now();
-    const result = await probeDatabase(hanging, 50);
-    expect(result).toEqual({ ok: false, error: "database did not answer within 50ms" });
+    expect(await probe()).toEqual({ ok: false, error: "database did not answer within 50ms" });
     expect(Date.now() - startedAt).toBeLessThan(HEALTH_TIMEOUT_MS);
+    expect(await probe()).toEqual({ ok: false, error: "database did not answer within 50ms" });
+    expect(hung.calls).toBe(1);
+  });
+
+  it("issues a fresh query once the previous one settles", async () => {
+    let calls = 0;
+    const answering = { query: async () => void calls++ } as unknown as PoolLike;
+    const probe = createDatabaseProbe(answering, 1_000);
+    expect(await probe()).toEqual({ ok: true });
+    expect(await probe()).toEqual({ ok: true });
+    expect(calls).toBe(2);
   });
 });
 

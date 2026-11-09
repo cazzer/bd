@@ -6,9 +6,9 @@
 
 ## 2. HTTP mode
 
-- [x] 2.1 `apps/mcp/src/http-config.ts`: parse `--port` (integer 1–65535, default 5320) and `--host` (only `127.0.0.1`, `::1`, or `localhost`, default `127.0.0.1`). A bad value exits naming it, and a non-loopback host exits with the "network exposure is not supported" message (design.md decisions 4–5).
+- [x] 2.1 `apps/mcp/src/http-config.ts`: parse `--port` (integer 0–65535, where 0 is an ephemeral port chosen by the OS; default 5320) and `--host` (only `127.0.0.1`, `::1`, or `localhost`, default `127.0.0.1`). A bad value exits naming it, and a non-loopback host exits with the "network exposure is not supported" message (design.md decisions 4–5).
 - [x] 2.2 `apps/mcp/src/request-guard.ts`: a copy of the web API's `isAllowedRequest` pinned to the MCP port, with its own tests: foreign Host → refused, foreign Origin → refused, absent Origin → allowed, `localhost`/`127.0.0.1` Host case-folded.
-- [x] 2.3 `apps/mcp/src/http.ts`: a `node:http` server on the parsed host and port. The guard runs before routing (403). `/mcp` routes POST/GET/DELETE through a session map (one `StreamableHTTPServerTransport` and one `createServer(db, { readOnly })` per session, `randomUUID` ids, an unknown id → 404). `EADDRINUSE` exits naming the port. The `ready on http://…` line goes to stderr (design.md decision 2).
+- [x] 2.3 `apps/mcp/src/http-server.ts` (started by the `http.ts` entrypoint): a `node:http` server on the parsed host and port. The guard runs before routing (403). `/mcp` routes POST/GET/DELETE through a session map (one `StreamableHTTPServerTransport` and one `createServer(db, { readOnly })` per session, `randomUUID` ids, an unknown id → 404). `EADDRINUSE` exits naming the port. The `ready on http://…` line goes to stderr (design.md decision 2).
 - [x] 2.4 Session lifetime: `lastSeen` per session, a 10-minute sweep closing sessions idle for more than 7 days, and a cap of 256 with least-recently-seen eviction, all as constants (design.md decision 3).
 - [x] 2.5 `GET /healthz`: `select 1` with a 2s timeout. Returns 200 `{ ready: true, readOnly, database }` or 503 naming the failure, and the process stays up (design.md decision 6).
 - [x] 2.6 `apps/mcp/package.json` gains a `serve` script. Root `package.json` gains `mcp:serve`.

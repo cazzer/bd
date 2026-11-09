@@ -18,9 +18,13 @@ describe("parseHttpArgs", () => {
   });
 
   // `--port=<v>` so a value starting with "-" reaches the range check.
-  it.each(["0", "70000", "abc", "80.5", "-1", ""])("refuses --port %j, naming the value", (value) => {
+  it.each(["70000", "65536", "abc", "80.5", "-1", ""])("refuses --port %j, naming the value", (value) => {
     expect(() => parseHttpArgs([`--port=${value}`])).toThrow(HttpConfigError);
-    expect(() => parseHttpArgs([`--port=${value}`])).toThrow(`--port "${value}" is not an integer from 1 to 65535`);
+    expect(() => parseHttpArgs([`--port=${value}`])).toThrow(`--port "${value}" is not an integer from 0 to 65535`);
+  });
+
+  it("accepts --port 0 for an ephemeral port", () => {
+    expect(parseHttpArgs(["--port", "0"]).port).toBe(0);
   });
 
   it.each(["0.0.0.0", "192.168.1.5", "::", "example.com"])("refuses non-loopback --host %s", (value) => {

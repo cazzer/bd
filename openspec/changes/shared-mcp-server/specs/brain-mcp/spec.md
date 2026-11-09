@@ -75,5 +75,5 @@ The server SHALL validate its database connection at startup and SHALL exit with
 
 #### Scenario: Invalid port
 
-- **WHEN** the HTTP server is started with a port that is not an integer from 1 to 65535
+- **WHEN** the HTTP server is started with a port that is not an integer from 0 to 65535 (0 means an ephemeral port chosen by the OS)
 - **THEN** it exits with an error naming the value it was given

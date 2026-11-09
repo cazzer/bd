@@ -6,7 +6,7 @@
 // scenario; see the ticket's requirements list for the mapping.
 
 import { randomUUID } from "node:crypto";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, isNotNull } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -29,8 +29,13 @@ const openRunIds: string[] = [];
 const toolRunIds: string[] = [];
 // Every actor a client in this file records ("name version" of its
 // clientInfo): connectClient's default and the claude-code identity the
-// attribution tests pass.
-const TEST_CLIENT_ACTORS = ["test-client 0.0.0", "claude-code 2.1.0"];
+// attribution tests pass. Versions carry a per-file suffix so no other
+// test file's client (or a live session) can ever share one of these actors.
+const FILE_SUFFIX = randomUUID().replace(/-/g, "");
+const DEFAULT_CLIENT = { name: "test-client", version: `0.0.0+${FILE_SUFFIX}` };
+const CLAUDE_CODE_CLIENT = { name: "claude-code", version: `2.1.0+${FILE_SUFFIX}` };
+const CLAUDE_CODE_ACTOR = `${CLAUDE_CODE_CLIENT.name} ${CLAUDE_CODE_CLIENT.version}`;
+const TEST_CLIENT_ACTORS = [`${DEFAULT_CLIENT.name} ${DEFAULT_CLIENT.version}`, CLAUDE_CODE_ACTOR];
 
 beforeAll(() => {
   pool = createPool(resolveDatabaseUrl());
@@ -65,10 +70,12 @@ afterEach(async () => {
   // Scoped to the actors this file's clients introduce themselves as: an
   // in-flight run also has both counts zero until it closes, and an
   // unscoped sweep deletes one belonging to stdio.test.ts (running in
-  // parallel) or to a live session sharing the database.
+  // parallel) or to a live session sharing the database. Only finished
+  // runs (finished_at set) are swept, so even an actor collision can never
+  // delete a run whose write is still in flight.
   await db
     .delete(ingestRuns)
-    .where(and(eq(ingestRuns.sourceSystem, "agent"), inArray(ingestRuns.actor, TEST_CLIENT_ACTORS), eq(ingestRuns.nodeCount, 0), eq(ingestRuns.edgeCount, 0)));
+    .where(and(eq(ingestRuns.sourceSystem, "agent"), inArray(ingestRuns.actor, TEST_CLIENT_ACTORS), eq(ingestRuns.nodeCount, 0), eq(ingestRuns.edgeCount, 0), isNotNull(ingestRuns.finishedAt)));
 });
 
 afterAll(async () => {
@@ -99,7 +106,7 @@ async function makeEdges(run: IngestRunHandle, specs: readonly Omit<EdgeInput, "
 
 
 /** `clientInfo` is what the client sends in its initialize handshake — the server derives the actor it records on ingest runs from it. */
-async function connectClient(opts?: CreateServerOptions, clientInfo: { name: string; version: string } = { name: "test-client", version: "0.0.0" }): Promise<{ client: Client }> {
+async function connectClient(opts?: CreateServerOptions, clientInfo: { name: string; version: string } = DEFAULT_CLIENT): Promise<{ client: Client }> {
   const server = createServer(db, opts);
   const client = new Client(clientInfo);
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -332,7 +339,7 @@ describe("brain_write", () => {
 
   it("records the connected client, as it introduced itself, as the actor on its ingest run — with no environment variable or argument involved (spec: writes name the connected client)", async () => {
     const suffix = uniqueSuffix();
-    const { client } = await connectClient(undefined, { name: "claude-code", version: "2.1.0" });
+    const { client } = await connectClient(undefined, CLAUDE_CODE_CLIENT);
     const result = parseText(
       await client.callTool({
         name: "brain_write",
@@ -342,7 +349,7 @@ describe("brain_write", () => {
     toolRunIds.push(result.ingestRunId);
 
     const [run] = await db.select({ sourceSystem: ingestRuns.sourceSystem, actor: ingestRuns.actor }).from(ingestRuns).where(eq(ingestRuns.id, result.ingestRunId));
-    expect(run).toEqual({ sourceSystem: "agent", actor: "claude-code 2.1.0" });
+    expect(run).toEqual({ sourceSystem: "agent", actor: CLAUDE_CODE_ACTOR });
   });
 
   it("stores SQL-looking content as literal text and never executes it (spec: no arbitrary SQL from the model)", async () => {
@@ -624,7 +631,7 @@ describe("brain_history", () => {
     ]);
     const survivorId = nodeMap.get("a")!;
     const loserId = nodeMap.get("b")!;
-    const { client } = await connectClient(undefined, { name: "claude-code", version: "2.1.0" });
+    const { client } = await connectClient(undefined, CLAUDE_CODE_CLIENT);
 
     const merge = parseText(await client.callTool({ name: "brain_merge", arguments: { loserId, survivorId } }));
     openRunIds.push(merge.ingestRunId);
@@ -637,7 +644,7 @@ describe("brain_history", () => {
       changedFields: ["mergedInto"],
       mergedInto: survivorId,
       title: "B",
-      ingestRun: { id: merge.ingestRunId, sourceSystem: "agent", actor: "claude-code 2.1.0" },
+      ingestRun: { id: merge.ingestRunId, sourceSystem: "agent", actor: CLAUDE_CODE_ACTOR },
     });
   });
 
@@ -950,7 +957,7 @@ describe("brain_update_work_item", () => {
   it("closes a work item, stamps closedAt, names its run, and the change shows in brain_history (spec: agent closes a work item)", async () => {
     const src = `mcp-wi-${uniqueSuffix()}`;
     usedSourceSystems.push(src);
-    const { client } = await connectClient(undefined, { name: "claude-code", version: "2.1.0" });
+    const { client } = await connectClient(undefined, CLAUDE_CODE_CLIENT);
 
     const written = parseText(await client.callTool({ name: "brain_write", arguments: { items: { nodeType: "work_item", sourceSystem: src, externalId: "wi", title: "Ship it", content: "body" } } }));
     toolRunIds.push(written.ingestRunId);
@@ -966,7 +973,7 @@ describe("brain_update_work_item", () => {
     const history = parseText(await client.callTool({ name: "brain_history", arguments: { id } }));
     expect(history.revisions[0]).toMatchObject({
       changedFields: ["metadata"],
-      ingestRun: { id: updated.ingestRunId, sourceSystem: "agent", actor: "claude-code 2.1.0" },
+      ingestRun: { id: updated.ingestRunId, sourceSystem: "agent", actor: CLAUDE_CODE_ACTOR },
     });
     expect(history.revisions[0].metadataChanges.status).toEqual({ before: "open", after: "closed" });
 

@@ -10,17 +10,32 @@
 // Server to a second transport, so one Server per session is what keeps
 // each client's writes named after that client.
 //
+// Loopback holds here, not only in http-config.ts: startHttpServer refuses
+// to serve if the address it bound is not loopback, and every request
+// from a non-loopback peer is refused before anything else looks at it.
+//
 // Requests are dispatched in this order:
-//   1. the local-only guard (request-guard.ts) → 403, before any route;
-//   2. GET /healthz → 200 or 503 (no session, never writes);
-//   3. /mcp with a session id the registry holds → that session's transport;
-//   4. /mcp with a session id it does not hold → 404 + JSON-RPC -32001, so
+//   1. a non-loopback peer, then the local-only guard (request-guard.ts)
+//      → 403, before any route;
+//   2. a declared body over MAX_BODY_BYTES → 413;
+//   3. GET /healthz → 200 or 503 (no session, never writes);
+//   4. /mcp with a method other than GET/POST/DELETE → 405;
+//   5. a POST body is read here, capped at MAX_BODY_BYTES (413), parsed
+//      (400 on bad JSON), and handed to the SDK as parsedBody;
+//   6. /mcp with a session id the registry holds → that session's transport;
+//   7. /mcp with a session id it does not hold → 404 + JSON-RPC -32001, so
 //      the client re-initializes. Sent here, not by the SDK: a fresh
 //      transport has no session id to compare against, and only 404s an
 //      id that mismatches its own;
-//   5. /mcp POST with no id → a new session (the SDK refuses anything but
+//   8. /mcp POST with no id → a new session (the SDK refuses anything but
 //      initialize on a transport that has none yet);
-//   6. /mcp GET/DELETE with no id → 400.
+//   9. /mcp GET/DELETE with no id → 400.
+//
+// In JSON-response mode the SDK never answers a POST whose session closes
+// while the call is in flight (its cleanup only drops the pending entry),
+// so each session tracks its open POST responses and its close answers
+// them 404 "Session not found" — whether the close came from a DELETE,
+// eviction, the idle sweep, or shutdown.
 //
 // Session lifetime (decision 3) is a memory bound, not a correctness one:
 // an expired session costs its client one 404 and one re-initialize.
@@ -28,10 +43,12 @@
 import { randomUUID } from "node:crypto";
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
+import { performance } from "node:perf_hooks";
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Database } from "@breakdown/db";
-import { isAllowedRequest } from "./request-guard.js";
+import type { LoopbackHost } from "./http-config.js";
+import { isAllowedRequest, isLoopbackAddress } from "./request-guard.js";
 import { createServer } from "./server.js";
 import { describeConnectionError, type Pool } from "./startup.js";
 
@@ -39,6 +56,13 @@ export const SWEEP_INTERVAL_MS = 10 * 60 * 1000;
 export const IDLE_LIMIT_MS = 7 * 24 * 60 * 60 * 1000;
 export const MAX_SESSIONS = 256;
 export const HEALTH_TIMEOUT_MS = 2_000;
+export const MAX_BODY_BYTES = 16 * 1024 * 1024;
+/** How long shutdown waits for in-flight requests before closing sessions under them. */
+export const SHUTDOWN_GRACE_MS = 3_000;
+/** How long shutdown waits for the 404s it just sent to flush before dropping connections. */
+const SHUTDOWN_FLUSH_MS = 500;
+/** How long a refused oversized upload keeps draining before its connection is dropped. */
+const TOO_LARGE_LINGER_MS = 1_000;
 
 /** Anything the registry can hold; closing it must release the session. */
 export interface Closeable {
@@ -61,6 +85,7 @@ export interface SessionRegistry<S extends Closeable> {
 export interface SessionRegistryOptions {
   maxSessions: number;
   idleLimitMs: number;
+  /** A monotonic clock in milliseconds (performance.now in the server). */
   now: () => number;
 }
 
@@ -121,26 +146,42 @@ export function createSessionRegistry<S extends Closeable>(options: SessionRegis
 export type ProbeResult = { ok: true } | { ok: false; error: string };
 
 /**
- * `select 1`, raced against a timer. statement_timeout is no help here:
- * with connectionTimeoutMillis unset, pg-pool waits forever for a
- * connection to a database that accepts TCP but never answers.
+ * A single-flight `select 1`: concurrent callers share one in-flight
+ * query, and each races it against its own timer. statement_timeout is no
+ * help here: with connectionTimeoutMillis unset, pg-pool waits forever for
+ * a connection to a database that accepts TCP but never answers. Sharing
+ * the query caps what a hung database costs at one abandoned query, not
+ * one per /healthz.
  */
-export async function probeDatabase(pool: Pick<Pool, "query">, timeoutMs: number): Promise<ProbeResult> {
-  let timer: NodeJS.Timeout | undefined;
-  const query = Promise.resolve(pool.query("select 1"));
-  // The loser of the race must not surface as an unhandled rejection.
-  query.catch(() => {});
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`database did not answer within ${timeoutMs}ms`)), timeoutMs);
-  });
-  try {
-    await Promise.race([query, timeout]);
-    return { ok: true };
-  } catch (err) {
-    return { ok: false, error: describeConnectionError(err) };
-  } finally {
-    clearTimeout(timer);
-  }
+export function createDatabaseProbe(pool: Pick<Pool, "query">, timeoutMs: number): () => Promise<ProbeResult> {
+  let inflight: Promise<void> | undefined;
+
+  return async () => {
+    if (!inflight) {
+      const query = Promise.resolve()
+        .then(() => pool.query("select 1"))
+        .then(() => undefined);
+      inflight = query;
+      // Handles the rejection too, so an abandoned query never surfaces as unhandled.
+      const settle = (): void => {
+        if (inflight === query) inflight = undefined;
+      };
+      query.then(settle, settle);
+    }
+
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`database did not answer within ${timeoutMs}ms`)), timeoutMs);
+    });
+    try {
+      await Promise.race([inflight, timeout]);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: describeConnectionError(err) };
+    } finally {
+      clearTimeout(timer);
+    }
+  };
 }
 
 export interface StartHttpServerOptions {
@@ -149,60 +190,154 @@ export interface StartHttpServerOptions {
   readOnly: boolean;
   /** `host:port/database`, no credentials (bootstrap's target). */
   target: string;
+  /** 0 asks the OS for an ephemeral port. */
   port: number;
-  host: string;
+  host: LoopbackHost;
 }
 
 export interface RunningHttpServer {
   /** `http://<bound address>:<port>/mcp`, IPv6 bracketed. */
   url: string;
   port: number;
-  /** Closes every session and the listener. The caller ends the pool. */
+  /** Stops accepting, drains, closes every session, then every connection. The caller ends the pool. */
   close(): Promise<void>;
 }
 
 interface Session extends Closeable {
   transport: StreamableHTTPServerTransport;
   server: Server;
+  /** POST responses still waiting on this session's answer. */
+  pending: Set<ServerResponse>;
 }
 
-function sendJson(res: ServerResponse, status: number, body: unknown): void {
-  res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
+function sendJson(res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}): void {
+  res.writeHead(status, { "content-type": "application/json", ...headers }).end(JSON.stringify(body));
 }
 
-function sendJsonRpcError(res: ServerResponse, status: number, code: number, message: string): void {
-  sendJson(res, status, { jsonrpc: "2.0", error: { code, message }, id: null });
+function sendJsonRpcError(res: ServerResponse, status: number, code: number, message: string, headers: Record<string, string> = {}): void {
+  sendJson(res, status, { jsonrpc: "2.0", error: { code, message }, id: null }, headers);
 }
 
-/** Listens on host:port and serves /mcp and /healthz; rejects if the listen fails (EADDRINUSE included). */
+/**
+ * 413, then drop the connection. The rest of the body is discarded for a
+ * short linger first: destroying a socket with unread input sends a reset,
+ * which can make the client lose the 413 it has not read yet.
+ */
+function sendTooLarge(req: IncomingMessage, res: ServerResponse): void {
+  req.resume();
+  res.once("finish", () => setTimeout(() => req.socket.destroy(), TOO_LARGE_LINGER_MS).unref());
+  sendJsonRpcError(res, 413, -32000, `Payload Too Large: request body exceeds ${MAX_BODY_BYTES} bytes`, { connection: "close" });
+}
+
+/** The whole body, or undefined once it passes `limit` bytes (chunked bodies declare no length). */
+function readBody(req: IncomingMessage, limit: number): Promise<Buffer | undefined> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    const cleanup = (): void => {
+      req.off("data", onData);
+      req.off("end", onEnd);
+      req.off("error", onError);
+      req.off("close", onClose);
+    };
+    const onData = (chunk: Buffer): void => {
+      size += chunk.length;
+      if (size > limit) {
+        cleanup();
+        resolve(undefined);
+        return;
+      }
+      chunks.push(chunk);
+    };
+    const onEnd = (): void => {
+      cleanup();
+      resolve(Buffer.concat(chunks));
+    };
+    const onError = (err: Error): void => {
+      cleanup();
+      reject(err);
+    };
+    const onClose = (): void => {
+      cleanup();
+      reject(new Error("request closed before its body was read"));
+    };
+    req.on("data", onData);
+    req.on("end", onEnd);
+    req.on("error", onError);
+    req.on("close", onClose);
+  });
+}
+
+function track(set: Set<ServerResponse>, res: ServerResponse): void {
+  set.add(res);
+  res.once("close", () => set.delete(res));
+}
+
+/** Listens on host:port and serves /mcp and /healthz; rejects if the listen fails (EADDRINUSE included) or the bound address is not loopback. */
 export async function startHttpServer(options: StartHttpServerOptions): Promise<RunningHttpServer> {
-  const { db, pool, readOnly, target } = options;
-  const registry = createSessionRegistry<Session>({ maxSessions: MAX_SESSIONS, idleLimitMs: IDLE_LIMIT_MS, now: Date.now });
+  const { db, readOnly, target } = options;
+  const registry = createSessionRegistry<Session>({ maxSessions: MAX_SESSIONS, idleLimitMs: IDLE_LIMIT_MS, now: () => performance.now() });
+  const probe = createDatabaseProbe(options.pool, HEALTH_TIMEOUT_MS);
   // Set once listening; no request is accepted before then.
   let guardPort = 0;
 
-  async function openSession(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  // Requests shutdown waits for. GETs are left out: on /mcp a GET is a
+  // session's SSE stream, which stays open until the session closes.
+  const inflight = new Set<ServerResponse>();
+  let onDrained: (() => void) | undefined;
+
+  function waitForInflight(ms: number): Promise<void> {
+    if (inflight.size === 0) return Promise.resolve();
+    return new Promise((resolve) => {
+      const timer = setTimeout(done, ms);
+      function done(): void {
+        clearTimeout(timer);
+        onDrained = undefined;
+        resolve();
+      }
+      onDrained = done;
+    });
+  }
+
+  async function openSession(req: IncomingMessage, res: ServerResponse, parsedBody: unknown): Promise<void> {
     const server = createServer(db, { readOnly });
+    const pending = new Set<ServerResponse>();
     const transport: StreamableHTTPServerTransport = new StreamableHTTPServerTransport({
       sessionIdGenerator: randomUUID,
       enableJsonResponse: true,
       onsessioninitialized: (id) => {
-        registry.add(id, { transport, server, close: () => server.close() });
+        registry.add(id, { transport, server, pending, close: () => server.close() });
       },
     });
     // Before connect: Protocol.connect chains its own onclose after this one.
     transport.onclose = () => {
       if (transport.sessionId) registry.remove(transport.sessionId);
+      for (const waiting of pending) {
+        if (!waiting.headersSent) sendJsonRpcError(waiting, 404, -32001, "Session not found");
+      }
+      pending.clear();
     };
-    await server.connect(transport);
-    await transport.handleRequest(req, res);
-    // Not an initialize (the SDK answered 400): nothing references this pair.
-    if (transport.sessionId === undefined) await server.close();
+    try {
+      await server.connect(transport);
+      await transport.handleRequest(req, res, parsedBody);
+    } finally {
+      // Not an initialize (the SDK answered 400), or it failed: nothing references this pair.
+      if (transport.sessionId === undefined) await server.close();
+    }
   }
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (!isLoopbackAddress(req.socket.remoteAddress)) {
+      sendJsonRpcError(res, 403, -32000, "Forbidden: this server accepts loopback peers only");
+      return;
+    }
     if (!isAllowedRequest({ host: req.headers.host, origin: req.headers.origin }, guardPort)) {
       sendJsonRpcError(res, 403, -32000, "Forbidden: this server accepts loopback requests from local origins only");
+      return;
+    }
+    const declaredLength = req.headers["content-length"];
+    if (declaredLength !== undefined && Number(declaredLength) > MAX_BODY_BYTES) {
+      sendTooLarge(req, res);
       return;
     }
 
@@ -211,41 +346,68 @@ export async function startHttpServer(options: StartHttpServerOptions): Promise<
 
     if (pathname === "/healthz") {
       if (method !== "GET") {
-        res.setHeader("allow", "GET");
-        sendJson(res, 405, { error: "method not allowed" });
+        sendJson(res, 405, { error: "method not allowed" }, { allow: "GET" });
         return;
       }
-      const probe = await probeDatabase(pool, HEALTH_TIMEOUT_MS);
-      if (probe.ok) sendJson(res, 200, { ready: true, readOnly, database: target });
-      else sendJson(res, 503, { ready: false, readOnly, database: target, error: probe.error });
+      const result = await probe();
+      if (result.ok) sendJson(res, 200, { ready: true, readOnly, database: target });
+      else sendJson(res, 503, { ready: false, readOnly, database: target, error: result.error });
       return;
     }
 
-    if (pathname === "/mcp") {
-      const header = req.headers["mcp-session-id"];
-      const sessionId = Array.isArray(header) ? header[0] : header;
-      if (sessionId !== undefined) {
-        const session = registry.get(sessionId);
-        if (!session) {
-          sendJsonRpcError(res, 404, -32001, "Session not found");
-          return;
-        }
-        registry.touch(sessionId);
-        await session.transport.handleRequest(req, res);
-        return;
-      }
-      if (method === "POST") {
-        await openSession(req, res);
-        return;
-      }
-      sendJsonRpcError(res, 400, -32000, "Bad Request: Mcp-Session-Id header is required");
+    if (pathname !== "/mcp") {
+      sendJson(res, 404, { error: "not found" });
       return;
     }
 
-    sendJson(res, 404, { error: "not found" });
+    if (method !== "GET" && method !== "POST" && method !== "DELETE") {
+      sendJsonRpcError(res, 405, -32000, "Method not allowed.", { allow: "GET, POST, DELETE" });
+      return;
+    }
+
+    let parsedBody: unknown;
+    if (method === "POST") {
+      const body = await readBody(req, MAX_BODY_BYTES);
+      if (body === undefined) {
+        sendTooLarge(req, res);
+        return;
+      }
+      try {
+        parsedBody = JSON.parse(body.toString("utf8"));
+      } catch {
+        sendJsonRpcError(res, 400, -32700, "Parse error: Invalid JSON");
+        return;
+      }
+    }
+
+    const header = req.headers["mcp-session-id"];
+    const sessionId = Array.isArray(header) ? header[0] : header;
+    if (sessionId !== undefined) {
+      const session = registry.get(sessionId);
+      if (!session) {
+        sendJsonRpcError(res, 404, -32001, "Session not found");
+        return;
+      }
+      registry.touch(sessionId);
+      if (method === "POST") track(session.pending, res);
+      await session.transport.handleRequest(req, res, parsedBody);
+      return;
+    }
+    if (method === "POST") {
+      await openSession(req, res, parsedBody);
+      return;
+    }
+    sendJsonRpcError(res, 400, -32000, "Bad Request: Mcp-Session-Id header is required");
   }
 
   const httpServer = createHttpServer((req, res) => {
+    if (req.method !== "GET") {
+      inflight.add(res);
+      res.once("close", () => {
+        inflight.delete(res);
+        if (inflight.size === 0) onDrained?.();
+      });
+    }
     handle(req, res).catch((err: unknown) => {
       console.error(`[breakdown-brain] ${req.method} ${req.url} failed: ${describeConnectionError(err)}`);
       if (!res.headersSent) sendJsonRpcError(res, 500, -32603, "Internal server error");
@@ -260,24 +422,40 @@ export async function startHttpServer(options: StartHttpServerOptions): Promise<
       resolve();
     });
   });
+
+  const address = httpServer.address() as AddressInfo;
+  if (!isLoopbackAddress(address.address)) {
+    await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+    throw new Error(`refusing to serve on ${address.address}: HTTP mode binds a loopback address only`);
+  }
   httpServer.on("error", (err) => {
     console.error(`[breakdown-brain] http server error: ${describeConnectionError(err)}`);
   });
 
-  const address = httpServer.address() as AddressInfo;
   guardPort = address.port;
   const sweep = setInterval(() => registry.sweep(), SWEEP_INTERVAL_MS);
   sweep.unref();
 
+  async function shutdown(): Promise<void> {
+    clearInterval(sweep);
+    const stopped = new Promise<void>((resolve, reject) => httpServer.close((err) => (err ? reject(err) : resolve())));
+    httpServer.closeIdleConnections();
+    await waitForInflight(SHUTDOWN_GRACE_MS);
+    // Answers any call still waiting with 404, via each session's onclose.
+    await registry.closeAll();
+    await waitForInflight(SHUTDOWN_FLUSH_MS);
+    httpServer.closeAllConnections();
+    await stopped;
+  }
+
+  let closing: Promise<void> | undefined;
   const hostPart = address.family === "IPv6" ? `[${address.address}]` : address.address;
   return {
     url: `http://${hostPart}:${address.port}/mcp`,
     port: address.port,
-    async close() {
-      clearInterval(sweep);
-      await registry.closeAll();
-      httpServer.closeAllConnections();
-      await new Promise<void>((resolve, reject) => httpServer.close((err) => (err ? reject(err) : resolve())));
+    close() {
+      closing ??= shutdown();
+      return closing;
     },
   };
 }

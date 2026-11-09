@@ -3,7 +3,17 @@
 // the guard wired into the real server.
 
 import { describe, expect, it } from "vitest";
-import { isAllowedRequest } from "./request-guard.js";
+import { isAllowedRequest, isLoopbackAddress } from "./request-guard.js";
+
+describe("isLoopbackAddress", () => {
+  it.each(["127.0.0.1", "127.1.2.3", "::1", "::ffff:127.0.0.1", "::FFFF:127.0.0.9"])("accepts %s", (address) => {
+    expect(isLoopbackAddress(address)).toBe(true);
+  });
+
+  it.each(["0.0.0.0", "192.168.1.5", "::", "::ffff:192.168.1.5", "128.0.0.1", "127.0.0.1.evil", "fe80::1", "", undefined])("refuses %s", (address) => {
+    expect(isLoopbackAddress(address)).toBe(false);
+  });
+});
 
 const PORT = 5320;
 

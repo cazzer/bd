@@ -33,7 +33,11 @@ function isLoopbackHost(value: string): value is LoopbackHost {
   return (LOOPBACK_HOSTS as readonly string[]).includes(value);
 }
 
-/** Parses `--port <n> --host <addr>` (process.argv.slice(2)); throws HttpConfigError naming the offending value. */
+/**
+ * Parses `--port <n> --host <addr>` (process.argv.slice(2)); throws
+ * HttpConfigError naming the offending value. `--port 0` asks the OS for
+ * an ephemeral port; the ready line names the one it chose.
+ */
 export function parseHttpArgs(argv: readonly string[]): HttpConfig {
   let values: { port?: string; host?: string };
   try {
@@ -44,14 +48,14 @@ export function parseHttpArgs(argv: readonly string[]): HttpConfig {
       allowPositionals: false,
     }));
   } catch (err) {
-    throw new HttpConfigError(`${err instanceof Error ? err.message : String(err)} (accepted: --port <1-65535> --host <127.0.0.1|::1|localhost>)`);
+    throw new HttpConfigError(`${err instanceof Error ? err.message : String(err)} (accepted: --port <0-65535> --host <127.0.0.1|::1|localhost>)`);
   }
 
   let port = DEFAULT_HTTP_PORT;
   if (values.port !== undefined) {
     const parsed = /^\d+$/.test(values.port) ? Number(values.port) : NaN;
-    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
-      throw new HttpConfigError(`--port "${values.port}" is not an integer from 1 to 65535`);
+    if (!Number.isInteger(parsed) || parsed > 65535) {
+      throw new HttpConfigError(`--port "${values.port}" is not an integer from 0 to 65535`);
     }
     port = parsed;
   }

@@ -7,8 +7,7 @@
 // forwards SIGTERM to the real node child, while SIGKILL would orphan it.
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { createServer, type Server } from "node:net";
-import type { AddressInfo } from "node:net";
+import { createServer, type AddressInfo, type Server } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
@@ -17,30 +16,38 @@ const mcpRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const tsxBin = path.join(mcpRoot, "node_modules", ".bin", "tsx");
 const entry = path.join(mcpRoot, "src", "http.ts");
 
-const children: ChildProcess[] = [];
-const netServers: Server[] = [];
-
-afterEach(async () => {
-  for (const child of children.splice(0)) {
-    if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
-  }
-  await Promise.all(netServers.splice(0).map((s) => new Promise<void>((resolve) => s.close(() => resolve()))));
-});
-
 interface Exited {
   code: number | null;
   stderr: string;
 }
 
-function spawnHttp(args: string[]): { child: ChildProcess; exited: Promise<Exited>; stderr: () => string } {
+interface Spawned {
+  child: ChildProcess;
+  exited: Promise<Exited>;
+  stderr: () => string;
+}
+
+const spawned: Spawned[] = [];
+const netServers: Server[] = [];
+
+afterEach(async () => {
+  for (const { child, exited } of spawned.splice(0)) {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+    await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 5_000))]);
+  }
+  await Promise.all(netServers.splice(0).map((s) => new Promise<void>((resolve) => s.close(() => resolve()))));
+});
+
+function spawnHttp(args: string[]): Spawned {
   const env = { ...process.env } as Record<string, string>;
   delete env["BRAIN_READ_ONLY"];
   const child = spawn(tsxBin, [entry, ...args], { env, stdio: ["ignore", "pipe", "pipe"] });
-  children.push(child);
   let stderr = "";
   child.stderr!.on("data", (chunk: Buffer) => (stderr += chunk.toString("utf8")));
   const exited = new Promise<Exited>((resolve) => child.on("exit", (code) => resolve({ code, stderr })));
-  return { child, exited, stderr: () => stderr };
+  const result = { child, exited, stderr: () => stderr };
+  spawned.push(result);
+  return result;
 }
 
 async function holdPort(): Promise<number> {
@@ -51,13 +58,6 @@ async function holdPort(): Promise<number> {
     server.listen(0, "127.0.0.1", () => resolve());
   });
   return (server.address() as AddressInfo).port;
-}
-
-async function freePort(): Promise<number> {
-  const port = await holdPort();
-  const server = netServers.pop()!;
-  await new Promise<void>((resolve) => server.close(() => resolve()));
-  return port;
 }
 
 describe("http entrypoint", () => {
@@ -78,15 +78,17 @@ describe("http entrypoint", () => {
     expect(stderr).not.toContain("ready on");
   }, 30_000);
 
-  it("serves /healthz once ready, and exits 0 on SIGTERM", async () => {
-    const port = await freePort();
-    const { child, exited, stderr } = spawnHttp(["--port", String(port)]);
-    const ready = `ready on http://127.0.0.1:${port}/mcp`;
+  it("serves /healthz on the ephemeral port its ready line names, and exits 0 on SIGTERM", async () => {
+    const { child, exited, stderr } = spawnHttp(["--port", "0"]);
+    const readyLine = /ready on http:\/\/127\.0\.0\.1:(\d+)\/mcp/;
     const deadline = Date.now() + 20_000;
-    while (!stderr().includes(ready)) {
+    let match: RegExpMatchArray | null;
+    while (!(match = stderr().match(readyLine))) {
       if (child.exitCode !== null || Date.now() > deadline) throw new Error(`never became ready — stderr=${stderr()}`);
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
+    const port = Number(match[1]);
+    expect(port).toBeGreaterThan(0);
     const res = await fetch(`http://127.0.0.1:${port}/healthz`);
     expect(res.status).toBe(200);
 

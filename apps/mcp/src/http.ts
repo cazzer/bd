@@ -11,6 +11,9 @@ import { bootstrap } from "./bootstrap.js";
 import { parseHttpArgs, type HttpConfig } from "./http-config.js";
 import { startHttpServer, type RunningHttpServer } from "./http-server.js";
 
+/** Covers close() (at most SHUTDOWN_GRACE_MS plus a flush) and pool.end(). */
+const SHUTDOWN_DEADLINE_MS = 5_000;
+
 function cannotStart(message: string): never {
   console.error(`[breakdown-brain] cannot start: ${message}`);
   process.exit(1);
@@ -37,11 +40,20 @@ async function main(): Promise<void> {
     cannotStart(err instanceof Error ? err.message : String(err));
   }
 
+  // A second signal, or a shutdown that overruns its deadline, exits 1
+  // without waiting: the operator (or supervisor) asked twice.
   let stopping = false;
   const stop = (signal: NodeJS.Signals): void => {
-    if (stopping) return;
+    if (stopping) {
+      console.error(`[breakdown-brain] second ${signal} received, exiting without finishing shutdown`);
+      process.exit(1);
+    }
     stopping = true;
     console.error(`[breakdown-brain] ${signal} received, closing sessions`);
+    setTimeout(() => {
+      console.error(`[breakdown-brain] shutdown did not finish within ${SHUTDOWN_DEADLINE_MS}ms, exiting`);
+      process.exit(1);
+    }, SHUTDOWN_DEADLINE_MS).unref();
     running
       .close()
       .then(() => pool.end())

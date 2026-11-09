@@ -36,7 +36,7 @@ On an `initialize` POST with no `mcp-session-id`, the server creates a transport
 *Alternative: stateless mode (`sessionIdGenerator: undefined`, a server per request).* Rejected. Each request would lose the client identity from `initialize`, and the attribution requirement depends on it.
 
 **3. Idle sessions expire after 7 days, and at most 256 sessions are held.**
-herdr tabs sit idle for hours waiting on reviews, so expiry has to be long. The skyos tabs were idle across a whole evening on 2026-11-08. A per-session `lastSeen` is checked on a 10-minute timer. Past the cap, the least-recently-seen session is closed. An expired session costs the client one 404 and one re-initialize, so the numbers are a memory bound, not a correctness one. They are constants in `http.ts`, not configuration.
+herdr tabs sit idle for hours waiting on reviews, so expiry has to be long. The skyos tabs were idle across a whole evening on 2026-11-08. A per-session `lastSeen` is checked on a 10-minute timer. Past the cap, the least-recently-seen session is closed. An expired session costs the client one 404 and one re-initialize, so the numbers are a memory bound, not a correctness one. They are constants in `http-server.ts` (`SWEEP_INTERVAL_MS`, `IDLE_LIMIT_MS`, `MAX_SESSIONS`), not configuration.
 
 **4. Port and bind address are command-line flags, not environment variables. This is an architecture decision.**
 `serve --port <n> --host <addr>`, defaulting to `--port 5320 --host 127.0.0.1`. The port sits next to the web API's 5310. The environment allowlist in CLAUDE.md (`DATABASE_URL`, `BRAIN_READ_ONLY`, `WEB_SERVER_PORT`) stays exactly as it is. A launchd plist, a systemd unit, and a container `command:` all pass arguments as easily as environment.

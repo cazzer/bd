@@ -23,6 +23,21 @@ export interface GuardedRequest {
 }
 
 const LOCAL_ORIGIN = /^http:\/\/(localhost|127\.0\.0\.1|\[::1\]):\d{1,5}$/;
+const LOOPBACK_V4 = /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/;
+
+/**
+ * True for a loopback socket address: 127.0.0.0/8, `::1`, or an IPv4
+ * loopback mapped into IPv6 (`::ffff:127.x.y.z`). http-server.ts checks
+ * both the address it bound and each request's peer with it, so loopback
+ * holds even if the bind validation in http-config.ts is ever widened.
+ */
+export function isLoopbackAddress(address: string | undefined): boolean {
+  if (address === undefined) return false;
+  const lowered = address.toLowerCase();
+  if (lowered === "::1") return true;
+  const v4 = lowered.startsWith("::ffff:") ? lowered.slice("::ffff:".length) : lowered;
+  return LOOPBACK_V4.test(v4);
+}
 
 /** True when the request may reach a route (module header). */
 export function isAllowedRequest(request: GuardedRequest, port: number): boolean {
