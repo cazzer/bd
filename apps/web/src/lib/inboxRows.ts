@@ -18,6 +18,8 @@ export interface InboxRowItem {
   source: string;
   /** ISO time. */
   receivedAt: string;
+  /** The work item it is about (inbox-follow-through); absent or null when unlinked. */
+  about?: { id: string; title: string } | null;
 }
 
 export interface QueueReviewRow {
@@ -55,4 +57,48 @@ export function sourcesOf(rows: readonly { source: string }[]): string[] {
   const set = new Set(rows.map((r) => r.source));
   const rest = [...set].filter((s) => s !== REVIEW_SOURCE).sort();
   return set.has(REVIEW_SOURCE) ? [REVIEW_SOURCE, ...rest] : rest;
+}
+
+/** Where a row sits in a work group: the group's work item, its size, and whether the row is the group's first. */
+export interface WorkGroupSlot {
+  workId: string;
+  title: string;
+  count: number;
+  first: boolean;
+}
+
+/**
+ * Needs me grouped by work context (inbox-follow-through, design.md decision
+ * 9): inbox rows about the same work item, when there are two or more of
+ * them, are pulled together at the first one's place, keeping their order;
+ * everything else keeps its place. Returns the reordered rows and, for each
+ * grouped row's key, its slot. Pure, and order-stable for a stable input.
+ */
+export function groupByWork<T extends { kind: string; key: string; item?: InboxRowItem }>(rows: readonly T[]): { rows: T[]; slots: Map<string, WorkGroupSlot> } {
+  const members = new Map<string, T[]>();
+  for (const row of rows) {
+    const work = row.kind === "inbox" ? (row.item?.about ?? null) : null;
+    if (work === null) continue;
+    const list = members.get(work.id);
+    if (list === undefined) members.set(work.id, [row]);
+    else list.push(row);
+  }
+  const slots = new Map<string, WorkGroupSlot>();
+  const out: T[] = [];
+  const emitted = new Set<string>();
+  for (const row of rows) {
+    const work = row.kind === "inbox" ? (row.item?.about ?? null) : null;
+    const group = work === null ? undefined : members.get(work.id);
+    if (work === null || group === undefined || group.length < 2) {
+      out.push(row);
+      continue;
+    }
+    if (emitted.has(work.id)) continue;
+    emitted.add(work.id);
+    group.forEach((member, i) => {
+      out.push(member);
+      slots.set(member.key, { workId: work.id, title: work.title, count: group.length, first: i === 0 });
+    });
+  }
+  return { rows: out, slots };
 }

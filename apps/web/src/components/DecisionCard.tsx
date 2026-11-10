@@ -12,6 +12,12 @@
 // on a card with options, the option whose button has focus, else the
 // recommended one (nothing from the fold's toggle); plain Accept otherwise;
 // with Shift, Request changes, which needs a message.
+//
+// `noteSendsToAgent` (inbox-follow-through, design.md decision 2): on a
+// card without options the footer shows one primary action, Accept while
+// the message box is blank and Send to agent (`changes`) once it holds a
+// note, and Ctrl/Cmd+Enter follows it. Option actions are unchanged and
+// carry the note. Hosts that leave it off (the board) keep both buttons.
 
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
@@ -34,6 +40,8 @@ export interface FooterLabels {
   notice?: ReactNode;
   /** Ctrl/Cmd+Enter accepts, Ctrl/Cmd+Shift+Enter requests changes. */
   shortcuts?: boolean;
+  /** One primary action on a card without options: Accept when the message is blank, the changes decision (`changesLabel`) when it holds a note. */
+  noteSendsToAgent?: boolean;
   /**
    * Where the shortcut hint is drawn instead of the footer (the run's
    * header, which has the width). Given, the footer has no recipient/hint
@@ -101,11 +109,12 @@ export function cardShortcut(
   e: { key: string; metaKey: boolean; ctrlKey: boolean; altKey: boolean; shiftKey: boolean; target: EventTarget | null },
   card: CardLike | null,
   message: string,
+  options: { noteSendsToAgent?: boolean } = {},
 ): CardShortcut | null {
   if (e.key !== "Enter" || !(e.metaKey || e.ctrlKey) || e.altKey) return null;
   if (e.shiftKey) return message.trim() === "" ? { kind: "needs-message" } : { kind: "changes" };
   const actions = card === null ? null : cardActions(card);
-  if (actions === null || card === null) return { kind: "accept" };
+  if (actions === null || card === null) return primaryDecision(message, options.noteSendsToAgent === true) === "changes" ? { kind: "changes" } : { kind: "accept" };
   // On an option's own button the shortcut takes that option, so a focused
   // "Choose B" never accepts the recommendation instead; on the fold's
   // toggle it takes nothing; anywhere else, the recommendation.
@@ -115,6 +124,11 @@ export function cardShortcut(
   const focused = focusedId === undefined ? undefined : card.options.find((o) => o.id === focusedId);
   const option = focused ?? actions.accept;
   return option === null ? { kind: "nothing" } : { kind: "accept", option };
+}
+
+/** What a card without options' primary action records: accept, unless the host sends a typed note to the agent. */
+export function primaryDecision(message: string, noteSendsToAgent: boolean): "accept" | "changes" {
+  return noteSendsToAgent && message.trim() !== "" ? "changes" : "accept";
 }
 
 export function DecisionFooter({
@@ -183,7 +197,12 @@ export function DecisionFooter({
   const describedBy = [needsMessage ? hintId : null, hintElsewhere ? recipientId : null].filter((id) => id !== null).join(" ") || undefined;
   const hint = labels.shortcuts && (
     <span aria-hidden="true" className="hidden shrink-0 items-center gap-1 whitespace-nowrap text-xs text-fg-muted lg:inline-flex">
-      {actions === null || actions.accept !== null ? (
+      {actions === null && labels.noteSendsToAgent ? (
+        <>
+          <Kbd>Ctrl/⌘</Kbd>
+          <Kbd>Enter</Kbd> {message.trim() === "" ? "accept" : "send to agent"} · a note sends it to the agent
+        </>
+      ) : actions === null || actions.accept !== null ? (
         <>
           <Kbd>Ctrl/⌘</Kbd>
           <Kbd>Enter</Kbd> accept{actions?.accept ? <> option {actions.accept.id}</> : null} · add <Kbd>Shift</Kbd> to request changes
@@ -272,7 +291,10 @@ export function DecisionFooter({
         <div className={`flex items-center gap-2 ${compact ? "max-sm:flex-nowrap max-sm:[&>button]:flex-1 sm:flex-wrap" : "flex-wrap"}`}>
           {open && (
             <>
-              {actions === null && (
+              {actions === null && labels.noteSendsToAgent ? (
+                <PrimaryByNote message={message} pending={pending} busy={busy} labels={labels} decide={decide} />
+              ) : null}
+              {actions === null && !labels.noteSendsToAgent && (
                 <button
                   type="button"
                   onClick={() => decide("accept")}
@@ -283,6 +305,7 @@ export function DecisionFooter({
                   {pending === "accept" ? "Accepting…" : <Label full={labels.acceptLabel} short={labels.acceptShort} />}
                 </button>
               )}
+              {!(actions === null && labels.noteSendsToAgent) && (
               <button
                 type="button"
                 onClick={() => decide("changes")}
@@ -293,6 +316,7 @@ export function DecisionFooter({
               >
                 {pending === "changes" ? "Sending…" : <Label full={labels.changesLabel} short={labels.changesShort} />}
               </button>
+              )}
             </>
           )}
           {labels.extra?.({ busy })}
@@ -526,4 +550,33 @@ function Label({ full, short }: { full: string; short: string | undefined }) {
 
 function Kbd({ children }: { children: ReactNode }) {
   return <kbd className="rounded border border-b-2 border-hairline px-1 font-mono text-xs text-fg">{children}</kbd>;
+}
+
+/** The single primary action of `noteSendsToAgent`: Accept on a blank message, the changes decision once a note is typed. */
+function PrimaryByNote({
+  message,
+  pending,
+  busy,
+  labels,
+  decide,
+}: {
+  message: string;
+  pending: ReviewDecisionKind | null;
+  busy: boolean;
+  labels: FooterLabels;
+  decide: (decision: ReviewDecisionKind) => void;
+}) {
+  const decision = primaryDecision(message, true);
+  const pendingText = pending === "changes" ? "Sending…" : pending === "accept" ? "Accepting…" : null;
+  return (
+    <button
+      type="button"
+      onClick={() => decide(decision)}
+      disabled={busy}
+      aria-keyshortcuts={labels.shortcuts ? "Control+Enter Meta+Enter" : undefined}
+      className="min-h-11 rounded-lg bg-accent px-4 text-sm font-semibold text-ground hover:bg-accent/90 focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-ground disabled:opacity-60 sm:min-h-10"
+    >
+      {pendingText ?? (decision === "accept" ? <Label full={labels.acceptLabel} short={labels.acceptShort} /> : <Label full={labels.changesLabel} short={labels.changesShort} />)}
+    </button>
+  );
 }

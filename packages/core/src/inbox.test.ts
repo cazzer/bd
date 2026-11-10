@@ -15,7 +15,10 @@ import {
   listInbox,
   loadStoredInboxMetadata,
   normalizeInboxItemMetadata,
+  unlinkInboxWorkContext,
 } from "./inbox.js";
+import { mergeNodes } from "./merge.js";
+import { normalizeWorkItemMetadata, WORK_ITEM_NODE_TYPE } from "./work-items.js";
 import { closeIngestRun, openIngestRun, type IngestRunHandle } from "./ingest-runs.js";
 import { upsertNodes } from "./nodes.js";
 import { connectTestDb, type TestPool, uniqueSuffix } from "./test-helpers.js";
@@ -66,6 +69,28 @@ describe("normalizeInboxItemMetadata", () => {
     expect(() => normalizeInboxItemMetadata({ source: "x", status: "open" })).toThrow(/status/);
     expect(() => normalizeInboxItemMetadata({ source: "x", url: "javascript:alert(1)" })).toThrow(/url/);
     expect(() => normalizeInboxItemMetadata({ source: "x", priority: 9 })).toThrow(/priority/);
+  });
+});
+
+describe("revision and close reason (inbox-follow-through)", () => {
+  it("keeps them as trimmed text, drops blanks, and refuses a wrong type or length", () => {
+    const m = normalizeInboxItemMetadata({ source: "slack", revision: "  dropped the alias line ", close_reason: "already sent a message, close this" });
+    expect(m["revision"]).toBe("dropped the alias line");
+    expect(m["close_reason"]).toBe("already sent a message, close this");
+    expect(normalizeInboxItemMetadata({ source: "slack", revision: "  " })).not.toHaveProperty("revision");
+    expect(() => normalizeInboxItemMetadata({ source: "slack", revision: "x".repeat(201) })).toThrow(/revision/);
+    expect(() => normalizeInboxItemMetadata({ source: "slack", revision: "two\nlines" })).toThrow(/revision/);
+    expect(() => normalizeInboxItemMetadata({ source: "slack", close_reason: 7 })).toThrow(/close_reason/);
+    expect(() => normalizeInboxItemMetadata({ source: "slack", close_reason: "x".repeat(501) })).toThrow(/close_reason/);
+  });
+
+  it("serves both, and the next person decision clears revision but not close_reason", async () => {
+    const id = await write("slack:C1/1", { source: "slack", revision: "rewrote the reply", close_reason: "kept from an earlier close" });
+    let item = (await mine()).find((i) => i.id === id)!;
+    expect([item.revision, item.closeReason]).toEqual(["rewrote the reply", "kept from an earlier close"]);
+    await decideInboxItem(db, id, { decision: "accept" });
+    item = (await mine()).find((i) => i.id === id)!;
+    expect([item.revision, item.closeReason]).toEqual([null, "kept from an earlier close"]);
   });
 });
 
@@ -301,5 +326,44 @@ describe("inbox digestion", () => {
     } finally {
       await db.execute(sql`DELETE FROM nodes WHERE source_system = 'inbox' AND external_id IN (${key}, ${`${key}-2`})`);
     }
+  });
+});
+
+describe("work context (inbox-follow-through)", () => {
+  async function work(externalId: string, title: string, project: string): Promise<string> {
+    const result = await upsertNodes(db, run, [
+      { nodeType: WORK_ITEM_NODE_TYPE, sourceSystem: SRC, externalId, title, content: "", metadata: normalizeWorkItemMetadata({ project }) },
+    ]);
+    return result.rows[0]!.id;
+  }
+
+  it("serves the heaviest about target, folds a merged one to its survivor, and unlinks", async () => {
+    const rfi = await work("work:vendor-rfi", "Vendor RFI", "vendor-rfi");
+    const other = await work("work:other", "Other", "other");
+    const item = await write("slack:C9/1", { source: "slack" });
+    const plain = await write("slack:C9/2", { source: "slack" });
+    await upsertEdges(db, run, [
+      { srcId: item, dstId: rfi, edgeType: "about", sourceSystem: SRC, weight: 0.9 },
+      { srcId: item, dstId: other, edgeType: "about", sourceSystem: SRC, weight: 0.4 },
+    ]);
+
+    let items = await mine();
+    expect(items.find((i) => i.id === item)?.about).toEqual({ id: rfi, title: "Vendor RFI", project: "vendor-rfi" });
+    expect(items.find((i) => i.id === plain)?.about).toBeNull();
+
+    const dupe = await work("work:vendor-rfi-dupe", "Vendor RFI (dupe)", "vendor-rfi");
+    const third = await write("slack:C9/3", { source: "slack" });
+    await upsertEdges(db, run, [{ srcId: third, dstId: dupe, edgeType: "about", sourceSystem: SRC }]);
+    await mergeNodes(db, dupe, rfi, run);
+    items = await mine();
+    expect(items.find((i) => i.id === third)?.about?.id).toBe(rfi);
+
+    expect(await unlinkInboxWorkContext(db, item)).toEqual({ id: item, removed: 2 });
+    items = await mine();
+    const after = items.find((i) => i.id === item)!;
+    expect(after.about).toBeNull();
+    expect(after.status).toBe("pending");
+    expect(await unlinkInboxWorkContext(db, item)).toEqual({ id: item, removed: 0 });
+    await expect(unlinkInboxWorkContext(db, rfi)).rejects.toThrow(NotAnInboxItemError);
   });
 });

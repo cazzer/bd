@@ -17,7 +17,9 @@
 //
 // Status is whose turn it is:
 //   pending   — the person's: decide accept / changes / dismiss
-//   changes   — the agent's: revise per the latest feedback, then set pending
+//   changes   — the agent's: triage the latest note into close (done),
+//               act (carry it out, done), or re-queue (pending, with a
+//               `revision` line) — inbox-follow-through, design.md decision 3
 //   accepted  — the executor's: carry out the proposed action, then set done
 //   session   — handed to an interactive Claude session the person opened on
 //               it (herdr tab); the session re-queues a draft as pending, or
@@ -48,6 +50,8 @@
 // items through `brain_list`.
 
 import { sql } from "drizzle-orm";
+import { ABOUT_EDGE_TYPE } from "./work-context.js";
+import { WORK_ITEM_NODE_TYPE } from "./work-items.js";
 import type { Database } from "@breakdown/db";
 import {
   InboxCardChangedError,
@@ -98,6 +102,10 @@ export const MAX_INBOX_SHORT_TEXT = 200;
 export const MAX_INBOX_URL_LENGTH = 2000;
 export const MAX_INBOX_READ = 20;
 export const MAX_INBOX_READ_REF_LENGTH = 500;
+/** `revision`: the agent's one line on what it changed when it re-queues an item the person sent back. */
+export const MAX_INBOX_REVISION_LENGTH = 200;
+/** `close_reason`: why an agent closed an item on the person's note (usually the note itself). */
+export const MAX_INBOX_CLOSE_REASON_LENGTH = 500;
 export const INBOX_READ_DEPTHS = ["full", "skimmed"] as const;
 export type InboxReadDepth = (typeof INBOX_READ_DEPTHS)[number];
 
@@ -151,6 +159,10 @@ export interface InboxItemFields {
   onAccept: string[];
   /** What the agent declared it opened. */
   read: InboxRead[];
+  /** The agent's one line on what changed when it re-queued the item after the person's note; cleared by the next decision. */
+  revision: string | null;
+  /** Why an agent closed the item on the person's note. */
+  closeReason: string | null;
 }
 
 const CONTROL_CHAR = /[\u0000-\u0008\u000b-\u001f\u007f]/;
@@ -211,6 +223,14 @@ export function normalizeInboxItemMetadata(raw: Record<string, unknown> | undefi
   }
   for (const key of ["from", "verdict"] as const) {
     const value = shortText(metadata[key], key, itemLabel);
+    if (value === null) delete metadata[key];
+    else metadata[key] = value;
+  }
+  for (const [key, max] of [["revision", MAX_INBOX_REVISION_LENGTH], ["close_reason", MAX_INBOX_CLOSE_REASON_LENGTH]] as const) {
+    const value = shortText(metadata[key], key, itemLabel, { max });
+    if (key === "revision" && value !== null && /[\n\t]/.test(value)) {
+      throw new InvalidInboxItemError(key, metadata[key], "must be one line", itemLabel);
+    }
     if (value === null) delete metadata[key];
     else metadata[key] = value;
   }
@@ -342,6 +362,8 @@ export function readInboxItemFields(metadata: Record<string, unknown>): InboxIte
     recommend: (metadata["recommend"] as string | undefined) ?? null,
     onAccept: (metadata["on_accept"] as string[] | undefined) ?? [],
     read: (metadata["read"] as InboxRead[] | undefined) ?? [],
+    revision: (metadata["revision"] as string | undefined) ?? null,
+    closeReason: (metadata["close_reason"] as string | undefined) ?? null,
   };
 }
 
@@ -361,6 +383,15 @@ export interface InboxItem extends InboxItemFields {
   updatedAt: Date;
   /** The batch this item is a candidate of, when it is one. */
   parentId: string | null;
+  /** The work item this item is about (its heaviest `about` edge, folded through merges); null when unlinked. */
+  about: InboxWorkContext | null;
+}
+
+/** The work an inbox item is a decision about (inbox-follow-through, work-context.ts). */
+export interface InboxWorkContext {
+  id: string;
+  title: string;
+  project: string | null;
 }
 
 export interface ListInboxOptions {
@@ -387,6 +418,7 @@ type RawInboxRow = {
   received_at: string;
   updated_at: string;
   parent_id: string | null;
+  about: { id: string; title: string; project: string | null } | null;
   total: string | number;
 };
 
@@ -422,6 +454,11 @@ SELECT n.id, n.external_id, n.title, n.content, n.metadata,
           JOIN resolved_nodes p ON p.id = COALESCE((SELECT merged_into FROM nodes WHERE id = e.dst_id), e.dst_id)
          WHERE e.edge_type = 'child_of' AND e.src_id = n.id AND p.node_type = ${INBOX_ITEM_NODE_TYPE}
          LIMIT 1) AS parent_id,
+       (SELECT json_build_object('id', w.id, 'title', w.title, 'project', w.metadata->>'project') FROM edges e
+          JOIN resolved_nodes w ON w.id = COALESCE((SELECT merged_into FROM nodes WHERE id = e.dst_id), e.dst_id)
+         WHERE e.edge_type = ${ABOUT_EDGE_TYPE} AND e.src_id = n.id AND w.node_type = ${WORK_ITEM_NODE_TYPE}
+         ORDER BY e.weight DESC, w.id
+         LIMIT 1) AS about,
        count(*) OVER () AS total
 FROM resolved_nodes n
 WHERE n.node_type = ${INBOX_ITEM_NODE_TYPE}
@@ -452,10 +489,36 @@ LIMIT ${limit}::int
       receivedAt: new Date(r.received_at),
       updatedAt: new Date(r.updated_at),
       parentId: r.parent_id,
+      about: r.about === null ? null : { id: r.about.id, title: r.about.title, project: r.about.project ?? null },
     });
   }
   const total = result.rows.length === 0 ? 0 : Number(result.rows[0]!.total);
   return { items, total, truncated: total > result.rows.length };
+}
+
+// --- Work context ---------------------------------------------------------------
+
+/**
+ * The person's "not this": removes every `about` edge out of an inbox item
+ * (whoever asserted it), leaving its status, feedback, and content as they
+ * are. Returns how many edges were removed; 0 when the item had none.
+ * Refuses an id that is not an inbox item. Edge removal writes no node, so
+ * no revision is recorded; the ingest re-links on its next pass only if it
+ * matches again, which the card then shows.
+ */
+export async function unlinkInboxWorkContext(db: Database, id: string): Promise<{ id: string; removed: number }> {
+  const requestedId = typeof id === "string" ? id.trim() : "";
+  if (!UUID_RE.test(requestedId)) throw new InvalidLookupIdError(id, "must be a valid uuid");
+  const found = await db.execute<{ id: string; node_type: string }>(sql`
+    SELECT id, node_type FROM nodes WHERE id = (SELECT COALESCE(merged_into, id) FROM nodes WHERE id = ${requestedId}::uuid)
+  `);
+  const row = found.rows[0];
+  if (!row) throw new NodeNotFoundError(requestedId);
+  if (row.node_type !== INBOX_ITEM_NODE_TYPE) throw new NotAnInboxItemError(row.id, row.node_type);
+  const removed = await db.execute<{ id: string }>(sql`
+    DELETE FROM edges WHERE src_id IN (SELECT id FROM nodes WHERE id = ${row.id}::uuid OR merged_into = ${row.id}::uuid) AND edge_type = ${ABOUT_EDGE_TYPE} RETURNING id
+  `);
+  return { id: row.id, removed: removed.rows.length };
 }
 
 // --- Deciding -----------------------------------------------------------------
@@ -555,7 +618,8 @@ async function writeInboxFeedback(db: Database, id: string, kind: InboxDecision 
       const after = NEXT_AFTER[kind];
       const entry: InboxFeedback = { decision: kind, message, at: (input.now ?? new Date()).toISOString(), ...(input.option === undefined ? {} : { option: input.option }) };
       const feedback = [...(current["feedback"] as InboxFeedback[]), entry];
-      const { needs_you: _handedBack, ...rest } = current;
+      // A decision answers the agent's hand-back (`needs_you`) and its re-queue note (`revision`).
+      const { needs_you: _handedBack, revision: _answered, ...rest } = current;
       const metadata = normalizeInboxItemMetadata({ ...rest, status: after, feedback });
 
       const prepared = unsafePrepareNodes(

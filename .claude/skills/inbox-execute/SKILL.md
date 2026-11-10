@@ -1,6 +1,6 @@
 ---
 name: inbox-execute
-description: Use when asked to carry out accepted inbox items — "run the inbox", "execute accepted items", "do what I approved". Reads inbox_item nodes with status accepted, performs each proposed action through the person's connectors, and marks them done.
+description: Use when asked to carry out accepted inbox items — "run the inbox", "execute accepted items", "do what I approved" — or to triage items sent back with a note (status changes). Performs each proposed action through the person's connectors and marks it done; a sent-back note is closed, acted on, or re-queued.
 ---
 
 # Inbox execute
@@ -26,3 +26,22 @@ The person accepted these items in breakdown's inbox. Your job is to do exactly 
 Never execute an item whose status isn't `accepted` when you read it.
 
 `bin/inbox-watch` runs this skill headless whenever you accept an item no session owns, so Accept acts within about 30 seconds.
+
+## Triage: items sent back with a note
+
+When the person types a note, the inbox's button becomes **Send to agent** and the item moves to `changes`. The note is direction, not a request for another card. For each `changes` item with no `pane`, `brain_get` it, read the latest `feedback` message, and pick exactly one outcome:
+
+| Outcome | When | Write |
+|---|---|---|
+| **close** | The note says it's done, already handled, not theirs, a dupe, or needs no action ("already sent a message, close this", "this question isn't addressed at me") | `status: "done"`, `close_reason: <the note, or a one-line paraphrase>`, and `**Closed:** <why>` at the top of `content` |
+| **act** | The note fully specifies what to do, and what goes out is the reviewed draft, plus at most the edits the note names ("send it but drop the last line", "send it to Robin instead", "file it under the OPS project") | Carry it out as in step 3, then write it as in step 4 (`status: "done"`, `**Done:** …`) |
+| **re-queue** | The note asks for something the person hasn't seen ("go read the PR and propose real feedback", "rewrite this warmer"), or it changes what gets sent beyond the edits it names | Rewrite `content` (and `action` if needed), then write `status: "pending"` with `revision: "<one line: what changed>"` |
+
+- **The re-queue rule:** if acting would send text under the person's name that they haven't read, re-queue. If you're unsure which outcome fits, re-queue. Re-queuing is the safe failure, because it's what used to happen every time.
+- A note that agrees and adds a small edit ("I generally agree, but drop the Firebase line") is an **act**. Don't make the person accept their own edit.
+- Always carry `feedback` forward unchanged. Write `title` and `externalId` as stored.
+- Report one line per item: the outcome and why ("closed: note says Alex already answered").
+
+## Record the decision on the work
+
+When an item you closed, acted on, or carried out (an accept with a note, or any accept on a card) has an `about` link (`brain_neighbors` on the item, edge type `about`), append to that work item's `decisions`: `{ at: <now>, decision: "close" | "act" | "accept", note: <the person's note, or a one-line paraphrase of what they chose>, item: <the inbox item's id> }`. `brain_get` the work item first and resend its whole metadata with the entry appended (a write replaces the node). Don't record a re-queue: nothing is decided yet. This is how the next agent, from any source, knows what's settled.

@@ -548,7 +548,11 @@ export {
   INBOX_READ_DEPTHS,
   MAX_INBOX_READ,
   MAX_INBOX_READ_REF_LENGTH,
+  MAX_INBOX_REVISION_LENGTH,
+  MAX_INBOX_CLOSE_REASON_LENGTH,
   releaseInboxItem,
+  unlinkInboxWorkContext,
+  type InboxWorkContext,
   inboxItemDigested,
   type InboxRead,
   type InboxReadDepth,
@@ -567,3 +571,11 @@ export {
   type DecideInboxItemInput,
   type DecideInboxItemResult,
 } from "./inbox.js";
+
+export {
+  ABOUT_EDGE_TYPE,
+  MAX_WORK_CONTEXT_ENTRIES,
+  normalizeWorkContextLog,
+  type WorkDecision,
+  type WorkSignal,
+} from "./work-context.js";

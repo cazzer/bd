@@ -19,6 +19,7 @@ import {
   MAX_INBOX_FEEDBACK_LENGTH,
   REVIEW_PANE_PATTERN,
   releaseInboxItem,
+  unlinkInboxWorkContext,
   REVIEW_OPTION_ID_PATTERN,
   requestInboxItem,
   type DecideInboxItemResult,
@@ -76,7 +77,8 @@ export function inboxNotifyText(result: DecideInboxItemResult, message: string, 
     case "accepted":
       return `[inbox] Accepted${option === undefined ? "" : ` option ${option}`}: "${result.title}".${note} Carry it out now, then run: inbox done ${result.id} "<what you did, with link>"`;
     case "changes":
-      return `[inbox] Changes requested on "${result.title}":${note} Revise the draft and re-queue it with the same --key (inbox request).`;
+      // inbox-follow-through, design.md decision 3: triage the note, don't just revise.
+      return `[inbox] Sent to agent on "${result.title}":${note} Triage it into one outcome. Close: the note says done, handled, not yours, or no action → run: inbox done ${result.id} "Closed on the note: <why>". Act: the note fully specifies it and what goes out is the reviewed draft with only the edits it names → do it, then run: inbox done ${result.id} "<what you did, with link>". Otherwise (new text under the person's name they haven't read, or you're unsure) → revise and re-queue with the same --key (inbox request), saying what changed in the first line.`;
     default:
       return `[inbox] Dismissed: "${result.title}".${note} Drop it; nothing to send.`;
   }
@@ -117,6 +119,18 @@ const inboxReleaseProcedure = publicProcedure.input(z.object({ id: z.string().uu
     return { id: result.id, before: result.before, after: result.after };
   } catch (err) {
     throw mapCoreError("inboxRelease", err);
+  }
+});
+
+/** The person's "not this" on an item's work context: removes its `about` link; status and feedback stay. */
+const inboxUnlinkWorkProcedure = publicProcedure.input(z.object({ id: z.string().uuid() })).mutation(async ({ ctx, input }) => {
+  if (ctx.readOnly) {
+    throw new TRPCError({ code: "FORBIDDEN", message: "The server is read-only (BRAIN_READ_ONLY); unlinking an item's work is refused." });
+  }
+  try {
+    return await unlinkInboxWorkContext(ctx.db, input.id);
+  } catch (err) {
+    throw mapCoreError("inboxUnlinkWork", err);
   }
 });
 
@@ -201,6 +215,7 @@ export const inboxRouter = router({
   inbox: inboxProcedure,
   inboxDecision: inboxDecisionProcedure,
   inboxRelease: inboxReleaseProcedure,
+  inboxUnlinkWork: inboxUnlinkWorkProcedure,
   inboxRequest: inboxRequestProcedure,
   inboxComplete: inboxCompleteProcedure,
 });

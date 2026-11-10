@@ -5,7 +5,7 @@
 // checkout to carry it out:
 //
 //   accepted → `claude -p` with the inbox-execute skill (does the action, marks it done)
-//   changes  → `claude -p` with the inbox-ingest skill, revise step only
+//   changes  → `claude -p` with inbox-execute's Triage: close, act, or re-queue on the note
 //
 // Items a live session owns (queued with `inbox request`, or opened with
 // "Open session") are skipped: the server already prompted that session.
@@ -39,7 +39,7 @@ const PROMPTS = {
   accepted:
     "Use the inbox-execute skill: carry out every accepted inbox item that has no `pane`, exactly as accepted (the chosen card option when there is one, and any accept note), then mark each done. Report one line per item.",
   changes:
-    "Use the inbox-ingest skill, step 5 only: revise every inbox item with status `changes` that has no `pane`, per its latest feedback, and set it back to pending. Don't pull any sources. Report one line per item.",
+    "Use the inbox-execute skill's Triage section: for every inbox item with status `changes` that has no `pane`, read its latest feedback and close it, act on it, or re-queue it, exactly as the section says. Don't pull any sources. Report one line per item: the outcome and why.",
 };
 
 function log(message) {

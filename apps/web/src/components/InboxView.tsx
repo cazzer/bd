@@ -26,12 +26,12 @@
 // requests changes, as in the board's run.
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
-import { filterBySource, needsMeRows, REVIEW_SOURCE, sourcesOf, type NeedsMeRow } from "../lib/inboxRows.js";
+import { filterBySource, groupByWork, needsMeRows, REVIEW_SOURCE, sourcesOf, type NeedsMeRow, type WorkGroupSlot } from "../lib/inboxRows.js";
 import { navigate } from "../lib/navigate.js";
 import { CARD_MOVED_TEXT, cardActions, chosenOption, describeChosen, isCardMovedRefusal, type CardOption } from "../lib/reviewCard.js";
 import { decisionBlocked } from "../lib/reviewDrawer.js";
 import { trpc } from "../trpc.js";
-import { cardShortcut, DecisionCardBody, DecisionFooter, type CardOutcome, type DecisionCardData, type Refusal } from "./DecisionCard.js";
+import { cardShortcut, DecisionCardBody, DecisionFooter, primaryDecision, type CardOutcome, type DecisionCardData, type Refusal } from "./DecisionCard.js";
 import { EvidenceView } from "./EvidenceView.js";
 import { ReviewItemPanel } from "./ReviewItemPanel.js";
 import { ReviewQueuePill, storeDraft, useReviewQueue, useShellDrawer } from "./ReviewQueue.js";
@@ -77,7 +77,7 @@ const STATUS_LABEL: Record<Item["status"], string> = {
 
 const FEEDBACK_LABEL: Record<Item["feedback"][number]["decision"], string> = {
   accept: "Accepted",
-  changes: "Changes requested",
+  changes: "Sent to agent",
   dismiss: "Dismissed",
   session: "Opened in a session",
   release: "Released to Needs me unread",
@@ -160,12 +160,17 @@ export function InboxView({ item: selectedKey, source }: { item: string | null; 
   const activeSource = tab === "mine" ? source : null;
 
   // The rows of the tab: Needs me merged and filtered; the others, inbox items by status.
-  const rows: Row[] = useMemo(() => {
-    if (tab === "mine") return filterBySource(needsMe, activeSource);
+  // Needs me is grouped by work context after the source filter (inbox-follow-through, design.md decision 9).
+  const { rows, workSlots } = useMemo((): { rows: Row[]; workSlots: Map<string, WorkGroupSlot> } => {
+    if (tab === "mine") {
+      const grouped = groupByWork(filterBySource(needsMe, activeSource));
+      return { rows: grouped.rows, workSlots: grouped.slots };
+    }
     const statuses = TABS.find((t) => t.key === tab)!.statuses;
-    return all
+    const tabRows = all
       .filter((i) => i.parentId === null && statuses.includes(i.status))
       .map((item): Row => ({ kind: "inbox", key: item.id, priority: item.priority, at: item.receivedAt, source: item.source, item }));
+    return { rows: tabRows, workSlots: new Map() };
   }, [tab, needsMe, activeSource, all]);
 
   const counts = useMemo(() => {
@@ -268,7 +273,8 @@ export function InboxView({ item: selectedKey, source }: { item: string | null; 
       } else if (e.key === "a" && selectedItem.status === "pending") {
         keyed.current?.accept();
       } else if (e.key === "d" && ["pending", "undigested"].includes(selectedItem.status)) {
-        void decide(selectedItem, "dismiss");
+        // The note box belongs to the selected item's detail; a typed note is kept as the dismiss reason.
+        void decide(selectedItem, "dismiss", message.current?.value ?? "");
       }
     }
     window.addEventListener("keydown", onKey);
@@ -340,11 +346,19 @@ export function InboxView({ item: selectedKey, source }: { item: string | null; 
                 {tab === "mine" ? "Nothing needs you right now." : tab === "undigested" ? "Nothing held: every item's agent read what it was about." : "Nothing here."}
               </li>
             )}
-            {rows.map((r) => (
-              <li key={r.key}>
+            {rows.map((r) => {
+              const slot = workSlots.get(r.key);
+              return (
+              <li key={r.key} className={slot !== undefined ? "border-l-2 border-accent/30" : undefined}>
+                {slot?.first === true && (
+                  <p className="px-4 pt-3 text-[11px] font-semibold uppercase tracking-wide text-fg-muted">
+                    {slot.title} · {slot.count}
+                  </p>
+                )}
                 <RowButton row={r} active={r.key === selectedRowKey} now={now} candidates={r.kind === "inbox" ? (childrenOf.get(r.item.id)?.length ?? 0) : 0} onPick={() => go(r.key)} />
               </li>
-            ))}
+              );
+            })}
           </ul>
         </div>
 
@@ -476,7 +490,7 @@ function InboxDetail({ item, parent, candidates, now, messageRef, keyed, onDecid
     try {
       await onDecide(item, decision, message, option?.id);
       const chosen = option !== undefined && card !== null ? ` ${describeChosen(chosenOption(card, option))}` : "";
-      setOutcome({ tone: "ok", text: decision === "accept" ? `Accepted.${chosen}` : "Sent back to the agent.", keepMessage: false, notified: null });
+      setOutcome({ tone: "ok", text: decision === "accept" ? `Accepted.${chosen}` : "Sent to the agent.", keepMessage: false, notified: null });
       setMessage("");
     } catch (err) {
       const text = messageOf(err);
@@ -505,7 +519,7 @@ function InboxDetail({ item, parent, candidates, now, messageRef, keyed, onDecid
   useEffect(() => {
     keyed.current = {
       accept: () => {
-        if (actions === null) void decide("accept");
+        if (actions === null) void decide(primaryDecision(message, true));
         else if (actions.accept !== null) void decide("accept", actions.accept);
       },
     };
@@ -516,7 +530,7 @@ function InboxDetail({ item, parent, candidates, now, messageRef, keyed, onDecid
 
   function onKeyDown(e: React.KeyboardEvent<HTMLElement>) {
     if (!open || e.defaultPrevented) return;
-    const shortcut = cardShortcut(e, card, message);
+    const shortcut = cardShortcut(e, card, message, { noteSendsToAgent: true });
     if (shortcut === null) return;
     e.preventDefault();
     if (e.repeat) return;
@@ -557,6 +571,7 @@ function InboxDetail({ item, parent, candidates, now, messageRef, keyed, onDecid
           {item.verdict !== null && <span className="rounded-full border border-hairline px-2 py-0.5">verdict: {item.verdict.replaceAll("_", " ")}</span>}
           <span>{ago(item.receivedAt, now)}</span>
           {item.from !== null && <span>from {item.from}</span>}
+          {item.about !== null && <WorkContextChip itemId={item.id} work={item.about} onUnlinked={onReload} />}
         </div>
         <h2 className="text-lg font-semibold text-fg">{item.title || "(untitled)"}</h2>
         {item.action !== "none" && (
@@ -565,6 +580,17 @@ function InboxDetail({ item, parent, candidates, now, messageRef, keyed, onDecid
           </p>
         )}
       </header>
+
+      {item.revision !== null && item.status === "pending" && (
+        <p role="note" className="rounded-xl border border-accent/40 bg-accent/10 px-3 py-2 text-sm text-fg">
+          <span className="font-medium">Revised on your note:</span> {item.revision}
+        </p>
+      )}
+      {item.closeReason !== null && (item.status === "done" || item.status === "dismissed") && (
+        <p role="note" className="rounded-xl border border-hairline bg-fg/[0.03] px-3 py-2 text-sm text-fg-muted">
+          <span className="font-medium text-fg">Closed on your note:</span> {item.closeReason}
+        </p>
+      )}
 
       {item.status === "undigested" && (
         <section aria-label="Undigested" className="space-y-2 rounded-xl border border-amber-400/40 bg-amber-400/10 p-3 text-sm text-amber-100">
@@ -576,7 +602,7 @@ function InboxDetail({ item, parent, candidates, now, messageRef, keyed, onDecid
             <button type="button" disabled={busy} onClick={() => void act(() => onRelease(item))} className="rounded-lg border border-amber-400/50 px-3 py-1 text-xs text-fg hover:bg-amber-400/20 disabled:opacity-60">
               Release to Needs me unread
             </button>
-            <button type="button" disabled={busy} onClick={() => void act(() => onDecide(item, "dismiss"))} className="rounded-lg px-3 py-1 text-xs text-fg-muted hover:text-fg disabled:opacity-60">
+            <button type="button" disabled={busy} onClick={() => void act(() => onDecide(item, "dismiss", message))} className="rounded-lg px-3 py-1 text-xs text-fg-muted hover:text-fg disabled:opacity-60">
               Dismiss
             </button>
           </div>
@@ -708,16 +734,17 @@ function InboxDetail({ item, parent, candidates, now, messageRef, keyed, onDecid
               sessionLinks={sessionLinks}
               labels={{
                 acceptLabel: "Accept",
-                changesLabel: "Request changes",
+                changesLabel: "Send to agent",
+                noteSendsToAgent: true,
                 shortcuts: true,
                 extra: ({ busy: writing }) =>
                   open && (
-                    <button type="button" disabled={writing || busy} onClick={() => void act(() => onDecide(item, "dismiss"))} className="min-h-11 rounded-lg px-4 text-sm text-fg-muted hover:text-fg disabled:opacity-60 sm:min-h-10">
+                    <button type="button" disabled={writing || busy} onClick={() => void act(() => onDecide(item, "dismiss", message))} className="min-h-11 rounded-lg px-4 text-sm text-fg-muted hover:text-fg disabled:opacity-60 sm:min-h-10">
                       Dismiss
                     </button>
                   ),
               }}
-              messageLabel="Note to the agent (required for Request changes)"
+              messageLabel="Note to the agent (with a note, it goes to the agent instead of being accepted)"
               actions={actions}
               message={message}
               setMessage={setMessage}
@@ -739,9 +766,9 @@ function InboxDetail({ item, parent, candidates, now, messageRef, keyed, onDecid
                 <span>
                   {item.status === "session"
                     ? "In an interactive session. It will send a draft back here for approval, or close the item when the work is done there."
-                    : "Sent back. The agent will revise it and return it to you."}
+                    : "With the agent. It closes it or does it on your note, and brings it back only if there is something new for you to see."}
                 </span>
-                <button type="button" disabled={busy} onClick={() => void act(() => onDecide(item, "dismiss"))} className="rounded-lg px-3 py-1 hover:text-fg disabled:opacity-60">
+                <button type="button" disabled={busy} onClick={() => void act(() => onDecide(item, "dismiss", message))} className="rounded-lg px-3 py-1 hover:text-fg disabled:opacity-60">
                   Dismiss
                 </button>
               </div>
@@ -759,5 +786,37 @@ function InboxDetail({ item, parent, candidates, now, messageRef, keyed, onDecid
         )}
       </div>
     </article>
+  );
+}
+
+/** "About: <work>" with the person's "not this", which removes the item's `about` link (inbox-follow-through). */
+function WorkContextChip({ itemId, work, onUnlinked }: { itemId: string; work: { id: string; title: string; project: string | null }; onUnlinked: () => void | Promise<void> }) {
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState<string | null>(null);
+  return (
+    <span className="inline-flex items-center gap-1 rounded-full border border-accent/40 bg-accent/10 px-2 py-0.5 text-fg">
+      <span title={work.project ?? undefined}>About: {work.title}</span>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={async () => {
+          setBusy(true);
+          setFailed(null);
+          try {
+            await trpc.inboxUnlinkWork.mutate({ id: itemId });
+            await onUnlinked();
+          } catch (err) {
+            setFailed(messageOf(err));
+          } finally {
+            setBusy(false);
+          }
+        }}
+        className="rounded-full px-1 text-fg-muted hover:text-fg disabled:opacity-60"
+        aria-label={`Not about ${work.title}: unlink`}
+      >
+        not this
+      </button>
+      {failed !== null && <span role="alert" className="text-red-300">{failed}</span>}
+    </span>
   );
 }

@@ -40,6 +40,16 @@ describe("inboxDecision with a card", () => {
   });
 });
 
+describe("inboxUnlinkWork", () => {
+  it("is refused on a read-only server and reports nothing removed on an unlinked item", async () => {
+    const { id } = await requestInboxItem(db, { externalId: `${KEY}-unlink`, title: "Ask", content: "x", metadata: { source: "slack" } });
+    await expect(caller(true).inboxUnlinkWork({ id })).rejects.toThrow(/read-only/);
+    expect(await caller().inboxUnlinkWork({ id })).toEqual({ id, removed: 0 });
+    const [item] = (await caller().inbox({ statuses: ["pending"] })).items.filter((i) => i.id === id);
+    expect(item?.about).toBeNull();
+  });
+});
+
 describe("inboxRelease", () => {
   it("releases an undigested item and is refused on a read-only server", async () => {
     const { id } = await requestInboxItem(db, { externalId: `${KEY}-held`, title: "PR", content: "x", metadata: { source: "github", url: "https://github.com/a/b/pull/1" } });
@@ -54,5 +64,14 @@ describe("inboxNotifyText", () => {
     const result = { id: "x", ingestRunId: "r", before: "pending" as const, after: "accepted" as const, title: "Batch", pane: null, socket: null };
     expect(inboxNotifyText(result, "", "track")).toMatch(/^\[inbox\] Accepted option track: "Batch"\./);
     expect(inboxNotifyText(result, "")).toMatch(/^\[inbox\] Accepted: "Batch"\./);
+  });
+
+  it("asks a session to triage a sent-back note into close, act, or re-queue", () => {
+    const result = { id: "x", ingestRunId: "r", before: "pending" as const, after: "changes" as const, title: "Reply to Pat", pane: "p1", socket: null };
+    const text = inboxNotifyText(result, "not for me, close it");
+    expect(text).toMatch(/^\[inbox\] Sent to agent on "Reply to Pat": Note: not for me, close it/);
+    expect(text).toContain('inbox done x "Closed on the note');
+    expect(text).toMatch(/Act: .*inbox done x/);
+    expect(text).toContain("re-queue with the same --key");
   });
 });
