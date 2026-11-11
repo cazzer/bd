@@ -53,6 +53,8 @@ If the person named specific sources ("just Asana"), ingest only those.
 5. **Triage items sent back.** For each item with status `changes`, follow the **Triage** section of the `inbox-execute` skill: close it, act on it, or re-queue it, by the person's latest note. Don't default to re-queue. A note that already says what to do is carried out, not handed back as a new card.
 6. **Close what resolved at the source.** For an open item whose `exit` rule now holds (email archived, task completed, thread resolved, PR reviewed), write it with `status: "done"`.
 7. **Report** in two lines: counts (new, updated, revised, closed per source, plus signals kept as history and new work items) and anything that failed (a connector error, a source you skipped).
+   - **Linking check, before you report:** count the items you wrote this run that have no `about` link (`brain_neighbors`, edge type `about`). Report it as "linked N of M". List any unlinked `new_action`, `reply`, or `review` item by title, since those should always have work. A Fathom agent that links none of its candidates has skipped Fathom step 4. Send it back to link them before you report.
+   - **Wait for every source agent.** Don't end the run while one is still working. If one can't finish, name it and the meetings or signals it left undone, so the person can rerun just those.
 
 ## Fathom: batches, skeptical by default
 
@@ -66,7 +68,13 @@ Fathom recaps over-report. They call discussion a "decision" and raise things al
    - `knowledge`: worth remembering, no action. `action: "ignore"`. Optionally also `brain_write` a note.
    - `new_action`: a real commitment by the person. Requires a transcript timestamp and quote in `content`, otherwise downgrade it. `action: "create_task"` (or whatever fits) with the draft.
 3. `brain_link` each candidate to its batch: `edgeType: "child_of"`, `srcId` candidate → `dstId` batch.
-4. Learn from overrides: candidates whose `feedback` flipped your verdict (dismissed a `new_action`, accepted an `ignore`) are examples. Read the last ~10 before triaging a new recap.
+4. **Match every candidate and the batch to their work, as in step 3b of Steps. A Fathom item is not exempt.** A meeting touches several pieces of work, so match each candidate on its own:
+   - `new_action` and `already_tracked`: always link `about` the work item it advances (create one if none fits). For `already_tracked`, it's the work of the task or PR you put in `links`.
+   - `knowledge`: link it when it's about a known piece of work, and append it to that work's `signals`. That's what keeps a decision from the meeting findable later.
+   - `not_actionable` and `not_mine`: link only when the match is obvious. Don't create a work item for them.
+   - The batch: link `about` the one work item the meeting is mostly about, if there is one (a "Sr. Software Engineer, Platform Kick Off" is the Platform SWE hire). Skip it for mixed meetings like a standup.
+   - Before writing a candidate, read the matched work's `decisions`. A candidate a decision already settles is `already_tracked` or `knowledge`, never `new_action`.
+5. Learn from overrides: candidates whose `feedback` flipped your verdict (dismissed a `new_action`, accepted an `ignore`) are examples. Read the last ~10 before triaging a new recap.
 
 ## Items from a live Claude session
 

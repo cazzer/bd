@@ -337,9 +337,13 @@ export function inboxItemDigested(metadata: Record<string, unknown>): boolean {
   if (typeof primary !== "string") return true;
   const base = withoutTrailingSlash(primary);
   const read = (metadata["read"] as InboxRead[] | undefined) ?? [];
+  // The url's resource without a position in it (`?timestamp=99`, `#heading`):
+  // reading the whole resource covers any position within it, so a Fathom
+  // candidate linking a moment of a call is covered by reading the call.
+  const resource = withoutTrailingSlash(base.split(/[?#]/, 1)[0]!);
   return read.some((r) => {
     const ref = withoutTrailingSlash(r.ref);
-    return ref === base || ref.startsWith(`${base}/`) || ref.startsWith(`${base}#`) || ref.startsWith(`${base}?`);
+    return ref === base || ref.startsWith(`${base}/`) || ref.startsWith(`${base}#`) || ref.startsWith(`${base}?`) || ref === resource;
   });
 }
 

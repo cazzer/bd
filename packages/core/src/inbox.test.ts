@@ -289,6 +289,15 @@ describe("inbox digestion", () => {
     expect(inboxItemDigested(normalizeInboxItemMetadata({ source: "session" }))).toBe(true);
   });
 
+  it("covers a position in a resource by a read of the whole resource, not of another one", () => {
+    const call = "https://fathom.video/calls/100000001";
+    const at = (url: string, read: string[]) => inboxItemDigested(normalizeInboxItemMetadata({ source: "fathom", url, read: read.map((ref) => ({ ref, depth: "full" })) }));
+    expect(at(`${call}?timestamp=99`, [call])).toBe(true);
+    expect(at(`${call}#t=99`, [`${call}/`])).toBe(true);
+    expect(at(`${call}?timestamp=99`, ["https://fathom.video/calls/100000002"])).toBe(false);
+    expect(at(`${call}?timestamp=99`, ["https://fathom.video/calls"])).toBe(false);
+  });
+
   it("holds a new item that skipped its url, releases it on a covering re-write, and never pulls a pending one back", () => {
     const skipped = normalizeInboxItemMetadata({ source: "github", url: PR });
     const read = normalizeInboxItemMetadata({ source: "github", url: PR, read: [{ ref: `${PR}/files`, depth: "full" }] });
