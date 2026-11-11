@@ -48,6 +48,6 @@
 
 ## 6. Docs and live check
 
-- [ ] 6.1 README "Visual reviews": the multi-card form, keys, keyless reuse, and grouping in Needs me
-- [ ] 6.2 Live: file a two-card review for a bead in this repo through `review-request <id> a.md b.md`. Confirm two reviews with distinct titles on the board, grouped in Needs me; accept one and send the other back; re-run the sent-back card alone and confirm only it updates
-- [ ] 6.3 Outside the repo: update `~/.claude/skills/context/visual-review.md` rule 2 to the one-call form, replacing the child-bead-per-question workaround; same for the shlo brief, step 1 (`~/.local/share/shlo-perf/BRIEF.md`)
+- [x] 6.1 README "Visual reviews": the multi-card form, keys, keyless reuse, and grouping in Needs me
+- [x] 6.2 Live: file a two-card review for a bead in this repo through `review-request <id> a.md b.md`. Confirm two reviews with distinct titles on the board, grouped in Needs me; accept one and send the other back; re-run the sent-back card alone and confirm only it updates
+- [x] 6.3 Outside the repo: update `~/.claude/skills/context/visual-review.md` rule 2 to the one-call form, replacing the child-bead-per-question workaround; same for the shlo brief, step 1 (`~/.local/share/shlo-perf/BRIEF.md`)
