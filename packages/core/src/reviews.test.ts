@@ -140,7 +140,7 @@ const card = (extra: Record<string, unknown> = {}) => ({ images: [], pane: null,
 
 describe("normalizeReviewMetadata decision cards", () => {
   it("finds every valid card fixture", () => {
-    expect(EXPECTED).toEqual(["before-after.expected.json", "long-recommendation.expected.json", "shlo-k54.4.1.1.expected.json"]);
+    expect(EXPECTED).toEqual(["before-after.expected.json", "keyed-budget.expected.json", "long-recommendation.expected.json", "shlo-k54.4.1.1.expected.json"]);
   });
 
   it.each(EXPECTED)("normalizes %s to itself, byte for byte", (name) => {
@@ -322,6 +322,32 @@ describe("normalizeReviewMetadata decision cards", () => {
     for (const name of EXPECTED) {
       const once = normalizeReviewMetadata(fixture(name));
       expect(normalizeReviewMetadata(once)).toEqual(once);
+    }
+  });
+});
+
+describe("normalizeReviewMetadata review keys", () => {
+  it("keeps a valid key after the summary and before the card", () => {
+    const review = normalizeReviewMetadata({ question: "q?", key: "budget", summary: "q?", images: [] });
+    expect(JSON.stringify(review)).toBe(`{"images":[],"pane":null,"summary":"q?","key":"budget","question":"q?"}`);
+    expect(normalizeReviewMetadata(review)).toEqual(review);
+  });
+
+  it("accepts the shortest and longest keys", () => {
+    for (const key of ["a", "0", `a${"-".repeat(39)}`, "shlo-k54-4-1-1", "a_b"]) {
+      expect(normalizeReviewMetadata(card({ key }))).toMatchObject({ key });
+    }
+  });
+
+  it("reads a missing, null, or empty key as absent", () => {
+    for (const extra of [{}, { key: null }, { key: "" }]) {
+      expect(normalizeReviewMetadata(card(extra))).not.toHaveProperty("key");
+    }
+  });
+
+  it("marks a review with a key outside the pattern invalid", () => {
+    for (const key of ["Has Spaces", "Upper", "-lead", "_lead", `a${"b".repeat(40)}`, "a.b", 7, true, ["a"]]) {
+      expect(normalizeReviewMetadata(card({ key }))).toEqual({ invalid: true });
     }
   });
 });

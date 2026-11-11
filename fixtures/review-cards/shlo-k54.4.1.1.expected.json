@@ -3,6 +3,7 @@
   "pane": "w1:p1",
   "socket": "/tmp/herdr-test.sock",
   "summary": "Drop omni_search v5–v8 on or after 2026-11-12 if the 7-day delta shows zero calls?",
+  "key": "shlo-k54-4-1-1",
   "question": "Drop omni_search v5–v8 on or after 2026-11-12 if the 7-day delta shows zero calls?",
   "options": [
     {

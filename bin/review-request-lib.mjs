@@ -14,6 +14,16 @@
 // `normalizeReviewMetadata` in packages/core/src/reviews.ts strictly: where
 // the normalizer fits over-long text, this refuses it naming the field, so
 // every card it accepts normalizes to itself (fixtures/review-cards/).
+//
+// Several cards (split-review-decisions, design.md decisions 1-3):
+// `<item-id> a.md b.md ...` files one review per card under the item. Every
+// card is validated and every image staged before any bead is written; the
+// notification, the board link, and the closing lines cover the call once.
+// A card's review is found again by its key (frontmatter `key`, else the
+// filename stem slugged), recorded in `review.key`. With no review holding
+// the key, a single card (and the image form, which writes no key) reuses
+// the newest keyless open review, as before keys existed; a multi-card call
+// never takes a keyless review, it warns about it.
 
 import fs from "node:fs/promises";
 import { realpathSync } from "node:fs";
@@ -21,8 +31,13 @@ import path from "node:path";
 import { parseArgs as parseNodeArgs } from "node:util";
 
 export const USAGE = [
-  "usage: review-request <item-id> <card.md> [--board-url <url>]",
+  "usage: review-request <item-id> <card.md>... [--board-url <url>]",
   "       review-request <item-id> --summary <text> [--board-url <url>] <image>...",
+  "",
+  "One decision per card. Several decisions are several cards in one call, each answered on its own.",
+  "Text, tables, and code go in the card (its body, a diff, a mermaid diagram), never in an image;",
+  "images are for what must be seen. A re-run replaces the review with the same key: keep a card's",
+  "filename across revisions, or set `key:` in its frontmatter.",
 ].join("\n");
 const PREFIX = "review-request: ";
 
@@ -47,6 +62,10 @@ const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
 const MAX_SUMMARY = 2000;
 const MAX_IMAGES = 20;
 const MAX_TITLE = 120;
+/** Cards one call may file. */
+export const MAX_CARDS = 6;
+// Must agree with REVIEW_KEY_PATTERN in packages/core/src/reviews.ts.
+const REVIEW_KEY = /^[a-z0-9][a-z0-9_-]{0,39}$/;
 const MAX_NOTIFICATION_BODY = 200;
 const REVIEW_LABEL = "review";
 const CHANGES_LABEL = "review:changes";
@@ -56,7 +75,7 @@ const OPEN_STATUSES = "open,in_progress,blocked,deferred";
 
 // The card contract; each limit must agree with its namesake in
 // packages/core/src/reviews.ts (MAX_REVIEW_QUESTION_LENGTH and the rest).
-const CARD_KEYS = ["question", "options", "recommend", "on_accept", "attachments"];
+const CARD_KEYS = ["question", "options", "recommend", "on_accept", "attachments", "key"];
 const OPTION_KEYS = ["id", "label", "what", "risk"];
 const ATTACHMENT_KEYS = {
   image: ["kind", "path", "caption", "pair"],
@@ -92,7 +111,7 @@ const NEW_REVIEW_ID_SUFFIX = `.${"9".repeat(15)}`;
 /**
  * @returns {{ help: true } | { error: string }
  *   | { args: { itemId: string, summary: string, boardUrl: string, images: string[] } }
- *   | { args: { itemId: string, cardPath: string, boardUrl: string } }}
+ *   | { args: { itemId: string, cardPaths: string[], boardUrl: string } }}
  */
 export function parseArgs(argv) {
   let parsed;
@@ -115,10 +134,14 @@ export function parseArgs(argv) {
   const [itemId, ...images] = positionals;
   if (itemId === undefined) return { error: "missing <item-id>" };
   if (!ITEM_ID.test(itemId)) return { error: `not an issue id: ${itemId}` };
-  if (values.summary === undefined && images.length === 1 && images[0].endsWith(".md")) {
+  if (values.summary === undefined && images.length > 0 && images.every((p) => p.endsWith(".md"))) {
+    if (images.length > MAX_CARDS) return { error: `at most ${MAX_CARDS} cards in one call, got ${images.length}` };
     const boardUrl = values["board-url"] ?? DEFAULT_BOARD_URL;
     if (!isHttpUrl(boardUrl)) return { error: `--board-url must be an http(s) URL: ${boardUrl}` };
-    return { args: { itemId, cardPath: images[0], boardUrl } };
+    return { args: { itemId, cardPaths: images, boardUrl } };
+  }
+  if (values.summary === undefined && images.some((p) => p.endsWith(".md"))) {
+    return { error: "card files and images can't be mixed: images go in a card's attachments" };
   }
   const summary = values.summary?.trim();
   if (!summary) return { error: "--summary is required" };
@@ -470,6 +493,7 @@ export async function validateCard(raw, body, cardDir) {
     }
   }
   const onAccept = validateOnAccept(problems, raw.on_accept);
+  const key = validateKey(problems, raw.key);
   const { attachments, imagePaths } = await validateAttachments(problems, raw.attachments, cardDir);
   const bodyProblem = textProblem("body", body);
   if (bodyProblem) problems.push(bodyProblem);
@@ -478,7 +502,7 @@ export async function validateCard(raw, body, cardDir) {
     const words = countBodyWords(body);
     if (words > MAX_BODY_WORDS) problems.push(`body: at most ${MAX_BODY_WORDS} words outside fenced blocks, got ${words}`);
   }
-  if (problems.length > 0) return { problems, card: null, imagePaths: [] };
+  if (problems.length > 0) return { problems, card: null, imagePaths: [], key: undefined };
   const card = {
     question,
     ...(options === undefined ? {} : { options }),
@@ -486,7 +510,31 @@ export async function validateCard(raw, body, cardDir) {
     ...(onAccept === undefined ? {} : { on_accept: onAccept }),
     ...(attachments === undefined ? {} : { attachments }),
   };
-  return { problems, card, imagePaths };
+  return { problems, card, imagePaths, key };
+}
+
+const KEY_RULE = "a lower-case letter or digit, then up to 39 lower-case letters, digits, _ or -";
+
+/** A frontmatter `key`, validated as given (never slugged, so the agent sees exactly what it set); undefined when absent. */
+function validateKey(problems, raw) {
+  if (raw === undefined || raw === null) return undefined;
+  const numeric = numericIdProblem("key", "key", raw);
+  if (numeric) {
+    problems.push(numeric);
+    return undefined;
+  }
+  if (typeof raw !== "string" || !REVIEW_KEY.test(raw)) {
+    problems.push(`key: must be ${KEY_RULE}; got ${describe(raw)}`);
+    return undefined;
+  }
+  return raw;
+}
+
+/** A card's key from its filename when its frontmatter sets none: the stem lower-cased, each run of other characters a `-`, outer `-` dropped. Null when that leaves no valid key. */
+export function keyFromFilename(cardPath) {
+  const stem = path.basename(cardPath).replace(/\.md$/, "");
+  const key = stem.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
+  return REVIEW_KEY.test(key) ? key : null;
 }
 
 /**
@@ -494,13 +542,14 @@ export async function validateCard(raw, body, cardDir) {
  * question, `images` = the stored image paths) and then the card, each image
  * attachment's path replaced by its stored path, in order.
  */
-export function cardReview({ card, images, pane, socket = null }) {
+export function cardReview({ card, images, pane, socket = null, key = undefined }) {
   let next = 0;
   const attachments = card.attachments?.map((attachment) =>
     attachment.kind === "image" ? { ...attachment, path: images[next++] } : attachment,
   );
   return {
     ...reviewMetadata({ images, pane, socket, summary: card.question }).review,
+    ...(key === undefined ? {} : { key }),
     ...card,
     ...(attachments === undefined ? {} : { attachments }),
   };
@@ -523,15 +572,29 @@ export function findProject(projects, realMain, realpathFn = realpathSync) {
   return projects.find((project) => realpathOr(project.path, realpathFn) === realMain) ?? null;
 }
 
-/** The newest open review child is reused; older duplicates are left alone. */
-export function chooseReview(children) {
-  if (children.length === 0) return null;
+/** The key an open review child records, or null for a keyless one (every review filed before keys, and every image-form review). */
+export function reviewKeyOf(child) {
+  const key = child?.metadata?.review?.key;
+  return typeof key === "string" && key !== "" ? key : null;
+}
+
+/**
+ * The open review child a request reuses (design.md decision 3): the newest
+ * holding `key`; else, for a single card or the image form (`key` null), the
+ * newest keyless one; else null. Older duplicates are left alone; `count` is
+ * how many matched.
+ */
+export function chooseReview(children, key = null, { single = true } = {}) {
   const time = (child) => {
     const parsed = Date.parse(child.created_at);
     return Number.isNaN(parsed) ? -Infinity : parsed;
   };
-  const newest = [...children].sort((a, b) => time(b) - time(a))[0];
-  return { review: newest, count: children.length };
+  const newest = (list) => (list.length === 0 ? null : { review: [...list].sort((a, b) => time(b) - time(a))[0], count: list.length });
+  if (key !== null) {
+    const keyed = newest(children.filter((child) => reviewKeyOf(child) === key));
+    if (keyed !== null || !single) return keyed;
+  }
+  return newest(children.filter((child) => reviewKeyOf(child) === null));
 }
 
 /** `bd update --metadata` merges top-level keys and replaces each one whole, so sending `review` alone keeps the rest. */
@@ -671,13 +734,17 @@ export async function requestReview(deps) {
     deps.warn(USAGE);
     return { exitCode: 2 };
   }
-  let staged = null;
+  const stagedAll = [];
   try {
-    const request = "cardPath" in parsed.args ? await readCardRequest(deps, parsed.args) : await imageRequest(deps, parsed.args);
-    const plan = await check(deps, request);
-    if (request.card) checkCardSize(deps, request, plan);
-    staged = await stageImages(deps, plan.project.key, request.images);
-    const result = await write(deps, request, plan, staged);
+    const requests = "cardPaths" in parsed.args ? await readCardRequests(deps, parsed.args) : [await imageRequest(deps, parsed.args)];
+    const plan = await check(deps, requests[0]);
+    const single = requests.length === 1;
+    const chosen = requests.map((request) => chooseReview(plan.children, request.card ? request.key : null, { single }));
+    for (const [index, request] of requests.entries()) {
+      if (request.card) checkCardSize(deps, request, { project: plan.project, existing: chosen[index] });
+    }
+    for (const request of requests) stagedAll.push(await stageImages(deps, plan.project.key, request.images));
+    const result = await fileAll(deps, requests, plan, chosen, stagedAll);
     if (result.exitCode === 0 && "summary" in parsed.args) {
       const warning = summaryWarning(parsed.args, deps.breakdownRoot);
       if (warning) deps.warn(warning);
@@ -689,7 +756,7 @@ export async function requestReview(deps) {
     return { exitCode: 1 };
   } finally {
     // Already gone once the images were moved into place; on any other path nothing may be left behind.
-    if (staged) await fs.rm(staged.dir, { recursive: true, force: true });
+    for (const staged of stagedAll) await fs.rm(staged.dir, { recursive: true, force: true });
   }
 }
 
@@ -700,7 +767,7 @@ export async function requestReview(deps) {
  */
 export function summaryWarning({ itemId, summary }, breakdownRoot) {
   if (summary.length <= SUMMARY_WARN_CHARS) return null;
-  return `${PREFIX}warning: the summary is ${summary.length} characters, over ${SUMMARY_WARN_CHARS}; a decision reads faster as a card: review-request ${itemId} <card.md> (examples: ${path.join(breakdownRoot, "fixtures", "review-cards")}).`;
+  return `${PREFIX}warning: the summary is ${summary.length} characters, over ${SUMMARY_WARN_CHARS}; a decision reads faster as a card, one card per decision: review-request ${itemId} <card.md>... (examples: ${path.join(breakdownRoot, "fixtures", "review-cards")}).`;
 }
 
 /**
@@ -757,16 +824,62 @@ async function readCardRequest(deps, args) {
     );
     throw new Refusal(`frontmatter: not valid YAML: ${where}. Nothing was filed.`);
   }
-  const { problems, card, imagePaths } = await validateCard(raw, split.body, path.dirname(cardFile));
+  const { problems, card, imagePaths, key: given } = await validateCard(raw, split.body, path.dirname(cardFile));
+  const key = given ?? keyFromFilename(args.cardPath);
+  if (problems.length === 0 && key === null) {
+    problems.push(`key: the filename ${path.basename(args.cardPath)} gives no usable key; set one in the frontmatter (${KEY_RULE})`);
+  }
+  if (problems.some((problem) => OVER_BUDGET.test(problem))) problems.push(splitHint(args.itemId));
   if (problems.length > 0) throw new Refusal([...problems, "Nothing was filed."].join("\n"));
   return {
     itemId: args.itemId,
     boardUrl: args.boardUrl,
+    cardPath: args.cardPath,
     images: imagePaths,
     description: split.body === "" ? card.question : split.body,
     headline: card.question,
     card,
+    key,
   };
+}
+
+/** A refusal for a card holding more than one decision fits: the question's length, or the body's characters or words. */
+const OVER_BUDGET = /^(question|body): at most /;
+
+export function splitHint(itemId) {
+  return `several decisions? one card each: review-request ${itemId} a.md b.md …`;
+}
+
+/**
+ * Every card of the call read and validated before anything else (design.md
+ * decision 1). One card refuses exactly as it always has; with several, each
+ * problem is prefixed with its card, keys must be unique, and the call
+ * refuses once with every card's problems.
+ */
+async function readCardRequests(deps, args) {
+  const read = (cardPath) => readCardRequest(deps, { itemId: args.itemId, boardUrl: args.boardUrl, cardPath });
+  if (args.cardPaths.length === 1) return [await read(args.cardPaths[0])];
+  const requests = [];
+  const problems = [];
+  for (const cardPath of args.cardPaths) {
+    try {
+      requests.push(await read(cardPath));
+    } catch (err) {
+      if (!(err instanceof Refusal)) throw err;
+      for (const line of err.message.split("\n")) {
+        const text = line.replace(/\s*Nothing was filed\.$/, "");
+        if (text !== "" && !text.startsWith("several decisions?")) problems.push(`${cardPath}: ${text}`);
+      }
+    }
+  }
+  const byKey = new Map();
+  for (const request of requests) byKey.set(request.key, [...(byKey.get(request.key) ?? []), request.cardPath]);
+  for (const [key, paths] of byKey) {
+    if (paths.length > 1) problems.push(`key ${key}: set by ${paths.join(" and ")}; each card needs its own key`);
+  }
+  if (problems.some((problem) => / (question|body): at most /.test(problem))) problems.push(splitHint(args.itemId));
+  if (problems.length > 0) throw new Refusal([...problems, "Nothing was filed."].join("\n"));
+  return requests;
 }
 
 function firstLineOf(text) {
@@ -782,7 +895,7 @@ function checkCardSize(deps, request, { project, existing }) {
   const id = existing ? existing.review.id : `${request.itemId}${NEW_REVIEW_ID_SUFFIX}`;
   const dir = path.join(reviewDir(deps.homedir, project.key), id);
   const images = request.images.map((given, index) => path.join(dir, copiedName(index, given)));
-  const review = cardReview({ card: request.card, images, pane: paneFrom(deps.env), socket: socketFrom(deps.env) });
+  const review = cardReview({ card: request.card, images, pane: paneFrom(deps.env), socket: socketFrom(deps.env), key: request.key });
   // The normalizer writes `pane: null` when there is none; count it as it will be stored.
   const size = JSON.stringify({ pane: null, ...review }).length;
   if (size > MAX_REVIEW_JSON) {
@@ -853,7 +966,7 @@ async function check(deps, args) {
   } catch (err) {
     throw new Refusal(`cannot list open reviews of ${args.itemId} in ${project.key}: ${err.message}. Nothing was filed.`);
   }
-  return { project, item, existing: chooseReview(children), bdCwd };
+  return { project, item, children, bdCwd };
 }
 
 /** Copies the images before any bead is filed, so a copy failure refuses with nothing filed. */
@@ -909,17 +1022,28 @@ function finishedBefore(review) {
   return (Array.isArray(recorded?.images) && recorded.images.length > 0) || typeof recorded?.question === "string";
 }
 
-async function write(deps, args, { project, item, existing, bdCwd }, staged) {
-  const pane = paneFrom(deps.env);
-  const socket = socketFrom(deps.env);
+/** `Review: <text>` within MAX_TITLE characters, never splitting a surrogate pair. */
+function reviewTitle(text, cut) {
+  if (!cut) return `Review: ${text}`;
+  const full = `Review: ${text}`;
+  if (full.length <= MAX_TITLE) return full;
+  const last = full.charCodeAt(MAX_TITLE - 1);
+  return full.slice(0, last >= 0xd800 && last <= 0xdbff ? MAX_TITLE - 1 : MAX_TITLE);
+}
+
+/**
+ * Files or reuses one request's review: create (or reuse), images into
+ * place, metadata, the update comment, the blocking edge. `{ ok: true, id,
+ * reused, stored }`, or `{ ok: false, id, message, filedNothing }` naming the
+ * step that failed (id null when no bead exists for it).
+ */
+async function fileOne(deps, request, { project, item, bdCwd }, existing, staged, { pane, socket }) {
+  // A card review is titled with its question (design.md decision 4); the image form keeps the item's title.
+  const title = request.card ? reviewTitle(request.card.question, true) : `Review: ${String(item.title ?? request.itemId).slice(0, MAX_TITLE)}`;
   let review;
   if (existing) {
     review = existing.review;
-    if (existing.count > 1) {
-      deps.warn(`${PREFIX}${existing.count} open reviews for ${args.itemId}; reusing the newest, ${review.id}.`);
-    }
   } else {
-    const title = `Review: ${String(item.title ?? args.itemId).slice(0, MAX_TITLE)}`;
     const created = await deps.run(
       "bd",
       [
@@ -928,37 +1052,33 @@ async function write(deps, args, { project, item, existing, bdCwd }, staged) {
         "--type", "task",
         "--labels", REVIEW_LABEL,
         "--no-inherit-labels",
-        "--parent", args.itemId,
-        "-d", args.description,
+        "--parent", request.itemId,
+        "-d", request.description,
         "--acceptance", REVIEW_ACCEPTANCE,
         "--json",
       ],
       bdCwd,
     );
     if (created.code !== 0) {
-      throw new Refusal(`bd create failed in ${project.path}: ${firstLine(created)}. Nothing was filed.`);
+      return { ok: false, id: null, filedNothing: true, message: `bd create failed in ${project.path}: ${firstLine(created)}.` };
     }
     try {
       const parsedCreate = parseJsonOutput(created.stdout);
       review = Array.isArray(parsedCreate) ? parsedCreate[0] : parsedCreate;
       if (typeof review?.id !== "string") throw new Error("no id");
     } catch {
-      throw new Refusal(
-        `bd create ran but printed no issue id; check \`bd list --parent ${args.itemId} --label review\` in ${project.path} before retrying.`,
-      );
+      return {
+        ok: false,
+        id: null,
+        filedNothing: false,
+        message: `bd create ran but printed no issue id; check \`bd list --parent ${request.itemId} --label review\` in ${project.path} before retrying.`,
+      };
     }
   }
   const id = review.id;
-  const partial = (step, detail) => {
-    deps.warn(
-      `${PREFIX}review ${id} was filed but ${step} failed: ${detail}. Re-run the same command to retry; it reuses ${id}.`,
-    );
-    return { exitCode: 1 };
-  };
+  const partial = (step, detail) => ({ ok: false, id, filedNothing: false, message: `review ${id} was filed but ${step} failed: ${detail}.` });
 
-  if (!SAFE_SEGMENT.test(id)) {
-    return partial("moving images into place", `issue id ${JSON.stringify(id)} is not a directory name`);
-  }
+  if (!SAFE_SEGMENT.test(id)) return partial("moving images into place", `issue id ${JSON.stringify(id)} is not a directory name`);
   let stored;
   try {
     stored = await placeImages(deps, project.key, id, staged);
@@ -966,56 +1086,122 @@ async function write(deps, args, { project, item, existing, bdCwd }, staged) {
     return partial("moving images into place", err.message);
   }
 
-  const metadata = args.card
-    ? { review: cardReview({ card: args.card, images: stored, pane, socket }) }
-    : reviewMetadata({ images: stored, pane, socket, summary: args.headline });
+  const metadata = request.card
+    ? { review: cardReview({ card: request.card, images: stored, pane, socket, key: request.key }) }
+    : reviewMetadata({ images: stored, pane, socket, summary: request.headline });
   const updateArgs = ["update", id, "--metadata", JSON.stringify(metadata)];
-  if (existing) updateArgs.push("--description", args.description);
+  if (existing) updateArgs.push("--description", request.description);
   if (existing && (review.labels ?? []).includes(CHANGES_LABEL)) updateArgs.push("--remove-label", CHANGES_LABEL);
+  if (existing && request.card && review.title !== title) updateArgs.push("--title", title);
   const updated = await deps.run("bd", updateArgs, bdCwd);
   if (updated.code !== 0) return partial("bd update", firstLine(updated));
 
   if (existing && finishedBefore(review)) {
-    const commented = await deps.run("bd", ["comments", "add", id, `Review updated: ${args.headline}`], bdCwd);
+    const commented = await deps.run("bd", ["comments", "add", id, `Review updated: ${request.headline}`], bdCwd);
     if (commented.code !== 0) return partial("bd comments add", firstLine(commented));
   }
 
   // bd forbids task↔epic `blocks`; an epic is gated by the parent link alone.
   if (item.issue_type !== "epic" && !blocksOn(item, id)) {
-    const dep = await deps.run("bd", ["dep", "add", args.itemId, id, "--type", "blocks"], bdCwd);
+    const dep = await deps.run("bd", ["dep", "add", request.itemId, id, "--type", "blocks"], bdCwd);
     if (dep.code !== 0) return partial("bd dep add", firstLine(dep));
   }
+  return { ok: true, id, reused: Boolean(existing), stored };
+}
 
-  const link = boardLink(args.boardUrl, project.key, id);
-  const queuedInOpenTab = await showInChrome(deps, args.boardUrl, link);
+/** Files every request in order, then shows the board, notifies, and tells the caller once (design.md decision 1). */
+async function fileAll(deps, requests, plan, chosen, stagedAll) {
+  const { project, children } = plan;
+  const itemId = requests[0].itemId;
+  const single = requests.length === 1;
+  const env = { pane: paneFrom(deps.env), socket: socketFrom(deps.env) };
 
+  for (const [index, existing] of chosen.entries()) {
+    if (existing && existing.count > 1) {
+      const which = requests[index].card && reviewKeyOf(existing.review) !== null ? ` with key ${reviewKeyOf(existing.review)}` : "";
+      deps.warn(`${PREFIX}${existing.count} open reviews for ${itemId}${which}; reusing the newest, ${existing.review.id}.`);
+    }
+  }
+  if (!single) {
+    const taken = new Set(chosen.filter(Boolean).map((c) => c.review.id));
+    for (const child of children) {
+      if (reviewKeyOf(child) === null && !taken.has(child.id)) {
+        deps.warn(`${PREFIX}open review ${child.id} under ${itemId} has no key, so this call left it alone; close it or re-file it from a card.`);
+      }
+    }
+  }
+
+  const filed = [];
+  for (const [index, request] of requests.entries()) {
+    const result = await fileOne(deps, request, plan, chosen[index], stagedAll[index], env);
+    if (result.ok) {
+      filed.push({ request, ...result });
+      continue;
+    }
+    if (single) {
+      if (result.filedNothing) throw new Refusal(`${result.message} Nothing was filed.`);
+      const retry = result.id === null ? "" : ` Re-run the same command to retry; it reuses ${result.id}.`;
+      deps.warn(`${PREFIX}${result.message.replace(/\.$/, "")}.${retry}`);
+      return { exitCode: 1 };
+    }
+    const done = filed.map((f) => f.id);
+    if (result.id !== null) done.push(`${result.id} (incomplete)`);
+    deps.warn(`${PREFIX}${result.message}`);
+    deps.warn(
+      `${PREFIX}stopped at ${request.cardPath}; filed so far: ${done.length === 0 ? "none" : done.join(", ")}. Re-run the same command to retry; it reuses filed reviews by key and files the rest.`,
+    );
+    return { exitCode: 1 };
+  }
+
+  const first = filed[0];
+  const link = boardLink(requests[0].boardUrl, project.key, first.id);
+  const queuedInOpenTab = await showInChrome(deps, requests[0].boardUrl, link);
+
+  const headline = single ? first.request.headline : filed.map((f) => f.request.headline).join(" · ");
   const notified = await deps.run(
     "herdr",
     [
-      "notification", "show", `Review requested: ${project.key} ${args.itemId}`,
-      "--body", args.headline.slice(0, MAX_NOTIFICATION_BODY),
+      "notification", "show", single ? `Review requested: ${project.key} ${itemId}` : `${filed.length} reviews requested: ${project.key} ${itemId}`,
+      "--body", headline.slice(0, MAX_NOTIFICATION_BODY),
       "--sound", "request",
     ],
     { cwd: deps.cwd },
   );
   if (notified.code !== 0) deps.warn(`${PREFIX}herdr notification failed (${firstLine(notified)}).`);
 
-  if (pane === null) {
+  const ids = filed.map((f) => f.id).join(", ");
+  if (env.pane === null) {
     deps.warn(
-      `${PREFIX}HERDR_PANE_ID is not set to a pane id, so the decision cannot be pushed to this pane; read \`bd comments ${id}\` for it.`,
+      `${PREFIX}HERDR_PANE_ID is not set to a pane id, so the decision cannot be pushed to this pane; read \`bd comments ${single ? first.id : "<id>"}\` for it${single ? "" : ` (${ids})`}.`,
     );
-  } else if (socket === null) {
+  } else if (env.socket === null) {
     deps.warn(
-      `${PREFIX}HERDR_SOCKET_PATH is not set to an absolute socket path, so the decision cannot be pushed to this pane; read \`bd comments ${id}\` for it.`,
+      `${PREFIX}HERDR_SOCKET_PATH is not set to an absolute socket path, so the decision cannot be pushed to this pane; read \`bd comments ${single ? first.id : "<id>"}\` for it${single ? "" : ` (${ids})`}.`,
     );
   }
 
-  const count = `${stored.length} image${stored.length === 1 ? "" : "s"}`;
-  deps.out(`Review ${id} ${existing ? "updated" : "filed"} for ${args.itemId} in ${project.key} (${count}).`);
+  const images = (n) => `${n} image${n === 1 ? "" : "s"}`;
+  if (single) {
+    deps.out(`Review ${first.id} ${first.reused ? "updated" : "filed"} for ${itemId} in ${project.key} (${images(first.stored.length)}).`);
+  } else {
+    for (const f of filed) {
+      deps.out(`Review ${f.id} ${f.reused ? "updated" : "filed"} for ${itemId} in ${project.key} (key ${f.request.key}, ${images(f.stored.length)}): ${f.request.headline}`);
+    }
+  }
+  // Open reviews this call did not touch, so a renamed card file's second review is visible (design.md, risks).
+  if (requests[0].card) {
+    const touched = new Set(filed.map((f) => f.id));
+    const others = children.filter((child) => !touched.has(child.id));
+    if (others.length > 0) {
+      deps.out(`Also open under ${itemId}: ${others.map((c) => `${c.id} (${reviewKeyOf(c) === null ? "no key" : `key ${reviewKeyOf(c)}`})`).join(", ")}.`);
+    }
+  }
   deps.out(`Board: ${link}`);
-  if (queuedInOpenTab) deps.out("Review queued in the open breakdown tab.");
+  if (queuedInOpenTab) deps.out(single ? "Review queued in the open breakdown tab." : "Reviews queued in the open breakdown tab.");
   deps.out(
-    `End your turn now and wait for a prompt in this pane with the decision (Review ${id} accepted|changes requested: …). If none arrives, read \`bd comments ${id}\`.`,
+    single
+      ? `End your turn now and wait for a prompt in this pane with the decision (Review ${first.id} accepted|changes requested: …). If none arrives, read \`bd comments ${first.id}\`.`
+      : `End your turn now and wait for one prompt in this pane per review (Review <id> accepted|changes requested: …); each is decided on its own. If none arrives, read \`bd comments <id>\`.`,
   );
   return { exitCode: 0 };
 }

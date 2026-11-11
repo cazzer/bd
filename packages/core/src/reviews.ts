@@ -56,6 +56,14 @@
 // (`summary` = question, `images` = image attachment paths), so a reader that
 // predates cards still shows the question and the images. `reviewCard` is
 // how every reader sees a review as a card, legacy or not.
+//
+// Review keys (split-review-decisions, design.md decision 2). A review filed
+// from a card carries `key` (REVIEW_KEY_PATTERN: a lower-case letter or
+// digit, then up to 39 of `a-z`, `0-9`, `_`, `-`), which is how
+// `review-request` finds the open review a card replaces when one item has
+// several. Absent, null, and empty are absent in the output; anything else
+// that breaks the pattern makes the review `{ invalid: true }`, as a bad
+// option id does. A review without a key normalizes exactly as before.
 
 import os from "node:os";
 import path from "node:path";
@@ -99,6 +107,9 @@ export const MAX_REVIEW_ATTACHMENTS = 20;
 export const MAX_REVIEW_ATTACHMENT_CAPTION_LENGTH = 200;
 /** Cap on a mermaid or diff attachment's `source`. */
 export const MAX_REVIEW_ATTACHMENT_SOURCE_LENGTH = 8000;
+/** A review's key: a lower-case letter or digit, then up to 39 lower-case letters, digits, `_`, `-`. */
+export const REVIEW_KEY_PATTERN = /^[a-z0-9][a-z0-9_-]{0,39}$/;
+export const MAX_REVIEW_KEY_LENGTH = 40;
 export const REVIEW_ATTACHMENT_KINDS = ["image", "mermaid", "diff"] as const;
 export const REVIEW_ATTACHMENT_PAIRS = ["before", "after"] as const;
 
@@ -143,6 +154,8 @@ export interface ReviewMetadata {
   /** The herdr server socket the pane id belongs to; present only when recorded. */
   socket?: string;
   summary: string;
+  /** Which of an item's reviews this is, for `review-request` to find on a re-run; present only when recorded. */
+  key?: string;
   /** Decision card keys (module header); each present only when the review carries it. */
   question?: string;
   options?: ReviewOption[];
@@ -230,10 +243,24 @@ export function normalizeReviewMetadata(raw: unknown): ReviewMetadata | InvalidR
     summary = withoutNul(fitText(rawSummary.trim(), MAX_REVIEW_SUMMARY_LENGTH) ?? "");
   }
 
+  const rawKey = raw["key"];
+  let key: string | undefined;
+  if (rawKey !== undefined && rawKey !== null && rawKey !== "") {
+    if (typeof rawKey !== "string" || !REVIEW_KEY_PATTERN.test(rawKey)) return { ...INVALID };
+    key = rawKey;
+  }
+
   const card = normalizeDecisionCard(raw);
   if (card === null) return { ...INVALID };
 
-  const review: ReviewMetadata = socket === undefined ? { images, pane, summary, ...card } : { images, pane, socket, summary, ...card };
+  const review: ReviewMetadata = {
+    images,
+    pane,
+    ...(socket === undefined ? {} : { socket }),
+    summary,
+    ...(key === undefined ? {} : { key }),
+    ...card,
+  };
   return JSON.stringify(review).length > MAX_REVIEW_METADATA_CHARS ? { ...INVALID } : review;
 }
 

@@ -6,6 +6,7 @@
   "pane": "w1:p1",
   "socket": "/tmp/herdr-test.sock",
   "summary": "Move the default-view picker from the toolbar into the node header?",
+  "key": "before-after",
   "question": "Move the default-view picker from the toolbar into the node header?",
   "on_accept": [
     "Move the picker into the node header and remove the toolbar control."

@@ -632,12 +632,13 @@ const VALID_CARDS = cardFixtures.filter((n) => n.endsWith(".expected.json")).map
 const INVALID_CARDS = cardFixtures.filter((n) => n.startsWith("invalid-") && n.endsWith(".md")).sort();
 /** The refusal each invalid fixture gets; a fixture missing here is still checked for refusing with nothing filed. */
 const INVALID_REFUSALS = {
-  "invalid-question-too-long.md": ["question: at most 140 characters, got 160", "Nothing was filed."],
+  "invalid-question-too-long.md": ["question: at most 140 characters, got 160", "several decisions? one card each: review-request scr-1 a.md b.md …", "Nothing was filed."],
   "invalid-repeated-option-id.md": ["options[1].id: A repeats options[0].id", "Nothing was filed."],
   "invalid-recommend-unknown.md": ['recommend: "D" names no option (options: A, B, C)', "Nothing was filed."],
   "invalid-unknown-kind.md": ['attachments[0].kind: must be image, mermaid, or diff, got "video"', "Nothing was filed."],
-  "invalid-unknown-key.md": ["recomend: unknown field (card fields: question, options, recommend, on_accept, attachments)", "Nothing was filed."],
-  "invalid-body-over-budget.md": ["body: at most 300 words outside fenced blocks, got 315", "Nothing was filed."],
+  "invalid-unknown-key.md": ["recomend: unknown field (card fields: question, options, recommend, on_accept, attachments, key)", "Nothing was filed."],
+  "invalid-body-over-budget.md": ["body: at most 300 words outside fenced blocks, got 315", "several decisions? one card each: review-request scr-1 a.md b.md …", "Nothing was filed."],
+  "invalid-key.md": ['key: must be a lower-case letter or digit, then up to 39 lower-case letters, digits, _ or -; got "Has Spaces"', "Nothing was filed."],
   "invalid-missing-frontmatter.md": [
     `frontmatter: missing in ${path.join(CARDS, "invalid-missing-frontmatter.md")}; a card starts with a \`---\` line, the card's YAML, and another \`---\` line. Nothing was filed.`,
   ],
@@ -654,9 +655,9 @@ const QUESTION_ONLY = "---\nquestion: Ship it?\n---\n";
 
 describe("parseArgs card form", () => {
   it("takes one .md positional without --summary as a card", () => {
-    assert.deepEqual(parseArgs(["scr-1", "cards/x.md"]), { args: { itemId: "scr-1", cardPath: "cards/x.md", boardUrl: BOARD } });
+    assert.deepEqual(parseArgs(["scr-1", "cards/x.md"]), { args: { itemId: "scr-1", cardPaths: ["cards/x.md"], boardUrl: BOARD } });
     assert.deepEqual(parseArgs(["scr-1", "x.md", "--board-url", "https://board.test"]), {
-      args: { itemId: "scr-1", cardPath: "x.md", boardUrl: "https://board.test" },
+      args: { itemId: "scr-1", cardPaths: ["x.md"], boardUrl: "https://board.test" },
     });
     assert.match(parseArgs(["scr-1", "x.md", "--board-url", "file:///x"]).error, /http\(s\) URL/);
   });
@@ -664,9 +665,14 @@ describe("parseArgs card form", () => {
     assert.deepEqual(parseArgs(["scr-1", "--summary", "s", "x.md"]), {
       args: { itemId: "scr-1", summary: "s", boardUrl: BOARD, images: ["x.md"] },
     });
-    assert.match(parseArgs(["scr-1", "x.md", "a.png"]).error, /--summary is required/);
-    assert.match(parseArgs(["scr-1", "x.md", "y.md"]).error, /--summary is required/);
+    assert.match(parseArgs(["scr-1", "x.md", "a.png"]).error, /card files and images can't be mixed/);
     assert.match(parseArgs(["scr-1", "x.markdown"]).error, /--summary is required/);
+  });
+  it("takes up to six cards, in order", () => {
+    const six = ["a.md", "b.md", "c.md", "d.md", "e.md", "f.md"];
+    assert.deepEqual(parseArgs(["scr-1", "x.md", "y.md"]), { args: { itemId: "scr-1", cardPaths: ["x.md", "y.md"], boardUrl: BOARD } });
+    assert.deepEqual(parseArgs(["scr-1", ...six]).args.cardPaths, six);
+    assert.match(parseArgs(["scr-1", ...six, "g.md"]).error, /at most 6 cards in one call, got 7/);
   });
   it("usage shows both forms", () => {
     assert.match(USAGE, /review-request <item-id> <card\.md>/);
@@ -821,14 +827,14 @@ describe("card body word budget", () => {
     assert.ok(body.length > 8000);
     const card = await writeCard(fx, cardWith(body));
     const h = await harness(fx, { argv: [ITEM, card] });
-    assert.deepEqual(h.warn, [`review-request: body: at most 8000 characters, got ${body.length}`, "review-request: Nothing was filed."]);
+    assert.deepEqual(h.warn, [`review-request: body: at most 8000 characters, got ${body.length}`, "review-request: several decisions? one card each: review-request scr-1 a.md b.md …", "review-request: Nothing was filed."]);
     await assertNothingFiled(fx, h);
   });
   it("refuses 301 words naming the budget and the count, with nothing filed", async () => {
     const fx = await fixture();
     const card = await writeCard(fx, cardWith(prose(301)));
     const h = await harness(fx, { argv: [ITEM, card] });
-    assert.deepEqual(h.warn, ["review-request: body: at most 300 words outside fenced blocks, got 301", "review-request: Nothing was filed."]);
+    assert.deepEqual(h.warn, ["review-request: body: at most 300 words outside fenced blocks, got 301", "review-request: several decisions? one card each: review-request scr-1 a.md b.md …", "review-request: Nothing was filed."]);
     assert.deepEqual(h.calls, []);
     await assertNothingFiled(fx, h);
   });
@@ -837,7 +843,7 @@ describe("card body word budget", () => {
 describe("long legacy summary", () => {
   const summaryOf = (n) => "s".repeat(n);
   const warning = (n) =>
-    `review-request: warning: the summary is ${n} characters, over 280; a decision reads faster as a card: review-request ${ITEM} <card.md> (examples: ${path.join(BREAKDOWN_ROOT, "fixtures", "review-cards")}).`;
+    `review-request: warning: the summary is ${n} characters, over 280; a decision reads faster as a card, one card per decision: review-request ${ITEM} <card.md>... (examples: ${path.join(BREAKDOWN_ROOT, "fixtures", "review-cards")}).`;
 
   it("is quiet at 280 characters", async () => {
     assert.equal(SUMMARY_WARN_CHARS, 280);
@@ -896,6 +902,7 @@ describe("card form", () => {
         pane: "w1:p2",
         socket: SOCKET,
         summary: "Ship it?",
+        key: "card",
         question: "Ship it?",
         options: [{ id: "yes", label: "Ship" }, { id: "no", label: "Hold" }],
         recommend: "yes",
@@ -933,9 +940,9 @@ describe("card form", () => {
     assert.equal(h.result.exitCode, 0, h.warn.join("\n"));
     assert.equal(h.calls.some((c) => c.args[0] === "create" || c.args[0] === "dep"), false);
     const update = callTo(h, "update");
-    assert.deepEqual(update.args.slice(4), ["--description", "Evidence, second pass.", "--remove-label", "review:changes"]);
+    assert.deepEqual(update.args.slice(4), ["--description", "Evidence, second pass.", "--remove-label", "review:changes", "--title", "Review: Ship it?"]);
     assert.deepEqual(JSON.parse(update.args[3]), {
-      review: { images: [], pane: "w1:p2", socket: SOCKET, summary: "Ship it?", question: "Ship it?" },
+      review: { images: [], pane: "w1:p2", socket: SOCKET, summary: "Ship it?", key: "card", question: "Ship it?" },
     });
     assert.deepEqual(callTo(h, "comments").args, ["comments", "add", REVIEW, "Review updated: Ship it?"]);
     assert.equal(h.out[0], `Review ${REVIEW} updated for ${ITEM} in scratch (0 images).`);
@@ -974,7 +981,7 @@ describe("card form", () => {
       "---\nquestion: Q?\nattachments:\n  - { kind: image, path: gone.png }\n  - { kind: image, path: ../notes.txt }\n---\n",
       ["attachments[0].path: image not found: gone.png", "attachments[1].path: not an image (png, jpg, jpeg, gif, webp): ../notes.txt"],
     ],
-    ["an over-long body", `${QUESTION_ONLY}${LONG}\n`, ["body: at most 8000 characters, got 8001"]],
+    ["an over-long body", `${QUESTION_ONLY}${LONG}\n`, ["body: at most 8000 characters, got 8001", "several decisions? one card each: review-request scr-1 a.md b.md …"]],
     ["frontmatter that is a list", "---\n- a\n---\n", ["frontmatter: must be a mapping of card fields, got a list"]],
     ["a numeric recommend", '---\nquestion: Q?\noptions:\n  - { id: "1", label: a }\n  - { id: "2", label: b }\nrecommend: 1\n---\n', ['recommend: got the number 1; quote it: recommend: "1"']],
     ["a NUL in the body", `${QUESTION_ONLY}before\u0000after\n`, ["body: contains a NUL character"]],
@@ -1057,7 +1064,7 @@ describe("card form", () => {
     assert.equal(h.result.exitCode, 0, h.warn.join("\n"));
     const create = callTo(h, "create").args;
     assert.equal(create[create.indexOf("-d") + 1], body);
-    assert.deepEqual(Object.keys(JSON.parse(callTo(h, "update").args[3]).review), ["images", "pane", "socket", "summary", "question"]);
+    assert.deepEqual(Object.keys(JSON.parse(callTo(h, "update").args[3]).review), ["images", "pane", "socket", "summary", "key", "question"]);
   });
 
   it("refuses a card file that does not exist", async () => {
@@ -1207,5 +1214,231 @@ console.log(JSON.stringify({ exitCode, resolved, warn }));
     const card = await inChild(await fixture(), [ITEM, path.join(CARDS, "shlo-k54.4.1.1.md")]);
     assert.equal(card.exitCode, 0, card.warn.join("\n"));
     assert.deepEqual(card.resolved, ["yaml"]);
+  });
+});
+
+// ---- Several cards, matched by key (split-review-decisions) ----
+
+const cardText = (question, extra = "") => `---\nquestion: "${question}"\n${extra}---\nEvidence for ${question}\n`;
+const createdAs = (args, n) => ok(JSON.stringify({ id: `${ITEM}.${n}`, title: args[2] }));
+const updatesOf = (h) => h.calls.filter((c) => c.cmd === "bd" && c.args[0] === "update");
+const keyed = (id, key, extra = {}) => ({
+  id,
+  created_at: "2026-11-10T00:00:00Z",
+  labels: ["review"],
+  title: `Review: ${key}?`,
+  metadata: { review: { images: [], pane: "w0:p0", summary: `${key}?`, key, question: `${key}?` } },
+  ...extra,
+});
+
+describe("several cards in one call", () => {
+  it("files one review per card with one lookup, one board link, and one notification", async () => {
+    const fx = await fixture();
+    const cards = [];
+    for (const name of ["city", "budget", "logos", "gates"]) cards.push(await writeCard(fx, cardText(`Which ${name}?`), `${name}.md`));
+    const h = await harness(fx, { argv: [ITEM, ...cards], handlers: { "bd create --title": createdAs } });
+    assert.equal(h.result.exitCode, 0, h.warn.join("\n"));
+    assert.deepEqual(order(h.calls), [
+      "git rev-parse", "bd show", "bd list",
+      "bd create", "bd update", "bd dep",
+      "bd create", "bd update", "bd dep",
+      "bd create", "bd update", "bd dep",
+      "bd create", "bd update", "bd dep",
+      "osascript -e", "open -a", "herdr notification",
+    ]);
+    const creates = h.calls.filter((c) => c.args[0] === "create");
+    assert.deepEqual(creates.map((c) => c.args[2]), ["Review: Which city?", "Review: Which budget?", "Review: Which logos?", "Review: Which gates?"]);
+    assert.deepEqual(updatesOf(h).map((c) => JSON.parse(c.args[3]).review.key), ["city", "budget", "logos", "gates"]);
+    assert.deepEqual(h.calls.filter((c) => c.args[0] === "dep").map((c) => c.args[3]), [`${ITEM}.1`, `${ITEM}.2`, `${ITEM}.3`, `${ITEM}.4`]);
+    assert.deepEqual(h.calls.find((c) => c.cmd === "herdr").args.slice(0, 5), [
+      "notification", "show", `4 reviews requested: scratch ${ITEM}`, "--body", "Which city? · Which budget? · Which logos? · Which gates?",
+    ]);
+    assert.deepEqual(h.calls.find((c) => c.cmd === "open").args, ["-a", "Google Chrome", `${BOARD}/board?project=scratch&item=${ITEM}.1`]);
+    assert.deepEqual(h.warn, []);
+    assert.deepEqual(h.out, [
+      `Review ${ITEM}.1 filed for ${ITEM} in scratch (key city, 0 images): Which city?`,
+      `Review ${ITEM}.2 filed for ${ITEM} in scratch (key budget, 0 images): Which budget?`,
+      `Review ${ITEM}.3 filed for ${ITEM} in scratch (key logos, 0 images): Which logos?`,
+      `Review ${ITEM}.4 filed for ${ITEM} in scratch (key gates, 0 images): Which gates?`,
+      `Board: ${BOARD}/board?project=scratch&item=${ITEM}.1`,
+      "End your turn now and wait for one prompt in this pane per review (Review <id> accepted|changes requested: …); each is decided on its own. If none arrives, read `bd comments <id>`.",
+    ]);
+    for (const n of [1, 2, 3, 4]) assert.deepEqual(await fs.readdir(path.join(fx.projectDir, `${ITEM}.${n}`)), []);
+  });
+
+  it("refuses the whole call, before any lookup, when one card is bad", async () => {
+    const fx = await fixture();
+    const a = await writeCard(fx, cardText("A?"), "a.md");
+    const b = await writeCard(fx, cardText("B?", "options:\n  - { id: X, label: x }\n  - { id: Y, label: y }\nrecommend: Z\n"), "b.md");
+    const c = await writeCard(fx, cardText("C?"), "c.md");
+    const h = await harness(fx, { argv: [ITEM, a, b, c] });
+    assert.deepEqual(h.warn, [`review-request: ${b}: recommend: "Z" names no option (options: X, Y)`, "review-request: Nothing was filed."]);
+    assert.deepEqual(h.calls, []);
+    await assertNothingFiled(fx, h);
+  });
+
+  it("prefixes each card's problems and adds the split hint once", async () => {
+    const fx = await fixture();
+    const a = await writeCard(fx, `---\nquestion: "A?"\n---\n${prose(301)}\n`, "a.md");
+    const b = await writeCard(fx, cardText("q".repeat(141)), "b.md");
+    const h = await harness(fx, { argv: [ITEM, a, b] });
+    assert.deepEqual(h.warn, [
+      `review-request: ${a}: body: at most 300 words outside fenced blocks, got 301`,
+      `review-request: ${b}: question: at most 140 characters, got 141`,
+      "review-request: several decisions? one card each: review-request scr-1 a.md b.md …",
+      "review-request: Nothing was filed.",
+    ]);
+    await assertNothingFiled(fx, h);
+  });
+
+  it("refuses two cards with the same key, naming both", async () => {
+    const fx = await fixture();
+    const a = await writeCard(fx, cardText("A?", "key: layout\n"), "a.md");
+    const b = await writeCard(fx, cardText("B?", "key: layout\n"), "b.md");
+    const h = await harness(fx, { argv: [ITEM, a, b] });
+    assert.deepEqual(h.warn, [`review-request: key layout: set by ${a} and ${b}; each card needs its own key`, "review-request: Nothing was filed."]);
+    await assertNothingFiled(fx, h);
+  });
+
+  it("refuses a filename that gives no key unless the frontmatter sets one", async () => {
+    const fx = await fixture();
+    const bad = await writeCard(fx, cardText("A?"), "___.md");
+    const h = await harness(fx, { argv: [ITEM, bad] });
+    assert.deepEqual(h.warn, [
+      "review-request: key: the filename ___.md gives no usable key; set one in the frontmatter (a lower-case letter or digit, then up to 39 lower-case letters, digits, _ or -)",
+      "review-request: Nothing was filed.",
+    ]);
+    await assertNothingFiled(fx, h);
+    const named = await writeCard(fx, cardText("A?", "key: first\n"), "___.md");
+    const ok2 = await harness(fx, { argv: [ITEM, named] });
+    assert.equal(ok2.result.exitCode, 0, ok2.warn.join("\n"));
+    assert.equal(JSON.parse(callTo(ok2, "update").args[3]).review.key, "first");
+  });
+
+  it("re-running one card of four updates only its review", async () => {
+    const fx = await fixture();
+    const children = ["city", "budget", "logos", "gates"].map((key, i) => keyed(`${ITEM}.${i + 1}`, key));
+    children[2].labels = ["review", "review:changes"];
+    const item = { id: ITEM, title: "Epic", issue_type: "epic", dependencies: [] };
+    const card = await writeCard(fx, cardText("Which logos, revised?"), "logos.md");
+    const h = await harness(fx, { item, children, argv: [ITEM, card] });
+    assert.equal(h.result.exitCode, 0, h.warn.join("\n"));
+    assert.equal(callTo(h, "create"), undefined);
+    const updates = updatesOf(h);
+    assert.equal(updates.length, 1);
+    assert.equal(updates[0].args[1], `${ITEM}.3`);
+    assert.deepEqual(updates[0].args.slice(4), ["--description", "Evidence for Which logos, revised?", "--remove-label", "review:changes", "--title", "Review: Which logos, revised?"]);
+    assert.deepEqual(callTo(h, "comments").args, ["comments", "add", `${ITEM}.3`, "Review updated: Which logos, revised?"]);
+    assert.equal(h.out[0], `Review ${ITEM}.3 updated for ${ITEM} in scratch (0 images).`);
+    assert.equal(h.out[1], `Also open under ${ITEM}: ${ITEM}.1 (key city), ${ITEM}.2 (key budget), ${ITEM}.4 (key gates).`);
+  });
+
+  it("does not retitle a reused review whose title already names its question", async () => {
+    const fx = await fixture();
+    const card = await writeCard(fx, cardText("logos?"), "logos.md");
+    const h = await harness(fx, { children: [keyed(`${ITEM}.3`, "logos")], argv: [ITEM, card] });
+    assert.equal(h.result.exitCode, 0, h.warn.join("\n"));
+    assert.equal(callTo(h, "update").args.includes("--title"), false);
+  });
+
+  it("a multi-card call leaves a keyless review alone and warns about it", async () => {
+    const fx = await fixture();
+    const legacy = { id: `${ITEM}.1`, created_at: "2026-10-01T00:00:00Z", labels: ["review"], metadata: { review: { images: [], summary: "old" } } };
+    const a = await writeCard(fx, cardText("A?"), "a.md");
+    const b = await writeCard(fx, cardText("B?"), "b.md");
+    const h = await harness(fx, { children: [legacy], argv: [ITEM, a, b], handlers: { "bd create --title": (args, n) => ok(JSON.stringify({ id: `${ITEM}.${n + 1}` })) } });
+    assert.equal(h.result.exitCode, 0, h.warn.join("\n"));
+    assert.deepEqual(updatesOf(h).map((c) => c.args[1]), [`${ITEM}.2`, `${ITEM}.3`]);
+    assert.deepEqual(h.warn, [`review-request: open review ${ITEM}.1 under ${ITEM} has no key, so this call left it alone; close it or re-file it from a card.`]);
+    assert.ok(h.out.includes(`Also open under ${ITEM}: ${ITEM}.1 (no key).`));
+  });
+
+  it("a single card reuses a keyless review and records its key", async () => {
+    const fx = await fixture();
+    const legacy = { id: REVIEW, created_at: "2026-10-01T00:00:00Z", labels: ["review"], metadata: { review: { images: [], summary: "old", question: "old" } } };
+    const card = await writeCard(fx, cardText("New?"));
+    const h = await harness(fx, { children: [legacy, keyed(`${ITEM}.9`, "other")], argv: [ITEM, card] });
+    assert.equal(h.result.exitCode, 0, h.warn.join("\n"));
+    assert.equal(callTo(h, "create"), undefined);
+    assert.equal(callTo(h, "update").args[1], REVIEW);
+    assert.equal(JSON.parse(callTo(h, "update").args[3]).review.key, "card");
+  });
+
+  it("the image form never reuses a keyed review", async () => {
+    const fx = await fixture();
+    const h = await harness(fx, { children: [keyed(`${ITEM}.5`, "a"), keyed(`${ITEM}.6`, "b")] });
+    assert.equal(h.result.exitCode, 0, h.warn.join("\n"));
+    assert.equal(callTo(h, "create").args[2], "Review: Board header");
+    assert.equal(callTo(h, "update").args[1], REVIEW);
+    assert.equal("key" in JSON.parse(callTo(h, "update").args[3]).review, false);
+  });
+
+  it("warns naming the count when several open reviews share a key", async () => {
+    const fx = await fixture();
+    const older = keyed(`${ITEM}.1`, "a", { created_at: "2026-11-01T00:00:00Z" });
+    const newer = keyed(`${ITEM}.2`, "a", { created_at: "2026-11-02T00:00:00Z" });
+    const card = await writeCard(fx, cardText("a?"), "a.md");
+    const h = await harness(fx, { children: [older, newer], argv: [ITEM, card] });
+    assert.equal(h.result.exitCode, 0, h.warn.join("\n"));
+    assert.equal(callTo(h, "update").args[1], `${ITEM}.2`);
+    assert.deepEqual(h.warn, [`review-request: 2 open reviews for ${ITEM} with key a; reusing the newest, ${ITEM}.2.`]);
+  });
+
+  it("a failure partway names what was filed, and a re-run finishes without duplicates", async () => {
+    const fx = await fixture();
+    const cards = [];
+    for (const name of ["a", "b", "c"]) cards.push(await writeCard(fx, cardText(`${name}?`), `${name}.md`));
+    const first = await harness(fx, {
+      argv: [ITEM, ...cards],
+      handlers: { "bd create --title": (args, n) => (n === 2 ? fail("database is locked") : createdAs(args, n)) },
+    });
+    assert.equal(first.result.exitCode, 1);
+    assert.deepEqual(first.warn, [
+      `review-request: bd create failed in ${fx.repo}: database is locked.`,
+      `review-request: stopped at ${cards[1]}; filed so far: ${ITEM}.1. Re-run the same command to retry; it reuses filed reviews by key and files the rest.`,
+    ]);
+    assert.equal(first.calls.some((c) => c.cmd === "herdr" || c.cmd === "open"), false);
+
+    const filed = keyed(`${ITEM}.1`, "a");
+    const again = await harness(fx, {
+      children: [filed],
+      argv: [ITEM, ...cards],
+      handlers: { "bd create --title": (args, n) => createdAs(args, n + 1) },
+    });
+    assert.equal(again.result.exitCode, 0, again.warn.join("\n"));
+    assert.deepEqual(again.calls.filter((c) => c.args[0] === "create").map((c) => c.args[2]), ["Review: b?", "Review: c?"]);
+    assert.deepEqual(updatesOf(again).map((c) => c.args[1]), [`${ITEM}.1`, `${ITEM}.2`, `${ITEM}.3`]);
+  });
+
+  it("cuts a card review's title to 120 characters", async () => {
+    const fx = await fixture();
+    const question = `${"q".repeat(139)}?`;
+    const h = await harness(fx, { argv: [ITEM, await writeCard(fx, cardText(question))] });
+    assert.equal(h.result.exitCode, 0, h.warn.join("\n"));
+    const title = callTo(h, "create").args[2];
+    assert.equal(title.length, 120);
+    assert.equal(title, `Review: ${question}`.slice(0, 120));
+  });
+});
+
+describe("card-first usage", () => {
+  it("leads --help with the card form and the one-decision rule", async () => {
+    const fx = await fixture();
+    const h = await harness(fx, { argv: ["--help"] });
+    assert.equal(h.result.exitCode, 0);
+    const lines = h.out.join("\n").split("\n");
+    assert.equal(lines[0], "usage: review-request <item-id> <card.md>... [--board-url <url>]");
+    assert.match(h.out.join("\n"), /One decision per card\. Several decisions are several cards in one call/);
+    assert.match(h.out.join("\n"), /never in an image/);
+    assert.match(h.out.join("\n"), /keep a card's\nfilename across revisions, or set `key:`/);
+  });
+
+  it("judges no summary wording and no image filename", async () => {
+    const fx = await fixture();
+    await fs.writeFile(path.join(fx.worktree, "01-card.png"), "C");
+    await fs.writeFile(path.join(fx.worktree, "contact-sheet.png"), "S");
+    const h = await harness(fx, { argv: [ITEM, "--summary", "Decide: A or B? Rec: A", "01-card.png", "contact-sheet.png"] });
+    assert.equal(h.result.exitCode, 0, h.warn.join("\n"));
+    assert.deepEqual(h.warn, []);
   });
 });

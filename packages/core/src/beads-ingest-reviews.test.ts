@@ -124,6 +124,8 @@ describe("ingestBeadsCheckout reviews", () => {
     const first = await load(project, bead, {});
     expect(first.nodes.created).toBe(2);
     expect((await rowOf(reviewId))?.metadata).toMatchObject({ review: card });
+    // The card's key (split-review-decisions) lands with it.
+    expect((await rowOf(reviewId))?.metadata).toMatchObject({ review: { key: "before-after" } });
 
     const again = await load(project, bead, {});
     expect(again.nodes).toEqual({ created: 0, updated: 0, unchanged: 2 });

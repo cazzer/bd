@@ -3,6 +3,7 @@
   "pane": "w1:p1",
   "socket": "/tmp/herdr-test.sock",
   "summary": "Retire the v1 search endpoint on 2026-12-01 once the mobile forced upgrade reaches 98% of weekly active installs, or keep it running, as is?",
+  "key": "long-recommendation",
   "question": "Retire the v1 search endpoint on 2026-12-01 once the mobile forced upgrade reaches 98% of weekly active installs, or keep it running, as is?",
   "options": [
     {
