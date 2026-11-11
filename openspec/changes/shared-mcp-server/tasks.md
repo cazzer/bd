@@ -50,8 +50,8 @@
   - rollback
 
   Update CLAUDE.md's `apps/mcp` architecture line to "MCP server over Streamable HTTP (shared, loopback) and stdio", and record in its conventions that the HTTP port and host are flags, not environment variables.
-- [ ] 4.2 Hand the user the exact repoint commands (design.md, Migration Plan step 3) and wait for them to run them. Do not edit `~/.claude.json` or `~/.codex/config.toml` from code.
-- [ ] 4.3 Verify on this machine after the repoint:
+- [x] 4.2 Hand the user the exact repoint commands (design.md, Migration Plan step 3) and wait for them to run them. Do not edit `~/.claude.json` or `~/.codex/config.toml` from code.
+- [x] 4.3 Verify on this machine after the repoint:
   - `claude mcp list` from `~/dev/skyos` and from `~/dev/bd` shows `brain` connected over HTTP
   - a Codex session lists the `brain_*` tools
   - `mcp:service restart` while a Claude Code session is open, then a `brain_map` call from that session succeeds without `/mcp` (else record the reconnect step in the README, per design.md Risks)
