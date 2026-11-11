@@ -40,6 +40,9 @@ export const TIMELINE_VIEW_PATH = "/timeline";
 /** The board view's path (live-beads-board). `parseRoute` also accepts it with one trailing slash. */
 export const BOARD_VIEW_PATH = "/board";
 
+/** The inbox view (inbox.ts in core). `parseRoute` also accepts it with one trailing slash. */
+export const INBOX_VIEW_PATH = "/inbox";
+
 /** The force-graph view: the submitted query, the node-type filters it was submitted with, and the selected node. `null`/`[]` mean absent. */
 export interface GraphRoute {
   view: "graph";
@@ -103,8 +106,20 @@ export interface BoardRoute {
   item: string | null;
 }
 
+/**
+ * The inbox: the selected item — an inbox item's id, or `<project>/<bead>`
+ * for a board review listed in Needs me — or `null` for the first one; and
+ * the source filter (`review`, or an inbox source such as `gmail`), or
+ * `null` for all (unify-review-queues).
+ */
+export interface InboxRoute {
+  view: "inbox";
+  item: string | null;
+  source?: string | null;
+}
+
 /** Every addressable view. A future view widens this union. */
-export type Route = GraphRoute | FeedRoute | CodeRoute | TimelineRoute | BoardRoute;
+export type Route = GraphRoute | FeedRoute | CodeRoute | TimelineRoute | BoardRoute | InboxRoute;
 
 /** `s` trimmed, or `null` when it is missing or whitespace-only — mirrors `runSearch`'s own trim, so `?q=%20` and no `q` at all mean the same thing. */
 function nonEmpty(s: string | null): string | null {
@@ -220,6 +235,11 @@ export function parseRoute(pathname: string, search: string): Route | null {
   if (path === BOARD_VIEW_PATH) {
     return boardRouteFromSearch(search);
   }
+  if (path === INBOX_VIEW_PATH) {
+    const params = new URLSearchParams(search);
+    const source = nonEmpty(params.get("source"));
+    return source === null ? { view: "inbox", item: nonEmpty(params.get("item")) } : { view: "inbox", item: nonEmpty(params.get("item")), source };
+  }
   return null;
 }
 
@@ -245,6 +265,13 @@ export function formatRoute(route: Route): string {
       return formatTimelineRoute(route);
     case "board":
       return formatBoardRoute(route);
+    case "inbox": {
+      const params = new URLSearchParams();
+      if (route.item !== null) params.set("item", route.item);
+      if (route.source != null) params.set("source", route.source);
+      const query = params.toString();
+      return query === "" ? INBOX_VIEW_PATH : `${INBOX_VIEW_PATH}?${query}`;
+    }
   }
 }
 

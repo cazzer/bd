@@ -27,6 +27,7 @@ import {
   MAX_REVIEW_METADATA_CHARS,
   MAX_REVIEW_SOCKET_PATH_LENGTH,
   MAX_REVIEW_SUMMARY_LENGTH,
+  normalizeDecisionCard,
   normalizeReviewComments,
   normalizeReviewMetadata,
   REVIEW_IMAGE_ROOT,
@@ -322,6 +323,41 @@ describe("normalizeReviewMetadata decision cards", () => {
       const once = normalizeReviewMetadata(fixture(name));
       expect(normalizeReviewMetadata(once)).toEqual(once);
     }
+  });
+});
+
+describe("normalizeDecisionCard", () => {
+  it("normalizes the card keys alone and ignores everything else", () => {
+    expect(
+      normalizeDecisionCard({
+        question: "  Track or ignore?  ",
+        options: [{ id: "track", label: "Track" }, { id: "ignore", label: "Ignore", risk: "  lose it " }],
+        recommend: "ignore",
+        on_accept: ["close the batch", "  "],
+        images: "not a card key",
+      }),
+    ).toEqual({
+      question: "Track or ignore?",
+      options: [{ id: "track", label: "Track" }, { id: "ignore", label: "Ignore", risk: "lose it" }],
+      recommend: "ignore",
+      on_accept: ["close the batch"],
+    });
+  });
+
+  it("is empty for a record without card keys, and idempotent", () => {
+    expect(normalizeDecisionCard({})).toEqual({});
+    const once = normalizeDecisionCard({ question: "Q?", options: [{ id: "A", label: "a" }, { id: "B", label: "b" }], recommend: "B" })!;
+    expect(normalizeDecisionCard({ ...once })).toEqual(once);
+  });
+
+  it("cuts long text, and is null when a key breaks the contract", () => {
+    const two = [{ id: "A", label: "a" }, { id: "B", label: "b" }];
+    expect(normalizeDecisionCard({ question: "x".repeat(MAX_REVIEW_QUESTION_LENGTH + 1) })).toEqual({ question: "x".repeat(MAX_REVIEW_QUESTION_LENGTH) });
+    expect(normalizeDecisionCard({ options: two, recommend: "C" })).toBeNull();
+    expect(normalizeDecisionCard({ recommend: "A" })).toBeNull();
+    expect(normalizeDecisionCard({ options: [two[0]] })).toBeNull();
+    expect(normalizeDecisionCard({ options: [two[0], two[0]] })).toBeNull();
+    expect(normalizeDecisionCard({ on_accept: "do it" })).toBeNull();
   });
 });
 

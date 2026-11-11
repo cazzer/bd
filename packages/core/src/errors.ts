@@ -395,7 +395,7 @@ export class InvalidLookupIdError extends KnowledgeStoreError {
 export class LookupFailedError extends KnowledgeStoreError {
   constructor(
     message: string,
-    readonly operation: "getNodes" | "getNeighbors" | "getNodeHistory" | "listNodes" | "getWorkItemReadiness" | "patchWorkItem" | "resolveDefaultViews" | "getSubtree" | "getTimeline" | "getNodesByExternalId" | "getWorkBoard" | "listBeadsProjects" | "getBoardItem" | "getRegisteredBeadsProject" | "listPendingReviews",
+    readonly operation: "getNodes" | "getNeighbors" | "getNodeHistory" | "listNodes" | "getWorkItemReadiness" | "patchWorkItem" | "resolveDefaultViews" | "getSubtree" | "getTimeline" | "getNodesByExternalId" | "getWorkBoard" | "listBeadsProjects" | "getBoardItem" | "getRegisteredBeadsProject" | "listPendingReviews" | "listInbox" | "decideInboxItem",
     options?: ErrorOptions,
   ) {
     super(message, options);
@@ -566,5 +566,56 @@ export class InvalidViewError extends KnowledgeStoreError {
     options?: ErrorOptions,
   ) {
     super(`invalid view${item === null ? "" : ` ${item}`}: ${field} (got ${JSON.stringify(value)}) ${reason}`, options);
+  }
+}
+
+/** An `inbox_item`'s metadata breaks the inbox contract (inbox.ts). */
+export class InvalidInboxItemError extends KnowledgeStoreError {
+  constructor(
+    readonly field: string,
+    readonly value: unknown,
+    reason: string,
+    readonly itemLabel?: string,
+  ) {
+    super(`invalid inbox item${itemLabel === undefined ? "" : ` ${itemLabel}`}: ${field} (got ${JSON.stringify(value)}) ${reason}`);
+  }
+}
+
+/** A decision was asked of an inbox item that is not waiting on the person (inbox.ts). */
+export class InboxDecisionConflictError extends KnowledgeStoreError {
+  constructor(
+    readonly nodeId: string,
+    readonly status: string,
+  ) {
+    super(`inbox item ${nodeId} is not waiting on a decision: its status is ${JSON.stringify(status)}`);
+  }
+}
+
+/**
+ * An inbox accept named an option the item's stored card does not offer, or
+ * named none on a card that now has options: an agent rewrote the card
+ * after the person opened it (unify-review-queues). Its wording carries the
+ * phrases the web's `isCardMovedRefusal` reads, like a review's.
+ */
+export class InboxCardChangedError extends KnowledgeStoreError {
+  constructor(
+    readonly nodeId: string,
+    readonly option: string | null,
+  ) {
+    super(
+      option === null
+        ? `inbox item ${nodeId} changed since it was opened and now asks to choose an option`
+        : `inbox item ${nodeId} does not offer option ${JSON.stringify(option)}; its card was rewritten after it was opened`,
+    );
+  }
+}
+
+/** The node a decision targets is not an `inbox_item`. */
+export class NotAnInboxItemError extends KnowledgeStoreError {
+  constructor(
+    readonly nodeId: string,
+    readonly nodeType: string,
+  ) {
+    super(`node ${nodeId} is not an inbox item: its node_type is ${JSON.stringify(nodeType)}, not "inbox_item"`);
   }
 }

@@ -140,6 +140,27 @@ Ask Claude something the seeded docs actually answer — e.g. "search the brain 
 
 The top two hits are exact full-text matches on `design.md` and `architecture-handoff.md` (both discuss "no embeddings" directly); everything else was reached by following `part-of-change`/`sibling` edges outward — no vector search involved.
 
+## Inbox
+
+A review queue for everything that needs a decision: email, Asana, Slack, Notion, Google Docs comments, GitHub reviews, Fathom action items, drafts from live Claude sessions, and the board's open reviews from every registered project. Open `http://localhost:5310/inbox` (with `pnpm dev` running). Keys: `j`/`k` move, `a` accept (the recommended option on a card), `c` message, `d` dismiss, `o` open session; `Ctrl/⌘+Enter` accepts and `+Shift` requests changes.
+
+- **Needs me** lists pending inbox items and open board reviews together, by priority then age. A review counts as P1, since an agent is waiting on it. The chips above the list filter by source (`?source=review`, `?source=gmail`, …). A review decided here is written and notified exactly as from the board's drawer.
+- **Cards.** An inbox item can carry the same decision card a review does (`question`, `options`, `recommend`, `on_accept`), shown and decided the same way. Accepting names the option, and the executor acts on it.
+- **Undigested.** An item whose agent didn't declare reading its `url` (`metadata.read`, or `inbox request --read 'full|<url>'`) is held in the Undigested tab, out of Needs me. The next ingest pass reads it and releases it. You can also release it by hand or dismiss it.
+
+Items are `inbox_item` nodes (`packages/core/src/inbox.ts`). The app makes no model call. Claude sessions fill and work the queue:
+
+| What | How |
+|---|---|
+| Fill it from your connectors | `/inbox-ingest` in a Claude session in this repo (rules: `local/needs-me.yaml`, copied from `config/needs-me.example.yaml`) |
+| Carry out accepted items | `/inbox-execute` |
+| Queue a draft from any session | `inbox request --key session:<slug> --title ... --url <u> --read 'full|<u>' < body.md` (decision is prompted back into that herdr pane) |
+| Close an item after acting | `inbox done <id> "<what you did>"` |
+| Go deep on one item | **Talk it through ↗** (`o`): a new tab in herdr's `inbox` workspace with Claude primed on the item. It sends its draft back here with `inbox request`, and your Accept is prompted back into that tab. `pnpm dev` has to run inside herdr (or herdr's default socket must exist). |
+| Make Accept act on its own | `inbox-watch` in a spare terminal: runs `claude -p` with `inbox-execute` (accepted) or the revise step (changes) for items no session owns |
+
+Headless, e.g. from launchd/cron: `claude -p --mcp-config .mcp.json "/inbox-ingest"`. Put the CLIs on `PATH` once: `ln -sf "$PWD/bin/inbox" "$PWD/bin/inbox-watch" ~/.local/bin/`.
+
 ## Visual reviews
 
 An agent asks a person to accept screenshots with one command, run from a registered checkout or any git worktree of one:

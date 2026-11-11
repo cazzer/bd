@@ -25,6 +25,7 @@ import {
   InvalidRetrievalOptionError,
   InvalidViewError,
   InvalidWorkItemError,
+  InvalidInboxItemError,
   KnowledgeStoreError,
   LookupFailedError,
   MergeFailedError,
@@ -181,6 +182,10 @@ export function mapError(toolName: string, err: unknown): CallToolResult {
     return actionable(err, "Fix that option and retry: predicates are { key, op: \"equals\", value } or { key, op: \"oneOf\", values }, values are scalars, cursor is a nextCursor from a previous brain_list response.");
   }
 
+  // --- Inbox items (brain_write of an inbox_item) ---
+  if (err instanceof InvalidInboxItemError) {
+    return actionable(err, "Fix that field on the named item and retry; nothing from this call was persisted. status is one of pending, changes, accepted, dismissed, done; source is required; url and links[].url are http(s); priority is an integer 0-4.");
+  }
   // --- Work items (brain_write of a work_item, brain_update_work_item) ---
   if (err instanceof InvalidWorkItemError) {
     return actionable(err, "Fix that field on the named item and retry; nothing from this call was persisted. status is one of open, in_progress, blocked, closed, deferred; priority is an integer 0-4.");

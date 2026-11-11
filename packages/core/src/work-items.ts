@@ -28,6 +28,7 @@
 // required, not redundant.
 
 import { sql, type SQL } from "drizzle-orm";
+import { normalizeWorkContextLog } from "./work-context.js";
 import type { Database } from "@breakdown/db";
 import {
   InvalidLookupIdError,
@@ -205,6 +206,9 @@ export function normalizeWorkItemMetadata(
     delete out[KEY.closedAt];
     delete out[KEY.closedReason];
   }
+
+  // A work item's decisions and signals (inbox-follow-through, work-context.ts).
+  normalizeWorkContextLog(out, index);
 
   return out;
 }
