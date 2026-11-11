@@ -308,9 +308,9 @@ describe("reviewQueue", () => {
     const rows = queue.reviews.filter((r) => r.project === QUEUE_A || r.project === QUEUE_B);
 
     expect(rows).toEqual([
-      { id: ids.get(`${TAG}-q1`), project: QUEUE_B, externalId: `${TAG}-q1`, title: `Review ${TAG}-q1`, summaryLine: "Queue header", imageCount: 1, requestedAt: "1000-06-01T00:00:01.000Z" },
-      { id: ids.get(`${TAG}-q2`), project: QUEUE_A, externalId: `${TAG}-q2`, title: `Review ${TAG}-q2`, summaryLine: null, imageCount: 0, requestedAt: "1000-06-01T00:00:02.000Z" },
-      { id: ids.get(`${TAG}-q3`), project: QUEUE_A, externalId: `${TAG}-q3`, title: `Review ${TAG}-q3`, summaryLine: null, imageCount: 0, requestedAt: "1000-06-01T00:00:03.000Z" },
+      { id: ids.get(`${TAG}-q1`), project: QUEUE_B, externalId: `${TAG}-q1`, title: `Review ${TAG}-q1`, summaryLine: "Queue header", imageCount: 1, requestedAt: "1000-06-01T00:00:01.000Z", parent: null },
+      { id: ids.get(`${TAG}-q2`), project: QUEUE_A, externalId: `${TAG}-q2`, title: `Review ${TAG}-q2`, summaryLine: null, imageCount: 0, requestedAt: "1000-06-01T00:00:02.000Z", parent: null },
+      { id: ids.get(`${TAG}-q3`), project: QUEUE_A, externalId: `${TAG}-q3`, title: `Review ${TAG}-q3`, summaryLine: null, imageCount: 0, requestedAt: "1000-06-01T00:00:03.000Z", parent: null },
     ]);
     // Smoke checks only: the store-wide count and cap are core's (review-queue.test.ts).
     expect(queue.total).toBeGreaterThanOrEqual(3);

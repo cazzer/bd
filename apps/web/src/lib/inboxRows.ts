@@ -27,6 +27,8 @@ export interface QueueReviewRow {
   externalId: string;
   /** ISO time. */
   requestedAt: string;
+  /** The work item the review is a child of (split-review-decisions); absent or null when it has none. */
+  parent?: { id: string; title: string } | null;
 }
 
 export type NeedsMeRow<I extends InboxRowItem, R extends QueueReviewRow> =
@@ -69,15 +71,21 @@ export interface WorkGroupSlot {
 
 /**
  * Needs me grouped by work context (inbox-follow-through, design.md decision
- * 9): inbox rows about the same work item, when there are two or more of
- * them, are pulled together at the first one's place, keeping their order;
- * everything else keeps its place. Returns the reordered rows and, for each
- * grouped row's key, its slot. Pure, and order-stable for a stable input.
+ * 9): rows about the same work item, when there are two or more of them, are
+ * pulled together at the first one's place, keeping their order; everything
+ * else keeps its place. An inbox row's work is the item it is `about`; a
+ * review row's is its parent work item (split-review-decisions, design.md
+ * decision 6). Both are canonical work_item node ids, so a review and an
+ * inbox item about the same work group together. Returns the reordered rows
+ * and, for each grouped row's key, its slot. Pure, and order-stable for a
+ * stable input.
  */
-export function groupByWork<T extends { kind: string; key: string; item?: InboxRowItem }>(rows: readonly T[]): { rows: T[]; slots: Map<string, WorkGroupSlot> } {
+export function groupByWork<T extends { kind: string; key: string; item?: InboxRowItem; review?: QueueReviewRow }>(rows: readonly T[]): { rows: T[]; slots: Map<string, WorkGroupSlot> } {
+  const workOf = (row: T): { id: string; title: string } | null =>
+    row.kind === "inbox" ? (row.item?.about ?? null) : row.kind === "review" ? (row.review?.parent ?? null) : null;
   const members = new Map<string, T[]>();
   for (const row of rows) {
-    const work = row.kind === "inbox" ? (row.item?.about ?? null) : null;
+    const work = workOf(row);
     if (work === null) continue;
     const list = members.get(work.id);
     if (list === undefined) members.set(work.id, [row]);
@@ -87,7 +95,7 @@ export function groupByWork<T extends { kind: string; key: string; item?: InboxR
   const out: T[] = [];
   const emitted = new Set<string>();
   for (const row of rows) {
-    const work = row.kind === "inbox" ? (row.item?.about ?? null) : null;
+    const work = workOf(row);
     const group = work === null ? undefined : members.get(work.id);
     if (work === null || group === undefined || group.length < 2) {
       out.push(row);

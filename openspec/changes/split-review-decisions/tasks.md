@@ -35,16 +35,16 @@
 
 ## 4. Parent on pending reviews
 
-- [ ] 4.1 Extract `getBoardItem`'s parent lateral into a shared SQL fragment builder in `packages/core/src/board.ts` (design.md decision 5); `getBoardItem` uses it, and its tests pass unchanged
-- [ ] 4.2 `listPendingReviews` joins the same fragment per row, scoped to the row's project; `PendingReview.parent` is `{ id, externalId, title } | null`, still one statement; `PendingReviewDto` passes it through
-- [ ] 4.3 Tests in `review-queue.test.ts`, with fixtures scoped to their own project key: a review under an epic carries the epic; no parent gives null; a merged-away parent folds to its survivor; a parent in another project is ignored
-- [ ] 4.4 `pnpm check` passes
+- [x] 4.1 Extract `getBoardItem`'s parent lateral into a shared SQL fragment builder in `packages/core/src/board.ts` (design.md decision 5); `getBoardItem` uses it, and its tests pass unchanged
+- [x] 4.2 `listPendingReviews` joins the same fragment per row, scoped to the row's project; `PendingReview.parent` is `{ id, externalId, title } | null`, still one statement; `PendingReviewDto` passes it through
+- [x] 4.3 Tests in `review-queue.test.ts`, with fixtures scoped to their own project key: a review under an epic carries the epic; no parent gives null; a merged-away parent folds to its survivor; a parent in another project is ignored
+- [x] 4.4 `pnpm check` passes
 
 ## 5. Needs me groups reviews by parent
 
-- [ ] 5.1 `apps/web/src/lib/inboxRows.ts`: `QueueReviewRow.parent`; `groupByWork` takes a review row's work from `review.parent` and an inbox row's from `item.about` (design.md decision 6); `InboxView` passes the parent through
-- [ ] 5.2 Tests in `inboxRows.test.ts`: three reviews under one parent group together at the first one's place; a review and an inbox item with the same work id group together; a lone review keeps its place; the source filter applies before grouping
-- [ ] 5.3 `pnpm check` passes
+- [x] 5.1 `apps/web/src/lib/inboxRows.ts`: `QueueReviewRow.parent`; `groupByWork` takes a review row's work from `review.parent` and an inbox row's from `item.about` (design.md decision 6); `InboxView` passes the parent through
+- [x] 5.2 Tests in `inboxRows.test.ts`: three reviews under one parent group together at the first one's place; a review and an inbox item with the same work id group together; a lone review keeps its place; the source filter applies before grouping
+- [x] 5.3 `pnpm check` passes
 
 ## 6. Docs and live check
 

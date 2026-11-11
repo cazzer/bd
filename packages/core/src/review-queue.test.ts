@@ -20,6 +20,7 @@ import type { Database } from "@breakdown/db";
 import { ingestRuns, nodes } from "@breakdown/db";
 import { InvalidLookupOptionError } from "./errors.js";
 import { closeIngestRun, openIngestRun, type IngestRunHandle } from "./ingest-runs.js";
+import { upsertEdges } from "./edges.js";
 import { mergeNodes } from "./merge.js";
 import { upsertNodes } from "./nodes.js";
 import { listPendingReviews, MAX_PENDING_REVIEWS, MAX_REVIEW_SUMMARY_LINE_LENGTH, type PendingReviews } from "./review-queue.js";
@@ -342,5 +343,66 @@ describe("listPendingReviews cap", () => {
     for (const limit of [0, -1, 1.5, MAX_PENDING_REVIEWS + 1]) {
       await expect(listPendingReviews(db, { limit })).rejects.toBeInstanceOf(InvalidLookupOptionError);
     }
+  });
+});
+
+describe("listPendingReviews parent (split-review-decisions)", () => {
+  const childOf = (srcId: string, dstId: string, weight = 1) => ({ srcId, dstId, edgeType: "child_of", sourceSystem: SRC, weight });
+
+  it("carries the work item a review is a child of, and null for one with none", async () => {
+    const { a, tag } = await scope();
+    const ids = await items([
+      { ext: `${tag}-epic`, project: a, status: "open", labels: [], title: "Launch a city" },
+      { ext: `${tag}-city`, project: a, status: "open", occurredAt: "1002-01-01T00:00:00.000Z" },
+      { ext: `${tag}-budget`, project: a, status: "open", occurredAt: "1002-01-01T00:00:01.000Z" },
+      { ext: `${tag}-orphan`, project: a, status: "open", occurredAt: "1002-01-01T00:00:02.000Z" },
+    ]);
+    await upsertEdges(db, run, [childOf(ids.get(`${tag}-city`)!, ids.get(`${tag}-epic`)!), childOf(ids.get(`${tag}-budget`)!, ids.get(`${tag}-epic`)!)]);
+
+    const rows = mine(await listPendingReviews(db), a);
+    const epic = { id: ids.get(`${tag}-epic`), externalId: `${tag}-epic`, title: "Launch a city" };
+    expect(rows.map((r) => [r.externalId, r.parent])).toEqual([
+      [`${tag}-city`, epic],
+      [`${tag}-budget`, epic],
+      [`${tag}-orphan`, null],
+    ]);
+  });
+
+  it("folds a merged-away parent to its survivor, and ignores a parent in another project", async () => {
+    const { a, b, tag } = await scope();
+    const ids = await items([
+      { ext: `${tag}-old-epic`, project: a, status: "open", labels: [] },
+      { ext: `${tag}-epic`, project: a, status: "open", labels: [], title: "Survivor" },
+      { ext: `${tag}-foreign`, project: b, status: "open", labels: [] },
+      { ext: `${tag}-r1`, project: a, status: "open", occurredAt: "1002-02-01T00:00:00.000Z" },
+      { ext: `${tag}-r2`, project: a, status: "open", occurredAt: "1002-02-01T00:00:01.000Z" },
+    ]);
+    await upsertEdges(db, run, [childOf(ids.get(`${tag}-r1`)!, ids.get(`${tag}-old-epic`)!), childOf(ids.get(`${tag}-r2`)!, ids.get(`${tag}-foreign`)!)]);
+    const mergeRun = await openIngestRun(db, SRC, { actor: "review-queue-test-merge" });
+    try {
+      await mergeNodes(db, ids.get(`${tag}-old-epic`)!, ids.get(`${tag}-epic`)!, mergeRun);
+    } finally {
+      await closeIngestRun(db, mergeRun);
+      extraRunIds.push(mergeRun.id);
+    }
+
+    const rows = mine(await listPendingReviews(db), a);
+    expect(rows.map((r) => [r.externalId, r.parent])).toEqual([
+      [`${tag}-r1`, { id: ids.get(`${tag}-epic`), externalId: `${tag}-epic`, title: "Survivor" }],
+      [`${tag}-r2`, null],
+    ]);
+  });
+
+  it("prefers the heavier child_of edge when a review has two parents", async () => {
+    const { a, tag } = await scope();
+    const ids = await items([
+      { ext: `${tag}-light`, project: a, status: "open", labels: [] },
+      { ext: `${tag}-heavy`, project: a, status: "open", labels: [] },
+      { ext: `${tag}-r`, project: a, status: "open", occurredAt: "1002-03-01T00:00:00.000Z" },
+    ]);
+    await upsertEdges(db, run, [childOf(ids.get(`${tag}-r`)!, ids.get(`${tag}-light`)!, 0.4), childOf(ids.get(`${tag}-r`)!, ids.get(`${tag}-heavy`)!, 0.9)]);
+
+    const [row] = mine(await listPendingReviews(db), a);
+    expect(row?.parent?.externalId).toBe(`${tag}-heavy`);
   });
 });

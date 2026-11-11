@@ -9,7 +9,7 @@ const item = (id: string, priority: number, at: string, extra: Partial<{ status:
   parentId: extra.parentId ?? null,
   source: extra.source ?? "gmail",
 });
-const review = (project: string, externalId: string, at: string) => ({ project, externalId, requestedAt: at });
+const review = (project: string, externalId: string, at: string, parent: { id: string; title: string } | null = null) => ({ project, externalId, requestedAt: at, parent });
 
 describe("needsMeRows", () => {
   it("merges pending top-level items with reviews, by priority then age", () => {
@@ -58,5 +58,43 @@ describe("groupByWork", () => {
     expect(grouped.slots.get("r2")).toMatchObject({ first: false });
     expect(grouped.slots.has("y")).toBe(false);
     expect(grouped.slots.has("x")).toBe(false);
+  });
+});
+
+describe("groupByWork with reviews (split-review-decisions)", () => {
+  const epic = { id: "w9", title: "Launch a city" };
+  const at = (day: number) => `2026-11-${String(day).padStart(2, "0")}T00:00:00.000Z`;
+
+  it("groups reviews under the same parent at the first one's place, each keeping its own key", () => {
+    const rows = needsMeRows(
+      [item("x", 1, at(2))],
+      [review("shlo", "shlo-btp.1", at(1), epic), review("shlo", "solo", at(3)), review("shlo", "shlo-btp.2", at(4), epic), review("shlo", "shlo-btp.3", at(5), epic)],
+    );
+    const grouped = groupByWork(rows);
+    expect(grouped.rows.map((r) => r.key)).toEqual(["shlo/shlo-btp.1", "shlo/shlo-btp.2", "shlo/shlo-btp.3", "x", "shlo/solo"]);
+    expect(grouped.slots.get("shlo/shlo-btp.1")).toEqual({ workId: "w9", title: "Launch a city", count: 3, first: true });
+    expect(grouped.slots.get("shlo/shlo-btp.3")).toMatchObject({ count: 3, first: false });
+    expect(grouped.slots.has("shlo/solo")).toBe(false);
+  });
+
+  it("groups a review with an inbox item about the same work item", () => {
+    const rows = needsMeRows([{ ...item("mail", 2, at(1)), about: epic }], [review("shlo", "shlo-btp.1", at(2), epic)]);
+    const grouped = groupByWork(rows);
+    expect(grouped.rows.map((r) => r.key)).toEqual(["shlo/shlo-btp.1", "mail"]);
+    expect(grouped.slots.get("mail")).toMatchObject({ workId: "w9", count: 2 });
+  });
+
+  it("leaves a lone review, and one without a parent, in place", () => {
+    const rows = needsMeRows([item("a", 0, at(1))], [review("p", "p-1", at(2), epic), review("p", "p-2", at(3))]);
+    const grouped = groupByWork(rows);
+    expect(grouped.rows.map((r) => r.key)).toEqual(["a", "p/p-1", "p/p-2"]);
+    expect(grouped.slots.size).toBe(0);
+  });
+
+  it("applies the source filter before grouping", () => {
+    const rows = needsMeRows([{ ...item("mail", 2, at(1)), about: epic }], [review("shlo", "shlo-btp.1", at(2), epic)]);
+    const grouped = groupByWork(filterBySource(rows, "review"));
+    expect(grouped.rows.map((r) => r.key)).toEqual(["shlo/shlo-btp.1"]);
+    expect(grouped.slots.size).toBe(0);
   });
 });

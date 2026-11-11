@@ -45,10 +45,16 @@
 // MAX_REVIEW_SUMMARY_LINE_LENGTH, and the number of images. A review that
 // breaks the contract (`{ invalid: true }`) or is absent reads as no summary
 // and zero images; the item stays in the queue.
+//
+// Each row carries its parent work item (split-review-decisions, design.md
+// decision 5): the same one-hop `child_of` resolution the board item read
+// uses (`childOfParentLateral`, board.ts), scoped to the row's own project,
+// joined per row in the same statement. Several reviews filed for one item
+// share it, which is what Needs me groups them by.
 
 import { sql } from "drizzle-orm";
 import type { Database } from "@breakdown/db";
-import { registeredProjectsCte } from "./board.js";
+import { childOfParentLateral, registeredProjectsCte } from "./board.js";
 import { InvalidLookupOptionError, LookupFailedError } from "./errors.js";
 import { fitText } from "./fit-text.js";
 import { normalizeReviewMetadata, REVIEW_CHANGES_LABEL, REVIEW_LABEL, REVIEW_METADATA_KEY } from "./reviews.js";
@@ -84,6 +90,8 @@ export interface PendingReview {
   imageCount: number;
   /** When the review was requested: `occurred_at`, else when the row was first written. */
   requestedAt: Date;
+  /** The work item the review is a `child_of` (canonical node id, bead id, title); null when it has none. */
+  parent: { id: string; externalId: string; title: string } | null;
 }
 
 export interface PendingReviews {
@@ -104,6 +112,9 @@ type RawPendingRow = {
   requested_at: string;
   created_at_text: string;
   total: string | number;
+  parent_id: string | null;
+  parent_external_id: string | null;
+  parent_title: string | null;
 };
 
 /** `text` as an instant when it is exactly a `toISOString()` value (so `2026-02-30…`, which Date rolls over, is not); null otherwise. */
@@ -139,8 +150,10 @@ SELECT n.id, n.metadata->>'project' AS project, n.external_id, n.title,
             THEN n.metadata->>'occurred_at'
             ELSE ${CREATED_AT_TEXT} END AS requested_at,
        ${CREATED_AT_TEXT} AS created_at_text,
-       count(*) OVER () AS total
+       count(*) OVER () AS total,
+       parent.id AS parent_id, parent.external_id AS parent_external_id, parent.title AS parent_title
 FROM resolved_nodes n
+LEFT JOIN LATERAL (${childOfParentLateral(sql`n.id`, sql`jsonb_build_object('project', n.metadata->>'project')`)}) parent ON true
 WHERE n.node_type = ${WORK_ITEM_NODE_TYPE}
   AND n.metadata @> ANY (ARRAY(SELECT jsonb_build_object('project', r.key, 'labels', ${JSON.stringify([REVIEW_LABEL])}::jsonb) FROM registered r))
   AND NOT n.metadata @> ${JSON.stringify({ labels: [REVIEW_CHANGES_LABEL] })}::jsonb
@@ -162,6 +175,7 @@ LIMIT ${limit}::int
       summaryLine: valid === null ? null : summaryLineOf(valid.question ?? valid.summary),
       imageCount: valid === null ? 0 : valid.images.length,
       requestedAt: instantOf(r.requested_at) ?? new Date(r.created_at_text),
+      parent: r.parent_id === null || r.parent_external_id === null || r.parent_title === null ? null : { id: r.parent_id, externalId: r.parent_external_id, title: r.parent_title },
     };
   });
   const total = result.rows.length === 0 ? 0 : Number(result.rows[0]!.total);

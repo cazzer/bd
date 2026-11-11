@@ -557,6 +557,33 @@ type RawItemRow = {
 };
 
 /**
+ * The body of a `LEFT JOIN LATERAL (...) parent ON true` that resolves one
+ * work item's parent (module header): one `child_of` hop from `itemId` or
+ * any id merged into it, the target folded through `merged_into`, a work
+ * item whose metadata contains `projectContainment` (a jsonb expression),
+ * never the item itself; the heavier edge, then `beads`, then the lesser id.
+ * Selects `id`, `external_id`, `title`. Shared by `getBoardItem` and the
+ * review queue (split-review-decisions, design.md decision 5) so the
+ * tie-break cannot drift between them.
+ */
+export function childOfParentLateral(itemId: SQL, projectContainment: SQL): SQL {
+  return sql`
+        SELECT p.id, p.external_id, p.title
+        FROM edges e
+        JOIN nodes d ON d.id = e.dst_id
+        JOIN resolved_nodes p ON p.id = COALESCE(d.merged_into, d.id)
+        WHERE e.edge_type = ${CHILD_OF_EDGE_TYPE}
+          -- An array probe, not an OR: it keeps the edges_src_id_edge_type_idx index scan.
+          AND e.src_id = ANY (ARRAY(SELECT ${itemId} UNION ALL SELECT a.id FROM nodes a WHERE a.merged_into = ${itemId}))
+          AND p.id <> ${itemId}
+          AND p.node_type = ${WORK_ITEM_NODE_TYPE}
+          AND p.metadata @> ${projectContainment}
+        ORDER BY e.weight DESC, (e.source_system = 'beads') DESC, p.id
+        LIMIT 1
+      `;
+}
+
+/**
  * The canonical work item of `project` whose external id is `externalId`, or
  * null when there is none (module header). Throws `InvalidLookupOptionError`
  * for a malformed project key or id and `LookupFailedError` for a database
@@ -587,20 +614,7 @@ export async function getBoardItem(db: Database, options: BoardItemOptions): Pro
       )
       SELECT item.*, parent.external_id AS parent_external_id, parent.title AS parent_title
       FROM item
-      LEFT JOIN LATERAL (
-        SELECT p.external_id, p.title
-        FROM edges e
-        JOIN nodes d ON d.id = e.dst_id
-        JOIN resolved_nodes p ON p.id = COALESCE(d.merged_into, d.id)
-        WHERE e.edge_type = ${CHILD_OF_EDGE_TYPE}
-          -- An array probe, not an OR: it keeps the edges_src_id_edge_type_idx index scan.
-          AND e.src_id = ANY (ARRAY(SELECT item.id UNION ALL SELECT a.id FROM nodes a WHERE a.merged_into = item.id))
-          AND p.id <> item.id
-          AND p.node_type = ${WORK_ITEM_NODE_TYPE}
-          AND p.metadata @> ${JSON.stringify({ project })}::jsonb
-        ORDER BY e.weight DESC, (e.source_system = 'beads') DESC, p.id
-        LIMIT 1
-      ) parent ON true
+      LEFT JOIN LATERAL (${childOfParentLateral(sql`item.id`, sql`${JSON.stringify({ project })}::jsonb`)}) parent ON true
     `);
   } catch (err) {
     throw new LookupFailedError(`getBoardItem query failed${formatPgInfo(asPgError(err))}`, "getBoardItem", { cause: err });

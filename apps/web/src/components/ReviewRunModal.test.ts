@@ -59,7 +59,7 @@ afterEach(() => {
   container.remove();
 });
 
-const review = (n: number) => ({ id: `id-${n}`, project: "p", externalId: `p-${n}`, title: `Card ${n}`, summaryLine: null, imageCount: 0, requestedAt: "2026-11-05T09:00:00.000Z" });
+const review = (n: number) => ({ id: `id-${n}`, project: "p", externalId: `p-${n}`, title: `Card ${n}`, summaryLine: null, imageCount: 0, requestedAt: "2026-11-05T09:00:00.000Z", parent: null });
 
 async function click(text: string) {
   const button = [...container.querySelectorAll("button")].find((b) => b.textContent === text);
