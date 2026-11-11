@@ -50,7 +50,7 @@ function fixtureReview(name: string): unknown {
   return JSON.parse(readFileSync(join(FIXTURES, `${name}.expected.json`), "utf8").replaceAll("/REVIEW_ROOT", ROOT));
 }
 
-function boardItem(rawReview: unknown, content = ""): unknown {
+function boardItem(rawReview: unknown, content = "", overrides: Partial<BoardItem> = {}): unknown {
   const item: BoardItem = {
     id: "00000000-0000-0000-0000-000000000001",
     externalId: "shlo-k54.4.1.1",
@@ -70,6 +70,7 @@ function boardItem(rawReview: unknown, content = ""): unknown {
     review: normalizeReviewMetadata(rawReview),
     comments: [],
     parent: null,
+    ...overrides,
   };
   return JSON.parse(JSON.stringify(toBoardItemDto(item, ROOT)));
 }
@@ -479,7 +480,8 @@ describe("a legacy review", () => {
     await render(boardItem({ images: [shot], pane: null, summary: "Board header\nwith a second line" }, "Board header\nwith a second line"));
     expect(sectionTitles()).toEqual(["Summary", "Screenshots · 1", "Thread · 0"]);
     expect(container.textContent).toContain("Board header\nwith a second line");
-    expect(container.querySelector("[data-stub=evidence]")).toBeNull();
+    // The summary renders as markdown, through the same read-only renderer as a card's evidence; there is no separate evidence section.
+    expect([...container.querySelectorAll("[data-stub=evidence]")].map((e) => e.textContent)).toEqual(["Board header\nwith a second line"]);
     expect(container.querySelector("button[aria-label^='Enlarge screenshot 1: 01-board.png']")).not.toBeNull();
     expect(buttons().filter((b) => /^(Accept|Request)/.test(b.textContent ?? "")).map((b) => b.textContent)).toEqual(["Accept", "Request changes"]);
     await click(button("Accept"));
@@ -491,5 +493,14 @@ describe("a legacy review", () => {
     await render(boardItem({ images: [], pane: null, summary: "q", question: "q", options: [{ id: "A", label: "a" }, { id: "A", label: "b" }] }));
     expect(container.querySelector("[role=note]")?.textContent).toContain("malformed in the tracker");
     expect(buttons().filter((b) => /^(Accept|Request)/.test(b.textContent ?? "")).map((b) => b.textContent)).toEqual(["Accept", "Request changes"]);
+  });
+});
+
+describe("an item that is not a review", () => {
+  test("renders its description as markdown", async () => {
+    const body = "## Why\n\n- first\n- second\n\n## Acceptance criteria\n\nDone when `pnpm check` passes";
+    await render(boardItem(null, body, { title: "Ship it", labels: [], isReview: false, review: null }));
+    expect(sectionTitles()).toContain("Description");
+    expect([...container.querySelectorAll("[data-stub=evidence]")].map((e) => e.textContent)).toEqual([body]);
   });
 });

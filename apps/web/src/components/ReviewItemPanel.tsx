@@ -47,7 +47,9 @@
 // flight (so focus never falls out of the panel when the pressed button
 // disables).
 // For any other item: its fields, its description, and a link to the
-// graph.
+// graph. The description and a legacy review's summary render as markdown
+// through EvidenceView (bead bodies are markdown; plain text reads the same
+// apart from single newlines joining a paragraph).
 //
 // `layout` is the attachments' (ReviewAttachments.tsx): `column` stacks
 // everything in one scrolling body; `stage` gives a review with
@@ -89,6 +91,7 @@ import { HttpStatusError, trpc } from "../trpc.js";
 import { ReviewAttachments, SectionTitle, type AttachmentLayout, type AttachmentSlot } from "./ReviewAttachments.js";
 import { ReviewSessionLinks } from "./ReviewSessionLinks.js";
 import { cardShortcut, DecisionCardBody, DecisionFooter, type CardOutcome, type FooterLabels, type Refusal } from "./DecisionCard.js";
+import { EvidenceView } from "./EvidenceView.js";
 
 type BoardItem = NonNullable<Awaited<ReturnType<typeof trpc.boardItem.query>>["item"]>;
 
@@ -570,7 +573,7 @@ function ReviewBody({
           {review !== null && !("invalid" in review) && review.summary !== "" && (
             <section>
               <SectionTitle>Summary</SectionTitle>
-              <p className="whitespace-pre-wrap text-sm leading-relaxed text-fg">{review.summary}</p>
+              <EvidenceView markdown={review.summary} />
             </section>
           )}
           {attachments}
@@ -630,7 +633,7 @@ function PlainBody({ item }: { item: BoardItem }) {
         {item.content.trim() === "" ? (
           <p className="text-sm text-fg-muted">No description.</p>
         ) : (
-          <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-fg">{item.content}</p>
+          <EvidenceView markdown={item.content} />
         )}
       </section>
       <GraphLink nodeId={item.id} className="inline-block rounded-lg border border-hairline px-3 py-1.5 text-sm text-accent hover:bg-surface-strong focus:outline-none focus:ring-2 focus:ring-accent">
