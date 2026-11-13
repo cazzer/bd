@@ -67,31 +67,27 @@ The web client fetches tRPC as now. A 401 renders a connect screen: one password
 
 - *Alternative: store the token in localStorage and attach a header.* Rejected: image tags can't carry headers, and script-readable storage widens the impact of an XSS bug.
 
-### 6. Image: bundle with esbuild, one image, two commands
+### 6. Image: one container, a launcher, both servers
 
-A multi-stage `Dockerfile` does the following:
-- **Deps stage:** `pnpm install --frozen-lockfile`.
-- **Build stage:** `vite build` for the client; esbuild bundles `apps/web/server/index.ts`, `apps/mcp/src/http.ts`, `packages/db` migrate, and the token CLI into `dist/*.mjs`, with `pg` and other packages that have native or optional pieces left external.
-- **Runtime stage:** `node:22-bookworm-slim`, production deps for the externals, `dist/`, the client build, the SQL migrations, and user `node`.
+Scope revised 2026-11-13. On the Jetson, Breakdown runs as two SkyOS apps (skyos sky-brx.2): `breakdown-db` (stock `pgvector/pgvector:pg16` with our settings) and `breakdown` (this image). Both are single containers configured by env, with data in named volumes.
 
-Bundling avoids tsx's esbuild-at-startup cost and keeps resident memory down. If a dependency resists bundling, tsx in the runtime is the fallback; the task records which was used. Node runs with `--max-old-space-size` set below each service's limit, through the compose `command`, not env.
+A multi-stage `Dockerfile` installs with pnpm, builds the client (`vite build`), bundles the server entrypoints, and ends in `node:22-bookworm-slim` as user `node`, carrying only runtime files and SQL migrations. The entrypoint is a small launcher (`docker/launch.mjs`). It reads `BREAKDOWN_*` env, runs migrations, starts the web and MCP servers as two child processes with flags (`--host`, `--port`, `--allow-host`, the client and media directories), forwards SIGTERM/SIGINT, and exits non-zero if either child exits. Node heap flags are set by the launcher.
 
-The web server gains a static handler for the built client (index fallback for client routes, immutable caching for hashed assets). It is used only when the client build directory exists, which is never true under `pnpm dev`, so Vite still serves in dev.
+The servers keep reading only `DATABASE_URL`, `BRAIN_READ_ONLY`, and `WEB_SERVER_PORT`. The launcher is deployment glue in the same role as the launchd plist, so the env allowlist rule still describes the app.
 
-### 7. Compose budget
+- *Alternative: both servers in one Node process.* Rejected. Each entrypoint owns its pool, signals, and fail-fast startup. Merging them couples their lifecycles in code, while two children keep them apart and still meet the one-container requirement.
+- *Alternative: let the servers read `BREAKDOWN_*` env directly.* Rejected. It would grow the allowlist for every deployment knob, whereas flags already serve launchd, compose, and SkyOS alike.
 
-`docker-compose.jetson.yml` (the existing `docker-compose.yml` stays the dev database):
+The web server serves the built client when given a client directory (index fallback for client routes, immutable caching for hashed assets). Under `pnpm dev` it gets none, so Vite still serves there.
 
-| Service | mem_limit / memswap_limit | cpus | Notes |
-| --- | --- | --- | --- |
-| postgres | 384m | 1.0 | `shared_buffers=96MB`, `effective_cache_size=192MB`, `work_mem=4MB`, `maintenance_work_mem=32MB`, `max_connections=30`, `wal_buffers=4MB`, `shm_size: 128m` |
-| migrate | 128m | 0.5 | one-shot; `service_completed_successfully` gates the servers |
-| web | 256m | 1.0 | `--max-old-space-size=160` |
-| mcp | 256m | 1.0 | `--max-old-space-size=160` |
+### 7. Caps and the local compose file
 
-The long-running total is 896m, and migrate exits before the servers start. Pools are sized so the sum (web + mcp + migrate) stays under `max_connections`.
+| App | memory cap | Notes |
+| --- | --- | --- |
+| breakdown-db | 384m | `shared_buffers=96MB`, `effective_cache_size=192MB`, `work_mem=4MB`, `maintenance_work_mem=32MB`, `max_connections=30`, `wal_buffers=4MB` |
+| breakdown | 512m | web and MCP children, each with a heap cap well under half |
 
-Inside the containers the servers bind `0.0.0.0` with `--allow-host` taken from the compose variable `BREAKDOWN_ALLOW_HOSTS`. Published ports bind `${BREAKDOWN_PUBLISH_ADDR:-127.0.0.1}` on the host, so the stack is also loopback-only on the host until the operator points it at the tailnet address. Data paths are `${BREAKDOWN_PGDATA:-breakdown-pgdata}` and `${BREAKDOWN_MEDIA:-breakdown-media}`; these are compose interpolation and never reach the app's environment. `DATABASE_URL` is `postgres://breakdown:${BREAKDOWN_DB_PASSWORD:?}@postgres:5432/breakdown`. `restart: unless-stopped` supervises the services. Healthchecks run inside each container against loopback, so they need no token.
+The total is 896m. Pool sizes keep web plus MCP under `max_connections`. `docker-compose.app.yml` runs the same two containers locally: same env, caps (`mem_limit` with `memswap_limit` equal to it, plus `cpus`) and named volumes, its own compose project name, ports published on `${BREAKDOWN_PUBLISH_ADDR:-127.0.0.1}` at the same numbers the servers listen on (decision 9). The existing `docker-compose.yml` stays the dev database. The SkyOS app definitions themselves live in skyos (sky-brx.2), not here.
 
 ### 8. Host-only binaries
 
