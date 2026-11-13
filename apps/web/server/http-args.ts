@@ -39,12 +39,18 @@ export class WebArgsError extends Error {
   }
 }
 
-const ACCEPTED = "accepted: --port <0-65535> --host <addr> --allow-host <hostname> (repeatable)";
+const ACCEPTED = "accepted: --port <1-65535> --host <addr> --allow-host <hostname> (repeatable)";
 
+// No 0 (an ephemeral port): the dispatcher pins Host to the port it is
+// given before the server listens, so an OS-chosen port would refuse every
+// request, and vite.config.ts's proxy could not find it either.
 function parsePort(value: string, source: string): number {
   const parsed = /^\d+$/.test(value) ? Number(value) : NaN;
   if (!Number.isInteger(parsed) || parsed > 65535) {
-    throw new WebArgsError(`${source} "${value}" is not an integer from 0 to 65535`);
+    throw new WebArgsError(`${source} "${value}" is not an integer from 1 to 65535`);
+  }
+  if (parsed === 0) {
+    throw new WebArgsError(`${source} "${value}": the web server needs a fixed port (admission pins Host to it); give one from 1 to 65535`);
   }
   return parsed;
 }

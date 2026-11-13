@@ -16,11 +16,15 @@
 // forwarding header is ignored. Plain HTTP over WireGuard is the expected
 // path, where `Secure` would make the browser drop the cookie.
 //
+// Only a `human` token gets a cookie (decision 9): an `agent` token is 401
+// here exactly like an unknown one, and nothing is set, since the web API
+// would refuse every request it admitted.
+//
 // Nothing here logs or echoes the token; every response body is a fixed
 // string.
 
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { isLoopbackAddress, TOKEN_COOKIE_NAME, UNAUTHORIZED_HEADERS } from "@breakdown/core";
+import { isLoopbackAddress, TOKEN_COOKIE_NAME, UNAUTHORIZED_HEADERS, type ClientTokenScope } from "@breakdown/core";
 
 export const AUTH_CONNECT_PATH = "/auth/connect";
 /** A token is 47 characters; a JSON body carrying one is far below this. */
@@ -30,8 +34,8 @@ const COOKIE_MAX_AGE_SECONDS = 365 * 24 * 60 * 60;
 const COOKIE_VALUE = /^[\x21\x23-\x2B\x2D-\x3A\x3C-\x5B\x5D-\x7E]+$/;
 
 export interface ConnectHandlerOptions {
-  /** The client a live token belongs to, or null. A throw propagates to the dispatcher (500). */
-  verifyToken: (token: string) => Promise<string | null>;
+  /** The client and scope of a live token, or null. A throw propagates to the dispatcher (500). */
+  verifyToken: (token: string) => Promise<{ client: string; scope: ClientTokenScope } | null>;
 }
 
 function sendText(res: ServerResponse, status: number, body: string, headers: Record<string, string> = {}): void {
@@ -136,8 +140,8 @@ export function createConnectHandler({ verifyToken }: ConnectHandlerOptions): (r
 
     // A value that cannot sit in a cookie is no token we issued; refusing it
     // here also keeps it out of the Set-Cookie header.
-    const client = COOKIE_VALUE.test(token) ? await verifyToken(token) : null;
-    if (client === null) {
+    const verified = COOKIE_VALUE.test(token) ? await verifyToken(token) : null;
+    if (verified === null || verified.scope !== "human") {
       sendText(res, 401, "Unauthorized\n", { ...UNAUTHORIZED_HEADERS });
       return;
     }

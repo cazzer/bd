@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import {
   admitRequest,
   credentialFrom,
+  forwardedAddressesFrom,
   isLoopbackAddress,
   normalizeAllowedHost,
   type AdmissionPolicy,
@@ -15,7 +16,10 @@ import {
 
 const PORT = 5320;
 const TAILNET = "breakdown.tail.example";
-const LIVE = { "bdt_worker": "worker-1", "bdt_phone": "phone" } as Record<string, string>;
+const LIVE: Record<string, { client: string; scope: "human" | "agent" }> = {
+  bdt_worker: { client: "worker-1", scope: "agent" },
+  bdt_phone: { client: "phone", scope: "human" },
+};
 
 function fakeStore() {
   const calls: string[] = [];
@@ -34,6 +38,7 @@ function policy(overrides: Partial<AdmissionPolicy> = {}) {
     port: PORT,
     allowedHosts: [TAILNET],
     originCheck: "unsafe-methods",
+    scopes: ["human", "agent"],
     isPublic: (method, path) => method === "POST" && path === "/auth/connect",
     verifyToken: store.verifyToken,
     ...overrides,
@@ -49,6 +54,7 @@ function request(overrides: Partial<AdmissionRequest> = {}): AdmissionRequest {
     peerIsLoopback: false,
     path: "/trpc/board",
     credential: undefined,
+    forwardedFor: undefined,
     ...overrides,
   };
 }
@@ -82,9 +88,9 @@ describe("admitRequest", () => {
     }
   });
 
-  it("refuses a missing Host, a Host with no port, and one on the wrong port", async () => {
+  it("refuses a missing Host, a loopback Host with no port, and one on the wrong port", async () => {
     const { policy: p, calls } = policy();
-    for (const host of [undefined, TAILNET, `${TAILNET}:5321`, "127.0.0.1", "127.0.0.1:5321"]) {
+    for (const host of [undefined, "", `${TAILNET}:5321`, `${TAILNET}:`, `${TAILNET}:05320x`, "127.0.0.1", "localhost", "[::1]", "127.0.0.1:5321"]) {
       expect(await admitRequest(request({ host, peerIsLoopback: true, credential: bearer("bdt_worker") }), p), String(host)).toEqual({
         outcome: "forbidden",
       });
@@ -154,11 +160,23 @@ describe("admitRequest", () => {
     }
   });
 
-  it("allows loopback and allowed Origins on any port, http or https", async () => {
+  it("allows loopback Origins on any port, http or https", async () => {
     const { policy: p } = policy();
-    for (const origin of ["http://localhost:5173", "http://127.0.0.1:1", "http://[::1]:5320", "HTTP://LOCALHOST:5173", `https://${TAILNET}`, `http://${TAILNET}:8080`]) {
+    for (const origin of ["http://localhost:5173", "http://127.0.0.1:1", "http://[::1]:5320", "HTTP://LOCALHOST:5173", "http://[0:0:0:0:0:0:0:1]:9"]) {
       const req = request({ method: "POST", origin, credential: bearer("bdt_worker") });
       expect(await admitRequest(req, p), origin).toEqual({ outcome: "allow", client: "worker-1" });
+    }
+  });
+
+  it("pins an allowed name's Origin to the server's port or the scheme's default", async () => {
+    const { policy: p } = policy();
+    for (const origin of [`http://${TAILNET}:${PORT}`, `https://${TAILNET}:${PORT}`, `https://${TAILNET}`, `http://${TAILNET}`, `http://${TAILNET}:80`, `https://${TAILNET}:443`]) {
+      const req = request({ method: "POST", origin, credential: bearer("bdt_worker") });
+      expect(await admitRequest(req, p), origin).toEqual({ outcome: "allow", client: "worker-1" });
+    }
+    for (const origin of [`http://${TAILNET}:8080`, `http://${TAILNET}:443`, `https://${TAILNET}:80`, `http://${TAILNET}:5321`]) {
+      const req = request({ method: "POST", origin, credential: cookie("bdt_phone") });
+      expect(await admitRequest(req, p), origin).toEqual({ outcome: "forbidden" });
     }
   });
 
@@ -210,6 +228,55 @@ describe("admitRequest", () => {
     expect(await admitRequest(request({ method: "POST", credential: bearer("bdt_worker") }), p)).toEqual({ outcome: "allow", client: "worker-1" });
   });
 
+  it("admits an allowed name with no port (a fronting proxy), never a bare loopback name", async () => {
+    const { policy: p } = policy();
+    expect(await admitRequest(request({ host: TAILNET, credential: bearer("bdt_phone") }), p)).toEqual({ outcome: "allow", client: "phone" });
+    expect(await admitRequest(request({ host: TAILNET.toUpperCase() }), p)).toEqual({ outcome: "unauthorized" });
+    const listsLoopback = policy({ allowedHosts: [TAILNET, "localhost", "127.0.0.1"] }).policy;
+    for (const host of ["localhost", "127.0.0.1"]) {
+      expect(await admitRequest(request({ host, peerIsLoopback: true }), listsLoopback), host).toEqual({ outcome: "forbidden" });
+    }
+  });
+
+  it("canonicalizes a bracketed IPv6 Host before matching", async () => {
+    const { policy: p } = policy({ allowedHosts: ["[fd7a:115c::1]"] });
+    expect(await admitRequest(request({ host: "[0:0:0:0:0:0:0:1]:5320", peerIsLoopback: true }), p)).toEqual({ outcome: "allow", client: null });
+    expect(await admitRequest(request({ host: "[FD7A:115C:0:0:0:0:0:1]:5320", credential: bearer("bdt_phone") }), p)).toEqual({
+      outcome: "allow",
+      client: "phone",
+    });
+    expect(await admitRequest(request({ host: "[fd7a:115c::1]", credential: bearer("bdt_phone") }), p)).toEqual({ outcome: "allow", client: "phone" });
+    for (const host of ["[fd7a:115c::2]:5320", "[not-v6]:5320", "[::1:5320", "::1:5320", "[fe80::1%25en0]:5320"]) {
+      expect(await admitRequest(request({ host, peerIsLoopback: true, credential: bearer("bdt_phone") }), p), host).toEqual({ outcome: "forbidden" });
+    }
+  });
+
+  it("refuses a live token outside the policy's scopes with 403", async () => {
+    const { policy: p, calls } = policy({ scopes: ["human"] });
+    expect(await admitRequest(request({ credential: bearer("bdt_worker") }), p)).toEqual({ outcome: "forbidden" });
+    expect(await admitRequest(request({ credential: cookie("bdt_worker") }), p)).toEqual({ outcome: "forbidden" });
+    expect(await admitRequest(request({ credential: bearer("bdt_phone") }), p)).toEqual({ outcome: "allow", client: "phone" });
+    expect(await admitRequest(request({ credential: bearer("bdt_unknown") }), p)).toEqual({ outcome: "unauthorized" });
+    expect(calls).toEqual(["bdt_worker", "bdt_worker", "bdt_phone", "bdt_unknown"]);
+  });
+
+  it("keeps loopback trust when every forwarded address is loopback", async () => {
+    const { policy: p, calls } = policy();
+    for (const forwardedFor of [["127.0.0.1"], ["::1", "127.0.0.1"]]) {
+      expect(await admitRequest(request({ host: "127.0.0.1:5320", peerIsLoopback: true, forwardedFor }), p)).toEqual({ outcome: "allow", client: null });
+    }
+    expect(calls).toHaveLength(0);
+  });
+
+  it("requires a token from a loopback peer whose forwarding header names a remote address", async () => {
+    const { policy: p } = policy();
+    for (const forwardedFor of [["100.64.0.9"], ["127.0.0.1", "100.64.0.9"], ["unknown"], ["_hidden"], [""]]) {
+      const req = request({ host: "127.0.0.1:5320", peerIsLoopback: true, forwardedFor });
+      expect(await admitRequest(req, p), forwardedFor.join(",")).toEqual({ outcome: "unauthorized" });
+      expect(await admitRequest({ ...req, credential: bearer("bdt_phone") }, p)).toEqual({ outcome: "allow", client: "phone" });
+    }
+  });
+
   it("treats a missing method as GET", async () => {
     const { policy: p } = policy();
     expect(await admitRequest(request({ method: undefined, origin: "https://evil.example", credential: bearer("bdt_worker") }), p)).toEqual({
@@ -240,6 +307,34 @@ describe("credentialFrom", () => {
     expect(credentialFrom({})).toBeUndefined();
     expect(credentialFrom({ cookie: "not_breakdown_token=bdt_x; breakdown_token_old=bdt_y" })).toBeUndefined();
     expect(credentialFrom({ cookie: "breakdown_token=" })).toBeUndefined();
+  });
+});
+
+describe("forwardedAddressesFrom", () => {
+  it("is undefined with no forwarding header", () => {
+    expect(forwardedAddressesFrom({})).toBeUndefined();
+  });
+
+  it("lists every X-Forwarded-For entry, ports and brackets stripped", () => {
+    expect(forwardedAddressesFrom({ "x-forwarded-for": "100.64.0.9, 127.0.0.1:5000, [::1]:80, ::1" })).toEqual(["100.64.0.9", "127.0.0.1", "::1", "::1"]);
+    expect(forwardedAddressesFrom({ "x-forwarded-for": ["127.0.0.1", "10.0.0.1"] })).toEqual(["127.0.0.1", "10.0.0.1"]);
+  });
+
+  it("includes X-Real-IP", () => {
+    expect(forwardedAddressesFrom({ "x-real-ip": "100.64.0.9" })).toEqual(["100.64.0.9"]);
+  });
+
+  it("reads each Forwarded element's for=, quoted or not", () => {
+    expect(
+      forwardedAddressesFrom({ forwarded: 'for=127.0.0.1;proto=http, For="[::1]:4711";by=203.0.113.43, proto=https;for="100.64.0.9"' }),
+    ).toEqual(["127.0.0.1", "::1", "100.64.0.9"]);
+  });
+
+  it("keeps unknown, obfuscated, and for-less entries so they fail closed", () => {
+    const addresses = forwardedAddressesFrom({ forwarded: "for=unknown, for=_hidden, proto=https", "x-forwarded-for": "127.0.0.1," });
+    expect(addresses).toEqual(["127.0.0.1", "", "unknown", "_hidden", ""]);
+    expect(addresses!.every(isLoopbackAddress)).toBe(false);
+    expect(forwardedAddressesFrom({ forwarded: "for=unknown" })!.every(isLoopbackAddress)).toBe(false);
   });
 });
 

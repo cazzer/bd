@@ -11,7 +11,9 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createConnectHandler, MAX_CONNECT_BODY_BYTES } from "./auth-connect.js";
 
 const TOKEN = "bdt_AbC-123_xyz";
-const verifyToken = async (token: string): Promise<string | null> => (token === TOKEN ? "phone" : null);
+const AGENT_TOKEN = "bdt_worker-token";
+const verifyToken = async (token: string) =>
+  token === TOKEN ? { client: "phone", scope: "human" as const } : token === AGENT_TOKEN ? { client: "worker-1", scope: "agent" as const } : null;
 const handler = createConnectHandler({ verifyToken });
 const COOKIE = `breakdown_token=${TOKEN}; HttpOnly; SameSite=Strict; Path=/; Max-Age=31536000`;
 
@@ -83,12 +85,20 @@ describe("POST /auth/connect", () => {
     expect(sent.body).not.toContain("bdt_wrong");
   });
 
+  it("refuses an agent token with 401, setting no cookie", async () => {
+    const sent = await send(json({ token: AGENT_TOKEN }));
+    expect(sent.status).toBe(401);
+    expect(sent.headers["www-authenticate"]).toBe("Bearer");
+    expect(sent.headers["set-cookie"]).toBeUndefined();
+    expect(sent.body).not.toContain(AGENT_TOKEN);
+  });
+
   it("refuses a value that could not sit in a cookie without consulting the store", async () => {
     let called = false;
     const guarded = createConnectHandler({
       verifyToken: async () => {
         called = true;
-        return "phone";
+        return { client: "phone", scope: "human" as const };
       },
     });
     const res = fakeResponse();

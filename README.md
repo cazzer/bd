@@ -151,17 +151,22 @@ pnpm mcp:serve --host 0.0.0.0 --allow-host breakdown.tail1234.ts.net
 pnpm --filter @breakdown/web dev:server --host 0.0.0.0 --allow-host breakdown.tail1234.ts.net
 ```
 
-A request whose `Host` is neither loopback nor allowed is refused with 403, token or not. Bound off loopback with no `--allow-host`, the server starts but warns that every remote request will get 403.
+A request whose `Host` is neither loopback nor allowed is refused with 403, token or not. An allowed name is accepted at the server's own port or with no port (a fronting proxy such as `tailscale serve` on 443), and a browser write must come from one of those same origins, so a page on another port of the host can't write. Bound off loopback with no `--allow-host`, the server starts but warns that every remote request will get 403.
 
-**Tokens.** Every request from off loopback needs a client token, on every path including `/healthz`, or gets 401. Mint one per client on the host:
+Give Breakdown a dedicated hostname: browsers send a host's cookies to every port on it, so any other app served under the same name would receive Breakdown's token cookie. Never point an L4 forwarder (socat, `ssh -R`) at either server's loopback port: its connections arrive from loopback with no forwarding header and bypass tokens entirely.
+
+**Tokens.** Every request from off loopback needs a client token, on every path including `/healthz`, or gets 401. So does a loopback request whose `X-Forwarded-For`, `X-Real-IP`, or `Forwarded` header names a remote address: a proxy acting for someone else isn't the local machine. Mint one per client on the host, choosing its scope:
 
 ```bash
-pnpm -s client-token create phone     # prints bdt_… once on stdout; only its hash is stored
-pnpm -s client-token list             # client, created, last used, live/revoked; never the token
+pnpm -s client-token create phone --scope human     # prints bdt_… once on stdout; only its hash is stored
+pnpm -s client-token create worker-1 --scope agent
+pnpm -s client-token list                           # client, scope, created, last used, live/revoked; never the token
 pnpm -s client-token revoke phone
 ```
 
-`-s` keeps pnpm's `> pkg@version` banner off stdout, so `TOKEN=$(pnpm -s client-token create phone)` captures the token alone. The token is shown once and can't be recovered; lose it and revoke and re-create. Tokens can only be managed here: no MCP tool and no web API procedure creates, lists, or revokes one. A revoked token is refused on its next request, with no cache to wait out. `last_used_at` is updated at most once a minute per client, and still is when the server runs with `BRAIN_READ_ONLY=1`.
+The scope is required. `human` is for a person's devices (phone, laptop): it works on the web API and MCP. `agent` is for workers and the driver: it works on MCP only, and the web API refuses it with 403, so an agent can't approve its own inbox request or decide a review.
+
+`-s` keeps pnpm's `> pkg@version` banner off stdout, so `TOKEN=$(pnpm -s client-token create phone --scope human)` captures the token alone. The token is shown once and can't be recovered; lose it and revoke and re-create. Tokens can only be managed here: no MCP tool and no web API procedure creates, lists, or revokes one. A revoked token is refused on its next request, with no cache to wait out. `last_used_at` is updated at most once a minute per client, and still is when the server runs with `BRAIN_READ_ONLY=1`.
 
 **MCP clients** send the token as a static header:
 
@@ -172,7 +177,7 @@ claude mcp add -s user --transport http brain http://breakdown.tail1234.ts.net:5
 
 Without the header, a 401 may send Claude Code into OAuth discovery, which this server doesn't offer; check the header first when a remote client reports an auth flow. Writes from a token are attributed to its client and the MCP client's own name, e.g. `worker-1 via claude-code 2.1.0`.
 
-**Browsers** connect once. A board opened from the tailnet with no cookie shows a connect screen; paste the client's token, and the server answers with an HttpOnly, SameSite=Strict cookie that carries every later request, images included. The token never goes in a URL (a query-string token is ignored), and revoking it ends the cookie too. Web writes from that browser are attributed to the client, e.g. `phone`. Remote browsers get the board from the web server itself once it serves the built client; never expose the Vite dev server with `--host`, because its proxy forwards to the API as a loopback request.
+**Browsers** connect once. A board opened from the tailnet with no cookie shows a connect screen; paste the client's token, and the server answers with an HttpOnly, SameSite=Strict cookie that carries every later request, images included. The token never goes in a URL (a query-string token is ignored), and revoking it ends the cookie too. Web writes from that browser are attributed to the client, e.g. `phone`. Only a `human` token can connect a browser. Remote browsers get the board from the web server itself once it serves the built client. Don't expose the Vite dev server with `--host`: its proxy passes the phone's address in `X-Forwarded-For`, so reads still need a token, but writes come from Vite's port, which isn't the API's origin, and are refused.
 
 Host-side firewall and tailnet ACLs live in skyos (`sky-brx`), not here.
 

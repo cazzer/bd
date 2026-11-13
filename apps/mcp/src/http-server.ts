@@ -13,15 +13,20 @@
 // Every request, /healthz included, passes the shared admission function
 // (packages/core admission.ts; tailnet-hosting decision 2) before anything
 // else looks at it. A loopback peer with a loopback Host needs no token, as
-// before; anything else needs an allowed Host and a live client token. The
-// admitted token client is bound to the session it initializes (decision
-// 4): the session's Server records it in each write's actor, and a later
-// request on that session presenting any other client — another token, or
-// none — is refused, so one client cannot continue another's session.
+// before (unless a forwarding header names a remote address); anything else
+// needs an allowed Host and a live client token, of either scope — MCP is
+// where agents work (decision 9). The admitted token client is bound to the
+// session it initializes (decision 4): the session's Server records it in
+// each write's actor, and a later request on that session presenting any
+// other client — another token, or none — is refused, so one client cannot
+// continue another's session. A refused request (401/403) naming a session
+// a token opened closes that session, so once its token is revoked, the
+// client's next request also ends its open SSE stream.
 //
 // Requests are dispatched in this order:
 //   1. admission: a foreign Host or Origin → 403; no usable token where
-//      one is needed → 401 with WWW-Authenticate: Bearer;
+//      one is needed → 401 with WWW-Authenticate: Bearer; either refusal
+//      closes the token-opened session its Mcp-Session-Id names;
 //   2. a declared body over MAX_BODY_BYTES → 413;
 //   3. GET /healthz → 200 or 503 (no session, never writes);
 //   4. /mcp with a method other than GET/POST/DELETE → 405;
@@ -57,7 +62,16 @@ import type { AddressInfo } from "node:net";
 import { performance } from "node:perf_hooks";
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { admitRequest, credentialFrom, isLoopbackAddress, UNAUTHORIZED_HEADERS, verifyClientToken, type AdmissionPolicy } from "@breakdown/core";
+import {
+  admitRequest,
+  credentialFrom,
+  forwardedAddressesFrom,
+  isLoopbackAddress,
+  UNAUTHORIZED_HEADERS,
+  verifyClientToken,
+  type AdmissionPolicy,
+  type ClientTokenScope,
+} from "@breakdown/core";
 import type { Database } from "@breakdown/db";
 import { createServer } from "./server.js";
 import { describeConnectionError, type Pool } from "./startup.js";
@@ -73,6 +87,8 @@ export const SHUTDOWN_GRACE_MS = 3_000;
 const SHUTDOWN_FLUSH_MS = 500;
 /** How long a refused oversized upload keeps draining before its connection is dropped. */
 const TOO_LARGE_LINGER_MS = 1_000;
+/** A person's tokens and agents' tokens alike (module header). */
+const MCP_SCOPES: readonly ClientTokenScope[] = ["human", "agent"];
 
 /** Anything the registry can hold; closing it must release the session. */
 export interface Closeable {
@@ -283,6 +299,11 @@ function readBody(req: IncomingMessage, limit: number): Promise<Buffer | undefin
   });
 }
 
+function sessionIdOf(req: IncomingMessage): string | undefined {
+  const header = req.headers["mcp-session-id"];
+  return Array.isArray(header) ? header[0] : header;
+}
+
 function track(set: Set<ServerResponse>, res: ServerResponse): void {
   set.add(res);
   res.once("close", () => set.delete(res));
@@ -295,7 +316,7 @@ export async function startHttpServer(options: StartHttpServerOptions): Promise<
   const probe = createDatabaseProbe(options.pool, HEALTH_TIMEOUT_MS);
   // Set once listening; no request is accepted before then.
   let guardPort = 0;
-  const verifyToken = (token: string): Promise<string | null> => verifyClientToken(db, token);
+  const verifyToken = (token: string) => verifyClientToken(db, token);
 
   // Requests shutdown waits for. GETs are left out: on /mcp a GET is a
   // session's SSE stream, which stays open until the session closes.
@@ -342,9 +363,24 @@ export async function startHttpServer(options: StartHttpServerOptions): Promise<
     }
   }
 
+  /**
+   * Closes the token-opened session a refused request names (module
+   * header). A tokenless loopback session is left alone: only a token can
+   * be revoked, and a remote caller holding a leaked id must not be able
+   * to end a local session.
+   */
+  function closeRefusedTokenSession(req: IncomingMessage): void {
+    const sessionId = sessionIdOf(req);
+    if (sessionId === undefined) return;
+    const session = registry.get(sessionId);
+    if (session === undefined || session.tokenClient === null) return;
+    registry.remove(sessionId);
+    void closeQuietly(sessionId, session, "refused");
+  }
+
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     // No isPublic: every MCP path, /healthz included, needs a token off loopback.
-    const policy: AdmissionPolicy = { port: guardPort, allowedHosts: options.allowedHosts, originCheck: "all-methods", verifyToken };
+    const policy: AdmissionPolicy = { port: guardPort, allowedHosts: options.allowedHosts, originCheck: "all-methods", scopes: MCP_SCOPES, verifyToken };
     // The raw request-target, deliberately not URL-normalized (admission.ts header).
     const rawUrl = req.url ?? "/";
     const queryAt = rawUrl.indexOf("?");
@@ -356,9 +392,11 @@ export async function startHttpServer(options: StartHttpServerOptions): Promise<
         peerIsLoopback: isLoopbackAddress(req.socket.remoteAddress),
         path: queryAt === -1 ? rawUrl : rawUrl.slice(0, queryAt),
         credential: credentialFrom(req.headers),
+        forwardedFor: forwardedAddressesFrom(req.headers),
       },
       policy,
     );
+    if (admission.outcome !== "allow") closeRefusedTokenSession(req);
     if (admission.outcome === "forbidden") {
       sendJsonRpcError(res, 403, -32000, "Forbidden: this server accepts requests only for its own or an allowed host, from local or allowed origins");
       return;
@@ -412,8 +450,7 @@ export async function startHttpServer(options: StartHttpServerOptions): Promise<
       }
     }
 
-    const header = req.headers["mcp-session-id"];
-    const sessionId = Array.isArray(header) ? header[0] : header;
+    const sessionId = sessionIdOf(req);
     if (sessionId !== undefined) {
       const session = registry.get(sessionId);
       if (!session) {
@@ -445,7 +482,10 @@ export async function startHttpServer(options: StartHttpServerOptions): Promise<
       });
     }
     handle(req, res).catch((err: unknown) => {
-      console.error(`[breakdown-brain] ${req.method} ${req.url} failed: ${describeConnectionError(err)}`);
+      // The method and the path only: a query string is never logged.
+      const rawUrl = req.url ?? "/";
+      const queryAt = rawUrl.indexOf("?");
+      console.error(`[breakdown-brain] ${req.method} ${queryAt === -1 ? rawUrl : rawUrl.slice(0, queryAt)} failed: ${describeConnectionError(err)}`);
       if (!res.headersSent) sendJsonRpcError(res, 500, -32603, "Internal server error");
       else res.end();
     });

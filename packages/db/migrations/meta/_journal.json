@@ -50,6 +50,13 @@
       "when": 1794602891744,
       "tag": "0006_client_tokens",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1794604945974,
+      "tag": "0007_client_token_scope",
+      "breakpoints": true
     }
   ]
 }

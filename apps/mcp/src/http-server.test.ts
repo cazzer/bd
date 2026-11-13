@@ -12,8 +12,10 @@
 //
 // Every server here binds loopback, so every request comes from a loopback
 // peer: a tailnet Host (TAILNET_HOST, allowed at start) is what forces the
-// token path — the realistic `tailscale serve` case, a local proxy
-// forwarding a remote caller. Nothing binds 0.0.0.0 (macOS firewall prompt).
+// token path, since admission trusts a loopback peer only with a loopback
+// Host. That stands in for a tailnet client reaching a non-loopback bind,
+// which a test cannot produce without binding 0.0.0.0 (macOS firewall
+// prompt).
 //
 // Calls that must stay in flight (a session closing under them) run
 // against a fake pool whose queries never answer.
@@ -205,10 +207,10 @@ function rawSocketRequest(port: number, head: string): Promise<string> {
 }
 
 /** A live token for a client name unique to this test file (deleted in afterAll). */
-async function newToken(label: string): Promise<{ client: string; token: string }> {
+async function newToken(label: string, scope: "human" | "agent" = "human"): Promise<{ client: string; token: string }> {
   const client = `mcpt-${label}-${suffix.slice(0, 16)}`;
   tokenClients.push(client);
-  const { token } = await createClientToken(db!, client);
+  const { token } = await createClientToken(db!, client, scope);
   return { client, token };
 }
 
@@ -451,6 +453,57 @@ describe("client tokens behind a tailnet Host", () => {
     expect(res.status).toBe(401);
     expect(res.headers["www-authenticate"]).toBe("Bearer");
     expect(await nodeExists(externalId)).toBe(false);
+  }, 30_000);
+
+  it("serves an agent token, /healthz and a session write alike", async () => {
+    const { running, host, healthz } = await startTailnet();
+    const { client, token } = await newToken("agent", "agent");
+    expect((await rawRequest(healthz, { method: "GET", headers: { host, authorization: `Bearer ${token}` } })).status).toBe(200);
+    const session = await rawInitialize(running.url, { host, authorization: `Bearer ${token}` });
+    const write = await rawRequest(running.url, { method: "POST", headers: session, body: brainWriteCall(`agent-write-${suffix}`) });
+    expect(write.status).toBe(200);
+    const [run] = await db!.select({ actor: ingestRuns.actor }).from(ingestRuns).where(eq(ingestRuns.id, runIdOf(write)));
+    expect(run?.actor).toBe(`${client} via ${RAW_CLIENT.name} ${RAW_CLIENT.version}`);
+  }, 30_000);
+
+  it("ends a revoked token's open SSE stream on the session's next request", async () => {
+    const { running, host } = await startTailnet();
+    const { client, token } = await newToken("stream");
+    const session = await rawInitialize(running.url, { host, authorization: `Bearer ${token}` });
+
+    const { "content-type": _type, ...getHeaders } = session;
+    let streamStatus = 0;
+    let streamEnded = false;
+    const stream = httpRequest(running.url, { method: "GET", headers: { ...getHeaders, accept: "text/event-stream" } }, (res) => {
+      streamStatus = res.statusCode ?? 0;
+      res.resume();
+      res.on("close", () => (streamEnded = true));
+    });
+    stream.on("error", () => (streamEnded = true));
+    stream.end();
+    await until(() => streamStatus !== 0);
+    expect(streamStatus).toBe(200);
+    expect(streamEnded).toBe(false);
+
+    await revokeClientToken(db!, client);
+    expect(streamEnded).toBe(false);
+    const refused = await rawRequest(running.url, { method: "POST", headers: session, body: BRAIN_MAP_CALL });
+    expect(refused.status).toBe(401);
+    await until(() => streamEnded);
+
+    // The session is gone: a re-issued token for the same client cannot pick it up.
+    tokenClients.push(client);
+    const { token: reissued } = await createClientToken(db!, client, "human");
+    const after = await rawRequest(running.url, { method: "POST", headers: { ...session, authorization: `Bearer ${reissued}` }, body: BRAIN_MAP_CALL });
+    expect(after.status).toBe(404);
+  }, 30_000);
+
+  it("leaves a tokenless loopback session open when a refused request names it", async () => {
+    const { running, host } = await startTailnet();
+    const { client, transport } = await connect(running.url, "loopback-kept", suffix);
+    const refused = await rawRequest(running.url, { method: "POST", headers: { ...sessionHeaders(transport), host }, body: BRAIN_MAP_CALL });
+    expect(refused.status).toBe(401);
+    await expect(client.callTool({ name: "brain_map", arguments: {} })).resolves.toBeDefined();
   }, 30_000);
 
   it("refuses with 403 a call on a session opened by another client, token or not, writing nothing", async () => {

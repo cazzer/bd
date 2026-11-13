@@ -17,6 +17,7 @@ import { createRequestDispatcher } from "./dispatch.js";
 
 const TAILNET = "breakdown.tail.example";
 const PHONE_TOKEN = "bdt_phone-token";
+const WORKER_TOKEN = "bdt_worker-token";
 const THROWING_TOKEN = "bdt_throws";
 
 let server: Server;
@@ -35,7 +36,8 @@ beforeAll(async () => {
     verifyToken: async (token) => {
       verified += 1;
       if (token === THROWING_TOKEN) throw new Error("token store unavailable");
-      return token === PHONE_TOKEN ? "phone" : null;
+      if (token === WORKER_TOKEN) return { client: "worker-1", scope: "agent" };
+      return token === PHONE_TOKEN ? { client: "phone", scope: "human" } : null;
     },
     connect: async (req, res) => {
       calls.push(`connect ${req.method} ${req.url}`);
@@ -122,6 +124,35 @@ describe("createRequestDispatcher: Host and Origin", () => {
     expect(verified).toBe(0);
   });
 
+  it("admits a bare allowed Host (a fronting proxy on its default port) with a token", async () => {
+    expect(await send("/trpc/board", { Host: TAILNET, ...bearer() })).toMatchObject({ status: 200, body: "trpc" });
+    expect(await send("/trpc/board", { Host: TAILNET })).toMatchObject({ status: 401 });
+    expect(await send("/trpc/board", { Host: "localhost" })).toMatchObject({ status: 403 });
+    expect(calls).toEqual(["trpc /trpc/board client=phone"]);
+  });
+
+  it("refuses a cookie write whose Origin is another port on the allowed host", async () => {
+    expect(await send("/trpc/createNote", { Host: tailnetHost(), Origin: `http://${TAILNET}:8080`, ...cookie() }, "POST")).toMatchObject({ status: 403 });
+    expect(calls).toEqual([]);
+  });
+
+  it("keeps loopback trust for the Vite proxy's forwarded request (X-Forwarded-For: 127.0.0.1)", async () => {
+    expect(await send("/trpc/createNote", { Host: `127.0.0.1:${port}`, Origin: "http://localhost:5310", "X-Forwarded-For": "127.0.0.1" }, "POST")).toMatchObject({
+      status: 200,
+      body: "trpc",
+    });
+    expect(calls).toEqual(["trpc /trpc/createNote client=null"]);
+  });
+
+  it("requires a token for a loopback-Host request forwarded for a remote address", async () => {
+    const headers: Record<string, string>[] = [{ "X-Forwarded-For": "100.64.0.9" }, { "X-Real-IP": "100.64.0.9" }, { Forwarded: "for=unknown" }];
+    for (const header of headers) {
+      expect(await send("/trpc/board", { Host: `127.0.0.1:${port}`, ...header }), JSON.stringify(header)).toMatchObject({ status: 401 });
+      expect(await send("/trpc/board", { Host: `127.0.0.1:${port}`, ...header, ...bearer() })).toMatchObject({ status: 200, body: "trpc" });
+    }
+    expect(calls).toEqual(Array(3).fill("trpc /trpc/board client=phone"));
+  });
+
   it("never calls the token store for a loopback request, even one carrying a token", async () => {
     await send("/trpc/board", { Host: `localhost:${port}` });
     await send("/trpc/board", { Host: `[::1]:${port}`, ...bearer() });
@@ -178,6 +209,12 @@ describe("createRequestDispatcher: client tokens", () => {
   it("admits a bearer POST with no Origin (a script, not a browser)", async () => {
     expect(await send("/trpc/createNote", { Host: tailnetHost(), ...bearer() }, "POST")).toMatchObject({ status: 200, body: "trpc" });
     expect(calls).toEqual(["trpc /trpc/createNote client=phone"]);
+  });
+
+  it("refuses an agent token with 403, by bearer or cookie, and calls nothing", async () => {
+    expect(await send("/trpc/board", { Host: tailnetHost(), ...bearer(WORKER_TOKEN) })).toMatchObject({ status: 403, body: "Forbidden\n" });
+    expect(await send("/trpc/createNote", { Host: tailnetHost(), Origin: `http://${tailnetHost()}`, ...cookie(WORKER_TOKEN) }, "POST")).toMatchObject({ status: 403 });
+    expect(calls).toEqual([]);
   });
 
   it("treats a token in the query string as no token", async () => {

@@ -1,4 +1,5 @@
-// `pnpm -s client-token create|list|revoke <client>`: the entrypoint for
+// `pnpm -s client-token create <client> --scope human|agent | list | revoke
+// <client>`: the entrypoint for
 // token-command.ts. It owns the pool's lifecycle and the exit code; nothing
 // connects at module scope beyond `main()`, and nothing imports this file.
 

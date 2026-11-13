@@ -91,8 +91,8 @@ async function main(): Promise<void> {
   const shutdown = new AbortController();
   await watcher.start();
 
-  // BRAIN_READ_ONLY refuses the review decision (the server's one tracker
-  // write) the way apps/mcp refuses its write tools.
+  // BRAIN_READ_ONLY refuses every write procedure (review decisions, the
+  // inbox, routers/write.ts) the way apps/mcp refuses its write tools.
   const readOnly = parseReadOnly(process.env["BRAIN_READ_ONLY"]);
   const reviewWriter = createReviewWriter();
 
@@ -107,7 +107,7 @@ async function main(): Promise<void> {
     }),
     basePath: "/trpc/",
   });
-  const verifyToken = (token: string): Promise<string | null> => verifyClientToken(db, token);
+  const verifyToken = (token: string) => verifyClientToken(db, token);
   const server = createServer(
     createRequestDispatcher({
       port,

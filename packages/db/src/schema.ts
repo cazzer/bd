@@ -368,13 +368,22 @@ const bytea = customType<{ data: Buffer; driverData: Buffer }>({
  * Revocation sets `revoked_at` rather than deleting, so the history stays;
  * the partial unique index allows one live token per client while letting a
  * revoked client be re-issued.
+ *
+ * `scope` says what a token may reach (design decision 9): `human` tokens
+ * (a phone, a laptop) are accepted by the web API and MCP, `agent` tokens
+ * (workers, a driver) by MCP only, so a worker cannot decide its own
+ * inbox request. It has no default: every token states its scope.
  */
+export const CLIENT_TOKEN_SCOPES = ["human", "agent"] as const;
+export type ClientTokenScope = (typeof CLIENT_TOKEN_SCOPES)[number];
+
 export const clientTokens = pgTable(
   "client_tokens",
   {
     id: uuid("id").primaryKey().defaultRandom(),
     client: text("client").notNull(),
     tokenHash: bytea("token_hash").notNull().unique(),
+    scope: text("scope").$type<ClientTokenScope>().notNull(),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -385,5 +394,6 @@ export const clientTokens = pgTable(
     uniqueIndex("client_tokens_live_client_idx")
       .on(table.client)
       .where(sql`${table.revokedAt} IS NULL`),
+    check("client_tokens_scope_check", sql`${table.scope} IN ('human', 'agent')`),
   ],
 );

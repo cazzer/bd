@@ -3,7 +3,10 @@
 // tailnet-hosting decision 2): a foreign Host, or an unsafe method from a
 // foreign Origin, is 403; a request that needs a client token and lacks a
 // live one is 401 with `WWW-Authenticate: Bearer`. A loopback peer with a
-// loopback Host needs no token, as before. Then, in order: the exact path
+// loopback Host needs no token, as before, unless a forwarding header names
+// a remote address. The web accepts only `human` tokens: its writes are a
+// person's decisions, so an `agent` token is 403 here (decision 9). Then,
+// in order: the exact path
 // AUTH_CONNECT_PATH to the connect handler (auth-connect.ts), anything
 // under REVIEW_IMAGES_PREFIX to the review image route (review-images.ts),
 // and everything else to tRPC's standalone handler.
@@ -13,7 +16,15 @@
 // client that made it (decision 4). Nothing here logs a token.
 
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { admitRequest, credentialFrom, isLoopbackAddress, UNAUTHORIZED_HEADERS, type AdmissionPolicy } from "@breakdown/core";
+import {
+  admitRequest,
+  credentialFrom,
+  forwardedAddressesFrom,
+  isLoopbackAddress,
+  UNAUTHORIZED_HEADERS,
+  type AdmissionPolicy,
+  type ClientTokenScope,
+} from "@breakdown/core";
 import { AUTH_CONNECT_PATH } from "./auth-connect.js";
 import { admittedClients } from "./context.js";
 import { REVIEW_IMAGES_PREFIX } from "./review-images.js";
@@ -23,8 +34,8 @@ export interface RequestDispatcherOptions {
   port: number;
   /** `--allow-host` values, each already through `normalizeAllowedHost`. */
   allowedHosts: readonly string[];
-  /** The client a live token belongs to, or null (verifyClientToken in production). */
-  verifyToken: (token: string) => Promise<string | null>;
+  /** The client and scope of a live token, or null (verifyClientToken in production). */
+  verifyToken: (token: string) => Promise<{ client: string; scope: ClientTokenScope } | null>;
   connect: (req: IncomingMessage, res: ServerResponse) => Promise<void>;
   reviewImages: (req: IncomingMessage, res: ServerResponse) => Promise<void>;
   trpc: (req: IncomingMessage, res: ServerResponse) => void;
@@ -39,10 +50,13 @@ function isPublicPath(method: string, path: string): boolean {
   return method === "POST" && path === AUTH_CONNECT_PATH;
 }
 
+/** A person's tokens only (module header). */
+const WEB_SCOPES: readonly ClientTokenScope[] = ["human"];
+
 const PLAIN_HEADERS = { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } as const;
 
 export function createRequestDispatcher({ port, allowedHosts, verifyToken, connect, reviewImages, trpc }: RequestDispatcherOptions): (req: IncomingMessage, res: ServerResponse) => void {
-  const policy: AdmissionPolicy = { port, allowedHosts, originCheck: "unsafe-methods", isPublic: isPublicPath, verifyToken };
+  const policy: AdmissionPolicy = { port, allowedHosts, originCheck: "unsafe-methods", scopes: WEB_SCOPES, isPublic: isPublicPath, verifyToken };
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     // The raw request-target, deliberately not URL-normalized (admission.ts header).
@@ -57,6 +71,7 @@ export function createRequestDispatcher({ port, allowedHosts, verifyToken, conne
         peerIsLoopback: isLoopbackAddress(req.socket.remoteAddress),
         path,
         credential: credentialFrom(req.headers),
+        forwardedFor: forwardedAddressesFrom(req.headers),
       },
       policy,
     );

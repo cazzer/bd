@@ -57,6 +57,18 @@ describe("inboxRelease", () => {
     await expect(caller(true).inboxRelease({ id })).rejects.toThrow(/read-only/);
     expect(await caller().inboxRelease({ id })).toMatchObject({ before: "undigested", after: "pending" });
   });
+
+  it("records the context's client as the release's actor", async () => {
+    const { id } = await requestInboxItem(db, { externalId: `${KEY}-held-phone`, title: "PR", content: "x", metadata: { source: "github", url: "https://github.com/a/b/pull/2" } });
+    expect(await createCallerFactory(appRouter)({ db, client: "phone" }).inboxRelease({ id })).toMatchObject({ after: "pending" });
+    // The procedure returns no run id; the released row names the run that wrote it.
+    const [run] = await db
+      .select({ actor: ingestRuns.actor, sourceSystem: ingestRuns.sourceSystem })
+      .from(nodes)
+      .innerJoin(ingestRuns, eq(ingestRuns.id, nodes.ingestRunId))
+      .where(eq(nodes.id, id));
+    expect(run).toEqual({ actor: "phone", sourceSystem: "human" });
+  });
 });
 
 // tailnet-hosting decision 4: the admitted token client is the run's

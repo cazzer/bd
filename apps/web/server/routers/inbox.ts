@@ -92,7 +92,7 @@ const inboxDecisionProcedure = publicProcedure.input(inboxDecisionInputSchema).m
   }
   let result: DecideInboxItemResult;
   try {
-    result = await decideInboxItem(ctx.db, input.id, { decision: input.decision, message: input.message, ...(input.option === undefined ? {} : { option: input.option }), actor: ctx.client ?? undefined });
+    result = await decideInboxItem(ctx.db, input.id, { decision: input.decision, message: input.message, ...(input.option === undefined ? {} : { option: input.option }) }, { actor: ctx.client ?? undefined });
   } catch (err) {
     throw mapCoreError("inboxDecision", err);
   }
@@ -115,7 +115,7 @@ const inboxReleaseProcedure = publicProcedure.input(z.object({ id: z.string().uu
     throw new TRPCError({ code: "FORBIDDEN", message: "The server is read-only (BRAIN_READ_ONLY); releasing an item is refused." });
   }
   try {
-    const result = await releaseInboxItem(ctx.db, input.id, { actor: ctx.client ?? undefined });
+    const result = await releaseInboxItem(ctx.db, input.id, {}, { actor: ctx.client ?? undefined });
     return { id: result.id, before: result.before, after: result.after };
   } catch (err) {
     throw mapCoreError("inboxRelease", err);
@@ -190,7 +190,7 @@ const inboxOpenSessionProcedure = publicProcedure.input(inboxIdSchema).mutation(
     throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: `Couldn't open the session: ${err instanceof Error ? err.message : String(err)}` });
   }
   try {
-    await handOffInboxItem(ctx.db, item.id, { pane: opened.pane, socket: ctx.herdrSocket, tab: opened.tab, actor: ctx.client ?? undefined });
+    await handOffInboxItem(ctx.db, item.id, { pane: opened.pane, socket: ctx.herdrSocket, tab: opened.tab }, { actor: ctx.client ?? undefined });
   } catch (err) {
     throw mapCoreError("inboxDecision", err);
   }

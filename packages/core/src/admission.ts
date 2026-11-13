@@ -8,27 +8,39 @@
 // Pure apart from `policy.verifyToken`, which the adapter wires to the
 // token store (client-tokens.ts). The decision, in order:
 //
-// 1. `Host` (case folded) must be `<name>:<port>` for a loopback name or an
-//    operator-allowed host. Anything else is 403, token or not: DNS
-//    rebinding needs only a browser and a cookie, so a credential never
-//    excuses a foreign Host.
-// 2. An `Origin`, when present on a checked method, must be http(s) with a
-//    loopback or allowed hostname (any port). The web checks only unsafe
-//    methods; MCP checks every method, because GET opens its SSE stream.
-//    `Origin: null` (a sandboxed or opaque origin) is refused.
+// 1. `Host` (case folded, a bracketed IPv6 address canonicalized) must be
+//    `<loopback name>:<port>`, or an operator-allowed name either at
+//    `:<port>` or bare (a fronting proxy such as `tailscale serve` on its
+//    scheme's default port sends no port). A loopback name always needs
+//    the port. Anything else is 403, token or not: DNS rebinding needs only
+//    a browser and a cookie, so a credential never excuses a foreign Host.
+// 2. An `Origin`, when present on a checked method, must be http(s) and
+//    either a loopback name (any port: the Vite client) or an allowed name
+//    at one of the authorities step 1 accepts for it — `:<port>`, or the
+//    scheme's default port. That pins writes to this server's own origin:
+//    a page on another port of the same tailnet host is a different
+//    origin. The web checks only unsafe methods; MCP checks every method,
+//    because GET opens its SSE stream. `Origin: null` is refused.
 // 3. A loopback peer with a loopback `Host` is trusted with no token —
-//    today's local path. Both conditions are needed: a loopback peer
-//    sending a tailnet `Host` is a local proxy hiding the real caller.
+//    today's local path — unless a forwarding header (`X-Forwarded-For`,
+//    `X-Real-IP`, `Forwarded`) names any address that is not loopback: a
+//    local proxy acting for a remote caller is not the local machine. A
+//    loopback peer sending a tailnet `Host` is likewise a proxy and gets no
+//    trust. An L4 forwarder (socat, `ssh -R`) adds no header and cannot be
+//    told apart from a local client; the operator must not run one.
 // 4. A public path (`policy.isPublic`) is admitted with no token.
 // 5. Otherwise a credential is required: missing, unknown, or revoked is
 //    401. A cookie on a checked method without an `Origin` is 403, since a
-//    cookie is ambient and only the Origin shows who sent it.
+//    cookie is ambient and only the Origin shows who sent it. A live token
+//    whose scope the policy does not accept is 403, not 401: the client is
+//    known, and a browser holding it must not be looped back to connect.
 //
 // `path` is the raw request-target with the query stripped, deliberately
 // not URL-normalized: a public-path predicate must match exactly what the
 // router will route, never a normalized spelling of it.
 
 import { isIPv6 } from "node:net";
+import type { ClientTokenScope } from "@breakdown/db";
 
 export const LOOPBACK_HOST_NAMES = ["127.0.0.1", "localhost", "[::1]"] as const;
 export const TOKEN_COOKIE_NAME = "breakdown_token";
@@ -47,6 +59,8 @@ export interface AdmissionRequest {
   /** Raw request-target, query stripped, NOT URL-normalized (module header). */
   path: string;
   credential: PresentedCredential | undefined;
+  /** `forwardedAddressesFrom(headers)`: undefined when no forwarding header is present. */
+  forwardedFor: readonly string[] | undefined;
 }
 
 export interface AdmissionPolicy {
@@ -57,8 +71,10 @@ export interface AdmissionPolicy {
   originCheck: "unsafe-methods" | "all-methods";
   /** `method` arrives upper-cased. */
   isPublic?: (method: string, path: string) => boolean;
-  /** The client a live token belongs to, or null. */
-  verifyToken: (token: string) => Promise<string | null>;
+  /** The scopes this server accepts; a live token of any other scope is 403. */
+  scopes: readonly ClientTokenScope[];
+  /** The client and scope of a live token, or null. */
+  verifyToken: (token: string) => Promise<{ client: string; scope: ClientTokenScope } | null>;
 }
 
 export type Admission =
@@ -79,23 +95,56 @@ export async function admitRequest(req: AdmissionRequest, policy: AdmissionPolic
   const originChecked = policy.originCheck === "all-methods" || (method !== "GET" && method !== "HEAD");
   if (originChecked && req.origin !== undefined && !isAllowedOrigin(req.origin, policy)) return FORBIDDEN;
 
-  if (req.peerIsLoopback && LOOPBACK_NAMES.has(hostName)) return { outcome: "allow", client: null };
+  const forwardedLocal = req.forwardedFor === undefined || req.forwardedFor.every(isLoopbackAddress);
+  if (req.peerIsLoopback && LOOPBACK_NAMES.has(hostName) && forwardedLocal) return { outcome: "allow", client: null };
   if (policy.isPublic?.(method, req.path)) return { outcome: "allow", client: null };
 
   if (req.credential === undefined) return UNAUTHORIZED;
   if (req.credential.source === "cookie" && originChecked && req.origin === undefined) return FORBIDDEN;
-  const client = await policy.verifyToken(req.credential.token);
-  return client === null ? UNAUTHORIZED : { outcome: "allow", client };
+  const verified = await policy.verifyToken(req.credential.token);
+  if (verified === null) return UNAUTHORIZED;
+  if (!policy.scopes.includes(verified.scope)) return FORBIDDEN;
+  return { outcome: "allow", client: verified.client };
 }
 
-/** The loopback or allowed name the Host header carries at the policy's port, or undefined. */
+/**
+ * Splits a Host header into its name (lowercased; a bracketed IPv6 address
+ * canonicalized as `normalizeAllowedHost` spells it) and its port text
+ * (`""` when there is none), or undefined for anything malformed.
+ */
+function splitHost(host: string): { name: string; port: string } | undefined {
+  const lowered = host.toLowerCase();
+  let name: string;
+  let rest: string;
+  if (lowered.startsWith("[")) {
+    const close = lowered.indexOf("]");
+    if (close === -1 || !isIPv6(lowered.slice(1, close))) return undefined;
+    try {
+      name = new URL(`http://${lowered.slice(0, close + 1)}`).hostname;
+    } catch {
+      return undefined; // e.g. a zone id, which isIPv6 accepts and a URL does not
+    }
+    rest = lowered.slice(close + 1);
+  } else {
+    const colon = lowered.indexOf(":");
+    name = colon === -1 ? lowered : lowered.slice(0, colon);
+    rest = colon === -1 ? "" : lowered.slice(colon);
+  }
+  if (rest === "") return { name, port: "" };
+  if (!/^:\d+$/.test(rest)) return undefined;
+  return { name, port: rest.slice(1) };
+}
+
+/** The loopback or allowed name the Host header carries at an authority step 1 accepts, or undefined. */
 function matchHost(host: string | undefined, policy: AdmissionPolicy): string | undefined {
   if (host === undefined) return undefined;
-  const lowered = host.toLowerCase();
-  const suffix = `:${policy.port}`;
-  if (!lowered.endsWith(suffix)) return undefined;
-  const name = lowered.slice(0, -suffix.length);
-  return LOOPBACK_NAMES.has(name) || policy.allowedHosts.includes(name) ? name : undefined;
+  const split = splitHost(host);
+  if (split === undefined) return undefined;
+  const { name, port } = split;
+  if (port === String(policy.port)) return LOOPBACK_NAMES.has(name) || policy.allowedHosts.includes(name) ? name : undefined;
+  // Bare: only an allowed, non-loopback name (a fronting proxy's request).
+  if (port === "") return !LOOPBACK_NAMES.has(name) && policy.allowedHosts.includes(name) ? name : undefined;
+  return undefined;
 }
 
 function isAllowedOrigin(origin: string, policy: AdmissionPolicy): boolean {
@@ -110,7 +159,57 @@ function isAllowedOrigin(origin: string, policy: AdmissionPolicy): boolean {
   if (url.username !== "" || url.password !== "" || url.pathname !== "/" || url.search !== "" || url.hash !== "") {
     return false;
   }
-  return LOOPBACK_NAMES.has(url.hostname) || policy.allowedHosts.includes(url.hostname);
+  if (LOOPBACK_NAMES.has(url.hostname)) return true;
+  // `url.port` is "" when the Origin names the scheme's default port, written or not.
+  return policy.allowedHosts.includes(url.hostname) && (url.port === "" || url.port === String(policy.port));
+}
+
+/**
+ * Every client address a forwarding header names — each `X-Forwarded-For`
+ * entry, `X-Real-IP`, and each `Forwarded` element's `for=` — with quotes,
+ * brackets, and ports stripped; or undefined when none of those headers is
+ * present. A value that is not an address (`unknown`, an obfuscated
+ * `_name`, an element with no `for=`, an empty entry) stays in the list as
+ * written, so `isLoopbackAddress` refuses it: an unreadable forwarding
+ * header fails closed.
+ */
+export function forwardedAddressesFrom(headers: {
+  "x-forwarded-for"?: string | string[];
+  "x-real-ip"?: string | string[];
+  forwarded?: string | string[];
+}): string[] | undefined {
+  const values = (header: string | string[] | undefined): string[] => (header === undefined ? [] : [header].flat());
+  const xff = values(headers["x-forwarded-for"]);
+  const realIp = values(headers["x-real-ip"]);
+  const forwarded = values(headers.forwarded);
+  if (xff.length === 0 && realIp.length === 0 && forwarded.length === 0) return undefined;
+
+  const addresses: string[] = [];
+  for (const header of xff) for (const entry of header.split(",")) addresses.push(stripAddress(entry));
+  for (const header of realIp) addresses.push(stripAddress(header));
+  for (const header of forwarded) {
+    for (const element of header.split(",")) {
+      const pair = element
+        .split(";")
+        .map((part) => part.trim())
+        .find((part) => part.toLowerCase().startsWith("for="));
+      addresses.push(pair === undefined ? "" : stripAddress(pair.slice("for=".length)));
+    }
+  }
+  return addresses;
+}
+
+/** `"[::1]:80"` → `::1`, `127.0.0.1:5000` → `127.0.0.1`, a bare address unchanged. */
+function stripAddress(value: string): string {
+  let address = value.trim();
+  if (address.length >= 2 && address.startsWith('"') && address.endsWith('"')) address = address.slice(1, -1).trim();
+  if (address.startsWith("[")) {
+    const close = address.indexOf("]");
+    return close === -1 ? address : address.slice(1, close);
+  }
+  // One colon is IPv4 with a port; more is a bare IPv6 address.
+  const colon = address.indexOf(":");
+  return colon !== -1 && colon === address.lastIndexOf(":") ? address.slice(0, colon) : address;
 }
 
 /**

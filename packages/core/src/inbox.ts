@@ -535,7 +535,10 @@ export interface DecideInboxItemInput {
   option?: string;
   /** The decision's timestamp; defaults to now (tests pin it). */
   now?: Date;
-  /** Recorded on the ingest run; defaults to "human". The web router sets it to the admitted token client, never from browser input. */
+}
+
+/** Like human-writes.ts's options: the ingest run's actor, default "human". The web router passes the admitted token client, never browser input. */
+export interface InboxWriteOptions {
   actor?: string;
 }
 
@@ -561,14 +564,14 @@ export interface DecideInboxItemResult {
  * Row-locked, written through the upsert path under a `human` ingest run,
  * so the revision trigger keeps the history. Pure Postgres.
  */
-export async function decideInboxItem(db: Database, id: string, input: DecideInboxItemInput): Promise<DecideInboxItemResult> {
+export async function decideInboxItem(db: Database, id: string, input: DecideInboxItemInput, options: InboxWriteOptions = {}): Promise<DecideInboxItemResult> {
   if (!(INBOX_DECISIONS as readonly string[]).includes(input.decision)) {
     throw new InvalidInboxItemError("decision", input.decision, `must be one of ${INBOX_DECISIONS.join(", ")}`);
   }
   if (input.option !== undefined && input.decision !== "accept") {
     throw new InvalidInboxItemError("option", input.option, "is taken only with accept");
   }
-  return writeInboxFeedback(db, id, input.decision, input);
+  return writeInboxFeedback(db, id, input.decision, input, options);
 }
 
 /**
@@ -576,13 +579,19 @@ export async function decideInboxItem(db: Database, id: string, input: DecideInb
  * agent could not open its artifact, and the person will decide anyway),
  * recording a `release` feedback entry. Refuses any other status.
  */
-export async function releaseInboxItem(db: Database, id: string, input: { message?: string; now?: Date; actor?: string } = {}): Promise<DecideInboxItemResult> {
-  return writeInboxFeedback(db, id, "release", input);
+export async function releaseInboxItem(db: Database, id: string, input: { message?: string; now?: Date } = {}, options: InboxWriteOptions = {}): Promise<DecideInboxItemResult> {
+  return writeInboxFeedback(db, id, "release", input, options);
 }
 
 const NEXT_AFTER: Record<InboxDecision | "release", InboxStatus> = { ...{ accept: "accepted", changes: "changes", dismiss: "dismissed" }, release: "pending" };
 
-async function writeInboxFeedback(db: Database, id: string, kind: InboxDecision | "release", input: { message?: string; option?: string; now?: Date; actor?: string }): Promise<DecideInboxItemResult> {
+async function writeInboxFeedback(
+  db: Database,
+  id: string,
+  kind: InboxDecision | "release",
+  input: { message?: string; option?: string; now?: Date },
+  options: InboxWriteOptions,
+): Promise<DecideInboxItemResult> {
   const requestedId = typeof id === "string" ? id.trim() : "";
   if (!UUID_RE.test(requestedId)) throw new InvalidLookupIdError(id, "must be a valid uuid");
   const message = (input.message ?? "").trim();
@@ -593,7 +602,7 @@ async function writeInboxFeedback(db: Database, id: string, kind: InboxDecision 
     throw new InvalidInboxItemError("message", `${message.slice(0, 40)}…`, `must be at most ${MAX_INBOX_FEEDBACK_LENGTH} characters`);
   }
 
-  const run = await openIngestRun(db, "human", { actor: input.actor ?? "human" });
+  const run = await openIngestRun(db, "human", { actor: options.actor ?? "human" });
   try {
     return await db.transaction(async (tx) => {
       let locked: { rows: { id: string; node_type: string; source_system: string; external_id: string; title: string; content: string; metadata: Record<string, unknown> }[] };
@@ -834,8 +843,6 @@ export interface HandOffInboxItemInput {
   socket: string;
   tab: string;
   now?: Date;
-  /** Recorded on the ingest run; defaults to "human" (see DecideInboxItemInput.actor). */
-  actor?: string;
 }
 
 /**
@@ -848,7 +855,12 @@ export interface HandOffInboxItemInput {
  * prompted back to that pane like any session item. Row-locked, under a
  * `human` ingest run. Pure Postgres.
  */
-export async function handOffInboxItem(db: Database, id: string, input: HandOffInboxItemInput): Promise<{ id: string; ingestRunId: string; before: InboxStatus }> {
+export async function handOffInboxItem(
+  db: Database,
+  id: string,
+  input: HandOffInboxItemInput,
+  options: InboxWriteOptions = {},
+): Promise<{ id: string; ingestRunId: string; before: InboxStatus }> {
   const requestedId = typeof id === "string" ? id.trim() : "";
   if (!UUID_RE.test(requestedId)) throw new InvalidLookupIdError(id, "must be a valid uuid");
   for (const [field, value] of [["pane", input.pane], ["socket", input.socket], ["tab", input.tab]] as const) {
@@ -856,7 +868,7 @@ export async function handOffInboxItem(db: Database, id: string, input: HandOffI
       throw new InvalidInboxItemError(field, value, "is required, without control characters");
     }
   }
-  const run = await openIngestRun(db, "human", { actor: input.actor ?? "human" });
+  const run = await openIngestRun(db, "human", { actor: options.actor ?? "human" });
   try {
     return await db.transaction(async (tx) => {
       let locked: { rows: { id: string; node_type: string; source_system: string; external_id: string; title: string; content: string; metadata: Record<string, unknown> }[] };

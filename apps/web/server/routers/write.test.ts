@@ -133,3 +133,22 @@ describe("the actor a web write records", () => {
     }
   });
 });
+
+// BRAIN_READ_ONLY: every write procedure is refused before it touches the
+// database, the same refusal the inbox procedures give.
+describe("a read-only server refuses every write procedure", () => {
+  const readOnly = () => createCaller({ db: poisonedDb(), readOnly: true });
+  const node = "00000000-0000-4000-8000-0000000000f4";
+  const edge = { srcId: node, dstId: "00000000-0000-4000-8000-0000000000f5", edgeType: "relates_to" };
+
+  it.each([
+    ["createNote", () => readOnly().createNote({ content: "x" })],
+    ["annotateNode", () => readOnly().annotateNode({ targetNodeId: node, content: "x" })],
+    ["updateNodeContent", () => readOnly().updateNodeContent({ nodeId: node, content: "x" })],
+    ["assertEdge", () => readOnly().assertEdge(edge)],
+    ["retractEdge", () => readOnly().retractEdge(edge)],
+    ["reweightEdge", () => readOnly().reweightEdge({ ...edge, weight: 0.5 })],
+  ] as const)("%s", async (_name, call) => {
+    await expect(call()).rejects.toMatchObject({ code: "FORBIDDEN", message: expect.stringContaining("read-only") });
+  });
+});

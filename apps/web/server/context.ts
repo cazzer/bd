@@ -23,7 +23,7 @@ export interface Context {
   watcher?: BeadsWatcher;
   /** Aborted at shutdown; subscriptions end on it so shutdown never waits on a connected browser. */
   shutdownSignal?: AbortSignal;
-  /** BRAIN_READ_ONLY (config.ts): the review decision is refused when set. Unset means writable, matching every other write procedure's callers. */
+  /** BRAIN_READ_ONLY (config.ts): every write procedure (review, inbox, routers/write.ts) is refused when set. Unset means writable. */
   readOnly?: boolean;
   /** Runs review decisions through `bd` (review-writer.ts). Optional so callers that never decide a review need not build one; the decision is refused without it. */
   reviewWriter?: ReviewWriter;

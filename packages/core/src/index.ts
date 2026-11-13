@@ -576,6 +576,7 @@ export {
   type InboxList,
   type ListInboxOptions,
   type DecideInboxItemInput,
+  type InboxWriteOptions,
   type DecideInboxItemResult,
 } from "./inbox.js";
 
@@ -592,15 +593,19 @@ export {
   listClientTokens,
   revokeClientToken,
   verifyClientToken,
+  isClientTokenScope,
   CLIENT_TOKEN_PREFIX,
   CLIENT_NAME_PATTERN,
   type CreatedClientToken,
   type ClientTokenListing,
+  type VerifiedClientToken,
 } from "./client-tokens.js";
+export type { ClientTokenScope } from "@breakdown/db";
 
 export {
   admitRequest,
   credentialFrom,
+  forwardedAddressesFrom,
   isLoopbackAddress,
   normalizeAllowedHost,
   LOOPBACK_HOST_NAMES,

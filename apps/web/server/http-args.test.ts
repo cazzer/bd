@@ -30,6 +30,9 @@ describe("parseWebArgs", () => {
       [["--port", "http"], undefined, /--port "http"/],
       [["--port", "70000"], undefined, /--port "70000"/],
       [["--port=-1"], undefined, /--port "-1"/],
+      [["--port", "0"], undefined, /--port "0": the web server needs a fixed port/],
+      [["--port", "000"], undefined, /--port "000": the web server needs a fixed port/],
+      [[], "0", /WEB_SERVER_PORT "0": the web server needs a fixed port/],
       [[], "abc", /WEB_SERVER_PORT "abc"/],
     ] as const) {
       expect(() => parseWebArgs(argv, env)).toThrow(WebArgsError);

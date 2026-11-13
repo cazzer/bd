@@ -51,8 +51,9 @@ async function lastUsedAt(client: string): Promise<Date | null> {
 describe("createClientToken", () => {
   it("returns a bdt_ token of 32 random bytes in base64url", async () => {
     const client = clientName();
-    const result = await createClientToken(db, client);
+    const result = await createClientToken(db, client, "human");
     expect(result.client).toBe(client);
+    expect(result.scope).toBe("human");
     expect(result.token).toMatch(/^bdt_[A-Za-z0-9_-]{43}$/);
     expect(Buffer.from(result.token.slice(4), "base64url")).toHaveLength(32);
     expect(result.createdAt).toBeInstanceOf(Date);
@@ -60,7 +61,7 @@ describe("createClientToken", () => {
 
   it("stores sha256(token) and no column holds the token text", async () => {
     const client = clientName();
-    const { token } = await createClientToken(db, client);
+    const { token } = await createClientToken(db, client, "human");
     const result = await db.execute<Record<string, unknown>>(sql`SELECT * FROM client_tokens WHERE client = ${client}`);
     expect(result.rows).toHaveLength(1);
     const row = result.rows[0] as Record<string, unknown>;
@@ -77,8 +78,8 @@ describe("createClientToken", () => {
 
   it("refuses a second live token for the client, naming it and the revoke command", async () => {
     const client = clientName();
-    await createClientToken(db, client);
-    const refused = await createClientToken(db, client).catch((e: unknown) => e);
+    await createClientToken(db, client, "human");
+    const refused = await createClientToken(db, client, "human").catch((e: unknown) => e);
     expect(refused).toBeInstanceOf(ClientTokenExistsError);
     expect((refused as Error).message).toContain(client);
     expect((refused as Error).message).toContain(`pnpm -s client-token revoke ${client}`);
@@ -87,7 +88,7 @@ describe("createClientToken", () => {
   it.each(["", "-leading-dash", ".dot", "has space", "slash/name", "a".repeat(65), "naïve"])(
     "refuses the client name %j without writing",
     async (name) => {
-      await expect(createClientToken(db, name)).rejects.toBeInstanceOf(InvalidClientNameError);
+      await expect(createClientToken(db, name, "human")).rejects.toBeInstanceOf(InvalidClientNameError);
     },
   );
 
@@ -95,7 +96,7 @@ describe("createClientToken", () => {
     const base = clientName("n");
     const name = `${base}._-`.padEnd(64, "x");
     created.push(name);
-    await expect(createClientToken(db, name)).resolves.toMatchObject({ client: name });
+    await expect(createClientToken(db, name, "human")).resolves.toMatchObject({ client: name });
   });
 });
 
@@ -103,14 +104,14 @@ describe("listClientTokens", () => {
   it("never carries a hash or token, and shows revoked rows", async () => {
     const live = clientName("live");
     const gone = clientName("gone");
-    await createClientToken(db, live);
-    await createClientToken(db, gone);
+    await createClientToken(db, live, "human");
+    await createClientToken(db, gone, "human");
     await revokeClientToken(db, gone);
 
     const rows = (await listClientTokens(db)).filter((r) => r.client === live || r.client === gone);
     expect(rows).toHaveLength(2);
     for (const row of rows) {
-      expect(Object.keys(row).sort()).toEqual(["client", "createdAt", "lastUsedAt", "revokedAt"]);
+      expect(Object.keys(row).sort()).toEqual(["client", "createdAt", "lastUsedAt", "revokedAt", "scope"]);
     }
     expect(rows.find((r) => r.client === live)?.revokedAt).toBeNull();
     expect(rows.find((r) => r.client === gone)?.revokedAt).toBeInstanceOf(Date);
@@ -120,7 +121,7 @@ describe("listClientTokens", () => {
 describe("revokeClientToken", () => {
   it("revokes a live token, then refuses a second revoke as not found", async () => {
     const client = clientName();
-    await createClientToken(db, client);
+    await createClientToken(db, client, "human");
     await revokeClientToken(db, client);
     await expect(revokeClientToken(db, client)).rejects.toBeInstanceOf(ClientTokenNotFoundError);
   });
@@ -133,8 +134,8 @@ describe("revokeClientToken", () => {
 describe("verifyClientToken", () => {
   it("names the client of a live token, and null once it is revoked", async () => {
     const client = clientName();
-    const { token } = await createClientToken(db, client);
-    expect(await verifyClientToken(db, token)).toBe(client);
+    const { token } = await createClientToken(db, client, "human");
+    expect(await verifyClientToken(db, token)).toEqual({ client, scope: "human" });
     await revokeClientToken(db, client);
     expect(await verifyClientToken(db, token)).toBeNull();
   });
@@ -147,15 +148,27 @@ describe("verifyClientToken", () => {
     expect(await verifyClientToken(db, `bdt_${"a".repeat(200)}`)).toBeNull();
   });
 
+  it("refuses anything but the exact minted shape without querying", async () => {
+    const noQuery = {
+      execute: () => {
+        throw new Error("verifyClientToken queried for a malformed token");
+      },
+    } as unknown as Database;
+    const body = "A".repeat(43);
+    for (const token of [`bdt_${body.slice(1)}`, `bdt_${body}A`, `bdt_${body.slice(1)}=`, `BDT_${body}`, `bdt_${body}\n`, ` bdt_${body}`]) {
+      expect(await verifyClientToken(noQuery, token)).toBeNull();
+    }
+  });
+
   it("does not admit a live token's text without its prefix", async () => {
     const client = clientName();
-    const { token } = await createClientToken(db, client);
+    const { token } = await createClientToken(db, client, "human");
     expect(await verifyClientToken(db, token.slice(4))).toBeNull();
   });
 
   it("sets last_used_at on first use", async () => {
     const client = clientName();
-    const { token } = await createClientToken(db, client);
+    const { token } = await createClientToken(db, client, "human");
     expect(await lastUsedAt(client)).toBeNull();
     await verifyClientToken(db, token);
     expect(await lastUsedAt(client)).toBeInstanceOf(Date);
@@ -163,7 +176,7 @@ describe("verifyClientToken", () => {
 
   it("touches last_used_at only when it is more than 60 seconds old", async () => {
     const client = clientName();
-    const { token } = await createClientToken(db, client);
+    const { token } = await createClientToken(db, client, "human");
 
     await db
       .update(clientTokens)
@@ -183,13 +196,22 @@ describe("verifyClientToken", () => {
     expect((await lastUsedAt(client))!.getTime()).toBe(recent!.getTime());
   });
 
+  it("returns an agent token's scope", async () => {
+    const client = clientName("agent");
+    const created = await createClientToken(db, client, "agent");
+    expect(created.scope).toBe("agent");
+    expect(await verifyClientToken(db, created.token)).toEqual({ client, scope: "agent" });
+    const [listed] = (await listClientTokens(db)).filter((r) => r.client === client);
+    expect(listed?.scope).toBe("agent");
+  });
+
   it("after a re-issue, the old token is refused and the new one admitted", async () => {
     const client = clientName();
-    const first = await createClientToken(db, client);
+    const first = await createClientToken(db, client, "human");
     await revokeClientToken(db, client);
-    const second = await createClientToken(db, client);
+    const second = await createClientToken(db, client, "human");
     expect(second.token).not.toBe(first.token);
     expect(await verifyClientToken(db, first.token)).toBeNull();
-    expect(await verifyClientToken(db, second.token)).toBe(client);
+    expect(await verifyClientToken(db, second.token)).toEqual({ client, scope: "human" });
   });
 });

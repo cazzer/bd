@@ -11,4 +11,6 @@ export {
   edges,
   resolvedNodes,
   clientTokens,
+  CLIENT_TOKEN_SCOPES,
+  type ClientTokenScope,
 } from "./schema.js";
