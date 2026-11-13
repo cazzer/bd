@@ -414,6 +414,7 @@ export {
   type ReviewAttachmentKind,
   type ReviewAttachmentPair,
   type ReviewImageAttachment,
+  type ReviewVideoAttachment,
   type ReviewSourceAttachment,
   type ReviewCard,
   type InvalidReview,

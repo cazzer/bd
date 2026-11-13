@@ -47,6 +47,7 @@ import {
   type ReviewImageAttachment,
   type ReviewMetadata,
   type ReviewSourceAttachment,
+  type ReviewVideoAttachment,
 } from "@breakdown/core";
 import { reviewImageUrl } from "./review-images.js";
 
@@ -108,12 +109,16 @@ export interface ReviewImageDto {
  * core (header), and so the question the drawer shows — and sends back as
  * `seen` with an option — is byte-for-byte the one the decision check
  * compares. Each image attachment carries its `name` and route `url`, as
- * `reviewImages` does. `legacy` says the review carries no card key at all
+ * `reviewImages` does; a video carries the same, and its poster's route URL
+ * as `posterUrl` (null without a poster, or outside the root). `legacy` says the review carries no card key at all
  * (`images` and `summary` only, as filed before cards), which the drawer
  * shows as it always has; it is decided here so the client never copies
  * the contract's key list.
  */
-export type ReviewCardAttachmentDto = (ReviewImageAttachment & { name: string; url: string | null }) | ReviewSourceAttachment;
+export type ReviewCardAttachmentDto =
+  | (ReviewImageAttachment & { name: string; url: string | null })
+  | (ReviewVideoAttachment & { name: string; url: string | null; posterUrl: string | null })
+  | ReviewSourceAttachment;
 export type ReviewCardDto = Omit<ReviewCard, "attachments"> & { attachments: ReviewCardAttachmentDto[]; legacy: boolean };
 
 /** The card keys of the review contract (reviews.ts), checked against its type. */
@@ -142,7 +147,18 @@ export function toBoardItemDto(item: BoardItem, reviewImageRoot: string = REVIEW
         ? null
         : {
             ...card,
-            attachments: card.attachments.map((a) => (a.kind === "image" ? { ...a, name: path.basename(a.path), url: reviewImageUrl(a.path, reviewImageRoot) } : a)),
+            attachments: card.attachments.map((a): ReviewCardAttachmentDto => {
+              if (a.kind === "image") return { ...a, name: path.basename(a.path), url: reviewImageUrl(a.path, reviewImageRoot) };
+              if (a.kind === "video") {
+                return {
+                  ...a,
+                  name: path.basename(a.path),
+                  url: reviewImageUrl(a.path, reviewImageRoot),
+                  posterUrl: a.poster === undefined ? null : reviewImageUrl(a.poster, reviewImageRoot),
+                };
+              }
+              return a;
+            }),
             legacy: CARD_KEYS.every((key) => review![key] === undefined),
           },
   };

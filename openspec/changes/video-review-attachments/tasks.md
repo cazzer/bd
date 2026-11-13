@@ -6,12 +6,12 @@
 
 ## 2. Video in the card contract, through to the board item
 
-- [ ] 2.1 `packages/core/src/reviews.ts`: `video` kind, `ReviewVideoAttachment` (key order `kind, path, poster, caption, pair, option`), `option` checked against the card's option ids and unique across videos, `option`+`pair` invalid; `index.ts` export; module header (design.md decisions 1, 3)
-- [ ] 2.2 `bin/review-request-lib.mjs`: `VIDEO_EXTENSIONS`, `MAX_VIDEO_BYTES`, `videoProblem`, video and option validation with the refusal strings in specs/review-videos, staged-file numbering, `stageFiles`, closing line counts videos, header comment (design.md decisions 2, 3)
-- [ ] 2.3 Fixtures: `reel-cuts.md` with `reel-a.mp4` (+ `reel-a-poster.jpg`, option A), `reel-b.mp4` (option B), `reel-raw.mp4` (no option), all ffmpeg-generated 270×480 under 100 KB total; `reel-cuts.expected.json`; `invalid-unknown-kind.md` → `pdf`; `invalid-video-option-unknown.md`, `invalid-video-extension.md`; fixtures README tables and rules
-- [ ] 2.4 `apps/web/server/dto.ts`: video `name`, `url`, `posterUrl`; `apps/web/src/lib/reviewAttachments.ts`: `VideoAttachment` mapping with `?v=`, `optionVideos`, `formatVideoTime`, `timestampNote`, `appendNote`; a basic video renderer and the `PairAttachments` video branch so typecheck passes
-- [ ] 2.5 Tests: core (`reel-cuts` idempotence, each invalid case, `option`/`poster` dropped on images, legacy byte-identical), CLI (fixture loop, every stored path staged, `videoProblem`, refusal strings, NN ordering), dto, `reviewAttachments`
-- [ ] 2.6 `pnpm check` passes, apart from known failures (`bd-a0r`, 5-second DB timeouts)
+- [x] 2.1 `packages/core/src/reviews.ts`: `video` kind, `ReviewVideoAttachment` (key order `kind, path, poster, caption, pair, option`), `option` checked against the card's option ids and unique across videos, `option`+`pair` invalid; `index.ts` export; module header (design.md decisions 1, 3)
+- [x] 2.2 `bin/review-request-lib.mjs`: `VIDEO_EXTENSIONS`, `MAX_VIDEO_BYTES`, `videoProblem`, video and option validation with the refusal strings in specs/review-videos, staged-file numbering, `stageFiles`, closing line counts videos, header comment (design.md decisions 2, 3)
+- [x] 2.3 Fixtures: `reel-cuts.md` with `reel-a.mp4` (+ `reel-a-poster.jpg`, option A), `reel-b.mp4` (option B), `reel-raw.mp4` (no option), all ffmpeg-generated 270×480 under 100 KB total; `reel-cuts.expected.json`; `invalid-unknown-kind.md` → `pdf`; `invalid-video-option-unknown.md`, `invalid-video-extension.md`; fixtures README tables and rules
+- [x] 2.4 `apps/web/server/dto.ts`: video `name`, `url`, `posterUrl`; `apps/web/src/lib/reviewAttachments.ts`: `VideoAttachment` mapping with `?v=`, `optionVideos`, `formatVideoTime`, `timestampNote`, `appendNote`; a basic video renderer and the `PairAttachments` video branch so typecheck passes
+- [x] 2.5 Tests: core (`reel-cuts` idempotence, each invalid case, `option`/`poster` dropped on images, legacy byte-identical), CLI (fixture loop, every stored path staged, `videoProblem`, refusal strings, NN ordering), dto, `reviewAttachments`
+- [x] 2.6 `pnpm check` passes, apart from known failures (`bd-a0r`, 5-second DB timeouts)
 
 ## 3. Reviewing a reel on the board
 

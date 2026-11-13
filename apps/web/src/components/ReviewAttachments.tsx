@@ -45,6 +45,7 @@ import {
   type ImageAttachment,
   type ReviewAttachment,
   type ReviewAttachmentKind,
+  type VideoAttachment,
 } from "../lib/reviewAttachments.js";
 import { DiffBlock } from "./DiffBlock.js";
 import { Lightbox } from "./Lightbox.js";
@@ -66,9 +67,9 @@ export interface AttachmentRendererProps<K extends ReviewAttachmentKind> {
 
 type Renderers = { [K in ReviewAttachmentKind]: (props: AttachmentRendererProps<K>) => ReactNode };
 
-const RENDERERS: Renderers = { image: ImageAttachments, mermaid: MermaidAttachments, diff: DiffAttachments };
+const RENDERERS: Renderers = { image: ImageAttachments, video: VideoAttachments, mermaid: MermaidAttachments, diff: DiffAttachments };
 
-const KIND_ORDER: readonly ReviewAttachmentKind[] = ["image", "mermaid", "diff"];
+const KIND_ORDER: readonly ReviewAttachmentKind[] = ["image", "video", "mermaid", "diff"];
 
 /** Lines a diff shows in the column before its "show all" control. */
 const COLUMN_DIFF_LINES = 12;
@@ -271,6 +272,40 @@ function Thumb({
   );
 }
 
+/** Videos: each as a vertical player with its caption. */
+function VideoAttachments({ attachments }: AttachmentRendererProps<"video">) {
+  if (attachments.length === 0) return null;
+  return (
+    <section>
+      <SectionTitle>Videos · {attachments.length}</SectionTitle>
+      <ul role="list" className="grid grid-cols-2 gap-3">
+        {attachments.map((v, i) => (
+          <li key={`${i}:${v.path}`}>
+            <ReviewVideo video={v} />
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function ReviewVideo({ video }: { video: VideoAttachment }) {
+  return (
+    <figure className="min-w-0">
+      {video.src === null ? (
+        <span className="flex aspect-[9/16] max-h-[60vh] items-center justify-center rounded-lg border border-hairline bg-ground p-3 text-center text-xs text-fg-muted">
+          <span>
+            Can't show: <span className="break-all font-mono">{video.path}</span>
+          </span>
+        </span>
+      ) : (
+        <video src={video.src} poster={video.poster ?? undefined} muted playsInline preload="metadata" controls loop className="aspect-[9/16] max-h-[60vh] w-full rounded-lg bg-black object-contain" />
+      )}
+      <figcaption className="mt-1 truncate font-mono text-[10px] text-fg-muted">{attachmentLabel(video)}</figcaption>
+    </figure>
+  );
+}
+
 /** Diagrams: each through MermaidBlock with its caption. On the stage a lone diagram is scaled to fit its share; several scroll together. */
 function MermaidAttachments({ attachments, layout }: AttachmentRendererProps<"mermaid">) {
   if (attachments.length === 0) return null;
@@ -412,6 +447,8 @@ function PairAttachments({ pairs, layout, focusTitle, onOverlayChange }: { pairs
           )}
         </button>
       );
+    } else if (a.kind === "video") {
+      content = <ReviewVideo video={a} />;
     } else if (a.kind === "mermaid") {
       content = stage ? (
         <div className="min-h-0 flex-1 overflow-y-auto">

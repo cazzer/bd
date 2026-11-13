@@ -64,6 +64,16 @@
 // several. Absent, null, and empty are absent in the output; anything else
 // that breaks the pattern makes the review `{ invalid: true }`, as a bad
 // option id does. A review without a key normalizes exactly as before.
+//
+// Videos (video-review-attachments, design.md decisions 1 and 3). An
+// attachment may be `{ kind: "video", path, poster?, caption?, pair?,
+// option? }`, keys in that order; `path` and `poster` obey the image path
+// rule. `option` names one of the card's option ids — the cut that option
+// would ship — so it is invalid on a card without options, when it names no
+// option, when two videos name the same option, or together with `pair`.
+// `option` and `poster` on any other kind are unknown keys, dropped like
+// any other. Videos count toward MAX_REVIEW_ATTACHMENTS; the legacy
+// `images` list holds image attachments only.
 
 import os from "node:os";
 import path from "node:path";
@@ -110,7 +120,7 @@ export const MAX_REVIEW_ATTACHMENT_SOURCE_LENGTH = 8000;
 /** A review's key: a lower-case letter or digit, then up to 39 lower-case letters, digits, `_`, `-`. */
 export const REVIEW_KEY_PATTERN = /^[a-z0-9][a-z0-9_-]{0,39}$/;
 export const MAX_REVIEW_KEY_LENGTH = 40;
-export const REVIEW_ATTACHMENT_KINDS = ["image", "mermaid", "diff"] as const;
+export const REVIEW_ATTACHMENT_KINDS = ["image", "video", "mermaid", "diff"] as const;
 export const REVIEW_ATTACHMENT_PAIRS = ["before", "after"] as const;
 
 // eslint-disable-next-line no-control-regex
@@ -139,6 +149,18 @@ export interface ReviewImageAttachment {
   pair?: ReviewAttachmentPair;
 }
 
+export interface ReviewVideoAttachment {
+  kind: "video";
+  /** Absolute; the same rule as an image attachment's path. */
+  path: string;
+  /** An image shown before the video plays; absolute, the same rule as `path`. */
+  poster?: string;
+  caption?: string;
+  pair?: ReviewAttachmentPair;
+  /** The id of the card option this video is the cut of; never with `pair`. */
+  option?: string;
+}
+
 export interface ReviewSourceAttachment {
   kind: "mermaid" | "diff";
   source: string;
@@ -146,7 +168,7 @@ export interface ReviewSourceAttachment {
   pair?: ReviewAttachmentPair;
 }
 
-export type ReviewAttachment = ReviewImageAttachment | ReviewSourceAttachment;
+export type ReviewAttachment = ReviewImageAttachment | ReviewVideoAttachment | ReviewSourceAttachment;
 
 export interface ReviewMetadata {
   images: string[];
@@ -343,9 +365,15 @@ export function normalizeDecisionCard(raw: Record<string, unknown>): DecisionCar
   if (rawAttachments !== undefined && rawAttachments !== null) {
     if (!Array.isArray(rawAttachments) || rawAttachments.length > MAX_REVIEW_ATTACHMENTS) return null;
     const attachments: ReviewAttachment[] = [];
+    const optionIds = new Set((card.options ?? []).map((o) => o.id));
+    const optionsWithVideo = new Set<string>();
     for (const rawAttachment of rawAttachments) {
-      const attachment = normalizeAttachment(rawAttachment);
+      const attachment = normalizeAttachment(rawAttachment, optionIds);
       if (attachment === null) return null;
+      if (attachment.kind === "video" && attachment.option !== undefined) {
+        if (optionsWithVideo.has(attachment.option)) return null;
+        optionsWithVideo.add(attachment.option);
+      }
       attachments.push(attachment);
     }
     if (attachments.length > 0) card.attachments = attachments;
@@ -354,7 +382,8 @@ export function normalizeDecisionCard(raw: Record<string, unknown>): DecisionCar
   return card;
 }
 
-function normalizeAttachment(raw: unknown): ReviewAttachment | null {
+/** One attachment under the contract, or null; `optionIds` are the card's option ids, for a video's `option`. */
+function normalizeAttachment(raw: unknown, optionIds: ReadonlySet<string>): ReviewAttachment | null {
   if (!isPlainObject(raw)) return null;
   const caption = optionalText(raw["caption"], MAX_REVIEW_ATTACHMENT_CAPTION_LENGTH);
   if (caption === null) return null;
@@ -371,6 +400,23 @@ function normalizeAttachment(raw: unknown): ReviewAttachment | null {
     const imagePath = raw["path"];
     if (!isReviewImagePath(imagePath)) return null;
     return { kind, path: imagePath, ...extras };
+  }
+  if (kind === "video") {
+    const videoPath = raw["path"];
+    if (!isReviewImagePath(videoPath)) return null;
+    const rawPoster = raw["poster"];
+    let poster: string | undefined;
+    if (rawPoster !== undefined && rawPoster !== null) {
+      if (!isReviewImagePath(rawPoster)) return null;
+      poster = rawPoster;
+    }
+    const rawOption = raw["option"];
+    let option: string | undefined;
+    if (rawOption !== undefined && rawOption !== null) {
+      if (typeof rawOption !== "string" || !optionIds.has(rawOption) || pair !== undefined) return null;
+      option = rawOption;
+    }
+    return { kind, path: videoPath, ...(poster === undefined ? {} : { poster }), ...extras, ...(option === undefined ? {} : { option }) };
   }
   if (kind === "mermaid" || kind === "diff") {
     const source = raw["source"];

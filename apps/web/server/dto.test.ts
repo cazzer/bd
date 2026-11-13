@@ -88,6 +88,42 @@ describe("toBoardItemDto card", () => {
     expect(dto.reviewImages).toEqual([{ path: shot, name: "01.png", url: "/review-images/bd/bd-1/01.png" }]);
   });
 
+  it("gives a video its name, route URL, and poster URL, and keeps it out of reviewImages", () => {
+    const reel = path.join(ROOT, "bd", "bd-1", "01-reel a.mp4");
+    const poster = path.join(ROOT, "bd", "bd-1", "02-reel-poster.jpg");
+    const review = normalized({
+      images: [],
+      pane: null,
+      summary: "Which cut?",
+      question: "Which cut?",
+      options: [
+        { id: "A", label: "Cut 1" },
+        { id: "B", label: "Cut 2" },
+      ],
+      attachments: [
+        { kind: "video", path: reel, poster, caption: "Cut 1", option: "A" },
+        { kind: "video", path: "/elsewhere/raw.webm", poster: "/elsewhere/raw.jpg" },
+      ],
+    });
+    const dto = toBoardItemDto(item(review), ROOT);
+    expect(dto.card?.attachments).toEqual([
+      {
+        kind: "video",
+        path: reel,
+        poster,
+        caption: "Cut 1",
+        option: "A",
+        name: "01-reel a.mp4",
+        url: "/review-images/bd/bd-1/01-reel%20a.mp4",
+        posterUrl: "/review-images/bd/bd-1/02-reel-poster.jpg",
+      },
+      { kind: "video", path: "/elsewhere/raw.webm", poster: "/elsewhere/raw.jpg", name: "raw.webm", url: null, posterUrl: null },
+    ]);
+    expect(dto.reviewImages).toEqual([]);
+    const noPoster = normalized({ images: [], pane: null, summary: "q", question: "q", attachments: [{ kind: "video", path: reel }] });
+    expect(toBoardItemDto(item(noPoster), ROOT).card?.attachments[0]).toMatchObject({ posterUrl: null });
+  });
+
   it("calls a review with any card key a card, even a question alone", () => {
     expect(toBoardItemDto(item(normalized({ images: [], pane: null, summary: "q", question: "q" })), ROOT).card?.legacy).toBe(false);
     expect(toBoardItemDto(item(normalized({ images: [], pane: null, summary: "", on_accept: ["x"] })), ROOT).card?.legacy).toBe(false);

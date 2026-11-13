@@ -36,6 +36,7 @@ import {
 } from "./reviews.js";
 
 const img = (n: number) => path.join(REVIEW_IMAGE_ROOT, "proj", "bd-1", `${String(n).padStart(2, "0")}-shot.png`);
+const vid = (n: number) => path.join(REVIEW_IMAGE_ROOT, "proj", "bd-1", `${String(n).padStart(2, "0")}-reel.mp4`);
 
 describe("normalizeReviewMetadata", () => {
   it("keeps a valid review and drops unknown keys", () => {
@@ -140,7 +141,13 @@ const card = (extra: Record<string, unknown> = {}) => ({ images: [], pane: null,
 
 describe("normalizeReviewMetadata decision cards", () => {
   it("finds every valid card fixture", () => {
-    expect(EXPECTED).toEqual(["before-after.expected.json", "keyed-budget.expected.json", "long-recommendation.expected.json", "shlo-k54.4.1.1.expected.json"]);
+    expect(EXPECTED).toEqual([
+      "before-after.expected.json",
+      "keyed-budget.expected.json",
+      "long-recommendation.expected.json",
+      "reel-cuts.expected.json",
+      "shlo-k54.4.1.1.expected.json",
+    ]);
   });
 
   it.each(EXPECTED)("normalizes %s to itself, byte for byte", (name) => {
@@ -230,7 +237,7 @@ describe("normalizeReviewMetadata decision cards", () => {
     ["attachments not an array", { attachments: { kind: "diff", source: "" } }],
     ["too many attachments", { attachments: Array.from({ length: MAX_REVIEW_ATTACHMENTS + 1 }, () => ({ kind: "diff", source: "+" })) }],
     ["an attachment that is not a plain object", { attachments: ["diff"] }],
-    ["an unknown attachment kind", { attachments: [{ kind: "video", path: img(1) }] }],
+    ["an unknown attachment kind", { attachments: [{ kind: "pdf", path: img(1) }] }],
     ["an attachment without a kind", { attachments: [{ path: img(1) }] }],
     ["an image attachment without a path", { attachments: [{ kind: "image" }] }],
     ["a relative image attachment path", { attachments: [{ kind: "image", path: "shots/a.png" }] }],
@@ -240,8 +247,51 @@ describe("normalizeReviewMetadata decision cards", () => {
     ["a diff attachment with a non-string source", { attachments: [{ kind: "diff", source: ["+a"] }] }],
     ["an unknown pair", { attachments: [{ kind: "image", path: img(1), pair: "during" }] }],
     ["a non-string caption", { attachments: [{ kind: "image", path: img(1), caption: 3 }] }],
+    ["a video without a path", { attachments: [{ kind: "video" }] }],
+    ["a relative video path", { attachments: [{ kind: "video", path: "reel.mp4" }] }],
+    ["a relative poster", { attachments: [{ kind: "video", path: vid(1), poster: "reel.jpg" }] }],
+    ["a non-string poster", { attachments: [{ kind: "video", path: vid(1), poster: 1 }] }],
+    ["a video option on a card without options", { attachments: [{ kind: "video", path: vid(1), option: "A" }] }],
+    ["a video option naming no option", { options: [optionA, optionB], attachments: [{ kind: "video", path: vid(1), option: "C" }] }],
+    ["a non-string video option", { options: [optionA, optionB], attachments: [{ kind: "video", path: vid(1), option: 1 }] }],
+    [
+      "two videos naming one option",
+      { options: [optionA, optionB], attachments: [{ kind: "video", path: vid(1), option: "A" }, { kind: "video", path: vid(2), option: "A" }] },
+    ],
+    ["a video with both option and pair", { options: [optionA, optionB], attachments: [{ kind: "video", path: vid(1), option: "A", pair: "before" }] }],
   ])("marks a card with %s invalid", (_label, extra) => {
     expect(normalizeReviewMetadata(card(extra))).toEqual({ invalid: true });
+  });
+
+  it("keeps a video's keys in order, and drops option and poster on other kinds", () => {
+    const review = normalizeReviewMetadata(
+      card({
+        options: [optionA, optionB],
+        attachments: [
+          { option: "B", pair: null, caption: " Cut 2 ", poster: img(2), path: vid(1), kind: "video", extra: 1 },
+          { kind: "video", path: vid(2), option: null, poster: null },
+          { kind: "image", path: img(1), option: "A", poster: img(3) },
+          { kind: "diff", source: "+", option: "A" },
+        ],
+      }),
+    );
+    expect(JSON.stringify((review as ReviewMetadata).attachments)).toBe(
+      JSON.stringify([
+        { kind: "video", path: vid(1), poster: img(2), caption: "Cut 2", option: "B" },
+        { kind: "video", path: vid(2) },
+        { kind: "image", path: img(1) },
+        { kind: "diff", source: "+" },
+      ]),
+    );
+    // A video is not an image: the legacy images list and reviewCard's appended images are untouched by it.
+    expect((review as ReviewMetadata).images).toEqual([]);
+    expect(normalizeReviewMetadata(review)).toEqual(review);
+  });
+
+  it("counts videos toward the attachment cap", () => {
+    const attachments = Array.from({ length: MAX_REVIEW_ATTACHMENTS }, (_, i) => ({ kind: i % 2 === 0 ? "video" : "image", path: i % 2 === 0 ? vid(i) : img(i) }));
+    expect(normalizeReviewMetadata(card({ attachments }))).toMatchObject({ attachments });
+    expect(normalizeReviewMetadata(card({ attachments: [...attachments, { kind: "video", path: vid(99) }] }))).toEqual({ invalid: true });
   });
 
   it("accepts exactly the option, step, and attachment caps", () => {

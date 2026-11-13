@@ -24,6 +24,17 @@
 // the key, a single card (and the image form, which writes no key) reuses
 // the newest keyless open review, as before keys existed; a multi-card call
 // never takes a keyless review, it warns about it.
+//
+// Videos (video-review-attachments, design.md decisions 2 and 3). A card
+// attachment may be `{ kind: video, path, poster?, caption?, pair?, option?
+// }`: an mp4 or webm of at most MAX_VIDEO_BYTES, an optional poster image,
+// and an optional `option` naming the card option the video is the cut of
+// (never with `pair`, at most one video per option). Videos and posters are
+// staged exactly as images are; a staged file's NN is its 1-based position
+// among every staged file in attachment order (an image's path, a video's
+// path, then that video's poster), so an image-only card numbers exactly as
+// before. The legacy `images` list holds image attachments only. The image
+// form takes images only; a video given there is "not an image".
 
 import fs from "node:fs/promises";
 import { realpathSync } from "node:fs";
@@ -59,6 +70,10 @@ const MAX_SOCKET_PATH = 512;
 // eslint-disable-next-line no-control-regex
 const CONTROL_CHAR = /[\u0000-\u001f\u007f]/;
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
+// Must agree with the content types apps/web/server/review-images.ts serves.
+const VIDEO_EXTENSIONS = new Set([".mp4", ".webm"]);
+/** A video attachment's size cap. */
+export const MAX_VIDEO_BYTES = 200 * 2 ** 20;
 const MAX_SUMMARY = 2000;
 const MAX_IMAGES = 20;
 const MAX_TITLE = 120;
@@ -79,6 +94,7 @@ const CARD_KEYS = ["question", "options", "recommend", "on_accept", "attachments
 const OPTION_KEYS = ["id", "label", "what", "risk"];
 const ATTACHMENT_KEYS = {
   image: ["kind", "path", "caption", "pair"],
+  video: ["kind", "path", "poster", "caption", "pair", "option"],
   mermaid: ["kind", "source", "caption", "pair"],
   diff: ["kind", "source", "caption", "pair"],
 };
@@ -178,6 +194,19 @@ export function imageProblem(imagePath, stat) {
   if (!stat.isFile() || !IMAGE_EXTENSIONS.has(path.extname(imagePath).toLowerCase())) {
     return `not an image (png, jpg, jpeg, gif, webp): ${imagePath}`;
   }
+  return null;
+}
+
+/** @param stat an fs.Stats for the path, or null when it does not exist. */
+export function videoProblem(videoPath, stat) {
+  if (stat === null) return `video not found: ${videoPath}`;
+  const ext = path.extname(videoPath).toLowerCase();
+  if (!stat.isFile() || !VIDEO_EXTENSIONS.has(ext)) {
+    // QuickTime holds the same H.264 an mp4 does, so a remux is lossless and instant.
+    const remux = ext === ".mov" ? `; remux it: ffmpeg -i ${videoPath} -c copy ${videoPath.slice(0, -ext.length)}.mp4` : "";
+    return `not a video (mp4, webm): ${videoPath}${remux}`;
+  }
+  if (stat.size > MAX_VIDEO_BYTES) return `video is ${Math.ceil(stat.size / 2 ** 20)} MB, over the ${MAX_VIDEO_BYTES / 2 ** 20} MB limit: ${videoPath}`;
   return null;
 }
 
@@ -329,9 +358,53 @@ function validateOnAccept(problems, raw) {
   return steps.length > 0 && steps.every((step) => step !== undefined) ? steps : undefined;
 }
 
-/** @returns {Promise<{ attachments: object[] | undefined, imagePaths: string[] }>} image paths absolute, in attachment order. */
-async function validateAttachments(problems, raw, cardDir) {
-  const none = { attachments: undefined, imagePaths: [] };
+/** A path field relative to the card, or null with the problem pushed when it is not text. */
+function cardPathField(problems, field, given, what) {
+  if (typeof given !== "string" || given.trim() === "" || given.includes("\u0000")) {
+    problems.push(`${field}: must be the path of ${what}, relative to the card, got ${given === undefined ? "nothing" : describe(given)}`);
+    return null;
+  }
+  return given;
+}
+
+/**
+ * A video attachment's `option` checked against the card's options: null
+ * with the problem pushed, or the id. `options` is the validated list, or
+ * undefined when the card has none or its options are already refused
+ * (then only "allowed only with options" can be said).
+ */
+function videoOption(problems, field, value, { hasOptions, options, videoOf }) {
+  if (!hasOptions) {
+    problems.push(`${field}: allowed only with options`);
+    return null;
+  }
+  const numeric = numericIdProblem(field, "option", value);
+  if (numeric) {
+    problems.push(numeric);
+    return null;
+  }
+  if (typeof value !== "string") {
+    problems.push(`${field}: must be an option id, got ${describe(value)}`);
+    return null;
+  }
+  if (options === undefined) return null;
+  if (!options.some((option) => option.id === value)) {
+    problems.push(`${field}: ${JSON.stringify(value)} names no option (options: ${options.map((o) => o.id).join(", ")})`);
+    return null;
+  }
+  if (videoOf.has(value)) {
+    problems.push(`${field}: ${value} already has a video (attachments[${videoOf.get(value)}])`);
+    return null;
+  }
+  return value;
+}
+
+/**
+ * @returns {Promise<{ attachments: object[] | undefined, stagedPaths: string[] }>} every file to stage, absolute, in
+ *   attachment order: an image's path; a video's path, then its poster.
+ */
+async function validateAttachments(problems, raw, cardDir, cardOptions) {
+  const none = { attachments: undefined, stagedPaths: [] };
   if (raw === undefined || raw === null) return none;
   if (!Array.isArray(raw)) {
     problems.push(`attachments: must be a list of at most ${MAX_ATTACHMENTS} attachments, got ${describe(raw)}`);
@@ -343,7 +416,8 @@ async function validateAttachments(problems, raw, cardDir) {
   }
   const before = problems.length;
   const attachments = [];
-  const imagePaths = [];
+  const stagedPaths = [];
+  const videoOf = new Map();
   for (const [index, attachment] of raw.entries()) {
     const field = `attachments[${index}]`;
     if (!isPlainObject(attachment)) {
@@ -352,7 +426,7 @@ async function validateAttachments(problems, raw, cardDir) {
     }
     const kind = attachment.kind;
     if (!Object.hasOwn(ATTACHMENT_KEYS, kind)) {
-      problems.push(`${field}.kind: must be image, mermaid, or diff, got ${kind === undefined ? "nothing" : describe(kind)}`);
+      problems.push(`${field}.kind: must be image, video, mermaid, or diff, got ${kind === undefined ? "nothing" : describe(kind)}`);
       continue;
     }
     unknownKeys(problems, `${field}.`, attachment, ATTACHMENT_KEYS[kind], `${kind === "image" ? "an" : "a"} ${kind} attachment`);
@@ -363,17 +437,42 @@ async function validateAttachments(problems, raw, cardDir) {
     }
     const extras = { ...(caption === undefined ? {} : { caption }), ...(pair === undefined || pair === null ? {} : { pair }) };
     if (kind === "image") {
-      const given = attachment.path;
-      if (typeof given !== "string" || given.trim() === "" || given.includes("\u0000")) {
-        problems.push(`${field}.path: must be the path of an image, relative to the card, got ${given === undefined ? "nothing" : describe(given)}`);
-        continue;
-      }
+      const given = cardPathField(problems, `${field}.path`, attachment.path, "an image");
+      if (given === null) continue;
       const abs = path.resolve(cardDir, given);
       const problem = imageProblem(given, await statOrNull(abs));
       if (problem) problems.push(`${field}.path: ${problem}`);
-      imagePaths.push(abs);
+      stagedPaths.push(abs);
       // The stored path replaces this one once the image is staged (cardReview).
       attachments.push({ kind, path: abs, ...extras });
+    } else if (kind === "video") {
+      const given = cardPathField(problems, `${field}.path`, attachment.path, "a video");
+      let abs = null;
+      if (given !== null) {
+        abs = path.resolve(cardDir, given);
+        const problem = videoProblem(given, await statOrNull(abs));
+        if (problem) problems.push(`${field}.path: ${problem}`);
+      }
+      let poster;
+      if (attachment.poster !== undefined && attachment.poster !== null) {
+        const givenPoster = cardPathField(problems, `${field}.poster`, attachment.poster, "an image");
+        if (givenPoster !== null) {
+          poster = path.resolve(cardDir, givenPoster);
+          const problem = imageProblem(givenPoster, await statOrNull(poster));
+          if (problem) problems.push(`${field}.poster: ${problem}`);
+        }
+      }
+      let option = null;
+      if (attachment.option !== undefined && attachment.option !== null) {
+        option = videoOption(problems, `${field}.option`, attachment.option, { ...cardOptions, videoOf });
+        if (option !== null) videoOf.set(option, index);
+        if (extras.pair !== undefined) problems.push(`${field}: option and pair can't both be set`);
+      }
+      if (abs === null) continue;
+      stagedPaths.push(abs);
+      if (poster !== undefined) stagedPaths.push(poster);
+      // The stored paths replace these once the files are staged (cardReview).
+      attachments.push({ kind, path: abs, ...(poster === undefined ? {} : { poster }), ...extras, ...(option === null ? {} : { option }) });
     } else {
       const source = attachment.source;
       if (typeof source !== "string" || source.trim() === "") {
@@ -387,7 +486,7 @@ async function validateAttachments(problems, raw, cardDir) {
     }
   }
   if (problems.length > before) return none;
-  return { attachments: attachments.length > 0 ? attachments : undefined, imagePaths };
+  return { attachments: attachments.length > 0 ? attachments : undefined, stagedPaths };
 }
 
 // A fence opener after its indent: three or more backticks or tildes; a backtick fence's info string holds no backtick.
@@ -465,13 +564,14 @@ export function countBodyWords(body) {
 /**
  * A parsed frontmatter value and body checked against the card contract,
  * every problem collected and named by its field. The card comes back in
- * the normalizer's key order, with image paths absolute (resolved against
- * `cardDir`); `problems` is empty when it may be filed.
+ * the normalizer's key order, with image, video, and poster paths absolute
+ * (resolved against `cardDir`) and listed in staging order in `stagedPaths`;
+ * `problems` is empty when it may be filed.
  */
 export async function validateCard(raw, body, cardDir) {
   const problems = [];
   if (!isPlainObject(raw)) {
-    return { problems: [`frontmatter: must be a mapping of card fields, got ${describe(raw)}`], card: null, imagePaths: [] };
+    return { problems: [`frontmatter: must be a mapping of card fields, got ${describe(raw)}`], card: null, stagedPaths: [] };
   }
   for (const key of Object.keys(raw)) {
     if (!CARD_KEYS.includes(key)) problems.push(`${key}: unknown field (card fields: ${CARD_KEYS.join(", ")})`);
@@ -494,7 +594,8 @@ export async function validateCard(raw, body, cardDir) {
   }
   const onAccept = validateOnAccept(problems, raw.on_accept);
   const key = validateKey(problems, raw.key);
-  const { attachments, imagePaths } = await validateAttachments(problems, raw.attachments, cardDir);
+  const hasOptions = raw.options !== undefined && raw.options !== null;
+  const { attachments, stagedPaths } = await validateAttachments(problems, raw.attachments, cardDir, { hasOptions, options });
   const bodyProblem = textProblem("body", body);
   if (bodyProblem) problems.push(bodyProblem);
   else if (body.length > MAX_BODY) problems.push(`body: at most ${MAX_BODY} characters, got ${body.length}`);
@@ -502,7 +603,7 @@ export async function validateCard(raw, body, cardDir) {
     const words = countBodyWords(body);
     if (words > MAX_BODY_WORDS) problems.push(`body: at most ${MAX_BODY_WORDS} words outside fenced blocks, got ${words}`);
   }
-  if (problems.length > 0) return { problems, card: null, imagePaths: [], key: undefined };
+  if (problems.length > 0) return { problems, card: null, stagedPaths: [], key: undefined };
   const card = {
     question,
     ...(options === undefined ? {} : { options }),
@@ -510,7 +611,7 @@ export async function validateCard(raw, body, cardDir) {
     ...(onAccept === undefined ? {} : { on_accept: onAccept }),
     ...(attachments === undefined ? {} : { attachments }),
   };
-  return { problems, card, imagePaths, key };
+  return { problems, card, stagedPaths, key };
 }
 
 const KEY_RULE = "a lower-case letter or digit, then up to 39 lower-case letters, digits, _ or -";
@@ -539,14 +640,20 @@ export function keyFromFilename(cardPath) {
 
 /**
  * The `review` value the card form writes: the legacy keys (`summary` = the
- * question, `images` = the stored image paths) and then the card, each image
- * attachment's path replaced by its stored path, in order.
+ * question, `images` = the stored image attachment paths) and then the card,
+ * each image, video, and poster path replaced by its stored path. `files` are
+ * the stored paths in staging order (validateAttachments' `stagedPaths`).
  */
-export function cardReview({ card, images, pane, socket = null, key = undefined }) {
+export function cardReview({ card, files, pane, socket = null, key = undefined }) {
   let next = 0;
-  const attachments = card.attachments?.map((attachment) =>
-    attachment.kind === "image" ? { ...attachment, path: images[next++] } : attachment,
-  );
+  const attachments = card.attachments?.map((attachment) => {
+    if (attachment.kind === "image") return { ...attachment, path: files[next++] };
+    if (attachment.kind !== "video") return attachment;
+    const stored = { ...attachment, path: files[next++] };
+    if (attachment.poster !== undefined) stored.poster = files[next++];
+    return stored;
+  });
+  const images = (attachments ?? []).flatMap((attachment) => (attachment.kind === "image" ? [attachment.path] : []));
   return {
     ...reviewMetadata({ images, pane, socket, summary: card.question }).review,
     ...(key === undefined ? {} : { key }),
@@ -743,7 +850,7 @@ export async function requestReview(deps) {
     for (const [index, request] of requests.entries()) {
       if (request.card) checkCardSize(deps, request, { project: plan.project, existing: chosen[index] });
     }
-    for (const request of requests) stagedAll.push(await stageImages(deps, plan.project.key, request.images));
+    for (const request of requests) stagedAll.push(await stageFiles(deps, plan.project.key, request.files));
     const result = await fileAll(deps, requests, plan, chosen, stagedAll);
     if (result.exitCode === 0 && "summary" in parsed.args) {
       const warning = summaryWarning(parsed.args, deps.breakdownRoot);
@@ -755,7 +862,7 @@ export async function requestReview(deps) {
     for (const line of message.split("\n")) deps.warn(PREFIX + line);
     return { exitCode: 1 };
   } finally {
-    // Already gone once the images were moved into place; on any other path nothing may be left behind.
+    // Already gone once the files were moved into place; on any other path nothing may be left behind.
     for (const staged of stagedAll) await fs.rm(staged.dir, { recursive: true, force: true });
   }
 }
@@ -771,9 +878,10 @@ export function summaryWarning({ itemId, summary }, breakdownRoot) {
 }
 
 /**
- * What `write` files, from either form: `images` as given (resolved against
- * the cwd when staged), `description` for the bead, `headline` for the
- * notification and the update comment, and the validated card or null.
+ * What `write` files, from either form: `files` to stage as given (resolved
+ * against the cwd when staged), `counts` of images and videos for the closing
+ * line, `description` for the bead, `headline` for the notification and the
+ * update comment, and the validated card or null.
  */
 async function imageRequest(deps, args) {
   const problems = [];
@@ -783,7 +891,7 @@ async function imageRequest(deps, args) {
   }
   if (problems.length > 0) throw new Refusal([...problems, "Nothing was filed."].join("\n"));
   const { itemId, boardUrl, images, summary } = args;
-  return { itemId, boardUrl, images, description: summary, headline: summary, card: null };
+  return { itemId, boardUrl, files: images, counts: { images: images.length, videos: 0 }, description: summary, headline: summary, card: null };
 }
 
 async function readCardRequest(deps, args) {
@@ -824,7 +932,7 @@ async function readCardRequest(deps, args) {
     );
     throw new Refusal(`frontmatter: not valid YAML: ${where}. Nothing was filed.`);
   }
-  const { problems, card, imagePaths, key: given } = await validateCard(raw, split.body, path.dirname(cardFile));
+  const { problems, card, stagedPaths, key: given } = await validateCard(raw, split.body, path.dirname(cardFile));
   const key = given ?? keyFromFilename(args.cardPath);
   if (problems.length === 0 && key === null) {
     problems.push(`key: the filename ${path.basename(args.cardPath)} gives no usable key; set one in the frontmatter (${KEY_RULE})`);
@@ -835,7 +943,11 @@ async function readCardRequest(deps, args) {
     itemId: args.itemId,
     boardUrl: args.boardUrl,
     cardPath: args.cardPath,
-    images: imagePaths,
+    files: stagedPaths,
+    counts: {
+      images: (card.attachments ?? []).filter((a) => a.kind === "image").length,
+      videos: (card.attachments ?? []).filter((a) => a.kind === "video").length,
+    },
     description: split.body === "" ? card.question : split.body,
     headline: card.question,
     card,
@@ -894,8 +1006,8 @@ function firstLineOf(text) {
 function checkCardSize(deps, request, { project, existing }) {
   const id = existing ? existing.review.id : `${request.itemId}${NEW_REVIEW_ID_SUFFIX}`;
   const dir = path.join(reviewDir(deps.homedir, project.key), id);
-  const images = request.images.map((given, index) => path.join(dir, copiedName(index, given)));
-  const review = cardReview({ card: request.card, images, pane: paneFrom(deps.env), socket: socketFrom(deps.env), key: request.key });
+  const files = request.files.map((given, index) => path.join(dir, copiedName(index, given)));
+  const review = cardReview({ card: request.card, files, pane: paneFrom(deps.env), socket: socketFrom(deps.env), key: request.key });
   // The normalizer writes `pane: null` when there is none; count it as it will be stored.
   const size = JSON.stringify({ pane: null, ...review }).length;
   if (size > MAX_REVIEW_JSON) {
@@ -969,15 +1081,15 @@ async function check(deps, args) {
   return { project, item, children, bdCwd };
 }
 
-/** Copies the images before any bead is filed, so a copy failure refuses with nothing filed. */
-async function stageImages(deps, key, images) {
+/** Copies the images, videos, and posters before any bead is filed, so a copy failure refuses with nothing filed. */
+async function stageFiles(deps, key, files) {
   const projectDir = reviewDir(deps.homedir, key);
   let dir = null;
   try {
     await fs.mkdir(projectDir, { recursive: true });
     dir = await fs.mkdtemp(path.join(projectDir, `.staging-${process.pid}-`));
     const names = [];
-    for (const [index, given] of images.entries()) {
+    for (const [index, given] of files.entries()) {
       const name = copiedName(index, given);
       await fs.copyFile(path.resolve(deps.cwd, given), path.join(dir, name));
       names.push(name);
@@ -985,11 +1097,11 @@ async function stageImages(deps, key, images) {
     return { dir, names };
   } catch (err) {
     if (dir) await fs.rm(dir, { recursive: true, force: true });
-    throw new Refusal(`could not copy the images under ${projectDir}: ${err.message}. Nothing was filed.`);
+    throw new Refusal(`could not copy the attachments under ${projectDir}: ${err.message}. Nothing was filed.`);
   }
 }
 
-/** Swaps the staged images in as the bead's directory; the previous images stay until the new ones are in place. */
+/** Swaps the staged files in as the bead's directory; the previous files stay until the new ones are in place. */
 async function placeImages(deps, key, id, staged) {
   const projectDir = reviewDir(deps.homedir, key);
   const finalDir = path.join(projectDir, id);
@@ -1087,7 +1199,7 @@ async function fileOne(deps, request, { project, item, bdCwd }, existing, staged
   }
 
   const metadata = request.card
-    ? { review: cardReview({ card: request.card, images: stored, pane, socket, key: request.key }) }
+    ? { review: cardReview({ card: request.card, files: stored, pane, socket, key: request.key }) }
     : reviewMetadata({ images: stored, pane, socket, summary: request.headline });
   const updateArgs = ["update", id, "--metadata", JSON.stringify(metadata)];
   if (existing) updateArgs.push("--description", request.description);
@@ -1180,12 +1292,13 @@ async function fileAll(deps, requests, plan, chosen, stagedAll) {
     );
   }
 
-  const images = (n) => `${n} image${n === 1 ? "" : "s"}`;
+  const plural = (n, noun) => `${n} ${noun}${n === 1 ? "" : "s"}`;
+  const media = ({ images, videos }) => (videos === 0 ? plural(images, "image") : `${plural(images, "image")}, ${plural(videos, "video")}`);
   if (single) {
-    deps.out(`Review ${first.id} ${first.reused ? "updated" : "filed"} for ${itemId} in ${project.key} (${images(first.stored.length)}).`);
+    deps.out(`Review ${first.id} ${first.reused ? "updated" : "filed"} for ${itemId} in ${project.key} (${media(first.request.counts)}).`);
   } else {
     for (const f of filed) {
-      deps.out(`Review ${f.id} ${f.reused ? "updated" : "filed"} for ${itemId} in ${project.key} (key ${f.request.key}, ${images(f.stored.length)}): ${f.request.headline}`);
+      deps.out(`Review ${f.id} ${f.reused ? "updated" : "filed"} for ${itemId} in ${project.key} (key ${f.request.key}, ${media(f.request.counts)}): ${f.request.headline}`);
     }
   }
   // Open reviews this call did not touch, so a renamed card file's second review is visible (design.md, risks).

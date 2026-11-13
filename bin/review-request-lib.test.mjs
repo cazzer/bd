@@ -9,6 +9,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   CHROME_APP_TAB_SCRIPT,
   MAX_BODY_WORDS,
+  MAX_VIDEO_BYTES,
   SUMMARY_WARN_CHARS,
   USAGE,
   apiBase,
@@ -26,6 +27,7 @@ import {
   splitCard,
   summaryWarning,
   validateCard,
+  videoProblem,
 } from "./review-request-lib.mjs";
 
 const BREAKDOWN_ROOT = "/opt/breakdown";
@@ -325,7 +327,7 @@ describe("requestReview refusals", () => {
     };
     const h = await harness(fx, { handlers: { "git rev-parse --path-format=absolute": vanish } });
     assert.equal(h.warn.length, 1);
-    assert.match(h.warn[0], new RegExp(`^review-request: could not copy the images under ${fx.projectDir}: ENOENT.*b\\.png.*\\. Nothing was filed\\.$`));
+    assert.match(h.warn[0], new RegExp(`^review-request: could not copy the attachments under ${fx.projectDir}: ENOENT.*b\\.png.*\\. Nothing was filed\\.$`));
     await assertNothingFiled(fx, h);
   });
 
@@ -635,7 +637,9 @@ const INVALID_REFUSALS = {
   "invalid-question-too-long.md": ["question: at most 140 characters, got 160", "several decisions? one card each: review-request scr-1 a.md b.md …", "Nothing was filed."],
   "invalid-repeated-option-id.md": ["options[1].id: A repeats options[0].id", "Nothing was filed."],
   "invalid-recommend-unknown.md": ['recommend: "D" names no option (options: A, B, C)', "Nothing was filed."],
-  "invalid-unknown-kind.md": ['attachments[0].kind: must be image, mermaid, or diff, got "video"', "Nothing was filed."],
+  "invalid-unknown-kind.md": ['attachments[0].kind: must be image, video, mermaid, or diff, got "pdf"', "Nothing was filed."],
+  "invalid-video-option-unknown.md": ['attachments[0].option: "C" names no option (options: A, B)', "Nothing was filed."],
+  "invalid-video-extension.md": ["attachments[0].path: not a video (mp4, webm): before.png", "Nothing was filed."],
   "invalid-unknown-key.md": ["recomend: unknown field (card fields: question, options, recommend, on_accept, attachments, key)", "Nothing was filed."],
   "invalid-body-over-budget.md": ["body: at most 300 words outside fenced blocks, got 315", "several decisions? one card each: review-request scr-1 a.md b.md …", "Nothing was filed."],
   "invalid-key.md": ['key: must be a lower-case letter or digit, then up to 39 lower-case letters, digits, _ or -; got "Has Spaces"', "Nothing was filed."],
@@ -716,16 +720,23 @@ describe("card fixtures", () => {
       const { body } = splitCard(await fs.readFile(cardFile, "utf8"));
       const create = callTo(h, "create").args;
       assert.equal(create[create.indexOf("-d") + 1], body === "" ? written.review.question : body);
-      const { question, images } = written.review;
+      const { question, images, attachments = [] } = written.review;
       assert.deepEqual(h.calls.find((c) => c.cmd === "herdr").args, [
         "notification", "show", `Review requested: scratch ${ITEM}`, "--body", question.slice(0, 200), "--sound", "request",
       ]);
-      assert.deepEqual((await fs.readdir(dir)).sort(), images.map((p) => path.basename(p)).sort());
-      for (const stored of images) {
-        const source = path.join(CARDS, path.basename(stored).replace(/^\d\d-/, ""));
-        assert.deepEqual(await fs.readFile(stored), await fs.readFile(source));
+      // Every stored path (images, videos, posters) is staged, and nothing else is; NN counts staged files in order.
+      const stored = attachments.flatMap((a) => [a.path, a.poster].filter((p) => p !== undefined));
+      assert.deepEqual(images, attachments.flatMap((a) => (a.kind === "image" ? [a.path] : [])));
+      assert.deepEqual(stored.map((p) => path.basename(p).slice(0, 3)), stored.map((_, i) => `${String(i + 1).padStart(2, "0")}-`));
+      assert.deepEqual((await fs.readdir(dir)).sort(), stored.map((p) => path.basename(p)).sort());
+      for (const file of stored) {
+        const source = path.join(CARDS, path.basename(file).replace(/^\d\d-/, ""));
+        assert.deepEqual(await fs.readFile(file), await fs.readFile(source));
       }
-      assert.equal(h.out[0], `Review ${REVIEW} filed for ${ITEM} in scratch (${images.length} image${images.length === 1 ? "" : "s"}).`);
+      const videos = attachments.filter((a) => a.kind === "video").length;
+      const plural = (n, noun) => `${n} ${noun}${n === 1 ? "" : "s"}`;
+      const media = videos === 0 ? plural(images.length, "image") : `${plural(images.length, "image")}, ${plural(videos, "video")}`;
+      assert.equal(h.out[0], `Review ${REVIEW} filed for ${ITEM} in scratch (${media}).`);
     });
   }
 
@@ -1133,6 +1144,152 @@ describe("card form", () => {
     const reused = await harness(reuseFx, { children: [existing], argv: [ITEM, await writeCard(reuseFx, imageCard(second))] });
     assert.equal(reused.result.exitCode, 0, reused.warn.join("\n"));
     assert.equal(callTo(reused, "update").args[3].length, `{"review":}`.length + 16_010 - 28);
+  });
+});
+
+// ---- Videos (video-review-attachments, design.md decisions 2 and 3) ----
+
+describe("videoProblem", () => {
+  const file = (size) => ({ isFile: () => true, size });
+  it("accepts an mp4 or webm up to 200 MB, any case of extension", () => {
+    assert.equal(MAX_VIDEO_BYTES, 200 * 2 ** 20);
+    assert.equal(videoProblem("reel.mp4", file(MAX_VIDEO_BYTES)), null);
+    assert.equal(videoProblem("cuts/reel.WEBM", file(1)), null);
+  });
+  it("names a missing file, a non-video, and a directory", () => {
+    assert.equal(videoProblem("gone.mp4", null), "video not found: gone.mp4");
+    assert.equal(videoProblem("reel.avi", file(1)), "not a video (mp4, webm): reel.avi");
+    assert.equal(videoProblem("reel.mp4", { isFile: () => false, size: 0 }), "not a video (mp4, webm): reel.mp4");
+  });
+  it("gives the remux command for a QuickTime file", () => {
+    assert.equal(videoProblem("reel.mov", file(1)), "not a video (mp4, webm): reel.mov; remux it: ffmpeg -i reel.mov -c copy reel.mp4");
+    assert.equal(videoProblem("cuts/Reel.MOV", file(1)), "not a video (mp4, webm): cuts/Reel.MOV; remux it: ffmpeg -i cuts/Reel.MOV -c copy cuts/Reel.mp4");
+  });
+  it("names the size in MB, rounded up, over the cap", () => {
+    assert.equal(videoProblem("reel.mp4", file(MAX_VIDEO_BYTES + 1)), "video is 201 MB, over the 200 MB limit: reel.mp4");
+    assert.equal(videoProblem("reel.mp4", file(250 * 2 ** 20)), "video is 250 MB, over the 200 MB limit: reel.mp4");
+  });
+});
+
+describe("video attachments", () => {
+  /** A card under the caller worktree's `cards/`, with `files` (name → contents) written beside it. */
+  async function videoCard(fx, frontmatter, files = {}) {
+    const card = await writeCard(fx, `---\n${frontmatter}---\n`);
+    for (const [name, contents] of Object.entries(files)) await fs.writeFile(path.join(fx.worktree, "cards", name), contents);
+    return card;
+  }
+  const AB = "options:\n  - { id: A, label: a }\n  - { id: B, label: b }\n";
+
+  it("numbers staged files in attachment order, a poster after its video, and lists images alone as legacy images", async () => {
+    const fx = await fixture();
+    const card = await videoCard(
+      fx,
+      `question: Which cut?\n${AB}attachments:\n  - { kind: image, path: ../a.png }\n  - { kind: video, path: cut.mp4, poster: cut.jpg, caption: Cut, option: B }\n  - { kind: image, path: ../b.png }\n  - { kind: video, path: raw.webm }\n`,
+      { "cut.mp4": "V1", "cut.jpg": "P1", "raw.webm": "W1" },
+    );
+    const h = await harness(fx, { argv: [ITEM, card] });
+    assert.equal(h.result.exitCode, 0, h.warn.join("\n"));
+    const dir = path.join(fx.projectDir, REVIEW);
+    const { review } = JSON.parse(callTo(h, "update").args[3]);
+    assert.deepEqual(review.images, [path.join(dir, "01-a.png"), path.join(dir, "04-b.png")]);
+    assert.equal(
+      JSON.stringify(review.attachments),
+      JSON.stringify([
+        { kind: "image", path: path.join(dir, "01-a.png") },
+        { kind: "video", path: path.join(dir, "02-cut.mp4"), poster: path.join(dir, "03-cut.jpg"), caption: "Cut", option: "B" },
+        { kind: "image", path: path.join(dir, "04-b.png") },
+        { kind: "video", path: path.join(dir, "05-raw.webm") },
+      ]),
+    );
+    assert.deepEqual((await fs.readdir(dir)).sort(), ["01-a.png", "02-cut.mp4", "03-cut.jpg", "04-b.png", "05-raw.webm"]);
+    assert.equal(await fs.readFile(path.join(dir, "03-cut.jpg"), "utf8"), "P1");
+    assert.equal(h.out[0], `Review ${REVIEW} filed for ${ITEM} in scratch (2 images, 2 videos).`);
+  });
+
+  it("refuses a video over 200 MB naming its size, with nothing filed", async () => {
+    const fx = await fixture();
+    const card = await videoCard(fx, "question: Q?\nattachments:\n  - { kind: video, path: reel.mp4 }\n");
+    // Sparse: the size is what is checked, never the content.
+    await fs.truncate(await (async () => {
+      const file = path.join(fx.worktree, "cards", "reel.mp4");
+      await fs.writeFile(file, "");
+      return file;
+    })(), 250 * 2 ** 20);
+    const h = await harness(fx, { argv: [ITEM, card] });
+    assert.deepEqual(h.warn, ["review-request: attachments[0].path: video is 250 MB, over the 200 MB limit: reel.mp4", "review-request: Nothing was filed."]);
+    assert.deepEqual(h.calls, []);
+    await assertNothingFiled(fx, h);
+  });
+
+  const refusals = [
+    ["a missing video", "question: Q?\nattachments:\n  - { kind: video, path: gone.mp4 }\n", {}, ["attachments[0].path: video not found: gone.mp4"]],
+    [
+      "a QuickTime video, with the remux command",
+      "question: Q?\nattachments:\n  - { kind: video, path: reel.mov }\n",
+      { "reel.mov": "Q" },
+      ["attachments[0].path: not a video (mp4, webm): reel.mov; remux it: ffmpeg -i reel.mov -c copy reel.mp4"],
+    ],
+    ["a video path that is not text", "question: Q?\nattachments:\n  - { kind: video, path: [a] }\n", {}, ["attachments[0].path: must be the path of a video, relative to the card, got a list"]],
+    [
+      "a missing poster and a non-image poster",
+      "question: Q?\nattachments:\n  - { kind: video, path: v.mp4, poster: gone.jpg }\n  - { kind: video, path: v.mp4, poster: ../notes.txt }\n",
+      { "v.mp4": "V" },
+      ["attachments[0].poster: image not found: gone.jpg", "attachments[1].poster: not an image (png, jpg, jpeg, gif, webp): ../notes.txt"],
+    ],
+    ["an option without options", "question: Q?\nattachments:\n  - { kind: video, path: v.mp4, option: A }\n", { "v.mp4": "V" }, ["attachments[0].option: allowed only with options"]],
+    [
+      "an option that names no option",
+      `question: Q?\n${AB}attachments:\n  - { kind: video, path: v.mp4, option: C }\n`,
+      { "v.mp4": "V" },
+      ['attachments[0].option: "C" names no option (options: A, B)'],
+    ],
+    [
+      "a numeric option",
+      'question: Q?\noptions:\n  - { id: "1", label: a }\n  - { id: "2", label: b }\nattachments:\n  - { kind: video, path: v.mp4, option: 1 }\n',
+      { "v.mp4": "V" },
+      ['attachments[0].option: got the number 1; quote it: option: "1"'],
+    ],
+    [
+      "two videos naming one option",
+      `question: Q?\n${AB}attachments:\n  - { kind: video, path: v.mp4, option: A }\n  - { kind: mermaid, source: x }\n  - { kind: video, path: v.mp4, option: A }\n`,
+      { "v.mp4": "V" },
+      ["attachments[2].option: A already has a video (attachments[0])"],
+    ],
+    [
+      "option and pair together",
+      `question: Q?\n${AB}attachments:\n  - { kind: video, path: v.mp4, option: A, pair: before }\n`,
+      { "v.mp4": "V" },
+      ["attachments[0]: option and pair can't both be set"],
+    ],
+    [
+      "an option on an image",
+      `question: Q?\n${AB}attachments:\n  - { kind: image, path: ../a.png, option: A }\n`,
+      {},
+      ["attachments[0].option: not a field of an image attachment (fields: kind, path, caption, pair)"],
+    ],
+    [
+      "an unknown key on a video",
+      "question: Q?\nattachments:\n  - { kind: video, path: v.mp4, autoplay: true }\n",
+      { "v.mp4": "V" },
+      ["attachments[0].autoplay: not a field of a video attachment (fields: kind, path, poster, caption, pair, option)"],
+    ],
+  ];
+  for (const [what, frontmatter, files, problems] of refusals) {
+    it(`refuses ${what}, naming the field, before any lookup`, async () => {
+      const fx = await fixture();
+      const h = await harness(fx, { argv: [ITEM, await videoCard(fx, frontmatter, files)] });
+      assert.deepEqual(h.warn, [...problems, "Nothing was filed."].map((line) => `review-request: ${line}`));
+      assert.deepEqual(h.calls, []);
+      await assertNothingFiled(fx, h);
+    });
+  }
+
+  it("the image form takes no video", async () => {
+    const fx = await fixture();
+    await fs.writeFile(path.join(fx.worktree, "reel.mp4"), "V");
+    const h = await harness(fx, { argv: [ITEM, "--summary", "s", "reel.mp4"] });
+    assert.deepEqual(h.warn, ["review-request: not an image (png, jpg, jpeg, gif, webp): reel.mp4", "review-request: Nothing was filed."]);
+    await assertNothingFiled(fx, h);
   });
 });
 
