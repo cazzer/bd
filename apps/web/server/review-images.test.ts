@@ -200,6 +200,13 @@ describe("createReviewImageHandler over HTTP", () => {
     expect(Buffer.from(await res.arrayBuffer())).toEqual(MP4);
   });
 
+  it("answers an empty file with 200 and no body", async () => {
+    const res = await fetch(`${origin}/review-images/empty.mp4`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-length")).toBe("0");
+    expect((await res.arrayBuffer()).byteLength).toBe(0);
+  });
+
   it("answers a single range with 206, Content-Range, and exactly those bytes", async () => {
     const res = await fetch(`${origin}/review-images/reel.mp4`, { headers: { Range: "bytes=0-1" } });
     expect(res.status).toBe(206);

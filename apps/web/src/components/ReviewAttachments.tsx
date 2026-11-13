@@ -64,7 +64,7 @@ import {
   type VideoAttachment,
 } from "../lib/reviewAttachments.js";
 import { DiffBlock } from "./DiffBlock.js";
-import { Lightbox } from "./Lightbox.js";
+import { Lightbox, type LightboxVideoState } from "./Lightbox.js";
 import { MermaidBlock } from "./MermaidBlock.js";
 import { IdBadge } from "./ReviewCardBody.js";
 
@@ -454,7 +454,7 @@ function ReviewVideo({
   const [failed, setFailed] = useState<string | null>(null);
   /** The whole second the player is at, so Note re-renders once a second at most. */
   const [second, setSecond] = useState(0);
-  const [enlarged, setEnlarged] = useState<{ startAt: number } | null>(null);
+  const [enlarged, setEnlarged] = useState<{ startAt: number; muted: boolean } | null>(null);
   const returnFocus = useRef(false);
   const enlargedNow = useRef(false);
   enlargedNow.current = enlarged !== null;
@@ -486,15 +486,18 @@ function ReviewVideo({
     const player = videoRef.current;
     const startAt = player?.currentTime ?? 0;
     player?.pause();
-    setEnlarged({ startAt: Number.isFinite(startAt) ? startAt : 0 });
+    setEnlarged({ startAt: Number.isFinite(startAt) ? startAt : 0, muted: player?.muted ?? true });
   }
 
-  function closeEnlarged(time?: number) {
+  function closeEnlarged(left?: LightboxVideoState) {
     const player = videoRef.current;
-    if (player && time !== undefined && Number.isFinite(time)) {
-      player.currentTime = time;
+    if (player && left !== undefined) {
+      if (Number.isFinite(left.time)) player.currentTime = left.time;
+      // Not a React prop after mount (`muted` is set once), so the element keeps what is set here.
+      player.muted = left.muted;
       syncSecond();
     }
+    if (left !== undefined) setLoop(left.loop);
     returnFocus.current = true;
     setEnlarged(null);
   }
@@ -554,7 +557,7 @@ function ReviewVideo({
       </figcaption>
       {enlarged !== null && src !== null && (
         <Lightbox
-          items={[{ kind: "video", name: video.name, path: video.path, src, poster: video.poster }]}
+          items={[{ kind: "video", name: video.name, path: video.path, src, poster: video.poster, muted: enlarged.muted, loop }]}
           index={0}
           onIndexChange={() => {}}
           startAt={enlarged.startAt}

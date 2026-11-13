@@ -197,13 +197,18 @@ export function imageProblem(imagePath, stat) {
   return null;
 }
 
+/** A path as one shell word for a command a person pastes: as is when plain, else single-quoted (a `'` inside as `'\''`). */
+function shellWord(text) {
+  return /^[A-Za-z0-9._/-]+$/.test(text) ? text : `'${text.replaceAll("'", "'\\''")}'`;
+}
+
 /** @param stat an fs.Stats for the path, or null when it does not exist. */
 export function videoProblem(videoPath, stat) {
   if (stat === null) return `video not found: ${videoPath}`;
   const ext = path.extname(videoPath).toLowerCase();
   if (!stat.isFile() || !VIDEO_EXTENSIONS.has(ext)) {
     // QuickTime holds the same H.264 an mp4 does, so a remux is lossless and instant.
-    const remux = ext === ".mov" ? `; remux it: ffmpeg -i ${videoPath} -c copy ${videoPath.slice(0, -ext.length)}.mp4` : "";
+    const remux = ext === ".mov" ? `; remux it: ffmpeg -i ${shellWord(videoPath)} -c copy ${shellWord(`${videoPath.slice(0, -ext.length)}.mp4`)}` : "";
     return `not a video (mp4, webm): ${videoPath}${remux}`;
   }
   if (stat.size > MAX_VIDEO_BYTES) return `video is ${Math.ceil(stat.size / 2 ** 20)} MB, over the ${MAX_VIDEO_BYTES / 2 ** 20} MB limit: ${videoPath}`;

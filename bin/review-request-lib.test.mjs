@@ -1165,6 +1165,13 @@ describe("videoProblem", () => {
     assert.equal(videoProblem("reel.mov", file(1)), "not a video (mp4, webm): reel.mov; remux it: ffmpeg -i reel.mov -c copy reel.mp4");
     assert.equal(videoProblem("cuts/Reel.MOV", file(1)), "not a video (mp4, webm): cuts/Reel.MOV; remux it: ffmpeg -i cuts/Reel.MOV -c copy cuts/Reel.mp4");
   });
+  it("single-quotes a remux path a shell would split or expand, a quote inside it too", () => {
+    assert.equal(
+      videoProblem("my cut (1).mov", file(1)),
+      "not a video (mp4, webm): my cut (1).mov; remux it: ffmpeg -i 'my cut (1).mov' -c copy 'my cut (1).mp4'",
+    );
+    assert.equal(videoProblem("Bob's $cut.mov", file(1)), `not a video (mp4, webm): Bob's $cut.mov; remux it: ffmpeg -i 'Bob'\\''s $cut.mov' -c copy 'Bob'\\''s $cut.mp4'`);
+  });
   it("names the size in MB, rounded up, over the cap", () => {
     assert.equal(videoProblem("reel.mp4", file(MAX_VIDEO_BYTES + 1)), "video is 201 MB, over the 200 MB limit: reel.mp4");
     assert.equal(videoProblem("reel.mp4", file(250 * 2 ** 20)), "video is 250 MB, over the 200 MB limit: reel.mp4");

@@ -223,12 +223,13 @@ export function createReviewImageHandler(options: ReviewImageHandlerOptions = {}
         ...COMMON_HEADERS,
       });
     }
-    if (req.method === "HEAD") {
+    if (req.method === "HEAD" || resolved.size === 0) {
       res.end();
       return;
     }
     try {
-      await pipeline(createReadStream(resolved.file, range ?? {}), res);
+      // Bounded by the size just sent as Content-Length, so a file that grows mid-stream never overruns it.
+      await pipeline(createReadStream(resolved.file, range ?? { start: 0, end: resolved.size - 1 }), res);
     } catch (err) {
       // A client that went away mid-file (a closed lightbox, a navigation) is not an error worth logging.
       // (pipeline has destroyed `res` by now either way, so the code is what tells them apart.)

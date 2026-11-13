@@ -10,8 +10,9 @@
 // parent owns where focus returns, and unmounts this when the item it shows
 // no longer exists.
 //
-// A video plays muted from `startAt` (the inline player's time), and closing
-// reports the time it reached, so the inline player picks up there.
+// A video plays from `startAt` (the inline player's time), muted and looping
+// as the inline player was, and closing reports the time it reached and its
+// mute and loop, so the inline player picks up there as it was left.
 
 import { useLayoutEffect, useRef, useState, type KeyboardEvent, type SyntheticEvent } from "react";
 import { stepIndex } from "../lib/reviewDrawer.js";
@@ -25,6 +26,17 @@ export interface LightboxItem {
   kind?: "image" | "video";
   /** A video's poster image, or null. */
   poster?: string | null;
+  /** A video starts muted unless this is false. */
+  muted?: boolean;
+  /** A video loops when this is true. */
+  loop?: boolean;
+}
+
+/** Where an enlarged video was left when the lightbox closed. */
+export interface LightboxVideoState {
+  time: number;
+  muted: boolean;
+  loop: boolean;
 }
 
 export interface LightboxProps {
@@ -33,8 +45,8 @@ export interface LightboxProps {
   onIndexChange: (index: number) => void;
   /** Where a video item starts playing, in seconds. */
   startAt?: number;
-  /** `time` is where a shown video had reached; absent for an image. */
-  onClose: (time?: number) => void;
+  /** `video` is where a shown video was left; absent for an image. */
+  onClose: (video?: LightboxVideoState) => void;
 }
 
 const NAV_BUTTON =
@@ -61,7 +73,8 @@ export function Lightbox({ items, index, onIndexChange, startAt, onClose }: Ligh
   }, []);
 
   function close() {
-    onClose(isVideo && videoRef.current ? videoRef.current.currentTime : undefined);
+    const player = isVideo ? videoRef.current : null;
+    onClose(player ? { time: player.currentTime, muted: player.muted, loop: player.loop } : undefined);
   }
 
   function onCancel(e: SyntheticEvent<HTMLDialogElement>) {
@@ -138,7 +151,8 @@ export function Lightbox({ items, index, onIndexChange, startAt, onClose }: Ligh
               controls
               playsInline
               autoPlay
-              muted
+              muted={item.muted ?? true}
+              loop={item.loop ?? false}
               onLoadedMetadata={(e) => {
                 if (startAt !== undefined && startAt > 0) e.currentTarget.currentTime = startAt;
               }}

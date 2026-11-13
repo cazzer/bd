@@ -545,7 +545,7 @@ describe("a card with video cuts", () => {
     expect(plain.textContent).toContain("The raw footage both cuts come from");
   });
 
-  test("plays muted, with controls, on a click, loading metadata only, and loops until Loop is turned off", async () => {
+  test("renders each player muted, with controls, inline, without autoplay, loading metadata only, and looping until Loop is turned off", async () => {
     await render(boardItem(fixtureReview("reel-cuts")));
     for (const video of container.querySelectorAll("video")) {
       expect(video.muted).toBe(true);
@@ -609,10 +609,28 @@ describe("a card with video cuts", () => {
     expect(trpcMock.reviewDecision.mutate.mock.calls[0]![0]).toMatchObject({ decision: "accept", option: "A" });
   });
 
+  test("the enlarged video starts muted and looping as the inline player was, and hands both back on close", async () => {
+    await render(boardItem(fixtureReview("reel-cuts")));
+    const inline = videoIn(cuts()[1]!);
+    inline.muted = false;
+    await click(container.querySelector<HTMLButtonElement>("button[aria-label='Loop option B: Cut 2']")!);
+    expect(inline.loop).toBe(false);
+    await click(container.querySelector<HTMLButtonElement>("button[aria-label='Enlarge video: option B: Cut 2']")!);
+    const big = container.querySelector<HTMLVideoElement>("dialog video")!;
+    expect(big.muted).toBe(false);
+    expect(big.loop).toBe(false);
+    big.muted = true;
+    big.loop = true;
+    await click(container.querySelector<HTMLButtonElement>("dialog button[aria-label=Close]")!);
+    expect(inline.muted).toBe(true);
+    expect(inline.loop).toBe(true);
+    expect(container.querySelector<HTMLButtonElement>("button[aria-label='Loop option B: Cut 2']")!.getAttribute("aria-pressed")).toBe("true");
+  });
+
   test("arrow keys on the enlarged video are the video's, not the lightbox's", async () => {
     await render(boardItem(fixtureReview("reel-cuts")));
     await click(container.querySelector<HTMLButtonElement>("button[aria-label='Enlarge video: option B: Cut 2']")!);
-    const big = container.querySelector("dialog video")!;
+    const big = container.querySelector<HTMLVideoElement>("dialog video")!;
     const key = new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true });
     await act(async () => {
       big.dispatchEvent(key);
