@@ -10,7 +10,7 @@ Breakdown is becoming the shared board for hangar worker containers on the Windo
 - The token's client name is recorded as the actor on every write it makes, on the MCP and web write paths alike.
 - A browser on the tailnet (the phone) connects by pasting its token into a form once; the server answers with an HttpOnly cookie, and the token never appears in a URL.
 - The two copies of the request guard become one shared implementation in `packages/core`.
-- A multi-arch (linux/arm64, linux/amd64) app image runs either entrypoint, with the web server also serving the built client. `docker-compose.jetson.yml` runs Postgres, migrations, web and MCP, each with a memory and CPU cap; Postgres is tuned for its cap, and data and media paths are configurable. Features that need host-only binaries (`bd`, `herdr`) report themselves unavailable inside the container instead of crashing.
+- A multi-arch (linux/arm64, linux/amd64) app image runs migrations and then serves web and MCP from one container, with the web server also serving the built client. On the Jetson it runs as two SkyOS apps, `breakdown-db` (Postgres tuned for its cap) and `breakdown`, configured by env through the image's entrypoint launcher, with media in one directory. `docker-compose.app.yml` runs the same two containers locally. Features that need host-only binaries (`bd`, `herdr`) report themselves unavailable inside the container instead of crashing.
 - A smoke test runs that stack under its caps on the Mac.
 
 Out of scope: deploying to the Jetson, the SSD, Tailscale ACLs and ufw (skyos epic sky-brx), the session registry (bd-d38.3), and remote media upload (bd-d38.6).
@@ -36,6 +36,6 @@ Rejected alternatives:
 - `packages/core`: the shared guard and token verifier, plus a token store.
 - `packages/db`: a new `client_tokens` table and migration. `nodes` is untouched, so the `resolved_nodes` view needs no change.
 - New CLI scripts: `pnpm token create|list|revoke`.
-- New: `Dockerfile`, `.dockerignore`, `docker-compose.jetson.yml`, a smoke-test script, and README deploy notes.
+- New: `Dockerfile`, `.dockerignore`, `docker/launch.mjs`, `docker-compose.app.yml`, Postgres settings, a smoke-test script, and README deploy notes.
 - CLAUDE.md: the architecture line saying "the host is loopback-only and enforced", and the adapters' copy-not-share note for the guard.
-- No new environment variables. The bind host and allowed hosts are flags, and compose data paths are compose interpolation, not app environment.
+- No new environment variables read by the servers. The bind host and allowed hosts are flags. The container's launcher reads `BREAKDOWN_*` env and passes them on as flags.
