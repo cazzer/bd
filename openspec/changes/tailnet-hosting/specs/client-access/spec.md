@@ -6,7 +6,7 @@ How a client other than the local machine reaches Breakdown's web API and MCP HT
 
 ### Requirement: Exposure beyond loopback is opt-in
 
-Each server SHALL bind `127.0.0.1` unless started with a bind address argument. A request SHALL be refused with HTTP 403, before any handler runs, when its `Host` header is neither a loopback name (`127.0.0.1`, `localhost`, `[::1]`) at the server's port nor a hostname the operator listed with an allowed-host argument, either at the server's port or without a port (a fronting proxy on its scheme's default port). An `Origin` whose host is an allowed host SHALL name one of those same authorities; an `Origin` on a loopback name MAY carry any port. Allowed hosts SHALL be given only on the command line, never read from the environment.
+Each server SHALL bind `127.0.0.1` unless started with a bind address argument. A request SHALL be refused with HTTP 403, before any handler runs, when its `Host` header is neither a loopback name (`127.0.0.1`, `localhost`, `[::1]`) at the server's port nor a hostname the operator listed with an allowed-host argument, either at the server's port or without a port (a fronting proxy on its scheme's default port). An `Origin` whose host is an allowed host SHALL name the server's port, or no port over `https` (the fronting proxy); an `Origin` on a loopback name MAY carry any port. Allowed hosts SHALL be given only on the command line, never read from the environment.
 
 #### Scenario: Default start
 

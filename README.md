@@ -153,7 +153,7 @@ pnpm --filter @breakdown/web dev:server --host 0.0.0.0 --allow-host breakdown.ta
 
 A request whose `Host` is neither loopback nor allowed is refused with 403, token or not. An allowed name is accepted at the server's own port or with no port (a fronting proxy such as `tailscale serve` on 443), and a browser write must come from one of those same origins, so a page on another port of the host can't write. Bound off loopback with no `--allow-host`, the server starts but warns that every remote request will get 403.
 
-Give Breakdown a dedicated hostname: browsers send a host's cookies to every port on it, so any other app served under the same name would receive Breakdown's token cookie. Never point an L4 forwarder (socat, `ssh -R`) at either server's loopback port: its connections arrive from loopback with no forwarding header and bypass tokens entirely.
+Give Breakdown a dedicated hostname: browsers send a host's cookies to every port on it, so any other app served under the same name would receive Breakdown's token cookie. Never point a forwarder that adds no forwarding header at either server's loopback port: L4 forwarders (socat, `ssh -R`) and nginx's default `proxy_pass` (which rewrites Host and sends no `X-Forwarded-For`) make remote requests look local and bypass tokens entirely.
 
 **Tokens.** Every request from off loopback needs a client token, on every path including `/healthz`, or gets 401. So does a loopback request whose `X-Forwarded-For`, `X-Real-IP`, or `Forwarded` header names a remote address: a proxy acting for someone else isn't the local machine. Mint one per client on the host, choosing its scope:
 

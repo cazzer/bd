@@ -168,13 +168,13 @@ describe("admitRequest", () => {
     }
   });
 
-  it("pins an allowed name's Origin to the server's port or the scheme's default", async () => {
+  it("pins an allowed name's Origin to the server's port, or no port over https", async () => {
     const { policy: p } = policy();
-    for (const origin of [`http://${TAILNET}:${PORT}`, `https://${TAILNET}:${PORT}`, `https://${TAILNET}`, `http://${TAILNET}`, `http://${TAILNET}:80`, `https://${TAILNET}:443`]) {
+    for (const origin of [`http://${TAILNET}:${PORT}`, `https://${TAILNET}:${PORT}`, `https://${TAILNET}`, `https://${TAILNET}:443`]) {
       const req = request({ method: "POST", origin, credential: bearer("bdt_worker") });
       expect(await admitRequest(req, p), origin).toEqual({ outcome: "allow", client: "worker-1" });
     }
-    for (const origin of [`http://${TAILNET}:8080`, `http://${TAILNET}:443`, `https://${TAILNET}:80`, `http://${TAILNET}:5321`]) {
+    for (const origin of [`http://${TAILNET}:8080`, `http://${TAILNET}:443`, `https://${TAILNET}:80`, `http://${TAILNET}:5321`, `http://${TAILNET}`, `http://${TAILNET}:80`]) {
       const req = request({ method: "POST", origin, credential: cookie("bdt_phone") });
       expect(await admitRequest(req, p), origin).toEqual({ outcome: "forbidden" });
     }

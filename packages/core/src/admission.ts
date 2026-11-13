@@ -160,8 +160,13 @@ function isAllowedOrigin(origin: string, policy: AdmissionPolicy): boolean {
     return false;
   }
   if (LOOPBACK_NAMES.has(url.hostname)) return true;
-  // `url.port` is "" when the Origin names the scheme's default port, written or not.
-  return policy.allowedHosts.includes(url.hostname) && (url.port === "" || url.port === String(policy.port));
+  if (!policy.allowedHosts.includes(url.hostname)) return false;
+  // `url.port` is "" when the Origin names the scheme's default port, written
+  // or not. A default-port Origin on an allowed name is accepted only over
+  // https (a fronting proxy such as `tailscale serve`): a plain-http page on
+  // port 80 of the same host is another app, not this server.
+  const effectivePort = url.port === "" ? (url.protocol === "https:" ? 443 : 80) : Number(url.port);
+  return effectivePort === policy.port || (url.port === "" && url.protocol === "https:");
 }
 
 /**
