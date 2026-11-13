@@ -6,7 +6,7 @@ How a client other than the local machine reaches Breakdown's web API and MCP HT
 
 ### Requirement: Exposure beyond loopback is opt-in
 
-Each server SHALL bind `127.0.0.1` unless started with a bind address argument. A request SHALL be refused with HTTP 403, before any handler runs, when its `Host` header (port included) is neither a loopback name (`127.0.0.1`, `localhost`, `[::1]`) at the server's port nor a hostname the operator listed with an allowed-host argument at that port. Allowed hosts SHALL be given only on the command line, never read from the environment.
+Each server SHALL bind `127.0.0.1` unless started with a bind address argument. A request SHALL be refused with HTTP 403, before any handler runs, when its `Host` header is neither a loopback name (`127.0.0.1`, `localhost`, `[::1]`) at the server's port nor a hostname the operator listed with an allowed-host argument, either at the server's port or without a port (a fronting proxy on its scheme's default port). An `Origin` whose host is an allowed host SHALL name one of those same authorities; an `Origin` on a loopback name MAY carry any port. Allowed hosts SHALL be given only on the command line, never read from the environment.
 
 #### Scenario: Default start
 
@@ -18,6 +18,16 @@ Each server SHALL bind `127.0.0.1` unless started with a bind address argument. 
 - **WHEN** a server is started bound to a non-loopback address with `breakdown.tail.example` allowed, and a request carrying a valid token arrives with `Host: breakdown.tail.example:<port>`
 - **THEN** the request reaches its handler
 
+#### Scenario: Behind a fronting proxy
+
+- **WHEN** a proxy on the same machine terminates HTTPS for `breakdown.tail.example` and forwards to the server with `Host: breakdown.tail.example` and the client's address in `X-Forwarded-For`
+- **THEN** the request passes the `Host` check and, as a forwarded request, needs a client token
+
+#### Scenario: Another port on the same host
+
+- **WHEN** a page served from `http://breakdown.tail.example:8080` makes the browser POST to the web API on its own port with the cookie attached
+- **THEN** the request is refused with 403
+
 #### Scenario: Foreign Host refused
 
 - **WHEN** a request arrives with a `Host` that is neither loopback nor allowed, with or without a valid token
@@ -25,7 +35,7 @@ Each server SHALL bind `127.0.0.1` unless started with a bind address argument. 
 
 ### Requirement: Off-loopback requests carry a client token
 
-A request whose peer address is not loopback SHALL carry a client token, as `Authorization: Bearer <token>` or as the session cookie set by the connect flow, on every path including health checks; otherwise it SHALL be refused with HTTP 401 before any handler runs. The only exceptions SHALL be the browser client's static files (which hold no data) and the connect endpoint itself, and both still pass the `Host` check. A request from a loopback peer with a loopback `Host` SHALL need no token. A token that is unknown or revoked SHALL be refused exactly as a missing one. The 401 response SHALL NOT say whether a token exists.
+A request whose peer address is not loopback SHALL carry a client token, as `Authorization: Bearer <token>` or as the session cookie set by the connect flow, on every path including health checks; otherwise it SHALL be refused with HTTP 401 before any handler runs. The only exceptions SHALL be the browser client's static files (which hold no data) and the connect endpoint itself, and both still pass the `Host` check. A request from a loopback peer with a loopback `Host` SHALL need no token, unless it carries a forwarding header (`X-Forwarded-For`, `Forwarded`, `X-Real-IP`) naming any address that is not loopback — a proxy acting for a remote client is not the local machine. A token that is unknown or revoked SHALL be refused exactly as a missing one. Revoking a token SHALL also end any MCP session it opened, at the latest when that session next makes a request or the revocation is next checked. The 401 response SHALL NOT say whether a token exists.
 
 #### Scenario: Valid token from the tailnet
 
@@ -46,6 +56,20 @@ A request whose peer address is not loopback SHALL carry a client token, as `Aut
 
 - **WHEN** a Claude Code session on the same machine calls `/mcp` on `127.0.0.1` with no token
 - **THEN** it is served as before
+
+### Requirement: Tokens carry a scope
+
+Every token SHALL be created with a scope, `human` or `agent`, chosen at creation and shown when listing. The web API, whose writes are a person's decisions (accepting an inbox request, a review decision, notes), SHALL refuse a request admitted by an `agent` token with HTTP 403, and the connect flow SHALL refuse to set a cookie for one. The MCP server SHALL accept both scopes.
+
+#### Scenario: Worker cannot approve its own request
+
+- **WHEN** a worker holding an `agent` token calls the web API to decide an inbox item
+- **THEN** it is refused with 403 and nothing is written
+
+#### Scenario: Worker over MCP
+
+- **WHEN** the same worker calls `/mcp` with its `agent` token
+- **THEN** it is served
 
 ### Requirement: Per-client tokens are minted and revoked locally
 

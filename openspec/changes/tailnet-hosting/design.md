@@ -18,7 +18,7 @@ The CLAUDE.md constraints still hold: no model call, no new environment variable
 
 **Non-Goals:**
 - TLS termination. WireGuard (the tailnet) encrypts transport, and `tailscale serve` can front HTTPS later without changing this design.
-- Token scopes or roles: every live token has full access, as a loopback client has today.
+- Fine-grained token permissions. A token has one of two scopes (`human`, `agent`); see decision 3.
 - Replacing herdr or beads inside the container (bd-d38.3, bd-98d).
 - Host provisioning, ACLs, ufw, and deployment (sky-brx).
 
@@ -96,6 +96,13 @@ Inside the containers the servers bind `0.0.0.0` with `--allow-host` taken from 
 ### 8. Host-only binaries
 
 Every spawn of `bd` or `herdr` maps ENOENT to a typed "unavailable" error naming the binary, which callers surface as a tRPC error rather than an unhandled rejection. The beads watcher starts with an empty registry when its registry path is absent, and logs that once. A startup test runs the web server with a PATH that holds neither binary.
+
+### 9. Review-round amendments (group 1)
+
+- **Scopes.** `client_tokens.scope` (`human` | `agent`, required at `create --scope`, migration 0007). The web dispatcher's policy accepts `human` only; an `agent` token there is 403 (not 401, so a browser holding one isn't looped back to the connect screen), and `/auth/connect` refuses it. MCP accepts both. Without this, a worker's MCP token also unlocked `inbox.decide` and review decisions on the web API: a worker could approve its own request.
+- **Host and Origin authorities.** An allowed name matches `name:<listen port>` or bare `name` (a fronting proxy such as `tailscale serve` sends no port). An Origin on an allowed name must be one of those authorities (`http(s)://name:<listen port>` or `http(s)://name` on the default port); loopback Origins keep any port (the Vite client). This pins writes to the server's own origin: a page on another port of the same tailnet host can't use the cookie for writes. Cookies are still shared across a host's ports, so Breakdown should get a dedicated hostname (documented; sky-brx).
+- **Forwarded requests aren't local.** Loopback trust (step 3) also requires that every `X-Forwarded-For` / `Forwarded` / `X-Real-IP` entry, if present, is loopback. Vite's proxy sets `xfwd`, so `pnpm dev --host` makes phone requests carry a token while local dev stays tokenless. An L4 forwarder (socat, `ssh -R`) can't be detected; documented.
+- **Group 2 note.** The compose stack must publish each server on the same port number it listens on, or front it with a proxy that sends a bare Host.
 
 ## Risks / Trade-offs
 
