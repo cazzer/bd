@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import {
-  SmokeFailure, TOKEN_OUTPUT, composeArgs, formatTable, limitProblems, parseInspect, parseMemoryPeak,
+  SmokeFailure, TOKEN_OUTPUT, composeArgs, formatTable, hardeningProblems, limitProblems, parseInspect, parseMemoryPeak,
   parseStatsMemUsage, sumLimits,
 } from "./compose-smoke-lib.mjs";
 
@@ -35,9 +35,20 @@ describe("parseInspect", () => {
       memory: 384 * MiB,
       memorySwap: 384 * MiB,
       nanoCpus: 1e9,
+      readOnlyRoot: false,
+      capDrop: [],
+      securityOpt: [],
+      init: false,
       oomKilled: false,
       restartCount: 0,
     }]);
+  });
+
+  test("reads the hardening settings", () => {
+    const [c] = parseInspect(JSON.stringify([inspected({
+      HostConfig: { Memory: 512 * MiB, MemorySwap: 512 * MiB, NanoCpus: 1.5e9, ReadonlyRootfs: true, CapDrop: ["ALL"], SecurityOpt: ["no-new-privileges:true"], Init: true },
+    })]));
+    assert.deepEqual([c.readOnlyRoot, c.capDrop, c.securityOpt, c.init], [true, ["ALL"], ["no-new-privileges:true"], true]);
   });
 
   test("an unlimited container reads as zero limits", () => {
@@ -116,5 +127,23 @@ describe("TOKEN_OUTPUT", () => {
     assert.match(`bdt_${"A".repeat(43)}\n`, TOKEN_OUTPUT);
     assert.doesNotMatch(`bdt_${"A".repeat(43)}`, TOKEN_OUTPUT);
     assert.doesNotMatch(`> @breakdown/core\nbdt_${"A".repeat(43)}\n`, TOKEN_OUTPUT);
+  });
+});
+
+describe("hardeningProblems", () => {
+  const hardened = { readOnlyRoot: true, capDrop: ["ALL"], securityOpt: ["no-new-privileges:true"], init: true };
+
+  test("the compose file's settings pass", () => {
+    assert.deepEqual(hardeningProblems(hardened), []);
+    assert.deepEqual(hardeningProblems({ ...hardened, securityOpt: ["no-new-privileges"] }), []);
+  });
+
+  test("each missing setting is named", () => {
+    assert.deepEqual(hardeningProblems({ readOnlyRoot: false, capDrop: ["NET_RAW"], securityOpt: [], init: false }), [
+      "root filesystem is writable",
+      'capabilities not all dropped (CapDrop ["NET_RAW"])',
+      "no-new-privileges not set",
+      "no init",
+    ]);
   });
 });

@@ -23,8 +23,18 @@
 //   miss with an extension   → 404
 //   not GET or HEAD          → 405 with `Allow: GET, HEAD`
 //
-// Every response carries `X-Content-Type-Options: nosniff`; HEAD answers
-// the same status and headers with no body.
+// Every response carries `X-Content-Type-Options: nosniff`, `X-Frame-Options:
+// DENY`, and a `Content-Security-Policy` header; HEAD answers the same
+// status and headers with no body. The header policy is index.html's meta
+// policy with two differences. It can say `frame-ancestors 'none'` and be
+// obeyed (a meta policy's frame-ancestors is ignored, so until now nothing
+// stopped another origin framing the board and clickjacking a review
+// decision). And script-src drops 'unsafe-inline': the meta keeps it only
+// for the React Fast Refresh preamble Vite injects under `pnpm dev`, and
+// `vite build` emits no inline script. A browser enforces both policies, so
+// the stricter header wins. style-src keeps 'unsafe-inline' (React style
+// attributes need it). static-client.test.ts checks the header against the
+// meta, so the two cannot drift.
 
 import { createReadStream } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
@@ -108,7 +118,15 @@ export async function loadClientManifest(dir: string): Promise<Map<string, Clien
   return manifest;
 }
 
-const NOSNIFF = { "X-Content-Type-Options": "nosniff" } as const;
+/** The served client's policy (module header). */
+export const CLIENT_CSP =
+  "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
+
+const SECURITY_HEADERS = {
+  "X-Content-Type-Options": "nosniff",
+  "X-Frame-Options": "DENY",
+  "Content-Security-Policy": CLIENT_CSP,
+} as const;
 const NO_CACHE = "no-cache";
 const IMMUTABLE = "public, max-age=31536000, immutable";
 
@@ -116,7 +134,7 @@ const IMMUTABLE = "public, max-age=31536000, immutable";
 const CLIENT_GONE: ReadonlySet<string> = new Set(["ERR_STREAM_PREMATURE_CLOSE", "EPIPE", "ECONNRESET"]);
 
 function refuse(res: ServerResponse, status: number, text: string, extra: Record<string, string> = {}): void {
-  res.writeHead(status, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store", ...NOSNIFF, ...extra });
+  res.writeHead(status, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store", ...SECURITY_HEADERS, ...extra });
   res.end(`${text}\n`);
 }
 
@@ -142,12 +160,12 @@ export function createStaticClientHandler(manifest: ClientManifest): (req: Incom
       return;
     }
     if (hit === undefined || hit === index) {
-      res.writeHead(200, { "Content-Type": index.type, "Content-Length": String(indexBody.length), "Cache-Control": NO_CACHE, ...NOSNIFF });
+      res.writeHead(200, { "Content-Type": index.type, "Content-Length": String(indexBody.length), "Cache-Control": NO_CACHE, ...SECURITY_HEADERS });
       res.end(req.method === "HEAD" ? undefined : indexBody);
       return;
     }
 
-    res.writeHead(200, { "Content-Type": hit.type, "Content-Length": String(hit.size), "Cache-Control": hit.immutable ? IMMUTABLE : NO_CACHE, ...NOSNIFF });
+    res.writeHead(200, { "Content-Type": hit.type, "Content-Length": String(hit.size), "Cache-Control": hit.immutable ? IMMUTABLE : NO_CACHE, ...SECURITY_HEADERS });
     if (req.method === "HEAD" || hit.size === 0) {
       res.end();
       return;

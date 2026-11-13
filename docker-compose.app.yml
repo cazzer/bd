@@ -10,6 +10,13 @@
 #
 # Each port is published at the number the server listens on: admission
 # pins an allowed Host to the server's own listen port (decision 9).
+#
+# Run `breakdown` on a bridge network with its ports published, as here;
+# never `network_mode: host`. The servers bind 0.0.0.0 inside the container,
+# which on a bridge is only the container's own interfaces. Under host
+# networking it is every host interface, and every process on the host is a
+# loopback peer, which admission trusts without a token. The launcher logs a
+# warning when it looks like it is in the host's network namespace.
 # Caps total 384m + 512m = 896m, under 1 GB; `pnpm smoke:app` checks them.
 name: breakdown
 
@@ -46,7 +53,9 @@ services:
     memswap_limit: 384m
     cpus: 1.0
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U breakdown -d breakdown"]
+      # Over TCP: the socket answers while the entrypoint's init-time server
+      # (unix socket only) runs, before the real server is listening.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U breakdown -d breakdown"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -65,7 +74,23 @@ services:
       - "${BREAKDOWN_PUBLISH_ADDR:-127.0.0.1}:${BREAKDOWN_WEB_PORT:-4310}:${BREAKDOWN_WEB_PORT:-4310}"
       - "${BREAKDOWN_PUBLISH_ADDR:-127.0.0.1}:${BREAKDOWN_MCP_PORT:-5320}:${BREAKDOWN_MCP_PORT:-5320}"
     volumes:
+      # Read-write: review media is still copied in by an operator with
+      # `docker cp` until it moves into the database (bd-d38.6).
       - ${BREAKDOWN_MEDIA:-breakdown-media}:/data/media
+    # Nothing but the media volume and /tmp is written at runtime:
+    # migrations, both servers, the token CLI, and the healthcheck write only
+    # to the database. The ports are above 1024, so no capability is needed.
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # An init as PID 1 reaps zombies and forwards signals to the launcher.
+    init: true
+    # Past the launcher's own 10 s SIGKILL deadline for its children.
+    stop_grace_period: 15s
     mem_limit: 512m
     memswap_limit: 512m
     cpus: 1.5

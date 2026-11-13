@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { describe, test } from "node:test";
-import { HEAP_MB, LaunchConfigError, migrateWithRetry, planLaunch, readPorts, supervise } from "./container-launch-lib.mjs";
+import { HEAP_MB, LaunchConfigError, hostNetworkWarning, migrateWithRetry, planLaunch, readPorts, runWithTimeout, supervise } from "./container-launch-lib.mjs";
 
 const DB = { DATABASE_URL: "postgres://u:p@breakdown-db:5432/breakdown" };
 
 describe("planLaunch", () => {
   test("DATABASE_URL alone gives the defaults", () => {
     const plan = planLaunch(DB, { appRoot: "/srv/app" });
+    assert.equal(plan.host, "0.0.0.0");
     assert.deepEqual(plan.migrate, [`--max-old-space-size=${HEAP_MB.migrate}`, "/srv/app/dist/migrate.mjs"]);
     assert.deepEqual(plan.web, [
       "--max-old-space-size=160", "/srv/app/dist/web.mjs",
@@ -95,7 +96,7 @@ describe("migrateWithRetry", () => {
     assert.equal(ok, true);
     assert.deepEqual(slept, [2000, 2000]);
     assert.equal(lines.length, 2);
-    assert.match(lines[0], /attempt 1 of 5/);
+    assert.match(lines[0], /^\[launcher\] migrate exited 1 \(attempt 1 of 5\)/);
   });
 
   test("gives up after the last attempt without a final sleep", async () => {
@@ -103,6 +104,94 @@ describe("migrateWithRetry", () => {
     const ok = await migrateWithRetry({ runMigrate: async () => 1, sleep: async (ms) => slept.push(ms), log: () => {}, attempts: 3, delayMs: 10 });
     assert.equal(ok, false);
     assert.equal(slept.length, 2);
+  });
+});
+
+describe("runWithTimeout", () => {
+  function fakeChild({ exitOnKill = true } = {}) {
+    const child = new EventEmitter();
+    child.kills = [];
+    child.kill = (signal) => {
+      child.kills.push(signal);
+      if (exitOnKill) setImmediate(() => child.emit("exit", null, signal));
+    };
+    return child;
+  }
+
+  test("resolves to the exit code of a child that finishes in time, and kills nothing", async () => {
+    const child = fakeChild();
+    const done = runWithTimeout(child, { timeoutMs: 1_000 });
+    child.emit("exit", 0, null);
+    assert.equal(await done, 0);
+    assert.deepEqual(child.kills, []);
+  });
+
+  test("resolves to the signal or the spawn error", async () => {
+    const signalled = fakeChild();
+    const bySignal = runWithTimeout(signalled, { timeoutMs: 1_000 });
+    signalled.emit("exit", null, "SIGTERM");
+    assert.equal(await bySignal, "exited on SIGTERM");
+    const broken = fakeChild();
+    const byError = runWithTimeout(broken, { timeoutMs: 1_000 });
+    broken.emit("error", new Error("spawn node ENOENT"));
+    assert.equal(await byError, "failed: spawn node ENOENT");
+  });
+
+  test("SIGKILLs a child still running at the deadline and resolves to a failure once it exits", async () => {
+    const child = fakeChild();
+    const result = await runWithTimeout(child, { timeoutMs: 20 });
+    assert.deepEqual(child.kills, ["SIGKILL"]);
+    assert.equal(result, "timed out after 0.02 s and was killed");
+  });
+
+  test("a timed-out attempt counts as failed and is retried", async () => {
+    const children = [fakeChild(), fakeChild()];
+    const lines = [];
+    const ok = await migrateWithRetry({
+      runMigrate: () => {
+        const child = children.shift();
+        const done = runWithTimeout(child, { timeoutMs: 20 });
+        if (children.length === 0) child.emit("exit", 0, null);
+        return done;
+      },
+      sleep: async () => {},
+      log: (line) => lines.push(line),
+      attempts: 3,
+    });
+    assert.equal(ok, true);
+    assert.equal(lines.length, 1);
+    assert.match(lines[0], /^\[launcher\] migrate timed out after 0\.02 s and was killed \(attempt 1 of 3\)/);
+  });
+});
+
+describe("hostNetworkWarning", () => {
+  const lo = { lo: [{ address: "127.0.0.1", internal: true }] };
+  const nic = (address) => [{ address, internal: false }];
+
+  test("a bridge-network container (loopback and eth<n>) gets no warning", () => {
+    assert.equal(hostNetworkWarning("0.0.0.0", { ...lo, eth0: nic("172.18.0.3") }), null);
+    assert.equal(hostNetworkWarning("0.0.0.0", { ...lo, eth0: nic("172.18.0.3"), eth1: nic("172.19.0.2") }), null);
+  });
+
+  test("a wildcard bind beside host interfaces warns, naming them", () => {
+    const host = { ...lo, eth0: nic("192.168.1.20"), docker0: nic("172.17.0.1"), tailscale0: nic("100.64.0.7"), wlan0: nic("192.168.1.21") };
+    for (const bind of ["0.0.0.0", "::", "[::]"]) {
+      const warning = hostNetworkWarning(bind, host);
+      assert.match(warning, /WARNING/);
+      assert.match(warning, /interfaces: docker0, tailscale0, wlan0\)/);
+      assert.match(warning, /tokenless access/);
+      assert.match(warning, /bridge network/);
+    }
+  });
+
+  test("a long interface list is cut to five names", () => {
+    const many = Object.fromEntries(["veth1", "veth2", "veth3", "veth4", "veth5", "veth6", "veth7"].map((name) => [name, nic("10.0.0.1")]));
+    assert.match(hostNetworkWarning("0.0.0.0", { ...lo, ...many }), /interfaces: veth1, veth2, veth3, veth4, veth5, and 2 more\)/);
+  });
+
+  test("a specific bind never warns, and an interface with only internal addresses is ignored", () => {
+    assert.equal(hostNetworkWarning("100.64.0.7", { ...lo, tailscale0: nic("100.64.0.7") }), null);
+    assert.equal(hostNetworkWarning("0.0.0.0", { ...lo, eth0: nic("172.18.0.3"), dummy0: [{ address: "10.0.0.1", internal: true }] }), null);
   });
 });
 

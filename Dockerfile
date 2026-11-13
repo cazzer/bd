@@ -42,6 +42,6 @@ COPY --from=build /build/bin/container-launch.mjs /build/bin/container-launch-li
 COPY --from=build --chown=node:node /empty-media /data/media
 USER node
 EXPOSE 4310 5320
-HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --start-interval=2s --retries=3 \
   CMD ["node", "/app/bin/container-healthcheck.mjs"]
 ENTRYPOINT ["node", "/app/bin/container-launch.mjs"]

@@ -2,13 +2,14 @@
 // throwaway build directory beside a sibling standing in for "everywhere
 // else", so a symlink out has a real file to reach if the walk followed it.
 
-import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer, request, type IncomingHttpHeaders, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createStaticClientHandler, loadClientManifest } from "./static-client.js";
+import { fileURLToPath } from "node:url";
+import { CLIENT_CSP, createStaticClientHandler, loadClientManifest } from "./static-client.js";
 
 const INDEX = "<!doctype html><title>board</title>";
 const SCRIPT = "console.log('board');";
@@ -89,6 +90,14 @@ describe("createStaticClientHandler", () => {
     expect(svg.headers).toMatchObject({ "content-type": "image/svg+xml", "cache-control": "no-cache" });
   });
 
+  it("sends the anti-framing headers and the policy on every response", async () => {
+    for (const [urlPath, method] of [["/", "GET"], ["/board/tides", "GET"], ["/assets/index-Abc123.js", "GET"], ["/favicon.svg", "HEAD"], ["/missing.css", "GET"], ["/", "POST"]] as const) {
+      const sent = await send(urlPath, method);
+      expect(sent.headers, `${method} ${urlPath}`).toMatchObject({ "x-frame-options": "DENY", "content-security-policy": CLIENT_CSP });
+    }
+    expect(CLIENT_CSP).toContain("frame-ancestors 'none'");
+  });
+
   it("answers 404 for a missing file with an extension, never index.html", async () => {
     for (const urlPath of ["/assets/missing.js", "/missing.css", "/assets/%2e%2e/index.html", "/x/../index.html"]) {
       const sent = await send(urlPath);
@@ -135,5 +144,26 @@ describe("loadClientManifest", () => {
   it("throws naming the directory when it does not exist", async () => {
     const gone = path.join(base, "gone");
     await expect(loadClientManifest(gone)).rejects.toThrow(`client directory ${gone} could not be read`);
+  });
+});
+
+describe("CLIENT_CSP", () => {
+  const directives = (policy: string): Map<string, string[]> =>
+    new Map(
+      policy
+        .split(";")
+        .map((part) => part.trim().split(/\s+/))
+        .filter((words) => words[0] !== "")
+        .map(([name, ...sources]) => [name!, sources]),
+    );
+
+  it("is index.html's meta policy with 'unsafe-inline' dropped from script-src only", async () => {
+    const html = await readFile(fileURLToPath(new URL("../index.html", import.meta.url)), "utf8");
+    const meta = /http-equiv="Content-Security-Policy"\s+content="([^"]+)"/.exec(html)?.[1];
+    expect(meta).toBeDefined();
+    const expected = directives(meta!);
+    expected.set("script-src", expected.get("script-src")!.filter((source) => source !== "'unsafe-inline'"));
+    expect(directives(CLIENT_CSP)).toEqual(expected);
+    expect(directives(CLIENT_CSP).get("style-src")).toContain("'unsafe-inline'");
   });
 });

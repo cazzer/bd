@@ -23,6 +23,8 @@ export const HEAP_MB = Object.freeze({ migrate: 96, web: 160, mcp: 128 });
 
 export const MIGRATE_ATTEMPTS = 30;
 export const MIGRATE_RETRY_MS = 2_000;
+/** One migrate attempt is SIGKILLed after this and counts as failed (a hung connect would otherwise hang the launcher). */
+export const MIGRATE_TIMEOUT_MS = 15_000;
 export const SHUTDOWN_DEADLINE_MS = 10_000;
 
 export class LaunchConfigError extends Error {
@@ -79,6 +81,7 @@ export function planLaunch(env, { appRoot = DEFAULT_APP_ROOT } = {}) {
   const childEnv = Object.fromEntries(Object.entries(env).filter(([key]) => !key.startsWith("BREAKDOWN_")));
 
   return {
+    host,
     migrate: [heap("migrate"), script("migrate")],
     web: [
       heap("web"), script("web"),
@@ -93,16 +96,72 @@ export function planLaunch(env, { appRoot = DEFAULT_APP_ROOT } = {}) {
 /**
  * Runs `runMigrate()` (resolves to an exit code) until it exits 0, up to
  * `attempts` times `delayMs` apart: the database app may still be starting,
- * and SkyOS apps have no depends_on. Resolves true on success.
+ * and SkyOS apps have no depends_on. Resolves true on success. With the
+ * defaults and each attempt bounded by `runWithTimeout`, the worst case
+ * before giving up is 30 × 15 s + 29 × 2 s = 508 s, about 8.5 minutes; a
+ * database that refuses connections fails each attempt in well under a
+ * second, so the usual worst case is about a minute.
  */
 export async function migrateWithRetry({ runMigrate, sleep, log, attempts = MIGRATE_ATTEMPTS, delayMs = MIGRATE_RETRY_MS }) {
   for (let attempt = 1; attempt <= attempts; attempt++) {
     const code = await runMigrate();
     if (code === 0) return true;
-    log(`[launcher] migrate exited ${code} (attempt ${attempt} of ${attempts})${attempt < attempts ? `; retrying in ${delayMs / 1000} s` : ""}`);
+    log(`[launcher] migrate ${typeof code === "number" ? `exited ${code}` : code} (attempt ${attempt} of ${attempts})${attempt < attempts ? `; retrying in ${delayMs / 1000} s` : ""}`);
     if (attempt < attempts) await sleep(delayMs);
   }
   return false;
+}
+
+/**
+ * Resolves once `child` (a ChildProcess-like emitter of "exit" and "error")
+ * is done: to its exit code, or to a phrase saying how it failed (killed by
+ * a signal, failed to spawn). A child still running after `timeoutMs` is
+ * sent SIGKILL and resolves to a "timed out" phrase once it exits, so
+ * migrateWithRetry counts it as a failed attempt.
+ */
+export function runWithTimeout(child, { timeoutMs = MIGRATE_TIMEOUT_MS, kill = (c, signal) => c.kill(signal) } = {}) {
+  return new Promise((resolve) => {
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      kill(child, "SIGKILL");
+    }, timeoutMs);
+    const settle = (result) => {
+      clearTimeout(timer);
+      resolve(timedOut ? `timed out after ${timeoutMs / 1000} s and was killed` : result);
+    };
+    child.once("exit", (code, signal) => settle(code ?? `exited on ${signal}`));
+    child.once("error", (err) => settle(`failed: ${err.message}`));
+  });
+}
+
+const WILDCARD_HOSTS = new Set(["0.0.0.0", "::", "[::]"]);
+
+/**
+ * A warning when a wildcard bind looks like it is in the host's network
+ * namespace (`network_mode: host`), else null. There `0.0.0.0` binds every
+ * host interface, and every process on the host is a loopback peer, which
+ * admission trusts without a token.
+ *
+ * The heuristic: on a bridge network a container's own namespace holds only
+ * loopback and `eth<n>` (one per attached network). Any other non-internal
+ * interface (`docker0`, `tailscale0`, `wlan0`, `enp3s0`, `l4tbr0`, `br-…`,
+ * `veth…`) belongs to a host. `interfaces` is `os.networkInterfaces()`.
+ */
+export function hostNetworkWarning(host, interfaces) {
+  if (!WILDCARD_HOSTS.has(host)) return null;
+  const hostLike = Object.entries(interfaces)
+    .filter(([, addresses]) => (addresses ?? []).some((address) => !address.internal))
+    .map(([name]) => name)
+    .filter((name) => !/^eth\d+$/.test(name))
+    .sort();
+  if (hostLike.length === 0) return null;
+  const shown = hostLike.length > 5 ? `${hostLike.slice(0, 5).join(", ")}, and ${hostLike.length - 5} more` : hostLike.join(", ");
+  return [
+    `[launcher] WARNING: binding ${host} and this container appears to share the host's network namespace (interfaces: ${shown}).`,
+    "[launcher] WARNING: under host networking the servers listen on every host interface, and any process on the host is a loopback peer with tokenless access.",
+    "[launcher] WARNING: run the image on a bridge network with its ports published (docker-compose.app.yml does).",
+  ].join("\n");
 }
 
 /**

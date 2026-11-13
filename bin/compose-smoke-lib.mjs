@@ -41,6 +41,10 @@ export function parseInspect(json) {
     memory: entry.HostConfig?.Memory ?? 0,
     memorySwap: entry.HostConfig?.MemorySwap ?? 0,
     nanoCpus: entry.HostConfig?.NanoCpus ?? 0,
+    readOnlyRoot: entry.HostConfig?.ReadonlyRootfs === true,
+    capDrop: entry.HostConfig?.CapDrop ?? [],
+    securityOpt: entry.HostConfig?.SecurityOpt ?? [],
+    init: entry.HostConfig?.Init === true,
     oomKilled: entry.State?.OOMKilled === true,
     restartCount: entry.RestartCount ?? 0,
   }));
@@ -90,6 +94,16 @@ export function limitProblems(container) {
   if (container.peak !== undefined && container.memory > 0 && container.peak >= container.memory) {
     problems.push(`peak ${container.peak} reached the limit ${container.memory}`);
   }
+  return problems;
+}
+
+/** Every hardening setting docker-compose.app.yml gives `breakdown` that the inspected container lacks. */
+export function hardeningProblems(container) {
+  const problems = [];
+  if (!container.readOnlyRoot) problems.push("root filesystem is writable");
+  if (!container.capDrop.includes("ALL")) problems.push(`capabilities not all dropped (CapDrop ${JSON.stringify(container.capDrop)})`);
+  if (!container.securityOpt.some((opt) => /^no-new-privileges(:true|=true)?$/.test(opt))) problems.push("no-new-privileges not set");
+  if (!container.init) problems.push("no init");
   return problems;
 }
 

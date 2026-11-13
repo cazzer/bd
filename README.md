@@ -186,17 +186,24 @@ Host-side firewall and tailnet ACLs live in skyos (`sky-brx`), not here.
 On a shared host (the SkyOS Jetson), Breakdown runs as two single-container apps configured by env, with data in named volumes:
 
 - **`breakdown-db`**: the stock `pgvector/pgvector:pg16` image, with the Postgres settings below.
-- **`breakdown`**: this repo's image (`Dockerfile`). Its entrypoint, `bin/container-launch.mjs`, runs migrations (retrying while the database starts), then the web server (serving the built client) and the MCP HTTP server as two children. If either one exits, the container exits non-zero so its supervisor restarts it.
+- **`breakdown`**: this repo's image (`Dockerfile`). Its entrypoint, `bin/container-launch.mjs`, runs migrations (retrying while the database starts: up to 30 attempts 2 s apart, each killed after 15 s), then the web server (serving the built client) and the MCP HTTP server as two children. If either one exits, the container exits non-zero so its supervisor restarts it.
 
 The SkyOS app definitions live in skyos (`sky-brx.2`). `docker-compose.app.yml` runs the same two containers locally with the same env, caps, and volumes, under its own compose project (`breakdown`), so the dev database (`docker-compose.yml`, project `bd`) is never touched:
 
 ```bash
 export BREAKDOWN_DB_PASSWORD=$(openssl rand -hex 24)   # keep it: it is fixed when the volume is first initialized
+export BREAKDOWN_WEB_PORT=14310 BREAKDOWN_MCP_PORT=15320
 docker compose -f docker-compose.app.yml up -d --build --wait
 docker compose -f docker-compose.app.yml exec -T breakdown node dist/token.mjs create phone --scope human
 ```
 
 Always name the file with `-f docker-compose.app.yml`. A bare `docker compose` in this directory is the dev database.
+
+On a development machine the default ports are already taken: 4310 by `pnpm dev`'s API server and 5320 by the launchd MCP service. The two `BREAKDOWN_*_PORT` variables move both what the servers listen on and what compose publishes, which must be the same number (see [Environment](#environment)). On the Jetson the defaults are fine.
+
+**Run it on a bridge network with its ports published**, as `docker-compose.app.yml` does, never with host networking (`network_mode: host`). Inside the container the servers bind `0.0.0.0`, which on a bridge means only the container's own interfaces. Under host networking it means every interface on the host, and every process on the host becomes a loopback peer, which admission trusts without a token. The launcher logs a warning at start when the bind is a wildcard and the container has any non-loopback interface other than `eth<n>` (a bridge network gives a container only those). That is a heuristic, and it warns without refusing.
+
+The compose file also runs `breakdown` with a read-only root filesystem (a `tmpfs` at `/tmp`; only the media volume is writable), every capability dropped, `no-new-privileges`, an init as PID 1, and a 15 s stop grace period, past the launcher's own 10 s deadline for its children. Mirror these in the SkyOS app definition where it allows.
 
 ### Caps
 
@@ -280,7 +287,7 @@ docker buildx build --builder breakdown-multi --platform linux/arm64,linux/amd64
 
 ### Smoke test
 
-`pnpm smoke:app` (not part of `pnpm check`; it needs Docker) builds the image and starts the stack as project `breakdown-smoke` with a random password and ports 14310/15320. It mints a `human` and an `agent` token in the container and checks, from the host: `/healthz` on both servers is 401 with `WWW-Authenticate: Bearer` without a token, the human token gets 200 on the web and the agent token 403 there, and the agent token gets 200 on MCP. It also checks that the board's HTML and hashed assets are public, a tRPC read without a token is 401, and an MCP session initializes, calls `brain_map`, and closes. After some load it inspects both containers (memory limit set, swap equal to it, cpus set, not OOM-killed, never restarted, peak under the cap, total under 1 GB) and prints the limits-and-peaks table. It always removes its project and volumes at the end. `--keep` leaves them up. It refuses to run against the projects `bd` and `breakdown`.
+`pnpm smoke:app` (not part of `pnpm check`; it needs Docker) builds the image and starts the stack as project `breakdown-smoke` with a random password and ports 14310/15320. It mints a `human` and an `agent` token in the container and checks, from the host: `/healthz` on both servers is 401 with `WWW-Authenticate: Bearer` without a token, the human token gets 200 on the web and the agent token 403 there, and the agent token gets 200 on MCP. It also checks that the board's HTML and hashed assets are public, that the HTML is sent with `X-Frame-Options: DENY` and a `Content-Security-Policy` with `frame-ancestors 'none'` and no inline script (and has none), a tRPC read without a token is 401, and an MCP session initializes, calls `brain_map`, and closes. After some load it inspects both containers (memory limit set, swap equal to it, cpus set, not OOM-killed, never restarted, peak under the cap, total under 1 GB), checks that `breakdown` runs hardened (read-only root it cannot write, all capabilities dropped, `no-new-privileges`, init), and prints the limits-and-peaks table. It always removes its project and volumes at the end, on Ctrl-C or SIGTERM too (exiting 130 or 143). `--keep` leaves them up. It refuses to run against the projects `bd` and `breakdown`.
 
 ## Inbox
 

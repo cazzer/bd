@@ -4,7 +4,8 @@
 // container, exercises both servers through the published ports from the
 // host (so every request is off loopback and needs a token), drives a little
 // load, then checks each container's caps, OOM state, restarts, and peak
-// memory. Tears the project and its volumes down at the end unless --keep.
+// memory. Tears the project and its volumes down at the end unless --keep,
+// and on SIGINT/SIGTERM too (then exits 130/143).
 //
 // Not part of `pnpm check`: it needs docker and builds the image.
 //
@@ -17,7 +18,7 @@ import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  SMOKE_PROJECT, SmokeFailure, TOKEN_OUTPUT, TOTAL_LIMIT_BYTES, composeArgs, formatTable, limitProblems, mib,
+  SMOKE_PROJECT, SmokeFailure, TOKEN_OUTPUT, TOTAL_LIMIT_BYTES, composeArgs, formatTable, hardeningProblems, limitProblems, mib,
   parseInspect, parseMemoryPeak, parseStatsMemUsage, sumLimits,
 } from "./compose-smoke-lib.mjs";
 
@@ -125,6 +126,18 @@ async function checkClient() {
     const asset = await request(WEB_PORT, { path: script });
     check(`GET ${script} → 200, immutable`, asset.status === 200 && /immutable/.test(asset.headers["cache-control"] ?? ""), `${asset.status} ${asset.headers["cache-control"] ?? "no cache-control"}`);
   }
+  const csp = index.headers["content-security-policy"] ?? "";
+  check(
+    "GET / sends X-Frame-Options: DENY and a CSP with frame-ancestors 'none' and no inline script",
+    index.headers["x-frame-options"] === "DENY" && csp.includes("frame-ancestors 'none'") && /script-src 'self';/.test(csp),
+    csp || "no CSP header",
+  );
+  check("index.html has no inline <script> (the header CSP would block it)", !/<script(?![^>]*\ssrc=)[^>]*>/i.test(index.body.replace(/<!--[\s\S]*?-->/g, "")));
+  const stylesheet = /href=["'](\/assets\/[^"']+\.css)["']/.exec(index.body)?.[1];
+  if (stylesheet) {
+    const css = await request(WEB_PORT, { path: stylesheet });
+    check(`GET ${stylesheet} → 200 text/css`, css.status === 200 && /text\/css/.test(css.headers["content-type"] ?? ""), `${css.status}`);
+  }
   const trpc = await request(WEB_PORT, { path: "/trpc/reviewQueue" });
   check("GET /trpc/reviewQueue without a token → 401", trpc.status === 401, `${trpc.status}`);
 }
@@ -213,6 +226,12 @@ async function checkContainers() {
   for (const line of formatTable(containers)) console.log(line);
   console.log("");
 
+  const app = containers.find((container) => container.service === "breakdown");
+  const hardening = app ? hardeningProblems(app) : ["no breakdown container"];
+  check("breakdown runs hardened (read-only root, all caps dropped, no-new-privileges, init)", hardening.length === 0, hardening.join("; "));
+  const probe = await compose(["exec", "-T", "breakdown", "node", "-e", "require('fs').writeFileSync('/app/write-probe', '')"], { capture: true, allowFail: true });
+  check("breakdown cannot write its root filesystem", probe.code !== 0 && /EROFS|read-only/i.test(probe.stderr), `exit ${probe.code}`);
+
   for (const container of containers) {
     const problems = limitProblems(container);
     check(`${container.service} holds its caps`, problems.length === 0, problems.join("; ") || `peak ${mib(container.peak)} of ${mib(container.memory)}`);
@@ -239,6 +258,39 @@ async function main() {
   await checkContainers();
 }
 
+// One teardown, shared by the normal end and a stop signal, so a signal
+// arriving mid-teardown waits for it rather than starting a second.
+let teardown;
+async function removeProject() {
+  if (keep) {
+    console.log(`--keep: leaving project ${SMOKE_PROJECT} up; remove it with BREAKDOWN_DB_PASSWORD=x docker compose -p ${SMOKE_PROJECT} -f docker-compose.app.yml down -v`);
+    return true;
+  }
+  try {
+    await compose(["down", "-v", "--remove-orphans"]);
+    return true;
+  } catch (err) {
+    console.error(`teardown failed: ${err.message}`);
+    return false;
+  }
+}
+/** Resolves true when the project is gone (or --keep), false when `down` failed. */
+function tearDown() {
+  teardown ??= removeProject();
+  return teardown;
+}
+
+let stopSignal = null;
+for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143]]) {
+  // `once`: a second signal falls back to the default and ends the run at once.
+  process.once(signal, async () => {
+    stopSignal ??= signal;
+    console.error(`\n${signal} received; ${keep ? "leaving the project up (--keep)" : `tearing down ${SMOKE_PROJECT}`}`);
+    await tearDown();
+    process.exit(code);
+  });
+}
+
 let exitCode = 0;
 try {
   await main();
@@ -250,17 +302,13 @@ try {
     console.log(`all ${results.length} checks passed`);
   }
 } catch (err) {
-  console.error(`\nsmoke test stopped: ${err instanceof Error ? err.message : String(err)}`);
   exitCode = 1;
-  await compose(["logs", "--no-color", "--tail", "80"]).catch(() => {});
-} finally {
-  if (keep) {
-    console.log(`--keep: leaving project ${SMOKE_PROJECT} up; remove it with BREAKDOWN_DB_PASSWORD=x docker compose -p ${SMOKE_PROJECT} -f docker-compose.app.yml down -v`);
-  } else {
-    await compose(["down", "-v", "--remove-orphans"]).catch((err) => {
-      console.error(`teardown failed: ${err.message}`);
-      exitCode = 1;
-    });
+  if (stopSignal === null) {
+    console.error(`\nsmoke test stopped: ${err instanceof Error ? err.message : String(err)}`);
+    await compose(["logs", "--no-color", "--tail", "80"]).catch(() => {});
   }
+} finally {
+  if (!(await tearDown())) exitCode = 1;
 }
-process.exit(exitCode);
+// A signal's handler owns the exit (130/143) once it has fired.
+if (stopSignal === null) process.exit(exitCode);
