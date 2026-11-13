@@ -50,6 +50,10 @@
 // `embeddeddolt/`. macOS can drop events, so the 30 s tick wakes every
 // project regardless: a missed wake costs latency, never correctness.
 //
+// Without `bd` on PATH (`bdAvailable: false`, a container; tailnet-hosting
+// decision 8) the watcher is inert: it says so once at start and never
+// reads the registry, ticks, or loads.
+//
 // Emitted on `events` under the single name `BEADS_WATCHER_EVENT` (never
 // `'error'`, which Node throws on when unhandled): `changed` only when the
 // load's `changed` flag is set — `edges.updated` is non-zero on every load
@@ -309,6 +313,13 @@ export interface BeadsWatcherOptions {
   log?: (message: string) => void;
   /** How long `stop()` lets in-flight loads finish before aborting their `bd` calls. Default 5 s. */
   stopGraceMs?: number;
+  /**
+   * False when the server found no `bd` on PATH (index.ts; tailnet-hosting
+   * decision 8): every load would fail, so nothing is watched. `start()`
+   * logs that once and reads no registry, `reload()` reports nothing, and
+   * `wake()` is false. Default true.
+   */
+  bdAvailable?: boolean;
 }
 
 export interface BeadsWatcher {
@@ -496,6 +507,25 @@ export function createBeadsWatcher(options: BeadsWatcherOptions): BeadsWatcher {
         t.scheduler.tick();
       }
     }, SAFETY_TICK_MS);
+  }
+
+  if (options.bdAvailable === false) {
+    return {
+      events,
+      async start() {
+        log("beads watcher: bd not found on PATH; no beads project is watched by this server");
+      },
+      async reload() {
+        return [];
+      },
+      outcomes() {
+        return [];
+      },
+      wake() {
+        return false;
+      },
+      async stop() {},
+    };
   }
 
   return {

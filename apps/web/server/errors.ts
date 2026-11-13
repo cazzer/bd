@@ -23,7 +23,7 @@
 // own stderr via `console.error` below, for whoever is running this
 // locally to read — never sent to the client.
 
-import { InboxCardChangedError, InboxDecisionConflictError, InvalidInboxItemError, NotAnInboxItemError } from "@breakdown/core";
+import { HostBinaryUnavailableError, InboxCardChangedError, InboxDecisionConflictError, InvalidInboxItemError, NotAnInboxItemError, type HostBinary } from "@breakdown/core";
 import {
   asPgError,
   ContentTooLargeError,
@@ -230,4 +230,13 @@ export function mapCoreError(procedureName: string, err: unknown): TRPCError {
     code: "INTERNAL_SERVER_ERROR",
     message: `${procedureName} failed unexpectedly. This is a server-side problem, not something in your input to fix. You may retry.`,
   });
+}
+
+/**
+ * Refuses a procedure that needs `binary` when the server started without
+ * it on PATH (context.ts `missingBinaries`; tailnet-hosting decision 8), with
+ * HostBinaryUnavailableError's message, before anything else is looked up.
+ */
+export function refuseMissingBinary(missing: readonly HostBinary[] | undefined, binary: HostBinary): void {
+  if (missing?.includes(binary)) throw new TRPCError({ code: "PRECONDITION_FAILED", message: new HostBinaryUnavailableError(binary).message });
 }

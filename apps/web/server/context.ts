@@ -4,6 +4,7 @@
 // so this stays testable without a real HTTP request.
 
 import type { IncomingMessage } from "node:http";
+import type { HostBinary } from "@breakdown/core";
 import type { Database } from "@breakdown/db";
 import type { BeadsWatcher } from "./beads-watcher.js";
 import type { RunHerdrJson } from "./herdr-session.js";
@@ -36,6 +37,14 @@ export interface Context {
   /** Where an inbox item's interactive session starts. */
   sessionCwd?: string;
   /**
+   * Host-only binaries (`bd`, `herdr`) not on PATH when the server started
+   * (index.ts; tailnet-hosting decision 8). A procedure that needs one is
+   * refused with PRECONDITION_FAILED naming it. Absent means none missing.
+   */
+  missingBinaries?: readonly HostBinary[];
+  /** The review media root (`--media-dir`, else core's REVIEW_IMAGE_ROOT); image URLs are built against it. */
+  reviewImageRoot?: string;
+  /**
    * The client token that admitted this request (dispatch.ts), or null for
    * a tokenless loopback request. Human writes record it as their run's
    * actor (tailnet-hosting decision 4). Optional so direct callers (tests)
@@ -53,6 +62,6 @@ export interface Context {
 export const admittedClients = new WeakMap<IncomingMessage, string>();
 
 /** Builds the per-request context factory tRPC's HTTP adapter calls. `db` is created once, at startup, and shared across every request. */
-export function createContextFactory(db: Database, live: Pick<Context, "watcher" | "shutdownSignal" | "readOnly" | "reviewWriter" | "runHerdr" | "herdrJson" | "herdrSocket" | "sessionCwd"> = {}) {
+export function createContextFactory(db: Database, live: Pick<Context, "watcher" | "shutdownSignal" | "readOnly" | "reviewWriter" | "runHerdr" | "herdrJson" | "herdrSocket" | "sessionCwd" | "missingBinaries" | "reviewImageRoot"> = {}) {
   return async ({ req }: { req: IncomingMessage }): Promise<Context> => ({ db, ...live, client: admittedClients.get(req) ?? null });
 }

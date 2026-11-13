@@ -9,7 +9,7 @@
 // loopback peer hiding a remote caller (a local proxy) — exactly the case
 // admission refuses to trust without a token.
 
-import { createServer, request, type IncomingHttpHeaders, type Server } from "node:http";
+import { createServer, request, type IncomingHttpHeaders, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { admittedClients } from "./context.js";
@@ -25,13 +25,14 @@ let port: number;
 let calls: string[];
 let verified: number;
 
-beforeAll(async () => {
+/** A server whose dispatcher's handlers record the call; with `withStatic`, the built client is configured too. */
+async function startDispatcher(withStatic: boolean): Promise<{ server: Server; port: number }> {
   let dispatch: ReturnType<typeof createRequestDispatcher> | null = null;
-  server = createServer((req, res) => dispatch!(req, res));
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  port = (server.address() as AddressInfo).port;
+  const srv = createServer((req, res) => dispatch!(req, res));
+  await new Promise<void>((resolve) => srv.listen(0, "127.0.0.1", resolve));
+  const listening = (srv.address() as AddressInfo).port;
   dispatch = createRequestDispatcher({
-    port,
+    port: listening,
     allowedHosts: [TAILNET],
     verifyToken: async (token) => {
       verified += 1;
@@ -43,6 +44,10 @@ beforeAll(async () => {
       calls.push(`connect ${req.method} ${req.url}`);
       res.end("connect");
     },
+    health: async (req, res) => {
+      calls.push(`health ${req.method} ${req.url} client=${admittedClients.get(req) ?? null}`);
+      res.end("health");
+    },
     reviewImages: async (req, res) => {
       calls.push(`images ${req.url} client=${admittedClients.get(req) ?? null}`);
       res.end("image");
@@ -51,11 +56,29 @@ beforeAll(async () => {
       calls.push(`trpc ${req.url} client=${admittedClients.get(req) ?? null}`);
       res.end("trpc");
     },
+    ...(withStatic
+      ? {
+          staticClient: async (req: IncomingMessage, res: ServerResponse) => {
+            calls.push(`static ${req.method} ${req.url}`);
+            res.end("static");
+          },
+        }
+      : {}),
   });
+  return { server: srv, port: listening };
+}
+
+let staticServer: Server;
+let staticPort: number;
+
+beforeAll(async () => {
+  ({ server, port } = await startDispatcher(false));
+  ({ server: staticServer, port: staticPort } = await startDispatcher(true));
 });
 
 afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
+  await new Promise<void>((resolve) => staticServer.close(() => resolve()));
 });
 
 beforeEach(() => {
@@ -70,9 +93,9 @@ interface Sent {
 }
 
 /** A raw request, so the Host header can be anything (fetch forbids setting it). */
-function send(path: string, headers: Record<string, string>, method = "GET"): Promise<Sent> {
+function send(path: string, headers: Record<string, string>, method = "GET", to = port): Promise<Sent> {
   return new Promise((resolve, reject) => {
-    const req = request({ host: "127.0.0.1", port, path, method, headers }, (res) => {
+    const req = request({ host: "127.0.0.1", port: to, path, method, headers }, (res) => {
       let body = "";
       res.setEncoding("utf8");
       res.on("data", (chunk: string) => (body += chunk));
@@ -239,5 +262,76 @@ describe("createRequestDispatcher: client tokens", () => {
   it("answers 500 and calls no handler when the token store throws", async () => {
     expect(await send("/trpc/board", { Host: tailnetHost(), ...bearer(THROWING_TOKEN) })).toMatchObject({ status: 500, body: "Internal Server Error\n" });
     expect(calls).toEqual([]);
+  });
+});
+
+describe("createRequestDispatcher: health", () => {
+  it("routes /healthz to the health handler, which needs a token off loopback", async () => {
+    expect(await send("/healthz", { Host: `127.0.0.1:${port}` })).toMatchObject({ status: 200, body: "health" });
+    expect(await send("/healthz", { Host: tailnetHost() })).toMatchObject({ status: 401 });
+    expect(await send("/healthz", { Host: tailnetHost(), ...bearer() })).toMatchObject({ status: 200, body: "health" });
+    expect(await send("/healthz", { Host: tailnetHost(), ...bearer(WORKER_TOKEN) })).toMatchObject({ status: 403 });
+    expect(calls).toEqual(["health GET /healthz client=null", "health GET /healthz client=phone"]);
+  });
+
+  it("without a built client, GET / off loopback still needs a token and goes to tRPC", async () => {
+    expect(await send("/", { Host: tailnetHost() })).toMatchObject({ status: 401 });
+    expect(await send("/", { Host: tailnetHost(), ...bearer() })).toMatchObject({ status: 200, body: "trpc" });
+    expect(calls).toEqual(["trpc / client=phone"]);
+  });
+});
+
+describe("createRequestDispatcher: the built client", () => {
+  const host = (): string => `${TAILNET}:${staticPort}`;
+  const toStatic = (path: string, headers: Record<string, string>, method = "GET") => send(path, headers, method, staticPort);
+
+  it("serves the client off loopback with no token, GET and HEAD", async () => {
+    expect(await toStatic("/", { Host: host() })).toMatchObject({ status: 200, body: "static" });
+    expect(await toStatic("/assets/index-Abc123.js", { Host: host() })).toMatchObject({ status: 200, body: "static" });
+    expect(await toStatic("/board/tides?item=x", { Host: host() }, "HEAD")).toMatchObject({ status: 200 });
+    expect(calls).toEqual(["static GET /", "static GET /assets/index-Abc123.js", "static HEAD /board/tides?item=x"]);
+    expect(verified).toBe(0);
+  });
+
+  it("still refuses every data path with no token", async () => {
+    for (const path of ["/trpc", "/trpc/board", "/review-images/a.png", "/healthz"]) {
+      expect(await toStatic(path, { Host: host() }), path).toMatchObject({ status: 401 });
+    }
+    expect(calls).toEqual([]);
+  });
+
+  it("routes /healthz with a human token to the health handler", async () => {
+    expect(await toStatic("/healthz", { Host: host(), ...bearer() })).toMatchObject({ status: 200, body: "health" });
+    expect(calls).toEqual(["health GET /healthz client=phone"]);
+  });
+
+  it("does not make a write to a client path public", async () => {
+    expect(await toStatic("/", { Host: host(), Origin: `http://${host()}` }, "POST")).toMatchObject({ status: 401 });
+    expect(calls).toEqual([]);
+  });
+
+  it("refuses a foreign Host on the client with 403", async () => {
+    expect(await toStatic("/", { Host: `evil.example:${staticPort}` })).toMatchObject({ status: 403 });
+    expect(calls).toEqual([]);
+  });
+
+  it("classifies a path that only normalizes to tRPC as client, never calling tRPC", async () => {
+    for (const path of ["/x/../trpc/a", "/%74rpc/a", "//trpc/a", "/trpcx"]) {
+      expect(await toStatic(path, { Host: host() }), path).toMatchObject({ status: 200, body: "static" });
+    }
+    expect(calls.every((c) => c.startsWith("static "))).toBe(true);
+    expect(calls).toHaveLength(4);
+  });
+
+  it("keeps the connect endpoint as before: POST public, GET not", async () => {
+    expect(await toStatic("/auth/connect", { Host: host(), Origin: `http://${host()}` }, "POST")).toMatchObject({ status: 200, body: "connect" });
+    expect(await toStatic("/auth/connect", { Host: host() })).toMatchObject({ status: 401 });
+    expect(calls).toEqual(["connect POST /auth/connect"]);
+  });
+
+  it("serves the client to a loopback request too", async () => {
+    expect(await toStatic("/", { Host: `localhost:${staticPort}` })).toMatchObject({ status: 200, body: "static" });
+    expect(await toStatic("/trpc/board", { Host: `localhost:${staticPort}` })).toMatchObject({ status: 200, body: "trpc" });
+    expect(calls).toEqual(["static GET /", "trpc /trpc/board client=null"]);
   });
 });

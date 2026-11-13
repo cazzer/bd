@@ -2,7 +2,8 @@ import { mkdtempSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileS
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { focusPane, openAgentSession, resolveHerdrSocket, tabLabel, type RunHerdrJson } from "./herdr-session.js";
+import { HostBinaryUnavailableError } from "@breakdown/core";
+import { createHerdrJsonRunner, focusPane, openAgentSession, resolveHerdrSocket, tabLabel, type RunHerdrJson } from "./herdr-session.js";
 
 const promptDir = mkdtempSync(path.join(tmpdir(), "herdr-prompts-"));
 const input = { promptDir, workspaceLabel: "reviews", title: "bd-4zn.2 Review the storage migration options", cwd: "/repo", prompt: "think with me", namePrefix: "review-bd-4zn-2", retryDelayMs: 1 };
@@ -92,5 +93,13 @@ describe("resolveHerdrSocket", () => {
     mkdirSync(path.join(home, ".config", "herdr"), { recursive: true });
     writeFileSync(path.join(home, ".config", "herdr", "herdr.sock"), "");
     expect(resolveHerdrSocket({ HERDR_SOCKET_PATH: "relative" }, home)).toBe(path.join(home, ".config", "herdr", "herdr.sock"));
+  });
+});
+
+describe("createHerdrJsonRunner", () => {
+  it("rejects with HostBinaryUnavailableError naming herdr when the executable is missing", async () => {
+    const err = await createHerdrJsonRunner(path.join(promptDir, "missing-herdr"))(["workspace", "list"], "/s").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(HostBinaryUnavailableError);
+    expect((err as HostBinaryUnavailableError).binary).toBe("herdr");
   });
 });

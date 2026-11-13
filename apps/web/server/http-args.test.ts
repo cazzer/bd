@@ -1,9 +1,10 @@
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { bindWarning, parseWebArgs, WebArgsError } from "./http-args.js";
 
 describe("parseWebArgs", () => {
   it("defaults to loopback, port 4310, and no allowed hosts", () => {
-    expect(parseWebArgs([], undefined)).toEqual({ host: "127.0.0.1", port: 4310, allowedHosts: [] });
+    expect(parseWebArgs([], undefined)).toEqual({ host: "127.0.0.1", port: 4310, allowedHosts: [], clientDir: null, mediaDir: null });
   });
 
   it("takes WEB_SERVER_PORT when --port is absent, and --port over it when present", () => {
@@ -23,6 +24,18 @@ describe("parseWebArgs", () => {
       "100.64.0.7",
       "[fd7a::1]",
     ]);
+  });
+
+  it("takes --client-dir and --media-dir as absolute paths", () => {
+    expect(parseWebArgs(["--client-dir", "/app/client", "--media-dir", "/data/media"], undefined)).toMatchObject({ clientDir: "/app/client", mediaDir: "/data/media" });
+    expect(parseWebArgs(["--client-dir", "dist"], undefined).clientDir).toBe(path.resolve("dist"));
+    expect(parseWebArgs(["--media-dir=./m"], undefined).mediaDir).toBe(path.resolve("m"));
+  });
+
+  it("refuses an empty directory flag or one with no value, naming the flag", () => {
+    expect(() => parseWebArgs(["--client-dir", ""], undefined)).toThrow(/--client-dir is empty/);
+    expect(() => parseWebArgs(["--media-dir", "  "], undefined)).toThrow(/--media-dir is empty/);
+    expect(() => parseWebArgs(["--client-dir"], undefined)).toThrow(WebArgsError);
   });
 
   it("refuses a bad port from either source, naming the value and its source", () => {

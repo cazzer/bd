@@ -36,7 +36,14 @@
 // `reviewImageUrl` is the other direction, used by the board item DTO: an
 // absolute image path under the root becomes the URL this route serves it
 // at, each segment percent-encoded; anything outside the root is null, so
-// the drawer shows it as missing without making a request.
+// the drawer shows it as missing without making a request. A review's
+// recorded paths were written on the host (`/Users/<me>/.local/share/
+// breakdown/reviews/...`), while a container serves the same files from its
+// `--media-dir` (tailnet-hosting task 2.1). So a path outside the root that
+// contains the segments `.local/share/breakdown/reviews/` is first rebased
+// onto the root: the part after the last occurrence is taken relative to
+// it, then checked exactly as before. A `..` segment after the marker makes
+// the URL null rather than being resolved.
 
 import { createReadStream } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
@@ -87,9 +94,29 @@ export function parseByteRange(header: string | undefined, size: number): ByteRa
   return { start, end };
 }
 
-/** The URL `createReviewImageHandler` serves `absolutePath` at, or null when it is not inside `root`. */
+/** The segments every host's review media root ends in (core's REVIEW_IMAGE_ROOT under any home). */
+const HOST_REVIEW_ROOT_SEGMENTS = [".local", "share", "breakdown", "reviews"] as const;
+
+/** `absolutePath` re-rooted under `root` from the last `.local/share/breakdown/reviews/` in it, or null when it has no such marker or a `..` after it (module header). */
+function rebaseHostReviewPath(absolutePath: string, root: string): string | null {
+  const segments = absolutePath.split(path.sep);
+  const width = HOST_REVIEW_ROOT_SEGMENTS.length;
+  for (let at = segments.length - width - 1; at >= 0; at--) {
+    if (!HOST_REVIEW_ROOT_SEGMENTS.every((name, i) => segments[at + i] === name)) continue;
+    const rest = segments.slice(at + width);
+    if (rest.includes("..")) return null;
+    return path.join(root, ...rest);
+  }
+  return null;
+}
+
+/** The URL `createReviewImageHandler` serves `absolutePath` at, or null when it is not inside `root` (after rebasing a host path; module header). */
 export function reviewImageUrl(absolutePath: string, root: string = REVIEW_IMAGE_ROOT): string | null {
-  if (!isInsideReviewRoot(absolutePath, root)) return null;
+  if (!isInsideReviewRoot(absolutePath, root)) {
+    const rebased = rebaseHostReviewPath(absolutePath, root);
+    if (rebased === null || !isInsideReviewRoot(rebased, root)) return null;
+    absolutePath = rebased;
+  }
   const rel = path.relative(root, path.resolve(absolutePath));
   return REVIEW_IMAGES_PREFIX + rel.split(path.sep).map(encodeURIComponent).join("/");
 }

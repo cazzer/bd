@@ -5,11 +5,22 @@
 // live one is 401 with `WWW-Authenticate: Bearer`. A loopback peer with a
 // loopback Host needs no token, as before, unless a forwarding header names
 // a remote address. The web accepts only `human` tokens: its writes are a
-// person's decisions, so an `agent` token is 403 here (decision 9). Then,
-// in order: the exact path
-// AUTH_CONNECT_PATH to the connect handler (auth-connect.ts), anything
-// under REVIEW_IMAGES_PREFIX to the review image route (review-images.ts),
-// and everything else to tRPC's standalone handler.
+// person's decisions, so an `agent` token is 403 here (decision 9).
+//
+// One classifier, `routeFor`, names where a path goes, and both the
+// routing and the public-path rule read it, so they cannot disagree. On
+// the raw path (query dropped, never URL-normalized):
+//   exactly AUTH_CONNECT_PATH          → the connect handler (auth-connect.ts)
+//   exactly HEALTH_PATH                → the health handler (health.ts)
+//   under REVIEW_IMAGES_PREFIX         → the review image route (review-images.ts)
+//   `/trpc` or under `/trpc/`          → tRPC's standalone handler
+//   anything else                      → the built client (static-client.ts)
+//                                        when one is configured, else tRPC
+// What needs no token: `POST /auth/connect`, and GET/HEAD of a path routed
+// to the built client (it holds no data; client-access spec). Because the
+// client is an exact manifest lookup, a path that only resolves to a data
+// route after normalization (`/x/../trpc/a`, `/%74rpc/a`) is classified as
+// client and can only get index.html or a 404. `/healthz` is not public.
 //
 // The admitted token client is handed to tRPC through `admittedClients`
 // (context.ts), keyed on the request object, so a write's run names the
@@ -29,6 +40,11 @@ import { AUTH_CONNECT_PATH } from "./auth-connect.js";
 import { admittedClients } from "./context.js";
 import { REVIEW_IMAGES_PREFIX } from "./review-images.js";
 
+export const HEALTH_PATH = "/healthz";
+const TRPC_PATH = "/trpc";
+
+type Handler = (req: IncomingMessage, res: ServerResponse) => Promise<void>;
+
 export interface RequestDispatcherOptions {
   /** The port the server listens on; admission pins Host to it. */
   port: number;
@@ -36,18 +52,33 @@ export interface RequestDispatcherOptions {
   allowedHosts: readonly string[];
   /** The client and scope of a live token, or null (verifyClientToken in production). */
   verifyToken: (token: string) => Promise<{ client: string; scope: ClientTokenScope } | null>;
-  connect: (req: IncomingMessage, res: ServerResponse) => Promise<void>;
-  reviewImages: (req: IncomingMessage, res: ServerResponse) => Promise<void>;
+  connect: Handler;
+  health: Handler;
+  reviewImages: Handler;
   trpc: (req: IncomingMessage, res: ServerResponse) => void;
+  /** The built client (static-client.ts), when `--client-dir` is given; without it every unclassified path goes to tRPC as before. */
+  staticClient?: Handler;
+}
+
+export type Route = "connect" | "health" | "review-images" | "trpc" | "static";
+
+/** Where a raw request path goes (module header). `static` only when a client handler is configured. */
+export function routeFor(path: string, hasStaticClient: boolean): Route {
+  if (path === AUTH_CONNECT_PATH) return "connect";
+  if (path === HEALTH_PATH) return "health";
+  if (path.startsWith(REVIEW_IMAGES_PREFIX)) return "review-images";
+  if (path === TRPC_PATH || path.startsWith(`${TRPC_PATH}/`)) return "trpc";
+  return hasStaticClient ? "static" : "trpc";
 }
 
 /**
  * What admission lets through without a token. The one place the web's
- * public surface is named: today only the connect endpoint, where a token
- * is obtained.
+ * public surface is named: the connect endpoint, where a token is
+ * obtained, and reads of the built client.
  */
-function isPublicPath(method: string, path: string): boolean {
-  return method === "POST" && path === AUTH_CONNECT_PATH;
+function isPublicPath(method: string, path: string, hasStaticClient: boolean): boolean {
+  if (method === "POST" && path === AUTH_CONNECT_PATH) return true;
+  return (method === "GET" || method === "HEAD") && routeFor(path, hasStaticClient) === "static";
 }
 
 /** A person's tokens only (module header). */
@@ -55,8 +86,10 @@ const WEB_SCOPES: readonly ClientTokenScope[] = ["human"];
 
 const PLAIN_HEADERS = { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } as const;
 
-export function createRequestDispatcher({ port, allowedHosts, verifyToken, connect, reviewImages, trpc }: RequestDispatcherOptions): (req: IncomingMessage, res: ServerResponse) => void {
-  const policy: AdmissionPolicy = { port, allowedHosts, originCheck: "unsafe-methods", scopes: WEB_SCOPES, isPublic: isPublicPath, verifyToken };
+export function createRequestDispatcher({ port, allowedHosts, verifyToken, connect, health, reviewImages, trpc, staticClient }: RequestDispatcherOptions): (req: IncomingMessage, res: ServerResponse) => void {
+  const hasStaticClient = staticClient !== undefined;
+  const isPublic = (method: string, path: string) => isPublicPath(method, path, hasStaticClient);
+  const policy: AdmissionPolicy = { port, allowedHosts, originCheck: "unsafe-methods", scopes: WEB_SCOPES, isPublic, verifyToken };
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     // The raw request-target, deliberately not URL-normalized (admission.ts header).
@@ -87,15 +120,23 @@ export function createRequestDispatcher({ port, allowedHosts, verifyToken, conne
     }
     if (admission.client !== null) admittedClients.set(req, admission.client);
 
-    if (path === AUTH_CONNECT_PATH) {
-      await connect(req, res);
-      return;
+    switch (routeFor(path, hasStaticClient)) {
+      case "connect":
+        await connect(req, res);
+        return;
+      case "health":
+        await health(req, res);
+        return;
+      case "review-images":
+        await reviewImages(req, res);
+        return;
+      case "static":
+        await staticClient!(req, res);
+        return;
+      case "trpc":
+        trpc(req, res);
+        return;
     }
-    if (rawUrl.startsWith(REVIEW_IMAGES_PREFIX)) {
-      await reviewImages(req, res);
-      return;
-    }
-    trpc(req, res);
   }
 
   return (req, res) => {

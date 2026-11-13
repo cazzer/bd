@@ -5,10 +5,20 @@
 // decision 4): the shared admission function refuses a foreign Host or a
 // foreign-Origin write with 403 and a request lacking a needed client token
 // with 401, then `POST /auth/connect` goes to the connect handler
-// (auth-connect.ts), a request under REVIEW_IMAGES_PREFIX to the review
-// image handler (review-images.ts), and everything else to tRPC's
-// standalone handler — the same `createHTTPHandler` that `createHTTPServer`
-// wraps, so tRPC sees exactly what it saw before.
+// (auth-connect.ts), `/healthz` to the health handler (health.ts), a
+// request under REVIEW_IMAGES_PREFIX to the review image handler
+// (review-images.ts), `/trpc` to tRPC's standalone handler — the same
+// `createHTTPHandler` that `createHTTPServer` wraps, so tRPC sees exactly
+// what it saw before — and, with `--client-dir`, everything else to the
+// built client (static-client.ts). Without it, everything else goes to tRPC
+// as before and Vite serves the client.
+//
+// `--media-dir` replaces the review media root (core's REVIEW_IMAGE_ROOT)
+// for both the image route and the URLs the board builds; it must exist.
+// `bd` and `herdr` are looked up on PATH once here (tailnet-hosting
+// decision 8): a missing one is logged once and named in the context, so
+// the procedures that need it refuse with PRECONDITION_FAILED, and without
+// `bd` the beads watcher watches nothing. Neither blocks startup.
 //
 // Nothing above main() reads the environment or opens a connection —
 // module scope only imports and defines main(); every side effect
@@ -24,8 +34,9 @@
 // token (dispatch.ts), and a bind with no allowed host is warned about at
 // startup.
 
-import { verifyClientToken } from "@breakdown/core";
+import { findOnPath, REVIEW_IMAGE_ROOT, verifyClientToken, type HostBinary } from "@breakdown/core";
 import { createDb, createPool, DatabaseUrlNotSetError, resolveDatabaseUrl } from "@breakdown/db";
+import { statSync } from "node:fs";
 import { createServer } from "node:http";
 import { createHTTPHandler } from "@trpc/server/adapters/standalone";
 import { createConnectHandler } from "./auth-connect.js";
@@ -33,7 +44,9 @@ import { createBeadsWatcher } from "./beads-watcher.js";
 import { parseReadOnly } from "./config.js";
 import { createContextFactory } from "./context.js";
 import { createRequestDispatcher } from "./dispatch.js";
+import { createHealthHandler } from "./health.js";
 import { createReviewImageHandler } from "./review-images.js";
+import { createStaticClientHandler, loadClientManifest } from "./static-client.js";
 import { createHerdrJsonRunner, resolveHerdrSocket } from "./herdr-session.js";
 import { bindWarning, parseWebArgs, WebArgsError, type WebArgs } from "./http-args.js";
 import { resolveSessionCwd } from "./inbox-session.js";
@@ -53,6 +66,27 @@ async function main(): Promise<void> {
   }
   const warning = bindWarning(args);
   if (warning !== null) console.error(`[breakdown-web] warning: ${warning}`);
+
+  // The client and media directories are checked before anything connects, like a flag.
+  let staticClient: ReturnType<typeof createStaticClientHandler> | undefined;
+  if (args.clientDir !== null) {
+    try {
+      staticClient = createStaticClientHandler(await loadClientManifest(args.clientDir));
+    } catch (err) {
+      console.error(`[breakdown-web] cannot start: --client-dir: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  }
+  const reviewImageRoot = args.mediaDir ?? REVIEW_IMAGE_ROOT;
+  if (args.mediaDir !== null && !isDirectory(args.mediaDir)) {
+    console.error(`[breakdown-web] cannot start: --media-dir ${args.mediaDir} is not an existing directory`);
+    process.exit(1);
+  }
+
+  const missingBinaries = (["bd", "herdr"] as const satisfies readonly HostBinary[]).filter((binary) => findOnPath(binary) === null);
+  for (const binary of missingBinaries) {
+    console.error(`[breakdown-web] ${binary} is unavailable on this server: not found on PATH; features that need it are refused`);
+  }
 
   let databaseUrl: string;
   try {
@@ -87,7 +121,7 @@ async function main(): Promise<void> {
   // start() returns once the registry is read — the first loads run in the
   // background so listening is not delayed — and logs/retries a registry
   // failure itself.
-  const watcher = createBeadsWatcher({ db });
+  const watcher = createBeadsWatcher({ db, bdAvailable: !missingBinaries.includes("bd") });
   const shutdown = new AbortController();
   await watcher.start();
 
@@ -104,6 +138,8 @@ async function main(): Promise<void> {
       herdrJson: createHerdrJsonRunner(),
       herdrSocket: resolveHerdrSocket(),
       sessionCwd: resolveSessionCwd(),
+      missingBinaries,
+      reviewImageRoot,
     }),
     basePath: "/trpc/",
   });
@@ -114,15 +150,18 @@ async function main(): Promise<void> {
       allowedHosts,
       verifyToken,
       connect: createConnectHandler({ verifyToken }),
-      reviewImages: createReviewImageHandler(),
+      health: createHealthHandler(pool),
+      reviewImages: createReviewImageHandler({ root: reviewImageRoot }),
       trpc: trpcHandler,
+      ...(staticClient !== undefined ? { staticClient } : {}),
     }),
   );
 
   const hostPart = host.includes(":") ? `[${host}]` : host;
   server.listen(port, host, () => {
     const allowed = allowedHosts.length > 0 ? `, allowing ${allowedHosts.join(", ")}` : "";
-    console.error(`[breakdown-web] ready on http://${hostPart}:${port}${allowed} — database ${describeConnectionTarget(databaseUrl)}${readOnly ? " (read-only)" : ""}`);
+    const client = args.clientDir !== null ? `, client from ${args.clientDir}` : "";
+    console.error(`[breakdown-web] ready on http://${hostPart}:${port}${allowed}${client} — database ${describeConnectionTarget(databaseUrl)}${readOnly ? " (read-only)" : ""}`);
   });
 
   // One shared guard: a second signal while shutting down exits at once
@@ -148,6 +187,14 @@ async function main(): Promise<void> {
         .catch((err) => console.error("[breakdown-web] error during shutdown:", err))
         .finally(() => process.exit(0));
     });
+  }
+}
+
+function isDirectory(dir: string): boolean {
+  try {
+    return statSync(dir).isDirectory();
+  } catch {
+    return false;
   }
 }
 
