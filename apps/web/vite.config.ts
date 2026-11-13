@@ -31,6 +31,11 @@ export default defineConfig({
         target: `http://127.0.0.1:${serverPort}`,
         changeOrigin: true,
       },
+      // The connect screen's token-for-cookie exchange (tailnet-hosting decision 5).
+      "/auth/connect": {
+        target: `http://127.0.0.1:${serverPort}`,
+        changeOrigin: true,
+      },
     },
   },
 });

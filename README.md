@@ -21,7 +21,7 @@ Postgres 16 (plain Docker container, not the Supabase CLI stack) · TypeScript, 
 ```
 packages/db     schema + migrations
 packages/core   batch writes, full-text + graph retrieval
-apps/mcp        MCP server (shared loopback HTTP + stdio)
+apps/mcp        MCP server (shared HTTP, loopback by default, + stdio)
 apps/web        later
 ```
 
@@ -62,7 +62,7 @@ Running it again reports `nodes: 0 created, 0 updated, 9 unchanged` and the same
 
 ### 3. Run the shared MCP server and point clients at it
 
-One long-running server on this machine serves every agent session, from any folder or herdr workspace, at `http://127.0.0.1:5320/mcp`. It listens on loopback only and refuses any other bind address. Each client gets its own MCP session, so writes are still attributed to the client that made them.
+One long-running server on this machine serves every agent session, from any folder or herdr workspace, at `http://127.0.0.1:5320/mcp`. It listens on loopback unless told otherwise (see [Reaching Breakdown over the tailnet](#reaching-breakdown-over-the-tailnet)). Each client gets its own MCP session, so writes are still attributed to the client that made them.
 
 Install it as a login service (macOS LaunchAgent: starts at login, restarted on any exit, retried every 10s until Postgres is up):
 
@@ -139,6 +139,42 @@ Ask Claude something the seeded docs actually answer — e.g. "search the brain 
 ```
 
 The top two hits are exact full-text matches on `design.md` and `architecture-handoff.md` (both discuss "no embeddings" directly); everything else was reached by following `part-of-change`/`sibling` edges outward — no vector search involved.
+
+## Reaching Breakdown over the tailnet
+
+Both servers bind `127.0.0.1` by default and nothing changes for local sessions: a loopback request with a loopback `Host` needs no token. Exposing either one to other machines takes two flags and one token per client.
+
+**Flags.** `--host <addr>` picks the bind address and `--allow-host <name>` (repeatable) names each hostname remote clients will use; both are flags under any supervisor, never environment variables.
+
+```bash
+pnpm mcp:serve --host 0.0.0.0 --allow-host breakdown.tail1234.ts.net
+pnpm --filter @breakdown/web dev:server --host 0.0.0.0 --allow-host breakdown.tail1234.ts.net
+```
+
+A request whose `Host` is neither loopback nor allowed is refused with 403, token or not. Bound off loopback with no `--allow-host`, the server starts but warns that every remote request will get 403.
+
+**Tokens.** Every request from off loopback needs a client token, on every path including `/healthz`, or gets 401. Mint one per client on the host:
+
+```bash
+pnpm -s client-token create phone     # prints bdt_… once on stdout; only its hash is stored
+pnpm -s client-token list             # client, created, last used, live/revoked; never the token
+pnpm -s client-token revoke phone
+```
+
+`-s` keeps pnpm's `> pkg@version` banner off stdout, so `TOKEN=$(pnpm -s client-token create phone)` captures the token alone. The token is shown once and can't be recovered; lose it and revoke and re-create. Tokens can only be managed here: no MCP tool and no web API procedure creates, lists, or revokes one. A revoked token is refused on its next request, with no cache to wait out. `last_used_at` is updated at most once a minute per client, and still is when the server runs with `BRAIN_READ_ONLY=1`.
+
+**MCP clients** send the token as a static header:
+
+```bash
+claude mcp add -s user --transport http brain http://breakdown.tail1234.ts.net:5320/mcp \
+  --header "Authorization: Bearer bdt_…"
+```
+
+Without the header, a 401 may send Claude Code into OAuth discovery, which this server doesn't offer; check the header first when a remote client reports an auth flow. Writes from a token are attributed to its client and the MCP client's own name, e.g. `worker-1 via claude-code 2.1.0`.
+
+**Browsers** connect once. A board opened from the tailnet with no cookie shows a connect screen; paste the client's token, and the server answers with an HttpOnly, SameSite=Strict cookie that carries every later request, images included. The token never goes in a URL (a query-string token is ignored), and revoking it ends the cookie too. Web writes from that browser are attributed to the client, e.g. `phone`. Remote browsers get the board from the web server itself once it serves the built client; never expose the Vite dev server with `--host`, because its proxy forwards to the API as a loopback request.
+
+Host-side firewall and tailnet ACLs live in skyos (`sky-brx`), not here.
 
 ## Inbox
 
