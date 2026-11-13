@@ -39,6 +39,9 @@ export {
   InboxCardChangedError,
   InvalidViewError,
   InvalidEventTimeError,
+  InvalidClientNameError,
+  ClientTokenExistsError,
+  ClientTokenNotFoundError,
 } from "./errors.js";
 
 // `asPgError`/`PgErrorLike` are re-exported (not just used internally) so
@@ -582,3 +585,28 @@ export {
   type WorkDecision,
   type WorkSignal,
 } from "./work-context.js";
+
+export {
+  createClientToken,
+  listClientTokens,
+  revokeClientToken,
+  verifyClientToken,
+  CLIENT_TOKEN_PREFIX,
+  CLIENT_NAME_PATTERN,
+  type CreatedClientToken,
+  type ClientTokenListing,
+} from "./client-tokens.js";
+
+export {
+  admitRequest,
+  credentialFrom,
+  isLoopbackAddress,
+  normalizeAllowedHost,
+  LOOPBACK_HOST_NAMES,
+  TOKEN_COOKIE_NAME,
+  UNAUTHORIZED_HEADERS,
+  type PresentedCredential,
+  type AdmissionRequest,
+  type AdmissionPolicy,
+  type Admission,
+} from "./admission.js";

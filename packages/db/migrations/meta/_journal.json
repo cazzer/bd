@@ -43,6 +43,13 @@
       "when": 1788394662452,
       "tag": "0005_blocks_acyclic_set_semantics",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1794602891744,
+      "tag": "0006_client_tokens",
+      "breakpoints": true
     }
   ]
 }
