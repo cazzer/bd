@@ -36,6 +36,6 @@ Rejected alternatives:
 - `packages/core`: the shared guard and token verifier, plus a token store.
 - `packages/db`: a new `client_tokens` table and migration. `nodes` is untouched, so the `resolved_nodes` view needs no change.
 - New CLI scripts: `pnpm token create|list|revoke`.
-- New: `Dockerfile`, `.dockerignore`, `docker/launch.mjs`, `docker-compose.app.yml`, Postgres settings, a smoke-test script, and README deploy notes.
+- New: `Dockerfile`, `.dockerignore`, `bin/container-launch.mjs`, `docker-compose.app.yml`, Postgres settings, a smoke-test script, and README deploy notes.
 - CLAUDE.md: the architecture line saying "the host is loopback-only and enforced", and the adapters' copy-not-share note for the guard.
 - No new environment variables read by the servers. The bind host and allowed hosts are flags. The container's launcher reads `BREAKDOWN_*` env and passes them on as flags.
