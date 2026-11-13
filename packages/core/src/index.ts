@@ -191,6 +191,7 @@ export {
   type RetractEdgeResult,
   type ReweightEdgeInput,
   type ReweightEdgeResult,
+  type HumanWriteOptions,
 } from "./human-writes.js";
 
 // Pure helpers for the repo-markdown seed script (bd-vt2.6, task 6.1) —

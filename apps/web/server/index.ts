@@ -1,10 +1,12 @@
 // Entrypoint (bd-hmd.3): fail-fast startup checks, then serve the tRPC
-// router over Node's http server, bound to loopback only.
+// router over Node's http server, bound to loopback by default.
 //
 // One server, one dispatcher (dispatch.ts; board-visual-reviews, design.md
-// decision 4): the request guard refuses a foreign Host or a foreign-Origin
-// write with 403, then a request under REVIEW_IMAGES_PREFIX goes to the
-// review image handler (review-images.ts) and everything else to tRPC's
+// decision 4): the shared admission function refuses a foreign Host or a
+// foreign-Origin write with 403 and a request lacking a needed client token
+// with 401, then `POST /auth/connect` goes to the connect handler
+// (auth-connect.ts), a request under REVIEW_IMAGES_PREFIX to the review
+// image handler (review-images.ts), and everything else to tRPC's
 // standalone handler — the same `createHTTPHandler` that `createHTTPServer`
 // wraps, so tRPC sees exactly what it saw before.
 //
@@ -13,33 +15,45 @@
 // happens inside the function, at process startup (mirrors
 // apps/mcp/src/index.ts's shape exactly).
 //
-// Binds `127.0.0.1` explicitly, not `0.0.0.0` and not Node's default
-// (which, with no host argument, listens on every interface) — the local
-// web spec's "Server binds to loopback" scenario requires that a request
-// from another host on the network cannot reach this at all, not merely
-// that it isn't advertised.
+// Bind address, port, and allowed hosts come from flags (http-args.ts;
+// tailnet-hosting decision 1). The default bind is `127.0.0.1` explicitly,
+// not `0.0.0.0` and not Node's default (which, with no host argument,
+// listens on every interface) — with no flags, a request from another host
+// on the network cannot reach this at all. `--host` widens the bind; even
+// then a remote request needs a Host named by `--allow-host` and a client
+// token (dispatch.ts), and a bind with no allowed host is warned about at
+// startup.
 
+import { verifyClientToken } from "@breakdown/core";
 import { createDb, createPool, DatabaseUrlNotSetError, resolveDatabaseUrl } from "@breakdown/db";
 import { createServer } from "node:http";
 import { createHTTPHandler } from "@trpc/server/adapters/standalone";
+import { createConnectHandler } from "./auth-connect.js";
 import { createBeadsWatcher } from "./beads-watcher.js";
 import { parseReadOnly } from "./config.js";
 import { createContextFactory } from "./context.js";
 import { createRequestDispatcher } from "./dispatch.js";
 import { createReviewImageHandler } from "./review-images.js";
 import { createHerdrJsonRunner, resolveHerdrSocket } from "./herdr-session.js";
+import { bindWarning, parseWebArgs, WebArgsError, type WebArgs } from "./http-args.js";
 import { resolveSessionCwd } from "./inbox-session.js";
 import { createHerdrRunner, createReviewWriter } from "./review-writer.js";
 import { appRouter } from "./router.js";
 import { describeConnectionError, describeConnectionTarget, verifyDatabaseConnection } from "./startup.js";
 
-/** Loopback-only: see the module header. Not configurable — there is no scenario in which this server should listen anywhere else. */
-const HOST = "127.0.0.1";
-
-/** Overridable via `WEB_SERVER_PORT` — vite.config.ts's dev proxy target must agree with this. */
-const DEFAULT_PORT = 4310;
-
 async function main(): Promise<void> {
+  // Flags first: a mistyped flag fails before anything connects.
+  let args: WebArgs;
+  try {
+    args = parseWebArgs(process.argv.slice(2), process.env["WEB_SERVER_PORT"]);
+  } catch (err) {
+    if (!(err instanceof WebArgsError)) throw err;
+    console.error(`[breakdown-web] cannot start: ${err.message}`);
+    process.exit(1);
+  }
+  const warning = bindWarning(args);
+  if (warning !== null) console.error(`[breakdown-web] warning: ${warning}`);
+
   let databaseUrl: string;
   try {
     // The only credential this server requires — see resolveDatabaseUrl,
@@ -82,7 +96,7 @@ async function main(): Promise<void> {
   const readOnly = parseReadOnly(process.env["BRAIN_READ_ONLY"]);
   const reviewWriter = createReviewWriter();
 
-  const port = Number(process.env["WEB_SERVER_PORT"] ?? DEFAULT_PORT);
+  const { host, port, allowedHosts } = args;
   const trpcHandler = createHTTPHandler({
     router: appRouter,
     createContext: createContextFactory(db, { watcher, shutdownSignal: shutdown.signal, readOnly, reviewWriter,
@@ -93,10 +107,22 @@ async function main(): Promise<void> {
     }),
     basePath: "/trpc/",
   });
-  const server = createServer(createRequestDispatcher({ port, reviewImages: createReviewImageHandler(), trpc: trpcHandler }));
+  const verifyToken = (token: string): Promise<string | null> => verifyClientToken(db, token);
+  const server = createServer(
+    createRequestDispatcher({
+      port,
+      allowedHosts,
+      verifyToken,
+      connect: createConnectHandler({ verifyToken }),
+      reviewImages: createReviewImageHandler(),
+      trpc: trpcHandler,
+    }),
+  );
 
-  server.listen(port, HOST, () => {
-    console.error(`[breakdown-web] ready on http://${HOST}:${port} — database ${describeConnectionTarget(databaseUrl)}${readOnly ? " (read-only)" : ""}`);
+  const hostPart = host.includes(":") ? `[${host}]` : host;
+  server.listen(port, host, () => {
+    const allowed = allowedHosts.length > 0 ? `, allowing ${allowedHosts.join(", ")}` : "";
+    console.error(`[breakdown-web] ready on http://${hostPart}:${port}${allowed} — database ${describeConnectionTarget(databaseUrl)}${readOnly ? " (read-only)" : ""}`);
   });
 
   // One shared guard: a second signal while shutting down exits at once

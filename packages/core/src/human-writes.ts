@@ -82,10 +82,21 @@ export const HUMAN_SOURCE_SYSTEM = "human";
  * from `HUMAN_SOURCE_SYSTEM` even though the two share a value today:
  * source system is the provenance of the content, actor is who drove the
  * write (knowledge-store spec, "Writes are attributable to an ingest
- * run"), and the web app has no per-person identity to record beyond
- * "a person".
+ * run"). The default when the caller names no one: a loopback browser has
+ * no identity beyond "a person". A write admitted by a client token passes
+ * that client as `options.actor` instead (tailnet-hosting decision 4).
  */
 const HUMAN_ACTOR = "human";
+
+/**
+ * Who drove a human write, when it is not the default `HUMAN_ACTOR`. A
+ * trailing option rather than an input field on purpose: the web router
+ * passes zod-parsed browser input straight through as `input`, so an
+ * input field would let the browser name its own actor.
+ */
+export interface HumanWriteOptions {
+  actor?: string;
+}
 
 /** `node_type` for a person-authored note. Requires no migration — `node_type` is open text by design (see design.md, "Repo-sourced nodes are read-only"). */
 export const NOTE_NODE_TYPE = "note";
@@ -95,14 +106,14 @@ export const ANNOTATES_EDGE_TYPE = "annotates";
 
 /**
  * Opens an ingest run attributed to `HUMAN_SOURCE_SYSTEM` with
- * `HUMAN_ACTOR` as its actor, runs `fn` with the handle, and always closes
+ * `actor` (default `HUMAN_ACTOR`) as its actor, runs `fn` with the handle, and always closes
  * the run afterward — including when `fn` throws — the same shape as
  * `apps/mcp/src/attribution.ts`'s `withAgentIngestRun` (which records the
  * connected client as actor instead), so a human write and an agent write
  * are revertible-as-a-unit the same way.
  */
-async function withHumanIngestRun<T>(db: Database, fn: (run: IngestRunHandle) => Promise<T>): Promise<{ ingestRunId: string; result: T }> {
-  const run = await openIngestRun(db, HUMAN_SOURCE_SYSTEM, { actor: HUMAN_ACTOR });
+async function withHumanIngestRun<T>(db: Database, actor: string | undefined, fn: (run: IngestRunHandle) => Promise<T>): Promise<{ ingestRunId: string; result: T }> {
+  const run = await openIngestRun(db, HUMAN_SOURCE_SYSTEM, { actor: actor ?? HUMAN_ACTOR });
   try {
     const result = await fn(run);
     return { ingestRunId: run.id, result };
@@ -171,7 +182,7 @@ export interface CreateNoteResult {
  * but cheap, and keeps this going through the same public entry point
  * every other node write does).
  */
-export async function createNote(db: Database, input: CreateNoteInput = {}): Promise<CreateNoteResult> {
+export async function createNote(db: Database, input: CreateNoteInput = {}, options: HumanWriteOptions = {}): Promise<CreateNoteResult> {
   const externalId = generateNoteExternalId();
   const nodeInput: NodeInput = {
     nodeType: NOTE_NODE_TYPE,
@@ -183,7 +194,7 @@ export async function createNote(db: Database, input: CreateNoteInput = {}): Pro
   };
   unsafePrepareNodes([nodeInput], DEFAULT_MAX_CONTENT_LENGTH, DEFAULT_MAX_METADATA_LENGTH, DEFAULT_MAX_TITLE_LENGTH);
 
-  const { ingestRunId, result } = await withHumanIngestRun(db, (run) => upsertNodes(db, run, [nodeInput]));
+  const { ingestRunId, result } = await withHumanIngestRun(db, options.actor, (run) => upsertNodes(db, run, [nodeInput]));
   const row = result.rows[0];
   if (!row) {
     // upsertNodes was called with exactly one input row — it always
@@ -246,7 +257,7 @@ export interface AnnotateNodeResult {
  * fast, friendly path for the case that happens on every keystroke, not
  * the race that happens never.
  */
-export async function annotateNode(db: Database, targetNodeId: string, input: AnnotateNodeInput = {}): Promise<AnnotateNodeResult> {
+export async function annotateNode(db: Database, targetNodeId: string, input: AnnotateNodeInput = {}, options: HumanWriteOptions = {}): Promise<AnnotateNodeResult> {
   const trimmedTarget = trimmedUuid(targetNodeId, "targetNodeId");
 
   const externalId = generateNoteExternalId();
@@ -271,7 +282,7 @@ export async function annotateNode(db: Database, targetNodeId: string, input: An
     throw new NodeNotFoundError(trimmedTarget);
   }
 
-  const { ingestRunId, result } = await withHumanIngestRun(db, (run) =>
+  const { ingestRunId, result } = await withHumanIngestRun(db, options.actor, (run) =>
     db.transaction(async (tx) => {
       let noteQueryResult: { rows: UpsertNodeRow[] };
       try {
@@ -344,7 +355,7 @@ export interface UpdateNodeContentResult {
  * missing node, a refused file-backed node, or oversized/control-character
  * content never leaves a permanent empty run in the audit trail.
  */
-export async function updateNodeContent(db: Database, nodeId: string, input: UpdateNodeContentInput = {}): Promise<UpdateNodeContentResult> {
+export async function updateNodeContent(db: Database, nodeId: string, input: UpdateNodeContentInput = {}, options: HumanWriteOptions = {}): Promise<UpdateNodeContentResult> {
   const trimmedId = trimmedUuid(nodeId, "nodeId");
 
   const [existing] = await db
@@ -378,7 +389,7 @@ export async function updateNodeContent(db: Database, nodeId: string, input: Upd
   };
   unsafePrepareNodes([merged], DEFAULT_MAX_CONTENT_LENGTH, DEFAULT_MAX_METADATA_LENGTH, DEFAULT_MAX_TITLE_LENGTH);
 
-  const { ingestRunId, result } = await withHumanIngestRun(db, (run) => upsertNodes(db, run, [merged]));
+  const { ingestRunId, result } = await withHumanIngestRun(db, options.actor, (run) => upsertNodes(db, run, [merged]));
   const row = result.rows[0];
   if (!row) {
     throw new NodeUpsertFailedError(`updateNodeContent: upsert returned no row for node ${trimmedId}`, 0, 0);
@@ -413,7 +424,7 @@ export interface AssertEdgeResult {
  * (knowledge-store spec, "Asserting an edge that already exists from the
  * same source").
  */
-export async function assertEdge(db: Database, input: AssertEdgeInput): Promise<AssertEdgeResult> {
+export async function assertEdge(db: Database, input: AssertEdgeInput, options: HumanWriteOptions = {}): Promise<AssertEdgeResult> {
   const edgeInput = { srcId: input.srcId, dstId: input.dstId, edgeType: input.edgeType, sourceSystem: HUMAN_SOURCE_SYSTEM, weight: input.weight, props: input.props };
   // Validated (pure, no database access) before an ingest run opens — see
   // createNote's doc comment for why a rejected write must not leave a
@@ -421,7 +432,7 @@ export async function assertEdge(db: Database, input: AssertEdgeInput): Promise<
   // internally; redundant but cheap).
   unsafePrepareEdges([edgeInput]);
 
-  const { ingestRunId, result } = await withHumanIngestRun(db, (run) => upsertEdges(db, run, [edgeInput]));
+  const { ingestRunId, result } = await withHumanIngestRun(db, options.actor, (run) => upsertEdges(db, run, [edgeInput]));
   const row = result.rows[0];
   if (!row) {
     throw new EdgeUpsertFailedError("assertEdge: upsert returned no row", 0, 0);
@@ -514,7 +525,7 @@ export interface ReweightEdgeResult {
  * itself would then affect zero rows, and that failure path throws the
  * same `EdgeNotFoundError` without leaving a stale row set.
  */
-export async function reweightEdge(db: Database, input: ReweightEdgeInput): Promise<ReweightEdgeResult> {
+export async function reweightEdge(db: Database, input: ReweightEdgeInput, options: HumanWriteOptions = {}): Promise<ReweightEdgeResult> {
   const [prepared] = unsafePrepareEdges([
     { srcId: input.srcId, dstId: input.dstId, edgeType: input.edgeType, sourceSystem: HUMAN_SOURCE_SYSTEM, weight: input.weight },
   ]);
@@ -534,7 +545,7 @@ export async function reweightEdge(db: Database, input: ReweightEdgeInput): Prom
     throw new EdgeNotFoundError(prepared.srcId, prepared.dstId, prepared.edgeType, HUMAN_SOURCE_SYSTEM);
   }
 
-  const { ingestRunId, result } = await withHumanIngestRun(db, async (run) => {
+  const { ingestRunId, result } = await withHumanIngestRun(db, options.actor, async (run) => {
     const [row] = await db
       .update(edges)
       .set({ weight: prepared.weight, ingestRunId: run.id })

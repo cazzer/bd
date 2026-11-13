@@ -376,3 +376,27 @@ describe("work context (inbox-follow-through)", () => {
     await expect(unlinkInboxWorkContext(db, rfi)).rejects.toThrow(NotAnInboxItemError);
   });
 });
+
+describe("the actor the person's inbox writes record (tailnet-hosting decision 4)", () => {
+  async function runOf(ingestRunId: string): Promise<{ actor: string | null; source_system: string } | undefined> {
+    return (await db.execute<{ actor: string | null; source_system: string }>(sql`SELECT actor, source_system FROM ingest_runs WHERE id = ${ingestRunId}`)).rows[0];
+  }
+
+  it("is `human` by default and the named client when the caller passes one", async () => {
+    const plain = await write("slack:C9/actor-default", { source: "slack" });
+    const decidedPlain = await decideInboxItem(db, plain, { decision: "dismiss" });
+    expect(await runOf(decidedPlain.ingestRunId)).toEqual({ actor: "human", source_system: "human" });
+
+    const fromPhone = await write("slack:C9/actor-phone", { source: "slack" });
+    const decided = await decideInboxItem(db, fromPhone, { decision: "accept", actor: "phone" });
+    expect(await runOf(decided.ingestRunId)).toEqual({ actor: "phone", source_system: "human" });
+
+    const held = await write("github:actor-held", { source: "github", status: "undigested" });
+    const released = await releaseInboxItem(db, held, { actor: "phone" });
+    expect(released.before).toBe("undigested");
+    expect(await runOf(released.ingestRunId)).toEqual({ actor: "phone", source_system: "human" });
+
+    const handed = await handOffInboxItem(db, held, { pane: "w9:p3", socket: "/tmp/herdr.sock", tab: "w9:t3", actor: "phone" });
+    expect(await runOf(handed.ingestRunId)).toEqual({ actor: "phone", source_system: "human" });
+  });
+});

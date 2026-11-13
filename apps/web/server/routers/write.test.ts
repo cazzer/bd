@@ -31,8 +31,8 @@
 //     count — so it can't be polluted by another file's fixtures either.
 
 import { createDb, createPool, resolveDatabaseUrl, type Database } from "@breakdown/db";
-import { edges } from "@breakdown/db";
-import { and, count, eq } from "drizzle-orm";
+import { edges, ingestRuns, nodes } from "@breakdown/db";
+import { and, count, eq, inArray } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Context } from "../context.js";
 import { appRouter } from "../router.js";
@@ -105,5 +105,31 @@ describe("a rejected write persists nothing (bd-hmd.3 review)", () => {
 
     const [after] = await db.select({ n: count() }).from(edges).where(scoped);
     expect(after?.n ?? 0).toBe(0);
+  });
+});
+
+// tailnet-hosting decision 4: a write admitted by a client token records
+// that client as its run's actor; a tokenless (loopback) one stays
+// `human`. The source system is `human` either way. Fixtures are deleted
+// by id: the node first, then its run.
+describe("the actor a web write records", () => {
+  it("is the context's client when one was admitted, and `human` without one", async () => {
+    const withClient = await createCaller({ db, client: "phone" }).createNote({ content: "from the phone" });
+    const without = await createCaller({ db, client: null }).createNote({ content: "from loopback" });
+    const absent = await callerWith(db).createNote({ content: "from a direct caller" });
+    const created = [withClient, without, absent];
+    try {
+      const runs = await db
+        .select({ id: ingestRuns.id, actor: ingestRuns.actor, sourceSystem: ingestRuns.sourceSystem })
+        .from(ingestRuns)
+        .where(inArray(ingestRuns.id, created.map((c) => c.ingestRunId)));
+      const byId = new Map(runs.map((r) => [r.id, r]));
+      expect(byId.get(withClient.ingestRunId)).toMatchObject({ actor: "phone", sourceSystem: "human" });
+      expect(byId.get(without.ingestRunId)).toMatchObject({ actor: "human", sourceSystem: "human" });
+      expect(byId.get(absent.ingestRunId)).toMatchObject({ actor: "human", sourceSystem: "human" });
+    } finally {
+      await db.delete(nodes).where(inArray(nodes.id, created.map((c) => c.id)));
+      await db.delete(ingestRuns).where(inArray(ingestRuns.id, created.map((c) => c.ingestRunId)));
+    }
   });
 });

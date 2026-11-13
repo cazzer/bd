@@ -628,3 +628,43 @@ describe("assertEdge / retractEdge / reweightEdge", () => {
     expect(openIngestRunCalls()).toBe(runsBefore);
   });
 });
+
+describe("the actor a human write records (tailnet-hosting decision 4)", () => {
+  async function runOf(ingestRunId: string): Promise<{ actor: string | null; sourceSystem: string } | undefined> {
+    const [row] = await db.select({ actor: ingestRuns.actor, sourceSystem: ingestRuns.sourceSystem }).from(ingestRuns).where(eq(ingestRuns.id, ingestRunId));
+    return row;
+  }
+
+  it("is `human` by default and the named client when the caller passes one, on every write that opens a run", async () => {
+    const plain = await createNote(db, { content: "no client" });
+    createdNodeIds.push(plain.id);
+    createdRunIds.push(plain.ingestRunId);
+    expect(await runOf(plain.ingestRunId)).toEqual({ actor: "human", sourceSystem: HUMAN_SOURCE_SYSTEM });
+
+    const note = await createNote(db, { content: "from the phone" }, { actor: "phone" });
+    createdNodeIds.push(note.id);
+    createdRunIds.push(note.ingestRunId);
+    expect(await runOf(note.ingestRunId)).toEqual({ actor: "phone", sourceSystem: HUMAN_SOURCE_SYSTEM });
+
+    const target = await makeFixtureNode("actor-fixture");
+    const annotated = await annotateNode(db, target.id, { content: "annotation" }, { actor: "phone" });
+    createdNodeIds.push(annotated.noteId);
+    createdEdgeIds.push(annotated.annotationEdgeId);
+    createdRunIds.push(annotated.ingestRunId);
+    expect((await runOf(annotated.ingestRunId))?.actor).toBe("phone");
+
+    const updated = await updateNodeContent(db, note.id, { content: "edited on the phone" }, { actor: "phone" });
+    createdRunIds.push(updated.ingestRunId);
+    expect((await runOf(updated.ingestRunId))?.actor).toBe("phone");
+
+    const other = await makeFixtureNode("actor-fixture");
+    const asserted = await assertEdge(db, { srcId: target.id, dstId: other.id, edgeType: "relates-to" }, { actor: "phone" });
+    createdEdgeIds.push(asserted.id);
+    createdRunIds.push(asserted.ingestRunId);
+    expect((await runOf(asserted.ingestRunId))?.actor).toBe("phone");
+
+    const reweighted = await reweightEdge(db, { srcId: target.id, dstId: other.id, edgeType: "relates-to", weight: 0.25 }, { actor: "phone" });
+    createdRunIds.push(reweighted.ingestRunId);
+    expect((await runOf(reweighted.ingestRunId))?.actor).toBe("phone");
+  });
+});
