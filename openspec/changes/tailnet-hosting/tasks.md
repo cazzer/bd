@@ -15,7 +15,7 @@
 
 - [x] 2.1 Web server serves the built client from a `--client-dir` (index fallback, immutable hashed assets) and widens the public paths to it; `/healthz` on web; one media directory flag for review media; tests
 - [x] 2.2 Host-only binaries: `bd`/`herdr` ENOENT becomes a typed "unavailable" error everywhere they spawn; beads watcher tolerates a missing registry; startup test with neither on PATH
-- [ ] 2.3 Multi-stage `Dockerfile` + `.dockerignore` + `docker/launch.mjs` (env → flags, migrate, two children, signal forwarding, exit on child exit); `docker buildx build --platform linux/arm64,linux/amd64` succeeds
+- [x] 2.3 Multi-stage `Dockerfile` + `.dockerignore` + `docker/launch.mjs` (env → flags, migrate, two children, signal forwarding, exit on child exit); `docker buildx build --platform linux/arm64,linux/amd64` succeeds
 - [ ] 2.4 Postgres settings for `breakdown-db`; `docker-compose.app.yml` running both containers with caps, env, named volumes, loopback publish, own project name
 - [ ] 2.5 Smoke test: up, token via the container, healthz 401/200 through the published ports, MCP initialize with the token, `docker stats` under each cap, down; run on the Mac and record peaks in the README
 - [ ] 2.6 README deploy section (env table, caps, token commands in the container) and CLAUDE.md note on the launcher; `pnpm check` green
