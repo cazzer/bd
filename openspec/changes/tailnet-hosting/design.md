@@ -53,7 +53,7 @@ Migration `0006_client_tokens.sql` creates `client_tokens(id uuid pk, client tex
 
 Verification is one indexed lookup (`token_hash = $1 and revoked_at is null`). `last_used_at` is updated only when it is null or older than 60 s, so steady traffic writes at most once a minute per client. There is no in-process cache, so revocation takes effect on the next request.
 
-The CLI is `packages/core/src/cli/token.ts`, exposed as root `pnpm -s client-token create|list|revoke <client>` (not `pnpm token`: pnpm 10 has a built-in `token` command that shadows the script and hands off to `npm token`; `-s` keeps pnpm's `> pkg@ script` banner off stdout). It prints the token once, on stdout, and nothing else. In the container it runs as `docker compose exec web node dist/token.mjs …`. No tRPC procedure or MCP tool touches the table, and a test enumerates both surfaces to prove it.
+The CLI is `packages/core/src/cli/token.ts`, exposed as root `pnpm -s client-token create <client> --scope human|agent`, `list`, `revoke <client>` (not `pnpm token`: pnpm 10 has a built-in `token` command that shadows the script and hands off to `npm token`; `-s` keeps pnpm's `> pkg@ script` banner off stdout). It prints the token once, on stdout, and nothing else. In the container it runs as `docker compose exec web node dist/token.mjs …`. No tRPC procedure or MCP tool touches the table, and a test enumerates both surfaces to prove it.
 
 - *Alternative: a token file on disk.* Rejected: revocation and last-use need a writer, and the database is already the one stateful dependency.
 

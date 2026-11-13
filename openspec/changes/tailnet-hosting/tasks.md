@@ -2,7 +2,7 @@
 
 - [x] 1.1 Migration `0006_client_tokens.sql` and drizzle schema for `client_tokens` (partial unique index on live `client`); schema test
 - [x] 1.2 Token store in `packages/core`: create (refuses a live duplicate), list (no secrets), revoke, verify (hash lookup, throttled `last_used_at`); tests against the database with scoped fixtures
-- [x] 1.3 Token CLI (`pnpm -s client-token create|list|revoke <client>`); prints the token once on stdout; test that the stored row holds only the hash
+- [x] 1.3 Token CLI (`pnpm -s client-token create <client> --scope human|agent`, `list`, `revoke <client>`); prints the token once on stdout; test that the stored row holds only the hash
 - [x] 1.4 Shared admission function in `packages/core` (design decision 2) with per-server Origin rule; unit tests for loopback, tailnet+token, foreign Host, missing/revoked token, foreign Origin, loopback peer with tailnet Host, public paths
 - [x] 1.5 MCP: `--host` accepts any address, repeatable `--allow-host`; remove loopback-bind/peer refusals; http-server applies the shared function (401 with `WWW-Authenticate`, 403 as today); delete the local guard copy; tests updated
 - [x] 1.6 MCP attribution: bind the token client to the session at initialize, refuse a different client on that session with 403, actor `"<client> via <name> <version>"`; tests
