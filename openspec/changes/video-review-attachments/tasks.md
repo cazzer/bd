@@ -15,10 +15,10 @@
 
 ## 3. Reviewing a reel on the board
 
-- [ ] 3.1 `ReviewAttachments.tsx`: the `ReviewVideo` player (9:16, muted, `playsInline`, `preload="metadata"`, controls, Loop toggle default on, Enlarge button, unavailable state) and the Videos slot (design.md decision 5)
-- [ ] 3.2 The options side-by-side slot ahead of pairs, in card order, with badge, label, and Recommended chip, in both layouts (design.md decision 6)
-- [ ] 3.3 `Lightbox.tsx`: video items, `startAt`, `onClose(time)`, no arrow-key stepping from a `<video>`, labels; inline player syncs time both ways (design.md decision 7)
-- [ ] 3.4 `ReviewItemPanel.test.ts` with `reel-cuts.expected.json`: cells A then B with labels, plain video in the Videos slot, poster, `muted`/`controls`/no `autoplay`, Loop flips `loop`, Enlarge opens a dialog with a `<video>` and reports its overlay
+- [x] 3.1 `ReviewAttachments.tsx`: the `ReviewVideo` player (9:16, muted, `playsInline`, `preload="metadata"`, controls, Loop toggle default on, Enlarge button, unavailable state) and the Videos slot (design.md decision 5)
+- [x] 3.2 The options side-by-side slot ahead of pairs, in card order, with badge, label, and Recommended chip, in both layouts (design.md decision 6)
+- [x] 3.3 `Lightbox.tsx`: video items, `startAt`, `onClose(time)`, no arrow-key stepping from a `<video>`, labels; inline player syncs time both ways (design.md decision 7)
+- [x] 3.4 `ReviewItemPanel.test.ts` with `reel-cuts.expected.json`: cells A then B with labels, plain video in the Videos slot, poster, `muted`/`controls`/no `autoplay`, Loop flips `loop`, Enlarge opens a dialog with a `<video>` and reports its overlay
 
 ## 4. Timestamped notes and live check
 

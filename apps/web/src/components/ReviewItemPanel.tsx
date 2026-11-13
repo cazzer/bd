@@ -374,7 +374,16 @@ export function ReviewItemPanel({
   const attachments = loaded?.isReview ? reviewAttachments(loaded) : [];
   const staged = layout === "stage" && attachments.length > 0;
 
-  const attachmentSlot = (slotLayout: AttachmentLayout) => <ReviewAttachments attachments={attachments} layout={slotLayout} focusTitle={() => titleRef.current?.focus()} onOverlayChange={onOverlayChange} />;
+  const attachmentSlot = (slotLayout: AttachmentLayout) => (
+    <ReviewAttachments
+      attachments={attachments}
+      layout={slotLayout}
+      focusTitle={() => titleRef.current?.focus()}
+      onOverlayChange={onOverlayChange}
+      options={card?.options ?? []}
+      recommend={card?.recommend ?? null}
+    />
+  );
 
   const body = (
     <div className="min-h-0 flex-1 space-y-5 overflow-y-auto p-4">

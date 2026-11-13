@@ -44,7 +44,7 @@ export function CardQuestion({ question }: { question: string }) {
   );
 }
 
-function IdBadge({ id, accent }: { id: string; accent: boolean }) {
+export function IdBadge({ id, accent }: { id: string; accent: boolean }) {
   return (
     <span aria-hidden="true" className={`grid h-5 min-w-5 shrink-0 place-items-center rounded px-1 font-mono text-[11px] font-semibold ${accent ? "bg-accent text-ground" : "bg-fg/10 text-fg-muted"}`}>
       {id}

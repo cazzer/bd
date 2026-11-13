@@ -12,6 +12,11 @@
 // are stubbed; they have their own tests (EvidenceView.test.ts). The
 // MermaidBlock stub draws an open <dialog> with a button, standing in for
 // the enlarged diagram (a dialog the panel itself opened).
+//
+// Videos (video-review-attachments, tasks.md 3.4, 4.2): jsdom has no media
+// playback and no modal dialogs, so `play`/`pause` and `showModal`/`close`
+// are stubbed, and a player's time is set through `currentTime`, which jsdom
+// stores without playing anything.
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -40,6 +45,16 @@ vi.mock("./MermaidBlock.js", async () => {
 });
 
 const { ReviewItemPanel } = await import("./ReviewItemPanel.js");
+
+const pauseSpy = vi.fn();
+HTMLMediaElement.prototype.play = vi.fn(async () => {});
+HTMLMediaElement.prototype.pause = pauseSpy;
+HTMLDialogElement.prototype.showModal = function (this: HTMLDialogElement) {
+  this.setAttribute("open", "");
+};
+HTMLDialogElement.prototype.close = function (this: HTMLDialogElement) {
+  this.removeAttribute("open");
+};
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -502,5 +517,107 @@ describe("an item that is not a review", () => {
     await render(boardItem(null, body, { title: "Ship it", labels: [], isReview: false, review: null }));
     expect(sectionTitles()).toContain("Description");
     expect([...container.querySelectorAll("[data-stub=evidence]")].map((e) => e.textContent)).toEqual([body]);
+  });
+});
+
+describe("a card with video cuts", () => {
+  const RAW = "/review-images/PROJECT/BEAD";
+  const V = `?v=${encodeURIComponent("2026-11-05T12:00:00.000Z")}`;
+  const cuts = () => [...container.querySelectorAll<HTMLLIElement>("section[aria-label='Cuts · 2'] li")];
+  const videoIn = (el: Element) => el.querySelector("video")!;
+
+  test("shows each option's cut side by side in card order under its id and label, then the plain video", async () => {
+    await render(boardItem(fixtureReview("reel-cuts")));
+    expect(sectionTitles()).toEqual(["Question", "Options · 2", "On accept · 1 step", "Cuts · 2", "Videos · 1", "Thread · 0"]);
+    const [a, b] = cuts();
+    expect(cuts().map((li) => li.getAttribute("data-option-id"))).toEqual(["A", "B"]);
+    expect(a!.textContent).toContain("Option A: Cut 1: open on the stalls");
+    expect(a!.textContent).toContain("Recommended");
+    expect(b!.textContent).toContain("Option B: Cut 2: open on the baker");
+    expect(b!.textContent).not.toContain("Recommended");
+    expect(videoIn(a!).getAttribute("src")).toBe(`${RAW}/01-reel-a.mp4${V}`);
+    expect(videoIn(a!).getAttribute("poster")).toBe(`${RAW}/02-reel-a-poster.jpg${V}`);
+    expect(videoIn(b!).getAttribute("src")).toBe(`${RAW}/03-reel-b.mp4${V}`);
+    expect(videoIn(b!).hasAttribute("poster")).toBe(false);
+    const plain = container.querySelector("section[aria-label='Videos · 1']")!;
+    expect(plain.querySelectorAll("video")).toHaveLength(1);
+    expect(videoIn(plain).getAttribute("src")).toBe(`${RAW}/04-reel-raw.mp4${V}`);
+    expect(plain.textContent).toContain("The raw footage both cuts come from");
+  });
+
+  test("plays muted, with controls, on a click, loading metadata only, and loops until Loop is turned off", async () => {
+    await render(boardItem(fixtureReview("reel-cuts")));
+    for (const video of container.querySelectorAll("video")) {
+      expect(video.muted).toBe(true);
+      expect(video.controls).toBe(true);
+      expect(video.autoplay).toBe(false);
+      expect(video.hasAttribute("playsinline")).toBe(true);
+      expect(video.getAttribute("preload")).toBe("metadata");
+      expect(video.loop).toBe(true);
+    }
+    const loop = container.querySelector<HTMLButtonElement>("button[aria-label='Loop option A: Cut 1']")!;
+    expect(loop.getAttribute("aria-pressed")).toBe("true");
+    await click(loop);
+    expect(loop.getAttribute("aria-pressed")).toBe("false");
+    expect(videoIn(cuts()[0]!).loop).toBe(false);
+    expect(videoIn(cuts()[1]!).loop).toBe(true);
+  });
+
+  test("shows a video it cannot serve as unavailable, with its path", async () => {
+    const raw = fixtureReview("reel-cuts") as { attachments: Array<Record<string, unknown>> };
+    raw.attachments[2] = { kind: "video", path: "/elsewhere/raw.mp4" };
+    await render(boardItem(raw));
+    const plain = container.querySelector("section[aria-label='Videos · 1']")!;
+    expect(plain.querySelector("video")).toBeNull();
+    expect(plain.textContent).toContain("Can't show: /elsewhere/raw.mp4");
+  });
+
+  test("Enlarge opens the video in a dialog at the inline time, closing brings the time back, and the panel holds its shortcuts meanwhile", async () => {
+    await render(boardItem(fixtureReview("reel-cuts")), { acceptLabel: "Accept", changesLabel: "Request changes", shortcuts: true });
+    const inline = videoIn(cuts()[0]!);
+    inline.currentTime = 5;
+    pauseSpy.mockClear();
+    const enlarge = container.querySelector<HTMLButtonElement>("button[aria-label='Enlarge video: option A: Cut 1']")!;
+    await click(enlarge);
+    expect(pauseSpy).toHaveBeenCalled();
+    const dialog = container.querySelector("dialog[open]")!;
+    expect(dialog.getAttribute("aria-label")).toBe("Video 1 of 1: 01-reel-a.mp4");
+    const big = dialog.querySelector("video")!;
+    expect(big.autoplay).toBe(true);
+    expect(big.muted).toBe(true);
+    expect(big.getAttribute("poster")).toBe(`${RAW}/02-reel-a-poster.jpg${V}`);
+    await act(async () => {
+      big.dispatchEvent(new Event("loadedmetadata"));
+    });
+    expect(big.currentTime).toBe(5);
+
+    // The overlay is reported: Cmd+Enter outside the dialog decides nothing while it is open.
+    const title = container.querySelector<HTMLElement>("[data-panel-title]")!;
+    await act(async () => {
+      title.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true }));
+    });
+    expect(trpcMock.reviewDecision.mutate).not.toHaveBeenCalled();
+
+    big.currentTime = 9;
+    await click(dialog.querySelector<HTMLButtonElement>("button[aria-label=Close]")!);
+    expect(container.querySelector("dialog video")).toBeNull();
+    expect(inline.currentTime).toBe(9);
+    expect(document.activeElement).toBe(enlarge);
+    await act(async () => {
+      title.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", metaKey: true, bubbles: true }));
+    });
+    expect(trpcMock.reviewDecision.mutate.mock.calls[0]![0]).toMatchObject({ decision: "accept", option: "A" });
+  });
+
+  test("arrow keys on the enlarged video are the video's, not the lightbox's", async () => {
+    await render(boardItem(fixtureReview("reel-cuts")));
+    await click(container.querySelector<HTMLButtonElement>("button[aria-label='Enlarge video: option B: Cut 2']")!);
+    const big = container.querySelector("dialog video")!;
+    const key = new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true });
+    await act(async () => {
+      big.dispatchEvent(key);
+    });
+    expect(key.defaultPrevented).toBe(false);
+    expect(container.querySelector("dialog video")).toBe(big);
   });
 });

@@ -1,39 +1,54 @@
-// The review drawer's enlarged screenshot (board-visual-reviews, task 4.4):
-// a native <dialog> opened with showModal(), so the browser puts it in the
-// top layer, makes the rest of the page inert, keeps focus inside it, and
-// fires `cancel` on Escape wherever focus is — and undoes all of it when the
-// dialog closes or unmounts, so no path can leave the page inert. Focus
-// starts on the close button. ArrowLeft / ArrowRight step through the
-// screenshots (wrapping). Escape's keydown is stopped here so the drawer
-// around it does not also close. The parent owns where focus returns, and
-// unmounts this when the screenshot it shows no longer exists.
+// The review drawer's enlarged screenshot or video (board-visual-reviews,
+// task 4.4; video-review-attachments, design.md decision 7): a native
+// <dialog> opened with showModal(), so the browser puts it in the top layer,
+// makes the rest of the page inert, keeps focus inside it, and fires `cancel`
+// on Escape wherever focus is — and undoes all of it when the dialog closes
+// or unmounts, so no path can leave the page inert. Focus starts on the close
+// button. ArrowLeft / ArrowRight step through the items (wrapping), except
+// from a <video>, whose own controls take those keys to seek. Escape's
+// keydown is stopped here so the drawer around it does not also close. The
+// parent owns where focus returns, and unmounts this when the item it shows
+// no longer exists.
+//
+// A video plays muted from `startAt` (the inline player's time), and closing
+// reports the time it reached, so the inline player picks up there.
 
 import { useLayoutEffect, useRef, useState, type KeyboardEvent, type SyntheticEvent } from "react";
 import { stepIndex } from "../lib/reviewDrawer.js";
 
-export interface LightboxImage {
+export interface LightboxItem {
   name: string;
   path: string;
-  /** Null when the image cannot be served; shown as unavailable. */
+  /** Null when the file cannot be served; shown as unavailable. */
   src: string | null;
+  /** Absent means an image. */
+  kind?: "image" | "video";
+  /** A video's poster image, or null. */
+  poster?: string | null;
 }
 
 export interface LightboxProps {
-  images: readonly LightboxImage[];
+  items: readonly LightboxItem[];
   index: number;
   onIndexChange: (index: number) => void;
-  onClose: () => void;
+  /** Where a video item starts playing, in seconds. */
+  startAt?: number;
+  /** `time` is where a shown video had reached; absent for an image. */
+  onClose: (time?: number) => void;
 }
 
 const NAV_BUTTON =
   "grid size-11 shrink-0 place-items-center rounded-full border border-hairline bg-surface-strong text-fg hover:border-accent focus:outline-none focus:ring-2 focus:ring-accent";
 
-export function Lightbox({ images, index, onIndexChange, onClose }: LightboxProps) {
+export function Lightbox({ items, index, onIndexChange, startAt, onClose }: LightboxProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
   const [failed, setFailed] = useState<ReadonlySet<string>>(new Set());
-  const image = images[index];
-  const n = images.length;
+  const item = items[index];
+  const n = items.length;
+  const isVideo = item?.kind === "video";
+  const noun = isVideo ? "Video" : "Screenshot";
 
   // Before paint, so the dialog never shows un-modal for a frame.
   useLayoutEffect(() => {
@@ -45,18 +60,25 @@ export function Lightbox({ images, index, onIndexChange, onClose }: LightboxProp
     };
   }, []);
 
+  function close() {
+    onClose(isVideo && videoRef.current ? videoRef.current.currentTime : undefined);
+  }
+
   function onCancel(e: SyntheticEvent<HTMLDialogElement>) {
     // React carries `cancel` up the tree; a dialog around this one (the review-all run) must not take it as its own.
     e.stopPropagation();
     e.preventDefault();
-    onClose();
+    close();
   }
 
   function onKeyDown(e: KeyboardEvent<HTMLDialogElement>) {
     if (e.key === "Escape") {
       // `cancel` closes it; the drawer's own Escape handler must not see this.
       e.stopPropagation();
-    } else if (e.key === "ArrowRight" && n > 1) {
+      return;
+    }
+    if (e.target instanceof HTMLVideoElement) return;
+    if (e.key === "ArrowRight" && n > 1) {
       e.preventDefault();
       onIndexChange(stepIndex(index, 1, n));
     } else if (e.key === "ArrowLeft" && n > 1) {
@@ -65,8 +87,9 @@ export function Lightbox({ images, index, onIndexChange, onClose }: LightboxProp
     }
   }
 
-  const unavailable = !image || image.src === null || failed.has(image.src);
-  const label = image ? `Screenshot ${index + 1} of ${n}: ${image.name}` : "Screenshot";
+  const unavailable = !item || item.src === null || failed.has(item.src);
+  const label = item ? `${noun} ${index + 1} of ${n}: ${item.name}` : noun;
+  const markFailed = () => setFailed((prev) => new Set(prev).add(item!.src!));
 
   return (
     <dialog
@@ -82,13 +105,13 @@ export function Lightbox({ images, index, onIndexChange, onClose }: LightboxProp
         <span className="shrink-0 font-mono text-fg-muted">
           {index + 1} / {n}
         </span>
-        <span className="min-w-0 truncate">{image?.name}</span>
+        <span className="min-w-0 truncate">{item?.name}</span>
         <span className="ml-auto" />
         <button
           ref={closeRef}
           type="button"
-          aria-label="Close image"
-          onClick={onClose}
+          aria-label="Close"
+          onClick={close}
           className="grid size-11 shrink-0 place-items-center rounded-lg border border-hairline text-fg-muted hover:bg-surface-strong hover:text-fg focus:outline-none focus:ring-2 focus:ring-accent"
         >
           ✕
@@ -96,27 +119,38 @@ export function Lightbox({ images, index, onIndexChange, onClose }: LightboxProp
       </div>
       <div className="flex min-h-0 flex-1 items-center gap-2 px-2 pb-4 sm:gap-4 sm:px-4">
         {n > 1 && (
-          <button type="button" aria-label="Previous screenshot" onClick={() => onIndexChange(stepIndex(index, -1, n))} className={NAV_BUTTON}>
+          <button type="button" aria-label={`Previous ${noun.toLowerCase()}`} onClick={() => onIndexChange(stepIndex(index, -1, n))} className={NAV_BUTTON}>
             ‹
           </button>
         )}
         <div className="flex h-full min-w-0 flex-1 items-center justify-center">
           {unavailable ? (
             <p className="max-w-full rounded-lg border border-hairline bg-surface-strong px-4 py-3 text-sm text-fg-muted">
-              Can't show: <span className="break-all font-mono">{image?.path}</span>
+              Can't show: <span className="break-all font-mono">{item?.path}</span>
             </p>
-          ) : (
-            <img
-              key={image.src}
-              src={image.src!}
-              alt={image.name}
-              onError={() => setFailed((prev) => new Set(prev).add(image.src!))}
-              className="max-h-full max-w-full rounded-lg object-contain shadow-2xl"
+          ) : isVideo ? (
+            <video
+              ref={videoRef}
+              key={item.src}
+              src={item.src!}
+              poster={item.poster ?? undefined}
+              aria-label={item.name}
+              controls
+              playsInline
+              autoPlay
+              muted
+              onLoadedMetadata={(e) => {
+                if (startAt !== undefined && startAt > 0) e.currentTarget.currentTime = startAt;
+              }}
+              onError={markFailed}
+              className="max-h-full max-w-full rounded-lg bg-black shadow-2xl"
             />
+          ) : (
+            <img key={item.src} src={item.src!} alt={item.name} onError={markFailed} className="max-h-full max-w-full rounded-lg object-contain shadow-2xl" />
           )}
         </div>
         {n > 1 && (
-          <button type="button" aria-label="Next screenshot" onClick={() => onIndexChange(stepIndex(index, 1, n))} className={NAV_BUTTON}>
+          <button type="button" aria-label={`Next ${noun.toLowerCase()}`} onClick={() => onIndexChange(stepIndex(index, 1, n))} className={NAV_BUTTON}>
             ›
           </button>
         )}

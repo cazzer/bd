@@ -125,7 +125,7 @@ export function MermaidDiagram({ source, caption, onPendingChange, fill = false 
         <summary className="cursor-pointer rounded text-fg-muted hover:text-fg focus:outline-none focus-visible:ring-2 focus-visible:ring-accent">Diagram source</summary>
         <div className="mt-1.5 whitespace-pre-wrap font-mono leading-relaxed text-fg [overflow-wrap:anywhere]">{source}</div>
       </details>
-      {enlarged && <Lightbox images={[{ name: caption ?? kind, path: kind, src: drawn.src }]} index={0} onIndexChange={() => {}} onClose={() => setEnlarged(false)} />}
+      {enlarged && <Lightbox items={[{ name: caption ?? kind, path: kind, src: drawn.src }]} index={0} onIndexChange={() => {}} onClose={() => setEnlarged(false)} />}
     </div>
   );
 }

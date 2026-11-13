@@ -33,6 +33,19 @@
 // A drawn diagram opens its own enlarged view (MermaidDiagram.tsx); the panel
 // keeps its shortcuts out of any dialog inside it, so that view needs no
 // overlay report.
+//
+// Videos (video-review-attachments, design.md decisions 5-8). Each plays in
+// a vertical 9:16 player (`ReviewVideo`): muted, started by a click on it,
+// native controls, metadata only until played, a Loop toggle on by default,
+// and an Enlarge button (a click on the video plays it, so enlarging is its
+// own control) that opens it in the lightbox at the inline player's time and
+// takes the lightbox's time back on close. A video that names a card option
+// goes to the cuts slot, ahead of the pairs: one cell per option with a
+// video, in the card's option order (A left), each headed by its id, label,
+// and — the recommended one — a Recommended chip; it is marked, never moved.
+// The rest go to the Videos slot. While the host passes `onTimestamp` (the
+// decision is open), each player has a Note button showing its current time,
+// which hands the host `timestampNote` text for the message.
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
@@ -45,16 +58,20 @@ import {
   type ImageAttachment,
   type ReviewAttachment,
   type ReviewAttachmentKind,
+  formatVideoTime,
+  optionVideos,
+  timestampNote,
   type VideoAttachment,
 } from "../lib/reviewAttachments.js";
 import { DiffBlock } from "./DiffBlock.js";
 import { Lightbox } from "./Lightbox.js";
 import { MermaidBlock } from "./MermaidBlock.js";
+import { IdBadge } from "./ReviewCardBody.js";
 
 export type AttachmentLayout = "column" | "stage";
 
-/** A slot of the attachments: the before/after pairs, or one kind. Overlays are reported per slot. */
-export type AttachmentSlot = "pair" | ReviewAttachmentKind;
+/** A slot of the attachments: the options' cuts, the before/after pairs, or one kind. Overlays are reported per slot. */
+export type AttachmentSlot = "options" | "pair" | ReviewAttachmentKind;
 
 export interface AttachmentRendererProps<K extends ReviewAttachmentKind> {
   attachments: Array<Extract<ReviewAttachment, { kind: K }>>;
@@ -63,6 +80,8 @@ export interface AttachmentRendererProps<K extends ReviewAttachmentKind> {
   focusTitle: () => void;
   /** An overlay of this renderer's opened or closed; Escape is the overlay's while it is open. */
   onOverlayChange: (open: boolean) => void;
+  /** A video's Note pressed: the text to add to the message. Absent while the decision is not open. */
+  onTimestamp?: (note: string) => void;
 }
 
 type Renderers = { [K in ReviewAttachmentKind]: (props: AttachmentRendererProps<K>) => ReactNode };
@@ -74,27 +93,78 @@ const KIND_ORDER: readonly ReviewAttachmentKind[] = ["image", "video", "mermaid"
 /** Lines a diff shows in the column before its "show all" control. */
 const COLUMN_DIFF_LINES = 12;
 
+/** A card option as the cuts slot heads a cell with it. */
+export interface AttachmentOption {
+  id: string;
+  label: string;
+}
+
 export interface ReviewAttachmentsProps {
   attachments: readonly ReviewAttachment[];
   layout: AttachmentLayout;
   focusTitle: () => void;
   /** Per slot, so one renderer closing its overlay never clears another's. */
   onOverlayChange: (slot: AttachmentSlot, open: boolean) => void;
+  /** The card's options, in card order; a video naming one is shown in its cell. */
+  options?: readonly AttachmentOption[];
+  /** The recommended option's id, marked in its cell. */
+  recommend?: string | null;
+  /** A video's Note pressed (see AttachmentRendererProps); absent hides the Note buttons. */
+  onTimestamp?: (note: string) => void;
 }
 
-export function ReviewAttachments({ attachments, layout, focusTitle, onOverlayChange }: ReviewAttachmentsProps) {
-  const { pairs, rest } = pairAttachments(attachments);
+const NO_OPTIONS: readonly AttachmentOption[] = [];
+
+export function ReviewAttachments({ attachments, layout, focusTitle, onOverlayChange, options = NO_OPTIONS, recommend = null, onTimestamp }: ReviewAttachmentsProps) {
+  const { byOption, rest: unoptioned } = optionVideos(
+    attachments,
+    options.map((o) => o.id),
+  );
+  const { pairs, rest } = pairAttachments(unoptioned);
+  const cells = byOption.map(({ optionId, video }) => ({ option: options.find((o) => o.id === optionId)!, video }));
   const slots = [
-    <PairAttachments key="pair" pairs={pairs} layout={layout} focusTitle={focusTitle} onOverlayChange={(open) => onOverlayChange("pair", open)} />,
-    ...KIND_ORDER.map((kind) => <KindSlot key={kind} kind={kind} attachments={rest} layout={layout} focusTitle={focusTitle} onOverlayChange={onOverlayChange} />),
+    <OptionVideos key="options" cells={cells} recommend={recommend} layout={layout} focusTitle={focusTitle} onOverlayChange={(open) => onOverlayChange("options", open)} onTimestamp={onTimestamp} />,
+    <PairAttachments key="pair" pairs={pairs} layout={layout} focusTitle={focusTitle} onOverlayChange={(open) => onOverlayChange("pair", open)} onTimestamp={onTimestamp} />,
+    ...KIND_ORDER.map((kind) => (
+      <KindSlot key={kind} kind={kind} attachments={rest} layout={layout} focusTitle={focusTitle} onOverlayChange={onOverlayChange} onTimestamp={onTimestamp} />
+    )),
   ];
   if (layout === "column") return <>{slots}</>;
   return <div className="flex h-full min-h-0 flex-col gap-4">{slots}</div>;
 }
 
-function KindSlot<K extends ReviewAttachmentKind>({ kind, attachments, layout, focusTitle, onOverlayChange }: ReviewAttachmentsProps & { kind: K }) {
+function KindSlot<K extends ReviewAttachmentKind>({
+  kind,
+  attachments,
+  layout,
+  focusTitle,
+  onOverlayChange,
+  onTimestamp,
+}: Pick<ReviewAttachmentsProps, "attachments" | "layout" | "focusTitle" | "onOverlayChange" | "onTimestamp"> & { kind: K }) {
   const Renderer = RENDERERS[kind] as (props: AttachmentRendererProps<K>) => ReactNode;
-  return <Renderer attachments={attachmentsOfKind(attachments, kind)} layout={layout} focusTitle={focusTitle} onOverlayChange={(open) => onOverlayChange(kind, open)} />;
+  return (
+    <Renderer
+      attachments={attachmentsOfKind(attachments, kind)}
+      layout={layout}
+      focusTitle={focusTitle}
+      onOverlayChange={(open) => onOverlayChange(kind, open)}
+      {...(onTimestamp === undefined ? {} : { onTimestamp })}
+    />
+  );
+}
+
+/**
+ * A slot's open overlays, its own (`ownOpen`) and its videos' enlarged
+ * views, reported to the host as one flag. A video reports through the
+ * returned callback, open on enlarging and closed on closing or unmounting.
+ */
+function useSlotOverlay(onOverlayChange: (open: boolean) => void, ownOpen = false): (open: boolean) => void {
+  const [videosOpen, setVideosOpen] = useState(0);
+  const open = ownOpen || videosOpen > 0;
+  useEffect(() => {
+    onOverlayChange(open);
+  }, [open]);
+  return (videoOpen: boolean) => setVideosOpen((n) => Math.max(0, n + (videoOpen ? 1 : -1)));
 }
 
 export function SectionTitle({ children, id }: { children: ReactNode; id?: string }) {
@@ -145,7 +215,7 @@ function ImageAttachments({ attachments, layout, focusTitle, onOverlayChange }: 
   }
 
   const onError = (src: string) => setFailed((prev) => new Set(prev).add(src));
-  const lightboxEl = lightbox !== null && lightbox < images.length && <Lightbox images={images} index={lightbox} onIndexChange={setLightbox} onClose={closeLightbox} />;
+  const lightboxEl = lightbox !== null && lightbox < images.length && <Lightbox items={images} index={lightbox} onIndexChange={setLightbox} onClose={closeLightbox} />;
 
   if (images.length === 0) return <>{lightboxEl}</>;
 
@@ -272,16 +342,19 @@ function Thumb({
   );
 }
 
-/** Videos: each as a vertical player with its caption. */
-function VideoAttachments({ attachments }: AttachmentRendererProps<"video">) {
+/** Videos that name no option: each a vertical player with its caption, two to a row in the column, in one row on the stage. */
+function VideoAttachments({ attachments, layout, focusTitle, onOverlayChange, onTimestamp }: AttachmentRendererProps<"video">) {
+  const onEnlargedChange = useSlotOverlay(onOverlayChange);
   if (attachments.length === 0) return null;
+  const stage = layout === "stage";
+  const title = `Videos · ${attachments.length}`;
   return (
-    <section>
-      <SectionTitle>Videos · {attachments.length}</SectionTitle>
-      <ul role="list" className="grid grid-cols-2 gap-3">
+    <section aria-label={title} className={stage ? `flex flex-col ${STAGE_SHARE}` : undefined}>
+      <SectionTitle>{title}</SectionTitle>
+      <ul role="list" className={stage ? "flex min-h-0 flex-1 gap-3" : "grid grid-cols-2 gap-3"}>
         {attachments.map((v, i) => (
-          <li key={`${i}:${v.path}`}>
-            <ReviewVideo video={v} />
+          <li key={`${i}:${v.path}`} className={stage ? "flex min-h-0 min-w-0 flex-1 flex-col" : "min-w-0"}>
+            <ReviewVideo video={v} label={attachmentLabel(v) ?? v.name} stage={stage} focusTitle={focusTitle} onEnlargedChange={onEnlargedChange} onTimestamp={onTimestamp} />
           </li>
         ))}
       </ul>
@@ -289,19 +362,205 @@ function VideoAttachments({ attachments }: AttachmentRendererProps<"video">) {
   );
 }
 
-function ReviewVideo({ video }: { video: VideoAttachment }) {
+/**
+ * The options' cuts side by side, in the card's option order, each under its
+ * option's id badge and label, the recommended one marked (design.md
+ * decision 6). Two to a row in the column (three once there are three or
+ * more); one row on the stage, ahead of the pairs.
+ */
+function OptionVideos({
+  cells,
+  recommend,
+  layout,
+  focusTitle,
+  onOverlayChange,
+  onTimestamp,
+}: {
+  cells: Array<{ option: AttachmentOption; video: VideoAttachment }>;
+  recommend: string | null;
+  layout: AttachmentLayout;
+  focusTitle: () => void;
+  onOverlayChange: (open: boolean) => void;
+  onTimestamp?: (note: string) => void;
+}) {
+  const onEnlargedChange = useSlotOverlay(onOverlayChange);
+  if (cells.length === 0) return null;
+  const stage = layout === "stage";
+  const title = `Cuts · ${cells.length}`;
   return (
-    <figure className="min-w-0">
-      {video.src === null ? (
-        <span className="flex aspect-[9/16] max-h-[60vh] items-center justify-center rounded-lg border border-hairline bg-ground p-3 text-center text-xs text-fg-muted">
+    <section aria-label={title} className={stage ? "flex min-h-0 min-w-0 flex-[3] flex-col" : undefined}>
+      <SectionTitle>{title}</SectionTitle>
+      <ul role="list" className={stage ? "flex min-h-0 flex-1 gap-3" : `grid gap-3 ${cells.length >= 3 ? "grid-cols-3" : "grid-cols-2"}`}>
+        {cells.map(({ option, video }) => {
+          const recommended = option.id === recommend;
+          return (
+            <li key={option.id} data-option-id={option.id} className={stage ? "flex min-h-0 min-w-0 flex-1 flex-col" : "min-w-0"}>
+              <div className="mb-1.5 flex min-w-0 items-center gap-2">
+                <IdBadge id={option.id} accent={recommended} />
+                <span title={option.label} className={`min-w-0 truncate text-xs text-fg ${recommended ? "font-semibold" : ""}`}>
+                  <span className="sr-only">Option {option.id}: </span>
+                  {option.label}
+                </span>
+                {recommended && <span className="ml-auto shrink-0 rounded-full border border-accent/60 bg-accent/15 px-2 py-0.5 text-[11px] text-fg">Recommended</span>}
+              </div>
+              <ReviewVideo
+                video={video}
+                label={`option ${option.id}${video.caption !== undefined ? `: ${video.caption}` : ""}`}
+                optionId={option.id}
+                stage={stage}
+                focusTitle={focusTitle}
+                onEnlargedChange={onEnlargedChange}
+                onTimestamp={onTimestamp}
+              />
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
+
+const PLAYER_BUTTON =
+  "rounded-md border border-hairline px-2 py-1 text-[11px] text-fg-muted hover:border-accent hover:text-fg focus:outline-none focus:ring-2 focus:ring-accent aria-pressed:border-accent aria-pressed:text-fg";
+
+/**
+ * One video as a vertical reel (module header): muted, click to play,
+ * native controls, metadata only until played, a Loop toggle (on), Enlarge,
+ * and Note while `onTimestamp` is given. `label` names it in its controls'
+ * labels; `optionId` marks a note with the option it is the cut of. Its
+ * enlarged view is reported through `onEnlargedChange`; when it unmounts
+ * while enlarged, focus goes to the panel's title.
+ */
+function ReviewVideo({
+  video,
+  label,
+  optionId,
+  stage = false,
+  focusTitle,
+  onEnlargedChange,
+  onTimestamp,
+}: {
+  video: VideoAttachment;
+  label: string;
+  optionId?: string;
+  stage?: boolean;
+  focusTitle: () => void;
+  onEnlargedChange: (open: boolean) => void;
+  onTimestamp?: (note: string) => void;
+}) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const enlargeRef = useRef<HTMLButtonElement>(null);
+  const [loop, setLoop] = useState(true);
+  const [failed, setFailed] = useState<string | null>(null);
+  /** The whole second the player is at, so Note re-renders once a second at most. */
+  const [second, setSecond] = useState(0);
+  const [enlarged, setEnlarged] = useState<{ startAt: number } | null>(null);
+  const returnFocus = useRef(false);
+  const enlargedNow = useRef(false);
+  enlargedNow.current = enlarged !== null;
+  const src = video.src !== null && video.src !== failed ? video.src : null;
+
+  useEffect(() => {
+    if (enlarged === null) return;
+    onEnlargedChange(true);
+    return () => onEnlargedChange(false);
+  }, [enlarged !== null]);
+  useEffect(() => {
+    if (enlarged !== null || !returnFocus.current) return;
+    returnFocus.current = false;
+    enlargeRef.current?.focus();
+  }, [enlarged]);
+  useEffect(
+    () => () => {
+      if (enlargedNow.current) focusTitle();
+    },
+    [],
+  );
+
+  function syncSecond() {
+    const whole = Math.floor(videoRef.current?.currentTime ?? 0);
+    setSecond((prev) => (prev === whole ? prev : whole));
+  }
+
+  function enlarge() {
+    const player = videoRef.current;
+    const startAt = player?.currentTime ?? 0;
+    player?.pause();
+    setEnlarged({ startAt: Number.isFinite(startAt) ? startAt : 0 });
+  }
+
+  function closeEnlarged(time?: number) {
+    const player = videoRef.current;
+    if (player && time !== undefined && Number.isFinite(time)) {
+      player.currentTime = time;
+      syncSecond();
+    }
+    returnFocus.current = true;
+    setEnlarged(null);
+  }
+
+  const time = formatVideoTime(second);
+  return (
+    <figure className={`min-w-0 ${stage ? "flex min-h-0 flex-1 flex-col" : ""}`}>
+      {src === null ? (
+        <span className={`flex aspect-[9/16] items-center justify-center rounded-lg border border-hairline bg-ground p-3 text-center text-xs text-fg-muted ${stage ? "max-h-full min-h-0 flex-1" : "max-h-[60vh] w-full"}`}>
           <span>
             Can't show: <span className="break-all font-mono">{video.path}</span>
           </span>
         </span>
       ) : (
-        <video src={video.src} poster={video.poster ?? undefined} muted playsInline preload="metadata" controls loop className="aspect-[9/16] max-h-[60vh] w-full rounded-lg bg-black object-contain" />
+        <video
+          ref={videoRef}
+          key={src}
+          src={src}
+          poster={video.poster ?? undefined}
+          aria-label={label}
+          muted
+          playsInline
+          preload="metadata"
+          controls
+          loop={loop}
+          onTimeUpdate={syncSecond}
+          onSeeked={syncSecond}
+          onLoadedMetadata={syncSecond}
+          onError={() => setFailed(src)}
+          className={`aspect-[9/16] rounded-lg bg-black object-contain ${stage ? "mx-auto max-h-full min-h-0 flex-1" : "max-h-[60vh] w-full"}`}
+        />
       )}
-      <figcaption className="mt-1 truncate font-mono text-[10px] text-fg-muted">{attachmentLabel(video)}</figcaption>
+      <figcaption className="mt-1.5 flex min-w-0 flex-wrap items-center gap-1.5">
+        <span title={attachmentLabel(video)} className="min-w-0 flex-1 truncate font-mono text-[10px] text-fg-muted">
+          {attachmentLabel(video)}
+        </span>
+        {src !== null && (
+          <>
+            <button type="button" aria-pressed={loop} aria-label={`Loop ${label}`} onClick={() => setLoop((on) => !on)} className={PLAYER_BUTTON}>
+              Loop
+            </button>
+            <button ref={enlargeRef} type="button" aria-label={`Enlarge video: ${label}`} onClick={enlarge} className={PLAYER_BUTTON}>
+              Enlarge
+            </button>
+            {onTimestamp !== undefined && (
+              <button
+                type="button"
+                aria-label={`Note ${time} of ${label} in the message`}
+                onClick={() => onTimestamp(timestampNote(videoRef.current?.currentTime ?? 0, optionId))}
+                className={PLAYER_BUTTON}
+              >
+                Note {time}
+              </button>
+            )}
+          </>
+        )}
+      </figcaption>
+      {enlarged !== null && src !== null && (
+        <Lightbox
+          items={[{ kind: "video", name: video.name, path: video.path, src, poster: video.poster }]}
+          index={0}
+          onIndexChange={() => {}}
+          startAt={enlarged.startAt}
+          onClose={closeEnlarged}
+        />
+      )}
     </figure>
   );
 }
@@ -381,7 +640,19 @@ function DiffAttachments({ attachments, layout }: AttachmentRendererProps<"diff"
  * as for the screenshots slot. On the stage the pairs take the larger share
  * and each image fits its half.
  */
-function PairAttachments({ pairs, layout, focusTitle, onOverlayChange }: { pairs: AttachmentPair[]; layout: AttachmentLayout; focusTitle: () => void; onOverlayChange: (open: boolean) => void }) {
+function PairAttachments({
+  pairs,
+  layout,
+  focusTitle,
+  onOverlayChange,
+  onTimestamp,
+}: {
+  pairs: AttachmentPair[];
+  layout: AttachmentLayout;
+  focusTitle: () => void;
+  onOverlayChange: (open: boolean) => void;
+  onTimestamp?: (note: string) => void;
+}) {
   const [lightbox, setLightbox] = useState<number | null>(null);
   const [failed, setFailed] = useState<ReadonlySet<string>>(new Set());
   const imageRefs = useRef<Array<HTMLButtonElement | null>>([]);
@@ -392,10 +663,7 @@ function PairAttachments({ pairs, layout, focusTitle, onOverlayChange }: { pairs
     .filter((a): a is ImageAttachment => a.kind === "image")
     .map((img) => (img.src !== null && failed.has(img.src) ? { ...img, src: null } : img));
 
-  const overlayOpen = lightbox !== null;
-  useEffect(() => {
-    onOverlayChange(overlayOpen);
-  }, [overlayOpen]);
+  const onEnlargedChange = useSlotOverlay(onOverlayChange, lightbox !== null);
 
   useEffect(() => {
     if (lightbox === null || lightbox < images.length) return;
@@ -416,7 +684,7 @@ function PairAttachments({ pairs, layout, focusTitle, onOverlayChange }: { pairs
   }
 
   const onError = (src: string) => setFailed((prev) => new Set(prev).add(src));
-  const lightboxEl = lightbox !== null && lightbox < images.length && <Lightbox images={images} index={lightbox} onIndexChange={setLightbox} onClose={closeLightbox} />;
+  const lightboxEl = lightbox !== null && lightbox < images.length && <Lightbox items={images} index={lightbox} onIndexChange={setLightbox} onClose={closeLightbox} />;
   if (pairs.length === 0) return <>{lightboxEl}</>;
 
   let imageIndex = 0;
@@ -448,7 +716,7 @@ function PairAttachments({ pairs, layout, focusTitle, onOverlayChange }: { pairs
         </button>
       );
     } else if (a.kind === "video") {
-      content = <ReviewVideo video={a} />;
+      content = <ReviewVideo video={a} label={attachmentLabel(a) ?? a.name} stage={stage} focusTitle={focusTitle} onEnlargedChange={onEnlargedChange} onTimestamp={onTimestamp} />;
     } else if (a.kind === "mermaid") {
       content = stage ? (
         <div className="min-h-0 flex-1 overflow-y-auto">
