@@ -621,3 +621,57 @@ describe("a card with video cuts", () => {
     expect(container.querySelector("dialog video")).toBe(big);
   });
 });
+
+describe("timestamped notes", () => {
+  const noteButtons = () => buttons().filter((b) => b.textContent?.startsWith("Note "));
+
+  test("Note appends the player's time, behind its option for a cut, on a new line, and focuses the message at its end", async () => {
+    await render(boardItem(fixtureReview("reel-cuts")));
+    const [a, , raw] = [...container.querySelectorAll("video")];
+    a!.currentTime = 7.4;
+    await act(async () => {
+      a!.dispatchEvent(new Event("timeupdate"));
+    });
+    const noteA = container.querySelector<HTMLButtonElement>("button[aria-label^='Note 0:07 of option A']")!;
+    expect(noteA.textContent).toBe("Note 0:07");
+    await click(noteA);
+    const box = container.querySelector("textarea")!;
+    expect(box.value).toBe("A 0:07 ");
+    expect(document.activeElement).toBe(box);
+    expect(box.selectionStart).toBe(box.value.length);
+    typeMessage("A 0:07 text too small");
+    raw!.currentTime = 3;
+    await click(noteButtons()[2]!);
+    expect(box.value).toBe("A 0:07 text too small\n0:03 ");
+    expect(box.selectionEnd).toBe(box.value.length);
+
+    trpcMock.reviewDecision.mutate.mockResolvedValue({ ok: true, decision: "changes", item: "shlo-k54.4.1.1", written: ["comment", "add-changes-label"], notified: { ok: true } });
+    await click(button("Request changes"));
+    expect(trpcMock.reviewDecision.mutate.mock.calls[0]![0]).toMatchObject({ decision: "changes", message: "A 0:07 text too small\n0:03 " });
+  });
+
+  test("shows the whole second the player is at, minutes too, and notes it rounded down", async () => {
+    await render(boardItem(fixtureReview("reel-cuts")));
+    const b = container.querySelectorAll("video")[1]!;
+    const noteB = () => noteButtons()[1]!;
+    b.currentTime = 61.2;
+    await act(async () => {
+      b.dispatchEvent(new Event("timeupdate"));
+    });
+    expect(noteB().textContent).toBe("Note 1:01");
+    b.currentTime = 61.9;
+    await act(async () => {
+      b.dispatchEvent(new Event("timeupdate"));
+    });
+    expect(noteB().textContent).toBe("Note 1:01");
+    await click(noteB());
+    expect(container.querySelector("textarea")!.value).toBe("B 1:01 ");
+  });
+
+  test("offers no Note on a decided review", async () => {
+    await render(boardItem(fixtureReview("reel-cuts"), "", { status: "closed", closedReason: "Accepted" }));
+    expect(container.querySelectorAll("video")).toHaveLength(3);
+    expect(noteButtons()).toEqual([]);
+    expect(container.querySelector("textarea")).toBeNull();
+  });
+});

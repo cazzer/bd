@@ -22,7 +22,7 @@
 
 ## 4. Timestamped notes and live check
 
-- [ ] 4.1 `ReviewItemPanel.tsx`: pass `options`, `recommend`, `onTimestamp` into `ReviewAttachments`; Note appends via `appendNote` and focuses the message; no Note once decided (design.md decision 8)
-- [ ] 4.2 Tests: Note at `currentTime = 7.4` appends `A 0:07 `, a second note goes on a new line, no button on a decided review
-- [ ] 4.3 Repo README "Visual reviews": `kind: video`, `option`, `poster`, mp4/webm under 200 MB, `-movflags +faststart` recommended
+- [x] 4.1 `ReviewItemPanel.tsx`: pass `options`, `recommend`, `onTimestamp` into `ReviewAttachments`; Note appends via `appendNote` and focuses the message; no Note once decided (design.md decision 8)
+- [x] 4.2 Tests: Note at `currentTime = 7.4` appends `A 0:07 `, a second note goes on a new line, no button on a decided review
+- [x] 4.3 Repo README "Visual reviews": `kind: video`, `option`, `poster`, mp4/webm under 200 MB, `-movflags +faststart` recommended
 - [ ] 4.4 Live check: curl a stored video with `Range: bytes=0-1` through the API and the Vite proxy (206); file `reel-cuts.md` against a bead; A and B side by side, enlarge and time sync; a two-line timestamped changes-requested message arrives in the pane intact

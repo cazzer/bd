@@ -46,6 +46,11 @@
 // whichever line reports the outcome, and to that line while a write is in
 // flight (so focus never falls out of the panel when the pressed button
 // disables).
+// While the decision is open and nothing is being written, each video's
+// Note button (ReviewAttachments.tsx) appends its time to the message on a
+// new line (lib/reviewAttachments.ts `appendNote`; video-review-attachments,
+// design.md decision 8) and puts the caret at the message's end; a note is
+// plain text, sent as typed.
 // For any other item: its fields, its description, and a link to the
 // graph. The description and a legacy review's summary render as markdown
 // through EvidenceView (bead bodies are markdown; plain text reads the same
@@ -83,7 +88,7 @@
 
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
 import { navigate } from "../lib/navigate.js";
-import { reviewAttachments } from "../lib/reviewAttachments.js";
+import { appendNote, reviewAttachments } from "../lib/reviewAttachments.js";
 import { CARD_MOVED_TEXT, cardActions, chosenOption, describeChosen, isCardMovedRefusal, seenFor, type CardOption, type ChosenOption } from "../lib/reviewCard.js";
 import { canDecide, decisionBlocked, decisionEffects, describeNotified, describeRecipient, describeThrownDecision, type ReviewDecisionKind } from "../lib/reviewDrawer.js";
 import { formatRoute, type GraphRoute } from "../lib/route.js";
@@ -245,6 +250,16 @@ export function ReviewItemPanel({
     if (next.trim() !== "") setNeedsMessage(false);
   }
 
+  /** Set by a Note press: once the message re-renders, focus it with the caret at its end. */
+  const caretToEnd = useRef(false);
+  useEffect(() => {
+    const box = messageRef.current;
+    if (!caretToEnd.current || box === null) return;
+    caretToEnd.current = false;
+    box.focus();
+    box.setSelectionRange(box.value.length, box.value.length);
+  }, [message]);
+
   useEffect(() => {
     titleRef.current?.focus();
   }, []);
@@ -374,6 +389,14 @@ export function ReviewItemPanel({
   const attachments = loaded?.isReview ? reviewAttachments(loaded) : [];
   const staged = layout === "stage" && attachments.length > 0;
 
+  const onTimestamp =
+    decidable && pending === null
+      ? (note: string) => {
+          caretToEnd.current = true;
+          setMessage(appendNote(message, note));
+        }
+      : undefined;
+
   const attachmentSlot = (slotLayout: AttachmentLayout) => (
     <ReviewAttachments
       attachments={attachments}
@@ -382,6 +405,7 @@ export function ReviewItemPanel({
       onOverlayChange={onOverlayChange}
       options={card?.options ?? []}
       recommend={card?.recommend ?? null}
+      {...(onTimestamp === undefined ? {} : { onTimestamp })}
     />
   );
 
