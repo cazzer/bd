@@ -14,7 +14,7 @@
 
 import { createTRPCClient, httpBatchLink, httpSubscriptionLink, splitLink } from "@trpc/client";
 import type { AppRouter } from "../server/router.js";
-import { markUnauthorized } from "./lib/connection.js";
+import { markAuthorized, markUnauthorized } from "./lib/connection.js";
 
 /** A response that is neither the server's JSON nor ok: its HTTP status, kept on the error tRPC wraps (`cause`). */
 export class HttpStatusError extends Error {
@@ -33,10 +33,12 @@ export class HttpStatusError extends Error {
 // A 401 means this browser holds no live client token (tailnet-hosting
 // decision 5): it flips the connect gate. Only this link sees it — the SSE
 // subscription link gets no status code — so the board's first query is
-// what brings the connect screen up.
+// what brings the connect screen up. An ok response retires the connect
+// screen's "did the cookie stick" marker.
 export async function fetchKeepingStatus(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   const res = await fetch(input, init);
   if (res.status === 401) markUnauthorized();
+  else if (res.ok) markAuthorized();
   if (!res.ok && !(res.headers.get("content-type") ?? "").includes("json")) throw new HttpStatusError(res.status, res.statusText);
   return res;
 }

@@ -26,4 +26,12 @@ describe("fetchKeepingStatus", () => {
     await expect(fetchKeepingStatus("/trpc/search")).rejects.toBeInstanceOf(HttpStatusError);
     expect(isUnauthorized()).toBe(false);
   });
+
+  test("an ok response retires the connect screen's attempt marker", async () => {
+    const removeItem = vi.fn();
+    vi.stubGlobal("sessionStorage", { removeItem });
+    stubFetch(200, "application/json");
+    await fetchKeepingStatus("/trpc/search");
+    expect(removeItem).toHaveBeenCalledWith("bd-connect-attempt");
+  });
 });
