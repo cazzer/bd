@@ -4,8 +4,8 @@
 - [x] 1.2 Token store in `packages/core`: create (refuses a live duplicate), list (no secrets), revoke, verify (hash lookup, throttled `last_used_at`); tests against the database with scoped fixtures
 - [x] 1.3 Token CLI (`pnpm -s client-token create|list|revoke <client>`); prints the token once on stdout; test that the stored row holds only the hash
 - [x] 1.4 Shared admission function in `packages/core` (design decision 2) with per-server Origin rule; unit tests for loopback, tailnet+token, foreign Host, missing/revoked token, foreign Origin, loopback peer with tailnet Host, public paths
-- [ ] 1.5 MCP: `--host` accepts any address, repeatable `--allow-host`; remove loopback-bind/peer refusals; http-server applies the shared function (401 with `WWW-Authenticate`, 403 as today); delete the local guard copy; tests updated
-- [ ] 1.6 MCP attribution: bind the token client to the session at initialize, refuse a different client on that session with 403, actor `"<client> via <name> <version>"`; tests
+- [x] 1.5 MCP: `--host` accepts any address, repeatable `--allow-host`; remove loopback-bind/peer refusals; http-server applies the shared function (401 with `WWW-Authenticate`, 403 as today); delete the local guard copy; tests updated
+- [x] 1.6 MCP attribution: bind the token client to the session at initialize, refuse a different client on that session with 403, actor `"<client> via <name> <version>"`; tests
 - [ ] 1.7 Web: `--host`/`--port`/`--allow-host` flags (`WEB_SERVER_PORT` fallback), dispatcher applies the shared function, admitted client in tRPC context, human-write actors take it; delete the local guard copy; tests
 - [ ] 1.8 Web connect flow: `POST /auth/connect` sets the cookie (design decision 5); client shows a connect screen on 401; query-string tokens ignored; tests including cross-site POST with cookie → 403
 - [ ] 1.9 Test that no MCP tool and no tRPC procedure creates, lists, or revokes tokens

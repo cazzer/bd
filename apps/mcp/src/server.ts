@@ -29,6 +29,12 @@ export interface CreateServerOptions {
   readOnly?: boolean;
   /** Overrides budget.ts's default response character budget — mainly for tests. */
   responseCharBudget?: number;
+  /**
+   * The client token that opened this session over HTTP (http-server.ts),
+   * if any. Prefixed to the actor so a write names both the authenticated
+   * client and the software it ran (tailnet-hosting decision 4).
+   */
+  tokenClient?: string;
 }
 
 /** Strips zod's `$schema` key: `Tool.inputSchema` is a bare JSON Schema object, not a document with its own `$schema` pointer. */
@@ -40,6 +46,7 @@ function toToolInputSchema(schema: z.ZodTypeAny): Tool["inputSchema"] {
 export function createServer(db: Database, options: CreateServerOptions = {}): Server {
   const readOnly = options.readOnly ?? false;
   const responseCharBudget = options.responseCharBudget ?? DEFAULT_RESPONSE_CHAR_BUDGET;
+  const tokenClient = options.tokenClient;
 
   // Every tool is dispatchable by name (so a write tool called while
   // read-only gets the explanatory refusal below, not "unknown tool") —
@@ -75,7 +82,9 @@ export function createServer(db: Database, options: CreateServerOptions = {}): S
     responseCharBudget,
     actor: () => {
       const client = server.getClientVersion();
-      return client ? `${client.name} ${client.version}` : undefined;
+      const software = client ? `${client.name} ${client.version}` : undefined;
+      if (tokenClient === undefined) return software;
+      return software ? `${tokenClient} via ${software}` : tokenClient;
     },
   };
 

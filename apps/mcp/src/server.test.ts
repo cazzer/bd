@@ -352,6 +352,21 @@ describe("brain_write", () => {
     expect(run).toEqual({ sourceSystem: "agent", actor: CLAUDE_CODE_ACTOR });
   });
 
+  it("prefixes the actor with the token client bound to the session (\"<client> via <name> <version>\")", async () => {
+    const suffix = uniqueSuffix();
+    const { client } = await connectClient({ tokenClient: "worker-1" }, CLAUDE_CODE_CLIENT);
+    const result = parseText(
+      await client.callTool({
+        name: "brain_write",
+        arguments: { items: { nodeType: "doc", externalId: `token-actor-${suffix}`, sourceSystem: `mcp-actor-${suffix}`, content: "c" } },
+      }),
+    );
+    toolRunIds.push(result.ingestRunId);
+
+    const [run] = await db.select({ sourceSystem: ingestRuns.sourceSystem, actor: ingestRuns.actor }).from(ingestRuns).where(eq(ingestRuns.id, result.ingestRunId));
+    expect(run).toEqual({ sourceSystem: "agent", actor: `worker-1 via ${CLAUDE_CODE_ACTOR}` });
+  });
+
   it("stores SQL-looking content as literal text and never executes it (spec: no arbitrary SQL from the model)", async () => {
     const suffix = uniqueSuffix();
     const sourceSystem = `mcp-sql-${suffix}`;

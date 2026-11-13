@@ -1,12 +1,19 @@
 // http-server.ts driven in-process on ephemeral ports (port 0) against the
 // test database (brain-mcp spec, "Shared HTTP transport", "HTTP mode is
-// local only"; brain-service spec, "Health endpoint").
+// local by default"; client-access spec; brain-service spec, "Health
+// endpoint").
 //
 // The database is shared with live sessions and with the other apps/mcp
 // test files running in parallel, so every fixture is scoped: nodes carry
 // this file's unique source system, and runs are removed by the ids the
 // writes returned. Client versions carry this file's suffix as a backstop
-// against any actor-scoped sweep elsewhere matching a run of ours.
+// against any actor-scoped sweep elsewhere matching a run of ours, and
+// client tokens are minted under names carrying it and deleted by name.
+//
+// Every server here binds loopback, so every request comes from a loopback
+// peer: a tailnet Host (TAILNET_HOST, allowed at start) is what forces the
+// token path — the realistic `tailscale serve` case, a local proxy
+// forwarding a remote caller. Nothing binds 0.0.0.0 (macOS firewall prompt).
 //
 // Calls that must stay in flight (a session closing under them) run
 // against a fake pool whose queries never answer.
@@ -19,10 +26,10 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { createDb, createPool, ingestRuns, nodes, resolveDatabaseUrl, type Database } from "@breakdown/db";
+import { createClientToken, revokeClientToken } from "@breakdown/core";
+import { clientTokens, createDb, createPool, ingestRuns, nodes, resolveDatabaseUrl, type Database } from "@breakdown/db";
 import { and, eq, inArray } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import type { LoopbackHost } from "./http-config.js";
 import { createDatabaseProbe, createSessionRegistry, HEALTH_TIMEOUT_MS, MAX_BODY_BYTES, startHttpServer, type RunningHttpServer } from "./http-server.js";
 import { describeConnectionTarget } from "./startup.js";
 
@@ -33,6 +40,9 @@ const stdioEntry = path.join(mcpRoot, "src", "index.ts");
 const suffix = randomUUID().replace(/-/g, "");
 const sourceSystem = `mcp-http-${suffix}`;
 const runIds: string[] = [];
+const tokenClients: string[] = [];
+const TAILNET_HOST = "breakdown.tail.example";
+const RAW_CLIENT = { name: "raw-client", version: `1.0.0+${suffix}` };
 
 let databaseUrl: string;
 let pool: ReturnType<typeof createPool> | undefined;
@@ -60,6 +70,7 @@ afterAll(async () => {
       await db.delete(nodes).where(inArray(nodes.ingestRunId, runIds));
       await db.delete(ingestRuns).where(inArray(ingestRuns.id, runIds));
     }
+    if (tokenClients.length > 0) await db.delete(clientTokens).where(inArray(clientTokens.client, tokenClients));
   }
   await pool?.end();
 });
@@ -82,7 +93,7 @@ function hangingPool(): PoolLike & { calls: number; connect(): Promise<never> } 
   return fake as unknown as PoolLike & { calls: number; connect(): Promise<never> };
 }
 
-async function start(overrides: { readOnly?: boolean; db?: Database; pool?: PoolLike; host?: LoopbackHost } = {}): Promise<RunningHttpServer> {
+async function start(overrides: { readOnly?: boolean; db?: Database; pool?: PoolLike; host?: string; allowedHosts?: string[] } = {}): Promise<RunningHttpServer> {
   const p = overrides.pool ?? pool!;
   const running = await startHttpServer({
     db: overrides.db ?? createDb(p as ReturnType<typeof createPool>),
@@ -91,6 +102,7 @@ async function start(overrides: { readOnly?: boolean; db?: Database; pool?: Pool
     target,
     port: 0,
     host: overrides.host ?? "127.0.0.1",
+    allowedHosts: overrides.allowedHosts ?? [],
   });
   servers.push(running);
   return running;
@@ -190,6 +202,45 @@ function rawSocketRequest(port: number, head: string): Promise<string> {
     socket.on("close", () => resolve(received));
     socket.on("error", reject);
   });
+}
+
+/** A live token for a client name unique to this test file (deleted in afterAll). */
+async function newToken(label: string): Promise<{ client: string; token: string }> {
+  const client = `mcpt-${label}-${suffix.slice(0, 16)}`;
+  tokenClients.push(client);
+  const { token } = await createClientToken(db!, client);
+  return { client, token };
+}
+
+const MCP_POST_HEADERS = { "content-type": "application/json", accept: "application/json, text/event-stream" };
+const PROTOCOL_VERSION = "2025-06-18";
+
+function initializeBody(): string {
+  return JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: PROTOCOL_VERSION, capabilities: {}, clientInfo: RAW_CLIENT } });
+}
+
+/**
+ * initialize then notifications/initialized over raw HTTP, with the given
+ * headers (Host, Authorization) on both; returns the session's headers for
+ * later calls. Throws with the response if the server refuses either step.
+ */
+async function rawInitialize(url: string, headers: Record<string, string>): Promise<Record<string, string>> {
+  const init = await rawRequest(url, { method: "POST", headers: { ...MCP_POST_HEADERS, ...headers }, body: initializeBody() });
+  const sessionId = init.headers["mcp-session-id"];
+  if (init.status !== 200 || typeof sessionId !== "string") throw new Error(`initialize refused: ${init.status} ${init.body}`);
+  const session = { ...MCP_POST_HEADERS, ...headers, "mcp-session-id": sessionId, "mcp-protocol-version": PROTOCOL_VERSION };
+  const initialized = await rawRequest(url, { method: "POST", headers: session, body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) });
+  if (initialized.status !== 202) throw new Error(`notifications/initialized refused: ${initialized.status} ${initialized.body}`);
+  return session;
+}
+
+/** The ingest run id a raw brain_write response reports (recorded for cleanup). */
+function runIdOf(response: RawResponse): string {
+  const result = (JSON.parse(response.body) as { result: { content: { text: string }[]; isError?: boolean } }).result;
+  expect(result.isError, result.content[0]!.text).toBeFalsy();
+  const { ingestRunId } = JSON.parse(result.content[0]!.text) as { ingestRunId: string };
+  runIds.push(ingestRunId);
+  return ingestRunId;
 }
 
 describe("sessions over Streamable HTTP", () => {
@@ -311,7 +362,7 @@ describe("sessions over Streamable HTTP", () => {
   });
 });
 
-describe("local-only guard", () => {
+describe("admission", () => {
   it("refuses a foreign Host and a foreign Origin with 403, writing nothing", async () => {
     const running = await start();
     const { transport } = await connect(running.url, "guard-client", suffix);
@@ -345,10 +396,105 @@ describe("local-only guard", () => {
     expect(res.status).toBe(415);
     expect(await nodeExists(externalId)).toBe(false);
   }, 30_000);
+});
 
-  it("refuses to serve when the bound address is not loopback", async () => {
-    // The type forbids it; a cast stands in for a later change that widens the bind.
-    await expect(start({ host: "0.0.0.0" as LoopbackHost })).rejects.toThrow(/refusing to serve on 0\.0\.0\.0/);
+describe("client tokens behind a tailnet Host", () => {
+  async function startTailnet(): Promise<{ running: RunningHttpServer; host: string; healthz: string }> {
+    const running = await start({ allowedHosts: [TAILNET_HOST] });
+    return { running, host: `${TAILNET_HOST}:${running.port}`, healthz: running.url.replace("/mcp", "/healthz") };
+  }
+
+  it("refuses initialize and a write without a token with 401 + WWW-Authenticate: Bearer, writing nothing", async () => {
+    const { running, host } = await startTailnet();
+    const init = await rawRequest(running.url, { method: "POST", headers: { ...MCP_POST_HEADERS, host }, body: initializeBody() });
+    expect(init.status).toBe(401);
+    expect(init.headers["www-authenticate"]).toBe("Bearer");
+    expect(init.headers["mcp-session-id"]).toBeUndefined();
+    expect(JSON.parse(init.body)).toEqual({ jsonrpc: "2.0", error: { code: -32000, message: "Unauthorized: a client token is required" }, id: null });
+
+    const externalId = `tokenless-${suffix}`;
+    const write = await rawRequest(running.url, { method: "POST", headers: { ...MCP_POST_HEADERS, host }, body: brainWriteCall(externalId) });
+    expect(write.status).toBe(401);
+    expect(await nodeExists(externalId)).toBe(false);
+  });
+
+  it("guards /healthz too: 401 without a token, 200 with one", async () => {
+    const { host, healthz } = await startTailnet();
+    const { token } = await newToken("health");
+    const without = await rawRequest(healthz, { method: "GET", headers: { host } });
+    expect(without.status).toBe(401);
+    expect(without.headers["www-authenticate"]).toBe("Bearer");
+    const withToken = await rawRequest(healthz, { method: "GET", headers: { host, authorization: `Bearer ${token}` } });
+    expect(withToken.status).toBe(200);
+  });
+
+  it("opens a session for a valid bearer token and attributes its write to \"<client> via <name> <version>\"", async () => {
+    const { running, host } = await startTailnet();
+    const { client, token } = await newToken("writer");
+    const session = await rawInitialize(running.url, { host, authorization: `Bearer ${token}` });
+
+    const write = await rawRequest(running.url, { method: "POST", headers: session, body: brainWriteCall(`token-write-${suffix}`) });
+    expect(write.status).toBe(200);
+    const runId = runIdOf(write);
+    const [run] = await db!.select({ sourceSystem: ingestRuns.sourceSystem, actor: ingestRuns.actor }).from(ingestRuns).where(eq(ingestRuns.id, runId));
+    expect(run).toEqual({ sourceSystem: "agent", actor: `${client} via ${RAW_CLIENT.name} ${RAW_CLIENT.version}` });
+  }, 30_000);
+
+  it("refuses the next call with 401 once the session's token is revoked", async () => {
+    const { running, host } = await startTailnet();
+    const { client, token } = await newToken("revoked");
+    const session = await rawInitialize(running.url, { host, authorization: `Bearer ${token}` });
+    await revokeClientToken(db!, client);
+
+    const externalId = `revoked-${suffix}`;
+    const res = await rawRequest(running.url, { method: "POST", headers: session, body: brainWriteCall(externalId) });
+    expect(res.status).toBe(401);
+    expect(res.headers["www-authenticate"]).toBe("Bearer");
+    expect(await nodeExists(externalId)).toBe(false);
+  }, 30_000);
+
+  it("refuses with 403 a call on a session opened by another client, token or not, writing nothing", async () => {
+    const { running, host } = await startTailnet();
+    const a = await newToken("owner");
+    const b = await newToken("intruder");
+    const session = await rawInitialize(running.url, { host, authorization: `Bearer ${a.token}` });
+    const externalId = `hijack-${suffix}`;
+    const forbidden = { jsonrpc: "2.0", error: { code: -32000, message: "Forbidden: this session belongs to another client" }, id: null };
+
+    const asB = await rawRequest(running.url, { method: "POST", headers: { ...session, authorization: `Bearer ${b.token}` }, body: brainWriteCall(externalId) });
+    expect(asB.status).toBe(403);
+    expect(JSON.parse(asB.body)).toEqual(forbidden);
+
+    const { authorization: _drop, ...tokenless } = session;
+    const asLoopback = await rawRequest(running.url, { method: "POST", headers: { ...tokenless, host: `127.0.0.1:${running.port}` }, body: brainWriteCall(externalId) });
+    expect(asLoopback.status).toBe(403);
+    expect(JSON.parse(asLoopback.body)).toEqual(forbidden);
+
+    expect(await nodeExists(externalId)).toBe(false);
+  }, 30_000);
+
+  it("refuses with 403 a token-bearing call on a tokenless loopback session", async () => {
+    const { running, host } = await startTailnet();
+    const { token } = await newToken("late");
+    const { transport } = await connect(running.url, "loopback-owner", suffix);
+    const externalId = `loopback-owned-${suffix}`;
+    const res = await rawRequest(running.url, { method: "POST", headers: { ...sessionHeaders(transport), host, authorization: `Bearer ${token}` }, body: brainWriteCall(externalId) });
+    expect(res.status).toBe(403);
+    expect(await nodeExists(externalId)).toBe(false);
+  }, 30_000);
+
+  it("refuses a valid token behind a foreign Host with 403", async () => {
+    const { running } = await startTailnet();
+    const { token } = await newToken("foreign");
+    const res = await rawRequest(running.url, { method: "POST", headers: { ...MCP_POST_HEADERS, host: `evil.example:${running.port}`, authorization: `Bearer ${token}` }, body: initializeBody() });
+    expect(res.status).toBe(403);
+  });
+
+  it("ignores a token in the query string: 401", async () => {
+    const { running, host } = await startTailnet();
+    const { token } = await newToken("query");
+    const res = await rawRequest(`${running.url}?token=${token}`, { method: "POST", headers: { ...MCP_POST_HEADERS, host }, body: initializeBody() });
+    expect(res.status).toBe(401);
   });
 });
 
