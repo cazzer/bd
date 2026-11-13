@@ -71,7 +71,7 @@ The web client fetches tRPC as now. A 401 renders a connect screen: one password
 
 Scope revised 2026-11-13. On the Jetson, Breakdown runs as two SkyOS apps (skyos sky-brx.2): `breakdown-db` (stock `pgvector/pgvector:pg16` with our settings) and `breakdown` (this image). Both are single containers configured by env, with data in named volumes.
 
-A multi-stage `Dockerfile` installs with pnpm, builds the client (`vite build`), bundles the server entrypoints, and ends in `node:22-bookworm-slim` as user `node`, carrying only runtime files and SQL migrations. The entrypoint is a small launcher (`docker/launch.mjs`). It reads `BREAKDOWN_*` env, runs migrations, starts the web and MCP servers as two child processes with flags (`--host`, `--port`, `--allow-host`, the client and media directories), forwards SIGTERM/SIGINT, and exits non-zero if either child exits. Node heap flags are set by the launcher.
+A multi-stage `Dockerfile` installs with pnpm, builds the client (`vite build`), bundles the server entrypoints, and ends in `node:22-bookworm-slim` as user `node`, carrying only runtime files and SQL migrations. The entrypoint is a small launcher (`bin/container-launch.mjs`). It reads `BREAKDOWN_*` env, runs migrations, starts the web and MCP servers as two child processes with flags (`--host`, `--port`, `--allow-host`, the client and media directories), forwards SIGTERM/SIGINT, and exits non-zero if either child exits. Node heap flags are set by the launcher.
 
 The servers keep reading only `DATABASE_URL`, `BRAIN_READ_ONLY`, and `WEB_SERVER_PORT`. The launcher is deployment glue in the same role as the launchd plist, so the env allowlist rule still describes the app.
 
@@ -87,7 +87,7 @@ The web server serves the built client when given a client directory (index fall
 | breakdown-db | 384m | `shared_buffers=96MB`, `effective_cache_size=192MB`, `work_mem=4MB`, `maintenance_work_mem=32MB`, `max_connections=30`, `wal_buffers=4MB` |
 | breakdown | 512m | web and MCP children, each with a heap cap well under half |
 
-The total is 896m. Pool sizes keep web plus MCP under `max_connections`. `docker-compose.app.yml` runs the same two containers locally: same env, caps (`mem_limit` with `memswap_limit` equal to it, plus `cpus`) and named volumes, its own compose project name, ports published on `${BREAKDOWN_PUBLISH_ADDR:-127.0.0.1}` at the same numbers the servers listen on (decision 9). The existing `docker-compose.yml` stays the dev database. The SkyOS app definitions themselves live in skyos (sky-brx.2), not here.
+The total is 896m. The live pools (web 10 + MCP 10, plus a one-connection token CLI) stay under `max_connections`; migrate runs and exits before the servers start. `docker-compose.app.yml` runs the same two containers locally: same env, caps (`mem_limit` with `memswap_limit` equal to it, plus `cpus`) and named volumes, its own compose project name, ports published on `${BREAKDOWN_PUBLISH_ADDR:-127.0.0.1}` at the same numbers the servers listen on (decision 9). The existing `docker-compose.yml` stays the dev database. The SkyOS app definitions themselves live in skyos (sky-brx.2), not here.
 
 ### 8. Host-only binaries
 

@@ -1,0 +1,79 @@
+# The two Jetson apps run locally (tailnet-hosting decision 7): breakdown-db
+# (stock pgvector Postgres 16, tuned for its cap) and breakdown (this repo's
+# image: migrate, then the web and MCP servers). Same env, caps, and named
+# volumes as the SkyOS app definitions in skyos (sky-brx.2).
+#
+# Its own project name, so it never touches the dev database (project `bd`,
+# docker-compose.yml). Always name this file:
+#
+#   BREAKDOWN_DB_PASSWORD=$(openssl rand -hex 24) docker compose -f docker-compose.app.yml up -d --wait
+#
+# Each port is published at the number the server listens on: admission
+# pins an allowed Host to the server's own listen port (decision 9).
+# Caps total 384m + 512m = 896m, under 1 GB; `pnpm smoke:app` checks them.
+name: breakdown
+
+services:
+  breakdown-db:
+    image: pgvector/pgvector:pg16
+    # Sized for the 384m cap: shared_buffers is a quarter of it, the planner
+    # assumes half for cache, and 30 connections × 4MB work_mem stays well
+    # inside. Live pools are web 10 + MCP 10 plus a one-connection token CLI.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=96MB
+      - -c
+      - effective_cache_size=192MB
+      - -c
+      - work_mem=4MB
+      - -c
+      - maintenance_work_mem=32MB
+      - -c
+      - max_connections=30
+      - -c
+      - wal_buffers=4MB
+    environment:
+      POSTGRES_DB: breakdown
+      POSTGRES_USER: breakdown
+      # Applied only when the data volume is first initialized.
+      POSTGRES_PASSWORD: ${BREAKDOWN_DB_PASSWORD:?set BREAKDOWN_DB_PASSWORD}
+    volumes:
+      - ${BREAKDOWN_PGDATA:-breakdown-pgdata}:/var/lib/postgresql/data
+    # Docker's 64m default /dev/shm is too small for parallel query workers.
+    shm_size: 128m
+    mem_limit: 384m
+    memswap_limit: 384m
+    cpus: 1.0
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U breakdown -d breakdown"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+  breakdown:
+    build: .
+    image: breakdown:local
+    environment:
+      DATABASE_URL: postgres://breakdown:${BREAKDOWN_DB_PASSWORD:?set BREAKDOWN_DB_PASSWORD}@breakdown-db:5432/breakdown
+      BREAKDOWN_WEB_PORT: ${BREAKDOWN_WEB_PORT:-4310}
+      BREAKDOWN_MCP_PORT: ${BREAKDOWN_MCP_PORT:-5320}
+      BREAKDOWN_ALLOW_HOSTS: ${BREAKDOWN_ALLOW_HOSTS:-}
+    ports:
+      - "${BREAKDOWN_PUBLISH_ADDR:-127.0.0.1}:${BREAKDOWN_WEB_PORT:-4310}:${BREAKDOWN_WEB_PORT:-4310}"
+      - "${BREAKDOWN_PUBLISH_ADDR:-127.0.0.1}:${BREAKDOWN_MCP_PORT:-5320}:${BREAKDOWN_MCP_PORT:-5320}"
+    volumes:
+      - ${BREAKDOWN_MEDIA:-breakdown-media}:/data/media
+    mem_limit: 512m
+    memswap_limit: 512m
+    cpus: 1.5
+    depends_on:
+      breakdown-db:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  breakdown-pgdata:
+  breakdown-media:

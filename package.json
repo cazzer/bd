@@ -20,6 +20,7 @@
     "mcp:serve": "pnpm --filter @breakdown/mcp serve",
     "mcp:service": "node bin/mcp-service.mjs",
     "bundle": "node bin/bundle-servers.mjs",
+    "smoke:app": "node bin/compose-smoke.mjs",
     "typecheck": "pnpm -r run typecheck",
     "test": "vitest run && node --test bin/*.test.mjs",
     "check": "pnpm typecheck && pnpm test"
