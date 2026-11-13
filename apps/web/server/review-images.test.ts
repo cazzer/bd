@@ -8,10 +8,12 @@ import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createReviewImageHandler, resolveReviewImage, REVIEW_IMAGES_PREFIX, reviewImageUrl } from "./review-images.js";
+import { createReviewImageHandler, parseByteRange, resolveReviewImage, REVIEW_IMAGES_PREFIX, reviewImageUrl } from "./review-images.js";
 
 const PNG = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex");
 const WEBP = Buffer.from("RIFF0000WEBPVP8 ");
+// Not a playable video: the route checks names, never content.
+const MP4 = Buffer.from(Array.from({ length: 64 }, (_, i) => i));
 
 let base: string;
 let root: string;
@@ -30,7 +32,13 @@ beforeAll(async () => {
   await writeFile(path.join(root, "C.PNG"), PNG);
   await writeFile(path.join(root, "notes.txt"), "secret notes");
   await writeFile(path.join(root, "with space #1?.png"), PNG);
+  await writeFile(path.join(root, "reel.mp4"), MP4);
+  await writeFile(path.join(root, "reel.webm"), MP4);
+  await writeFile(path.join(root, "reel.mov"), MP4);
+  await writeFile(path.join(root, "empty.mp4"), "");
   await writeFile(path.join(outside, "secret.png"), PNG);
+  await writeFile(path.join(outside, "secret.mp4"), MP4);
+  await symlink(path.join(outside, "secret.mp4"), path.join(root, "escape.mp4"));
   await symlink(path.join(outside, "secret.png"), path.join(root, "escape.png"));
   await symlink(outside, path.join(root, "linkdir"));
   await symlink(path.join(root, "notes.txt"), path.join(root, "trick.png"));
@@ -67,6 +75,13 @@ describe("resolveReviewImage", () => {
     expect(await resolveReviewImage(url("trick.png"), root)).toMatchObject({ ok: false, status: 403 });
   });
 
+  it("serves mp4 and webm as video, and refuses .mov and an mp4 symlink out of the root with 403", async () => {
+    expect(await resolveReviewImage(url("reel.mp4"), root)).toMatchObject({ ok: true, contentType: "video/mp4", size: MP4.length });
+    expect(await resolveReviewImage(url("reel.webm"), root)).toMatchObject({ ok: true, contentType: "video/webm" });
+    expect(await resolveReviewImage(url("reel.mov"), root)).toMatchObject({ ok: false, status: 403, reason: "Not a review image or video" });
+    expect(await resolveReviewImage(url("escape.mp4"), root)).toMatchObject({ ok: false, status: 403, reason: "Outside the review image root" });
+  });
+
   it("refuses a NUL or a malformed escape with 400", async () => {
     expect(await resolveReviewImage(url("a.png%00.png"), root)).toMatchObject({ ok: false, status: 400 });
     expect(await resolveReviewImage(url("%E0%A4%A.png"), root)).toMatchObject({ ok: false, status: 400 });
@@ -89,6 +104,37 @@ describe("resolveReviewImage", () => {
 
   it("refuses the root itself", async () => {
     expect(await resolveReviewImage(url(""), root)).toMatchObject({ ok: false, status: 403 });
+  });
+});
+
+describe("parseByteRange", () => {
+  it.each([
+    ["bytes=0-1", 100, { start: 0, end: 1 }],
+    ["bytes=5-", 100, { start: 5, end: 99 }],
+    ["bytes=-3", 100, { start: 97, end: 99 }],
+    ["bytes=-300", 100, { start: 0, end: 99 }],
+    ["bytes=90-500", 100, { start: 90, end: 99 }],
+    ["bytes=99-99", 100, { start: 99, end: 99 }],
+    ["bytes=-0", 100, "unsatisfiable"],
+    ["bytes=100-", 100, "unsatisfiable"],
+    ["bytes=400-500", 100, "unsatisfiable"],
+    ["bytes=0-1", 0, "unsatisfiable"],
+    ["bytes=-5", 0, "unsatisfiable"],
+    ["bytes=5-2", 100, null],
+    ["bytes=0-1,4-5", 100, null],
+    ["bytes=-", 100, null],
+    ["bytes=abc", 100, null],
+    ["items=0-1", 100, null],
+    ["garbage", 100, null],
+    ["", 100, null],
+    [`bytes=${"1".repeat(16)}-`, 100, null],
+    [`bytes=0-${"9".repeat(16)}`, 100, null],
+  ] as const)("%s of %i bytes → %o", (header, size, expected) => {
+    expect(parseByteRange(header, size)).toEqual(expected);
+  });
+
+  it("answers null with no header", () => {
+    expect(parseByteRange(undefined, 100)).toBeNull();
   });
 });
 
@@ -144,6 +190,64 @@ describe("createReviewImageHandler over HTTP", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("content-length")).toBe(String(PNG.length));
     expect((await res.arrayBuffer()).byteLength).toBe(0);
+  });
+
+  it("sends Accept-Ranges on a whole-file answer", async () => {
+    const res = await fetch(`${origin}/review-images/reel.mp4`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("video/mp4");
+    expect(res.headers.get("accept-ranges")).toBe("bytes");
+    expect(Buffer.from(await res.arrayBuffer())).toEqual(MP4);
+  });
+
+  it("answers a single range with 206, Content-Range, and exactly those bytes", async () => {
+    const res = await fetch(`${origin}/review-images/reel.mp4`, { headers: { Range: "bytes=0-1" } });
+    expect(res.status).toBe(206);
+    expect(res.headers.get("content-range")).toBe(`bytes 0-1/${MP4.length}`);
+    expect(res.headers.get("content-length")).toBe("2");
+    expect(res.headers.get("accept-ranges")).toBe("bytes");
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(Buffer.from(await res.arrayBuffer())).toEqual(MP4.subarray(0, 2));
+
+    const tail = await fetch(`${origin}/review-images/reel.webm`, { headers: { Range: "bytes=-3" } });
+    expect(tail.status).toBe(206);
+    expect(tail.headers.get("content-type")).toBe("video/webm");
+    expect(tail.headers.get("content-range")).toBe(`bytes 61-63/${MP4.length}`);
+    expect(Buffer.from(await tail.arrayBuffer())).toEqual(MP4.subarray(61));
+  });
+
+  it("answers an unsatisfiable range with 416 and the size", async () => {
+    const res = await fetch(`${origin}/review-images/reel.mp4`, { headers: { Range: "bytes=40000-" } });
+    expect(res.status).toBe(416);
+    expect(res.headers.get("content-range")).toBe(`bytes */${MP4.length}`);
+    await res.arrayBuffer();
+    const empty = await fetch(`${origin}/review-images/empty.mp4`, { headers: { Range: "bytes=0-1" } });
+    expect(empty.status).toBe(416);
+    expect(empty.headers.get("content-range")).toBe("bytes */0");
+    await empty.arrayBuffer();
+  });
+
+  it("ignores a multi-range or malformed header and serves the whole file", async () => {
+    for (const range of ["bytes=0-1,4-5", "bytes=5-2", "lines=1-2"]) {
+      const res = await fetch(`${origin}/review-images/reel.mp4`, { headers: { Range: range } });
+      expect(res.status, range).toBe(200);
+      expect(res.headers.get("content-length"), range).toBe(String(MP4.length));
+      expect(Buffer.from(await res.arrayBuffer()), range).toEqual(MP4);
+    }
+  });
+
+  it("answers HEAD with a range with the 206 headers and no body", async () => {
+    const res = await fetch(`${origin}/review-images/reel.mp4`, { method: "HEAD", headers: { Range: "bytes=2-5" } });
+    expect(res.status).toBe(206);
+    expect(res.headers.get("content-range")).toBe(`bytes 2-5/${MP4.length}`);
+    expect(res.headers.get("content-length")).toBe("4");
+    expect((await res.arrayBuffer()).byteLength).toBe(0);
+  });
+
+  it("refuses .mov with 403", async () => {
+    const res = await fetch(`${origin}/review-images/reel.mov`);
+    expect(res.status).toBe(403);
+    expect(await res.text()).toBe("Not a review image or video\n");
   });
 
   it("refuses other methods with 405", async () => {

@@ -1,7 +1,7 @@
 // The review image route (board-visual-reviews, design.md decision 4):
-// `GET /review-images/<relative path>` serves one screenshot from the review
-// image root (core's REVIEW_IMAGE_ROOT, `~/.local/share/breakdown/reviews`)
-// and nothing else. index.ts dispatches the prefix here before the tRPC
+// `GET /review-images/<relative path>` serves one screenshot or video from the
+// review image root (core's REVIEW_IMAGE_ROOT, `~/.local/share/breakdown/reviews`)
+// and nothing else (video-review-attachments added mp4/webm and byte ranges). index.ts dispatches the prefix here before the tRPC
 // handler on the same loopback server; Vite proxies it in development.
 //
 // A request is checked in this order, and each refusal happens before any
@@ -9,15 +9,24 @@
 //   1. decode each path segment (a malformed escape or a NUL → 400);
 //   2. lexical containment under the root (`..` in any spelling → 403,
 //      without touching the filesystem);
-//   3. the requested name ends in png/jpg/jpeg/gif/webp (else 403);
+//   3. the requested name ends in png/jpg/jpeg/gif/webp/mp4/webm (else
+//      403; `.mov` included, since browsers other than Safari can't play it);
 //   4. realpath the root and the target (missing → 404);
 //   5. the real target is inside the real root (a symlink that leads out
 //      → 403);
-//   6. the real target's own name is an image (a `.png` symlink to a text
-//      file → 403);
+//   6. the real target's own name is an image or video (a `.png` symlink to
+//      a text file → 403);
 //   7. it is a regular file (a directory → 404).
 // Only then is it opened and streamed, with its type, `Cache-Control:
-// no-store`, and `X-Content-Type-Options: nosniff`.
+// no-store`, `X-Content-Type-Options: nosniff`, and `Accept-Ranges: bytes`.
+//
+// Byte ranges (video-review-attachments, design.md decision 4): Safari will
+// not play a video whose server ignores `Range`, and seeking in any browser
+// needs it. One range is honored (`parseByteRange`): a satisfiable one is a
+// 206 with `Content-Range` and exactly those bytes; an unsatisfiable one is a
+// 416 with `Content-Range: bytes */<size>`; a malformed, reversed, or
+// multi-range header is ignored and the whole file served, which RFC 9110
+// permits. HEAD answers the same status and headers with no body.
 //
 // Accepted race: between the realpath in step 5 and the open, a file inside
 // the root could be swapped for a symlink that leads out. Closing that needs
@@ -44,9 +53,39 @@ const CONTENT_TYPES: Readonly<Record<string, string>> = {
   ".jpeg": "image/jpeg",
   ".gif": "image/gif",
   ".webp": "image/webp",
+  ".mp4": "video/mp4",
+  ".webm": "video/webm",
 };
 
-const IMAGE_NAME = /\.(png|jpe?g|gif|webp)$/i;
+const SERVED_NAME = /\.(png|jpe?g|gif|webp|mp4|webm)$/i;
+const NOT_SERVED = "Not a review image or video";
+
+export type ByteRange = { start: number; end: number };
+
+/**
+ * The single byte range a `Range` header asks of a `size`-byte file
+ * (module header): `{start, end}` inclusive, "unsatisfiable" for a range
+ * that starts past the end, a zero-length suffix, or any range of an empty
+ * file, and null for a header to ignore (absent, malformed, reversed, or
+ * several ranges).
+ */
+export function parseByteRange(header: string | undefined, size: number): ByteRange | "unsatisfiable" | null {
+  if (header === undefined) return null;
+  const match = /^bytes=(\d{0,15})-(\d{0,15})$/.exec(header.trim());
+  if (!match) return null;
+  const [, first, last] = match as unknown as [string, string, string];
+  if (first === "" && last === "") return null;
+  if (first === "") {
+    const suffix = Number(last);
+    if (suffix === 0 || size === 0) return "unsatisfiable";
+    return { start: Math.max(0, size - suffix), end: size - 1 };
+  }
+  const start = Number(first);
+  if (last !== "" && Number(last) < start) return null;
+  if (size === 0 || start >= size) return "unsatisfiable";
+  const end = last === "" ? size - 1 : Math.min(Number(last), size - 1);
+  return { start, end };
+}
 
 /** The URL `createReviewImageHandler` serves `absolutePath` at, or null when it is not inside `root`. */
 export function reviewImageUrl(absolutePath: string, root: string = REVIEW_IMAGE_ROOT): string | null {
@@ -79,7 +118,7 @@ export async function resolveReviewImage(pathname: string, root: string = REVIEW
   }
   const requested = path.resolve(root, ...segments);
   if (!isInsideReviewRoot(requested, root)) return { ok: false, status: 403, reason: "Outside the review image root" };
-  if (!IMAGE_NAME.test(requested)) return { ok: false, status: 403, reason: "Not an image" };
+  if (!SERVED_NAME.test(requested)) return { ok: false, status: 403, reason: NOT_SERVED };
 
   let realRoot: string;
   let realTarget: string;
@@ -94,7 +133,7 @@ export async function resolveReviewImage(pathname: string, root: string = REVIEW
   if (!isInsideReviewRoot(realTarget, realRoot)) return { ok: false, status: 403, reason: "Outside the review image root" };
   const ext = path.extname(realTarget).toLowerCase();
   const contentType = CONTENT_TYPES[ext];
-  if (contentType === undefined) return { ok: false, status: 403, reason: "Not an image" };
+  if (contentType === undefined) return { ok: false, status: 403, reason: NOT_SERVED };
   let info;
   try {
     info = await stat(realTarget);
@@ -163,19 +202,35 @@ export function createReviewImageHandler(options: ReviewImageHandlerOptions = {}
       refuse(res, resolved.status, resolved.reason);
       return;
     }
-    res.writeHead(200, {
-      "Content-Type": resolved.contentType,
-      "Content-Length": String(resolved.size),
-      ...COMMON_HEADERS,
-    });
+    const range = parseByteRange(req.headers.range, resolved.size);
+    if (range === "unsatisfiable") {
+      refuse(res, 416, "Range not satisfiable", { "Accept-Ranges": "bytes", "Content-Range": `bytes */${resolved.size}` });
+      return;
+    }
+    if (range === null) {
+      res.writeHead(200, {
+        "Content-Type": resolved.contentType,
+        "Content-Length": String(resolved.size),
+        "Accept-Ranges": "bytes",
+        ...COMMON_HEADERS,
+      });
+    } else {
+      res.writeHead(206, {
+        "Content-Type": resolved.contentType,
+        "Content-Length": String(range.end - range.start + 1),
+        "Content-Range": `bytes ${range.start}-${range.end}/${resolved.size}`,
+        "Accept-Ranges": "bytes",
+        ...COMMON_HEADERS,
+      });
+    }
     if (req.method === "HEAD") {
       res.end();
       return;
     }
     try {
-      await pipeline(createReadStream(resolved.file), res);
+      await pipeline(createReadStream(resolved.file, range ?? {}), res);
     } catch (err) {
-      // A client that went away mid-image (a closed lightbox, a navigation) is not an error worth logging.
+      // A client that went away mid-file (a closed lightbox, a navigation) is not an error worth logging.
       // (pipeline has destroyed `res` by now either way, so the code is what tells them apart.)
       if (!CLIENT_GONE.has((err as NodeJS.ErrnoException).code ?? "")) {
         console.error("[breakdown-web] review image stream failed:", err);

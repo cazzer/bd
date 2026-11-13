@@ -1,8 +1,8 @@
 ## 1. Media route serves video with byte ranges
 
-- [ ] 1.1 `apps/web/server/review-images.ts`: `.mp4`/`.webm` content types and served-name pattern; refusal reason "Not a review image or video"; `.mov` and other extensions 403; same guard order (design.md decision 4)
-- [ ] 1.2 Exported `parseByteRange(header, size)`; `Accept-Ranges: bytes` always; 206 with `Content-Range` and a ranged stream; 416 with `Content-Range: bytes */size`; HEAD gets headers only; header comment updated
-- [ ] 1.3 `review-images.test.ts`: the `parseByteRange` table (`0-1`, `5-`, `-3`, `-0`, past end, reversed, multi-range, garbage, size 0, over 15 digits); over HTTP 206 / 416 / 200 with `Accept-Ranges` / HEAD with range; content types; `.mov` 403; an `.mp4` symlink out of the root 403
+- [x] 1.1 `apps/web/server/review-images.ts`: `.mp4`/`.webm` content types and served-name pattern; refusal reason "Not a review image or video"; `.mov` and other extensions 403; same guard order (design.md decision 4)
+- [x] 1.2 Exported `parseByteRange(header, size)`; `Accept-Ranges: bytes` always; 206 with `Content-Range` and a ranged stream; 416 with `Content-Range: bytes */size`; HEAD gets headers only; header comment updated
+- [x] 1.3 `review-images.test.ts`: the `parseByteRange` table (`0-1`, `5-`, `-3`, `-0`, past end, reversed, multi-range, garbage, size 0, over 15 digits); over HTTP 206 / 416 / 200 with `Accept-Ranges` / HEAD with range; content types; `.mov` 403; an `.mp4` symlink out of the root 403
 
 ## 2. Video in the card contract, through to the board item
 
