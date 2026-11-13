@@ -64,7 +64,7 @@ There SHALL be one token per named client. A token SHALL be generated from at le
 #### Scenario: Last use recorded
 
 - **WHEN** a client's token admits a request
-- **THEN** listing tokens shows a last-use time for that client no earlier than that request
+- **THEN** listing tokens shows a last-use time for that client within 60 seconds of its latest admitted request
 
 ### Requirement: Writes are attributed to the token's client
 
@@ -77,7 +77,7 @@ A write admitted by a client token SHALL be recorded with an actor that names th
 
 #### Scenario: Web write from the phone
 
-- **WHEN** the board, connected with the `phone` token, records a review decision or a note
+- **WHEN** the board, connected with the `phone` token, writes a note or decides an inbox item
 - **THEN** the ingest run's actor is `phone`, and its source system is unchanged
 
 ### Requirement: Browsers connect with a cookie, not a URL
