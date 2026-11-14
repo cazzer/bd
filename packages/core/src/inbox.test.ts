@@ -1,14 +1,18 @@
+import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Database } from "@breakdown/db";
 import { upsertEdges } from "./edges.js";
-import { InboxCardChangedError, InboxDecisionConflictError, InvalidInboxItemError, NotAnInboxItemError } from "./errors.js";
+import { InboxCardChangedError, InboxDecisionConflictError, InboxItemNotThisSessionError, InboxItemSessionEndedError, InvalidInboxItemError, NotAnInboxItemError } from "./errors.js";
 import {
+  assertSessionCreatedAbsentKeys,
+  assertSessionMayWriteInboxItems,
   carryForwardInboxDecisions,
   completeInboxItem,
   decideInboxItem,
   handOffInboxItem,
   inboxItemDigested,
+  inboxNotifyText,
   releaseInboxItem,
   requestInboxItem,
   INBOX_ITEM_NODE_TYPE,
@@ -307,7 +311,8 @@ describe("inbox digestion", () => {
     expect(carryForwardInboxDecisions(skipped, held)["status"]).toBe("undigested");
     expect(carryForwardInboxDecisions(read, held)["status"]).toBe("pending");
     expect(carryForwardInboxDecisions(skipped, read)["status"]).toBe("pending");
-    expect(carryForwardInboxDecisions({ ...skipped, status: "changes" }, null)["status"]).toBe("changes");
+    // A new item's status is never the agent's: "changes" is the person's.
+    expect(carryForwardInboxDecisions({ ...skipped, status: "changes" }, null)["status"]).toBe("undigested");
   });
 
   it("holds a session-queued PR it did not read, lists it only on request, and lets the person release or dismiss it", async () => {
@@ -398,5 +403,308 @@ describe("the actor the person's inbox writes record (tailnet-hosting decision 4
 
     const handed = await handOffInboxItem(db, held, { pane: "w9:p3", socket: "/tmp/herdr.sock", tab: "w9:t3" }, { actor: "phone" });
     expect(await runOf(handed.ingestRunId)).toEqual({ actor: "phone", source_system: "human" });
+  });
+});
+
+// hangar-queue decisions 6 and 9: an item a remote session filed is bound to
+// that session (from its token, never the body), and the person's decision,
+// release, or hand-off on it becomes that session's message while the
+// session is live; once it has ended, nothing is sent and the item turns
+// local.
+describe("items a hangar session filed", () => {
+  const key = `session:hangar-${SRC}`;
+  const sessions: string[] = [];
+  const sessionNodes: string[] = [];
+  /** A session id with no session node behind it: what an ended-and-gone session looks like. */
+  const session = (): string => {
+    const id = randomUUID();
+    sessions.push(id);
+    return id;
+  };
+  /**
+   * A hangar session node in `state`, written straight to the store (not
+   * through the queue). Never queued, so no real hangar can claim it, and
+   * claimed by a `test-` name no real hangar lists.
+   */
+  async function sessionNode(state: string): Promise<string> {
+    const result = await upsertNodes(db, run, [
+      { nodeType: "hangar_session", sourceSystem: "hangar", externalId: randomUUID(), title: "test session", metadata: { state, flavor: "headless", repo: "test/repo", claimed_by: `test-${SRC}` } },
+    ]);
+    const id = result.rows[0]!.id;
+    sessions.push(id);
+    sessionNodes.push(id);
+    return id;
+  }
+  afterAll(async () => {
+    await db.execute(sql`DELETE FROM nodes WHERE source_system = 'inbox' AND external_id LIKE ${`${key}%`}`);
+    if (sessions.length > 0) await db.execute(sql`DELETE FROM hangar_messages WHERE session_id = ANY(${`{${sessions.join(",")}}`}::uuid[])`);
+    if (sessionNodes.length > 0) await db.execute(sql`DELETE FROM nodes WHERE id = ANY(${`{${sessionNodes.join(",")}}`}::uuid[])`);
+  });
+
+  async function messagesFor(sessionId: string): Promise<{ kind: string; body: Record<string, unknown> }[]> {
+    return (await db.execute<{ kind: string; body: Record<string, unknown> }>(sql`SELECT kind, body FROM hangar_messages WHERE session_id = ${sessionId}::uuid ORDER BY id`)).rows;
+  }
+
+  async function messagesAbout(itemId: string): Promise<number> {
+    return (await db.execute(sql`SELECT 1 FROM hangar_messages WHERE body->>'item_id' = ${itemId}`)).rows.length;
+  }
+
+  it("validates `session` as a uuid and reads it as hangarSession", () => {
+    const id = randomUUID();
+    const normalized = normalizeInboxItemMetadata({ source: "session", session: id.toUpperCase() });
+    expect(normalized["session"]).toBe(id);
+    expect(normalizeInboxItemMetadata({ source: "session", session: null })).not.toHaveProperty("session");
+    expect(() => normalizeInboxItemMetadata({ source: "session", session: "w1:p1" })).toThrow(InvalidInboxItemError);
+  });
+
+  it("never takes `session` from a writer: carry-forward drops the incoming one and keeps the stored one", () => {
+    const stored = normalizeInboxItemMetadata({ source: "session", session: randomUUID() });
+    const forged = normalizeInboxItemMetadata({ source: "session", session: randomUUID() });
+    expect(carryForwardInboxDecisions(forged, null)).not.toHaveProperty("session");
+    expect(carryForwardInboxDecisions(forged, stored)["session"]).toBe(stored["session"]);
+    expect(carryForwardInboxDecisions(normalizeInboxItemMetadata({ source: "session" }), stored)["session"]).toBe(stored["session"]);
+  });
+
+  it("stamps the server-supplied session, drops pane and socket, and ignores a body's session for a local caller", async () => {
+    const s = session();
+    const filed = await requestInboxItem(db, {
+      externalId: `${key}-stamp`,
+      title: "Ship it?",
+      content: "plan",
+      metadata: { source: "session", pane: "w1:p1", socket: "/tmp/herdr.sock", session: randomUUID() },
+      session: s,
+    });
+    expect(filed.session).toBe(s);
+    const [item] = (await listInbox(db, { ids: [filed.id] })).items;
+    expect(item).toMatchObject({ hangarSession: s, pane: null });
+
+    const local = await requestInboxItem(db, { externalId: `${key}-local`, title: "Local", content: "x", metadata: { source: "session", session: "not even a uuid", pane: "w1:p2" } });
+    expect(local.session).toBeNull();
+    expect((await listInbox(db, { ids: [local.id] })).items[0]).toMatchObject({ hangarSession: null, pane: "w1:p2" });
+
+    // A local re-request of the session's item keeps it bound to the session.
+    const again = await requestInboxItem(db, { externalId: `${key}-stamp`, title: "Ship it?", content: "plan v2", metadata: { source: "session" } });
+    expect(again.session).toBe(s);
+  });
+
+  it("appends exactly one message per decision and per release, with the decision's body", async () => {
+    const s = await sessionNode("running");
+    const card = { question: "Which?", options: [{ id: "a", label: "A" }, { id: "b", label: "B" }] };
+    const filed = await requestInboxItem(db, { externalId: `${key}-decide`, title: "Pick one", content: "x", metadata: { source: "session", ...card }, session: s });
+    const decided = await decideInboxItem(db, filed.id, { decision: "accept", option: "b", message: " go " });
+    expect(decided).toMatchObject({ session: s, endedSession: null, pane: null, after: "accepted" });
+    const expectedText = inboxNotifyText({ id: filed.id, title: "Pick one", after: "accepted" }, "go", "b");
+    expect(await messagesFor(s)).toEqual([
+      { kind: "inbox_decision", body: { item_id: filed.id, title: "Pick one", decision: "accept", outcome: "accepted", option: "b", message: "go", text: expectedText } },
+    ]);
+
+    const s2 = await sessionNode("claimed");
+    const held = await requestInboxItem(db, { externalId: `${key}-release`, title: "Read it", content: "x", metadata: { source: "github", url: "https://github.com/a/b/pull/9" }, session: s2 });
+    expect(held.status).toBe("undigested");
+    expect(await releaseInboxItem(db, held.id)).toMatchObject({ session: s2, after: "pending" });
+    const released = await messagesFor(s2);
+    expect(released).toHaveLength(1);
+    expect(released[0]!.body).toMatchObject({ item_id: held.id, decision: "release", outcome: "pending", message: "", text: expect.stringContaining("Released") });
+    expect(released[0]!.body).not.toHaveProperty("option");
+  });
+
+  it("tells the session on hand-off and clears it, so later decisions go to the local pane", async () => {
+    const s = await sessionNode("running");
+    const filed = await requestInboxItem(db, { externalId: `${key}-handoff`, title: "Deep one", content: "x", metadata: { source: "session" }, session: s });
+    const handed = await handOffInboxItem(db, filed.id, { pane: "w9:p7", socket: "/tmp/herdr.sock", tab: "w9:t7" });
+    expect(handed.session).toBe(s);
+    const told = await messagesFor(s);
+    expect(told).toHaveLength(1);
+    expect(told[0]!.body).toMatchObject({ item_id: filed.id, decision: "session", outcome: "session", text: expect.stringContaining("stop work on it") });
+    expect((await listInbox(db, { ids: [filed.id] })).items[0]).toMatchObject({ hangarSession: null, pane: "w9:p7" });
+
+    // The local session re-queues its draft; the person's decision is the pane's, not a message.
+    await requestInboxItem(db, { externalId: `${key}-handoff`, title: "Deep one", content: "draft", metadata: { source: "session", pane: "w9:p7", socket: "/tmp/herdr.sock" } });
+    expect(await decideInboxItem(db, filed.id, { decision: "dismiss" })).toMatchObject({ session: null, pane: "w9:p7" });
+    expect(await messagesFor(s)).toHaveLength(1);
+  });
+
+  it("refuses accept and send-back once the session has ended (stopped, failed, merged away, or gone), writing nothing", async () => {
+    const survivor = await sessionNode("running");
+    const merged = await sessionNode("running");
+    await db.execute(sql`UPDATE nodes SET merged_into = ${survivor}::uuid WHERE id = ${merged}::uuid`);
+    const ended: [string, string][] = [
+      ["stopped", await sessionNode("stopped")],
+      ["failed", await sessionNode("failed")],
+      ["merged", merged],
+      ["gone", session()],
+    ];
+    for (const [label, s] of ended) {
+      const filed = await requestInboxItem(db, { externalId: `${key}-ended-${label}`, title: `Ended ${label}`, content: "x", metadata: { source: "session" }, session: s });
+      expect(filed.session).toBe(s);
+      const revisions = async () => Number((await db.execute<{ n: string }>(sql`SELECT count(*) AS n FROM node_revisions WHERE node_id = ${filed.id}::uuid`)).rows[0]!.n);
+      const before = await revisions();
+      for (const decision of ["accept", "changes"] as const) {
+        const refused = await decideInboxItem(db, filed.id, { decision, message: "go" }).catch((e: unknown) => e);
+        expect(refused, `${label} ${decision}`).toBeInstanceOf(InboxItemSessionEndedError);
+        expect(refused, `${label} ${decision}`).toMatchObject({ nodeId: filed.id, sessionId: s });
+      }
+      expect(await revisions(), label).toBe(before);
+      expect(await messagesFor(s), label).toEqual([]);
+      // Still the remote session's, still in front of the person: never routed to a local executor.
+      const [item] = (await listInbox(db, { ids: [filed.id] })).items;
+      expect(item, label).toMatchObject({ status: "pending", hangarSession: s, feedback: [] });
+
+      // Dismiss is the person's explicit choice: it works, sends nothing, and clears the session.
+      expect(await decideInboxItem(db, filed.id, { decision: "dismiss" }), label).toMatchObject({ session: null, endedSession: s, after: "dismissed" });
+      expect(await messagesFor(s), label).toEqual([]);
+      expect((await listInbox(db, { ids: [filed.id], statuses: ["dismissed"] })).items[0], label).toMatchObject({ hangarSession: null });
+    }
+    expect(await messagesFor(survivor)).toEqual([]);
+
+    // Release clears the session too; a later accept is then an ordinary local accept.
+    const stopped = await sessionNode("stopped");
+    const held = await requestInboxItem(db, { externalId: `${key}-ended-release`, title: "Held", content: "x", metadata: { source: "github", url: "https://github.com/a/b/pull/7" }, session: stopped });
+    expect(await releaseInboxItem(db, held.id)).toMatchObject({ session: null, endedSession: stopped, after: "pending" });
+    expect((await listInbox(db, { ids: [held.id] })).items[0]).toMatchObject({ status: "pending", hangarSession: null });
+    expect(await decideInboxItem(db, held.id, { decision: "accept" })).toMatchObject({ session: null, endedSession: null, after: "accepted" });
+
+    // Hand-off works and takes the item local.
+    const handedOver = await requestInboxItem(db, { externalId: `${key}-ended-handoff`, title: "Deep", content: "x", metadata: { source: "session" }, session: stopped });
+    expect(await handOffInboxItem(db, handedOver.id, { pane: "w9:p8", socket: "/tmp/herdr.sock", tab: "w9:t8" })).toMatchObject({ session: null });
+    expect(await messagesFor(stopped)).toEqual([]);
+    expect((await listInbox(db, { ids: [handedOver.id], statuses: ["session"] })).items[0]).toMatchObject({ hangarSession: null, pane: "w9:p8" });
+  });
+
+  it("rolls back a session-bound batch when a key its unlocked pre-read found absent was inserted before the upsert", async () => {
+    const s = await sessionNode("running");
+    const raced = `${key}-race`;
+    const fresh = `${key}-race-fresh`;
+    const keys = [raced, fresh].map((externalId) => ({ nodeType: INBOX_ITEM_NODE_TYPE, sourceSystem: "inbox", externalId }));
+    // brain_write trims keys before the pre-read; the pre-read matches them trimmed either way.
+    const absent = await assertSessionMayWriteInboxItems(db, s, [{ ...keys[0]!, externalId: ` ${raced} ` }, keys[1]!]);
+    expect(absent.size).toBe(2);
+
+    // A local pane files the same key between the read and the write.
+    const local = await requestInboxItem(db, { externalId: raced, title: "Local ask", content: "mine", metadata: { source: "session", pane: "w1:p2", socket: "/tmp/herdr.sock" } });
+    const batch = keys.map((k) => ({ ...k, title: "Taken", content: "x", metadata: normalizeInboxItemMetadata({ source: "session", session: s }) }));
+    const refused = await upsertNodes(db, run, batch, { beforeCommit: (r) => assertSessionCreatedAbsentKeys(s, absent, r.rows) }).catch((e: unknown) => e);
+    expect(refused).toBeInstanceOf(InboxItemNotThisSessionError);
+    expect(refused).toMatchObject({ nodeId: local.id, sessionId: s });
+
+    // Nothing from the batch: the local item as it was, the fresh key never created.
+    expect((await listInbox(db, { ids: [local.id] })).items[0]).toMatchObject({ title: "Local ask", hangarSession: null, pane: "w1:p2" });
+    expect((await db.execute(sql`SELECT 1 FROM nodes WHERE source_system = 'inbox' AND external_id = ${fresh}`)).rows).toEqual([]);
+
+    // Without a racing writer the same check passes and the batch commits.
+    const clean = await assertSessionMayWriteInboxItems(db, s, [keys[1]!]);
+    const written = await upsertNodes(db, run, [batch[1]!], { beforeCommit: (r) => assertSessionCreatedAbsentKeys(s, clean, r.rows) });
+    expect(written.created).toBe(1);
+  });
+
+  it("appends nothing for a local item", async () => {
+    const filed = await requestInboxItem(db, { externalId: `${key}-plain`, title: "Local ask", content: "x", metadata: { source: "session", pane: "w1:p3", socket: "/tmp/herdr.sock" } });
+    expect(await decideInboxItem(db, filed.id, { decision: "accept" })).toMatchObject({ session: null, endedSession: null, pane: "w1:p3" });
+    expect(await messagesAbout(filed.id)).toBe(0);
+  });
+
+  it("lets a session complete only its own items", async () => {
+    const mine = await sessionNode("running");
+    const filed = await requestInboxItem(db, { externalId: `${key}-complete`, title: "Do it", content: "x", metadata: { source: "session" }, session: mine });
+    await decideInboxItem(db, filed.id, { decision: "accept" });
+    await expect(completeInboxItem(db, filed.id, "done", { session: session() })).rejects.toThrow(InboxItemNotThisSessionError);
+    const local = await requestInboxItem(db, { externalId: `${key}-complete-local`, title: "Local", content: "x", metadata: { source: "session" } });
+    await decideInboxItem(db, local.id, { decision: "accept" });
+    await expect(completeInboxItem(db, local.id, "done", { session: mine })).rejects.toThrow(InboxItemNotThisSessionError);
+    await completeInboxItem(db, filed.id, "done", { session: mine.toUpperCase() });
+    expect((await listInbox(db, { ids: [filed.id], statuses: ["done"] })).items).toHaveLength(1);
+  });
+});
+
+// hangar-queue security review: a session-bound worker cannot take another
+// session's (or a local pane's) item, and no agent write approves anything.
+describe("a session-bound request cannot take an item it did not file", () => {
+  const key = `session:takeover-${SRC}`;
+  const sessions: string[] = [];
+  const session = (): string => {
+    const id = randomUUID();
+    sessions.push(id);
+    return id;
+  };
+  afterAll(async () => {
+    await db.execute(sql`DELETE FROM nodes WHERE source_system = 'inbox' AND external_id LIKE ${`${key}%`}`);
+    if (sessions.length > 0) await db.execute(sql`DELETE FROM hangar_messages WHERE session_id = ANY(${`{${sessions.join(",")}}`}::uuid[])`);
+  });
+
+  async function stored(id: string): Promise<{ content: string; metadata: Record<string, unknown> }> {
+    return (await db.execute<{ content: string; metadata: Record<string, unknown> }>(sql`SELECT content, metadata FROM nodes WHERE id = ${id}::uuid`)).rows[0]!;
+  }
+
+  it("refuses worker A re-sending worker B's item, writing nothing", async () => {
+    const a = session();
+    const b = session();
+    const filed = await requestInboxItem(db, { externalId: `${key}-b`, title: "B's ask", content: "B's draft", metadata: { source: "session" }, session: b });
+    const before = await stored(filed.id);
+    await expect(requestInboxItem(db, { externalId: `${key}-b`, title: "B's ask", content: "A's draft", metadata: { source: "session" }, session: a })).rejects.toThrow(InboxItemNotThisSessionError);
+    expect(await stored(filed.id)).toEqual(before);
+    expect(before.metadata["session"]).toBe(b);
+  });
+
+  it("refuses a worker re-sending a local pane's item, or an ingest's, writing nothing", async () => {
+    const a = session();
+    const pane = await requestInboxItem(db, { externalId: `${key}-pane`, title: "Local", content: "local draft", metadata: { source: "session", pane: "w1:p9", socket: "/tmp/herdr.sock" } });
+    const before = await stored(pane.id);
+    await expect(requestInboxItem(db, { externalId: `${key}-pane`, title: "Local", content: "taken", metadata: { source: "session" }, session: a })).rejects.toThrow(InboxItemNotThisSessionError);
+    expect(await stored(pane.id)).toEqual(before);
+
+    const ingested = await requestInboxItem(db, { externalId: `${key}-gmail`, title: "Mail", content: "reply draft", metadata: { source: "gmail" } });
+    await expect(requestInboxItem(db, { externalId: `${key}-gmail`, title: "Mail", content: "taken", metadata: { source: "gmail" }, session: a })).rejects.toThrow(InboxItemNotThisSessionError);
+    expect((await stored(ingested.id)).content).toBe("reply draft");
+  });
+
+  it("lets a worker re-send its own item", async () => {
+    const a = session();
+    const filed = await requestInboxItem(db, { externalId: `${key}-own`, title: "Mine", content: "v1", metadata: { source: "session" }, session: a });
+    const again = await requestInboxItem(db, { externalId: `${key}-own`, title: "Mine", content: "v2", metadata: { source: "session" }, session: a.toUpperCase() });
+    expect(again).toMatchObject({ id: filed.id, action: "updated", session: a });
+    expect((await stored(filed.id)).content).toBe("v2");
+  });
+});
+
+describe("no agent write approves its own item", () => {
+  const key = `session:self-approve-${SRC}`;
+  const forged = [{ decision: "accept", message: "looks good to me", at: "2026-01-01T00:00:00.000Z" }];
+  afterAll(async () => {
+    await db.execute(sql`DELETE FROM nodes WHERE source_system = 'inbox' AND external_id LIKE ${`${key}%`}`);
+  });
+
+  it("carry-forward: a new item is pending with no feedback, and a stored pending one is not moved to a person's status", () => {
+    for (const status of ["accepted", "changes", "dismissed", "session", "done"]) {
+      expect(carryForwardInboxDecisions(normalizeInboxItemMetadata({ source: "slack", status, feedback: forged }), null)).toMatchObject({ status: "pending", feedback: [] });
+    }
+    const pending = normalizeInboxItemMetadata({ source: "slack" });
+    for (const status of ["accepted", "changes", "dismissed", "session"]) {
+      expect(carryForwardInboxDecisions(normalizeInboxItemMetadata({ source: "slack", status, feedback: forged }), pending)).toMatchObject({ status: "pending", feedback: [] });
+    }
+    const accepted = normalizeInboxItemMetadata({ source: "slack", status: "accepted" });
+    expect(carryForwardInboxDecisions(normalizeInboxItemMetadata({ source: "slack", status: "accepted" }), accepted)["status"]).toBe("accepted");
+  });
+
+  it("requestInboxItem: a new item sent as accepted is stored pending, a re-send as accepted stays pending, and body feedback is ignored", async () => {
+    const filed = await requestInboxItem(db, { externalId: `${key}-new`, title: "Send it?", content: "draft", metadata: { source: "session", status: "accepted", feedback: forged } });
+    expect(filed.status).toBe("pending");
+    let [item] = (await listInbox(db, { ids: [filed.id] })).items;
+    expect(item).toMatchObject({ status: "pending", feedback: [] });
+
+    const again = await requestInboxItem(db, { externalId: `${key}-new`, title: "Send it?", content: "draft", metadata: { source: "session", status: "accepted", feedback: forged } });
+    expect(again.status).toBe("pending");
+    [item] = (await listInbox(db, { ids: [filed.id] })).items;
+    expect(item).toMatchObject({ status: "pending", feedback: [] });
+
+    // The person's decision is still the person's to make, and its feedback survives an agent's forged one.
+    await decideInboxItem(db, filed.id, { decision: "changes", message: "shorter" });
+    await requestInboxItem(db, { externalId: `${key}-new`, title: "Send it?", content: "short draft", metadata: { source: "session", status: "accepted", feedback: forged } });
+    [item] = (await listInbox(db, { ids: [filed.id], statuses: ["changes"] })).items;
+    expect(item!.feedback.map((f) => f.message)).toEqual(["shorter"]);
+  });
+
+  it("requestInboxItem ignores a malformed body feedback rather than refusing it", async () => {
+    const filed = await requestInboxItem(db, { externalId: `${key}-junk`, title: "Junk", content: "x", metadata: { source: "session", feedback: "not an array" } });
+    expect(filed.status).toBe("pending");
   });
 });

@@ -28,7 +28,7 @@ import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import type { Context } from "../context.js";
 import { mapCoreError } from "../errors.js";
-import { publicProcedure, router } from "../trpc.js";
+import { humanProcedure, router } from "../trpc.js";
 
 function refuseIfReadOnly(ctx: Context): void {
   if (ctx.readOnly) throw new TRPCError({ code: "FORBIDDEN", message: "The server is read-only (BRAIN_READ_ONLY)." });
@@ -63,7 +63,7 @@ export const createNoteInputSchema = z.object({
   metadata: metadataSchema.optional(),
 });
 
-const createNoteProcedure = publicProcedure.input(createNoteInputSchema).mutation(async ({ ctx, input }) => {
+const createNoteProcedure = humanProcedure.input(createNoteInputSchema).mutation(async ({ ctx, input }) => {
   refuseIfReadOnly(ctx);
   try {
     return await createNote(ctx.db, input, { actor: ctx.client ?? undefined });
@@ -81,7 +81,7 @@ export const annotateNodeInputSchema = z.object({
   metadata: metadataSchema.optional(),
 });
 
-const annotateNodeProcedure = publicProcedure.input(annotateNodeInputSchema).mutation(async ({ ctx, input }) => {
+const annotateNodeProcedure = humanProcedure.input(annotateNodeInputSchema).mutation(async ({ ctx, input }) => {
   refuseIfReadOnly(ctx);
   try {
     return await annotateNode(ctx.db, input.targetNodeId, { title: input.title, content: input.content, metadata: input.metadata }, { actor: ctx.client ?? undefined });
@@ -99,7 +99,7 @@ export const updateNodeContentInputSchema = z.object({
   metadata: metadataSchema.optional(),
 });
 
-const updateNodeContentProcedure = publicProcedure.input(updateNodeContentInputSchema).mutation(async ({ ctx, input }) => {
+const updateNodeContentProcedure = humanProcedure.input(updateNodeContentInputSchema).mutation(async ({ ctx, input }) => {
   refuseIfReadOnly(ctx);
   try {
     return await updateNodeContent(ctx.db, input.nodeId, { title: input.title, content: input.content, metadata: input.metadata }, { actor: ctx.client ?? undefined });
@@ -118,7 +118,7 @@ const assertEdgeInputSchema = z.object({
   props: metadataSchema.optional(),
 });
 
-const assertEdgeProcedure = publicProcedure.input(assertEdgeInputSchema).mutation(async ({ ctx, input }) => {
+const assertEdgeProcedure = humanProcedure.input(assertEdgeInputSchema).mutation(async ({ ctx, input }) => {
   refuseIfReadOnly(ctx);
   try {
     return await assertEdge(ctx.db, input, { actor: ctx.client ?? undefined });
@@ -135,7 +135,7 @@ const retractEdgeInputSchema = z.object({
   edgeType: z.string().min(1, "must not be empty"),
 });
 
-const retractEdgeProcedure = publicProcedure.input(retractEdgeInputSchema).mutation(async ({ ctx, input }) => {
+const retractEdgeProcedure = humanProcedure.input(retractEdgeInputSchema).mutation(async ({ ctx, input }) => {
   refuseIfReadOnly(ctx);
   try {
     return await retractEdge(ctx.db, input);
@@ -153,7 +153,7 @@ const reweightEdgeInputSchema = z.object({
   weight: z.number().min(0).max(1),
 });
 
-const reweightEdgeProcedure = publicProcedure.input(reweightEdgeInputSchema).mutation(async ({ ctx, input }) => {
+const reweightEdgeProcedure = humanProcedure.input(reweightEdgeInputSchema).mutation(async ({ ctx, input }) => {
   refuseIfReadOnly(ctx);
   try {
     return await reweightEdge(ctx.db, input, { actor: ctx.client ?? undefined });

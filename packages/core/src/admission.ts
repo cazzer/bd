@@ -41,6 +41,7 @@
 
 import { isIPv6 } from "node:net";
 import type { ClientTokenScope } from "@breakdown/db";
+import type { VerifiedClientToken } from "./client-tokens.js";
 
 export const LOOPBACK_HOST_NAMES = ["127.0.0.1", "localhost", "[::1]"] as const;
 export const TOKEN_COOKIE_NAME = "breakdown_token";
@@ -73,17 +74,30 @@ export interface AdmissionPolicy {
   isPublic?: (method: string, path: string) => boolean;
   /** The scopes this server accepts; a live token of any other scope is 403. */
   scopes: readonly ClientTokenScope[];
-  /** The client and scope of a live token, or null. */
-  verifyToken: (token: string) => Promise<{ client: string; scope: ClientTokenScope } | null>;
+  /** The client, scope, and bound session of a live token, or null. */
+  verifyToken: (token: string) => Promise<VerifiedClientToken | null>;
 }
 
+/**
+ * `scope` is null exactly when `client` is: a trusted loopback request or a
+ * public path, admitted with no token. `sessionId` is the hangar session a
+ * session token is bound to (hangar-queue decision 4), null otherwise.
+ * `byCredential` on a refusal is true only when the presented token itself
+ * caused it — unknown or revoked (401), or live but outside the policy's
+ * scopes (403, which names the token's client) — so an adapter can act on
+ * the token (MCP closes the session it opened) without letting a request
+ * that merely names a session, with no credential or from a foreign Host,
+ * do the same.
+ */
 export type Admission =
-  | { outcome: "allow"; client: string | null }
-  | { outcome: "forbidden" }
-  | { outcome: "unauthorized" };
+  | { outcome: "allow"; client: string | null; scope: ClientTokenScope | null; sessionId: string | null }
+  | { outcome: "forbidden"; byCredential: false }
+  | { outcome: "forbidden"; byCredential: true; client: string }
+  | { outcome: "unauthorized"; byCredential: boolean };
 
-const FORBIDDEN: Admission = { outcome: "forbidden" };
-const UNAUTHORIZED: Admission = { outcome: "unauthorized" };
+const FORBIDDEN: Admission = { outcome: "forbidden", byCredential: false };
+const UNAUTHORIZED: Admission = { outcome: "unauthorized", byCredential: false };
+const TOKENLESS: Admission = { outcome: "allow", client: null, scope: null, sessionId: null };
 const LOOPBACK_NAMES: ReadonlySet<string> = new Set(LOOPBACK_HOST_NAMES);
 
 /** Decides whether a request may reach a handler (module header). */
@@ -96,15 +110,15 @@ export async function admitRequest(req: AdmissionRequest, policy: AdmissionPolic
   if (originChecked && req.origin !== undefined && !isAllowedOrigin(req.origin, policy)) return FORBIDDEN;
 
   const forwardedLocal = req.forwardedFor === undefined || req.forwardedFor.every(isLoopbackAddress);
-  if (req.peerIsLoopback && LOOPBACK_NAMES.has(hostName) && forwardedLocal) return { outcome: "allow", client: null };
-  if (policy.isPublic?.(method, req.path)) return { outcome: "allow", client: null };
+  if (req.peerIsLoopback && LOOPBACK_NAMES.has(hostName) && forwardedLocal) return TOKENLESS;
+  if (policy.isPublic?.(method, req.path)) return TOKENLESS;
 
   if (req.credential === undefined) return UNAUTHORIZED;
   if (req.credential.source === "cookie" && originChecked && req.origin === undefined) return FORBIDDEN;
   const verified = await policy.verifyToken(req.credential.token);
-  if (verified === null) return UNAUTHORIZED;
-  if (!policy.scopes.includes(verified.scope)) return FORBIDDEN;
-  return { outcome: "allow", client: verified.client };
+  if (verified === null) return { outcome: "unauthorized", byCredential: true };
+  if (!policy.scopes.includes(verified.scope)) return { outcome: "forbidden", byCredential: true, client: verified.client };
+  return { outcome: "allow", client: verified.client, scope: verified.scope, sessionId: verified.sessionId };
 }
 
 /**

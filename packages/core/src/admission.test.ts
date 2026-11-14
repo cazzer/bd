@@ -13,12 +13,15 @@ import {
   type AdmissionPolicy,
   type AdmissionRequest,
 } from "./admission.js";
+import type { VerifiedClientToken } from "./client-tokens.js";
 
 const PORT = 5320;
 const TAILNET = "breakdown.tail.example";
-const LIVE: Record<string, { client: string; scope: "human" | "agent" }> = {
-  bdt_worker: { client: "worker-1", scope: "agent" },
-  bdt_phone: { client: "phone", scope: "human" },
+const SESSION = "0b6f6a52-2c71-4a43-9d0a-3c5a1e0d9f10";
+const LIVE: Record<string, VerifiedClientToken> = {
+  bdt_worker: { client: "worker-1", scope: "agent", sessionId: null },
+  bdt_phone: { client: "phone", scope: "human", sessionId: null },
+  bdt_session: { client: `session-${SESSION}`, scope: "agent", sessionId: SESSION },
 };
 
 function fakeStore() {
@@ -66,23 +69,24 @@ describe("admitRequest", () => {
   it("trusts a loopback peer with a loopback Host, without consulting the store", async () => {
     for (const host of ["127.0.0.1:5320", "localhost:5320", "[::1]:5320"]) {
       const { policy: p, calls } = policy();
-      expect(await admitRequest(request({ host, peerIsLoopback: true }), p), host).toEqual({ outcome: "allow", client: null });
+      expect(await admitRequest(request({ host, peerIsLoopback: true }), p), host).toEqual({ outcome: "allow", client: null, scope: null, sessionId: null });
       expect(calls).toHaveLength(0);
     }
   });
 
   it("admits a tailnet Host with a live bearer token as that client", async () => {
     const { policy: p, calls } = policy();
-    expect(await admitRequest(request({ credential: bearer("bdt_worker") }), p)).toEqual({ outcome: "allow", client: "worker-1" });
+    expect(await admitRequest(request({ credential: bearer("bdt_worker") }), p)).toEqual({ outcome: "allow", client: "worker-1", scope: "agent", sessionId: null });
     expect(calls).toEqual(["bdt_worker"]);
   });
 
   it("refuses a foreign Host with or without a token, before the store", async () => {
     for (const credential of [undefined, bearer("bdt_worker")]) {
       const { policy: p, calls } = policy();
-      expect(await admitRequest(request({ host: `evil.example:${PORT}`, credential }), p)).toEqual({ outcome: "forbidden" });
+      expect(await admitRequest(request({ host: `evil.example:${PORT}`, credential }), p)).toEqual({ outcome: "forbidden", byCredential: false });
       expect(await admitRequest(request({ host: `evil.example:${PORT}`, credential, peerIsLoopback: true }), p)).toEqual({
         outcome: "forbidden",
+        byCredential: false,
       });
       expect(calls).toHaveLength(0);
     }
@@ -93,6 +97,7 @@ describe("admitRequest", () => {
     for (const host of [undefined, "", `${TAILNET}:5321`, `${TAILNET}:`, `${TAILNET}:05320x`, "127.0.0.1", "localhost", "[::1]", "127.0.0.1:5321"]) {
       expect(await admitRequest(request({ host, peerIsLoopback: true, credential: bearer("bdt_worker") }), p), String(host)).toEqual({
         outcome: "forbidden",
+        byCredential: false,
       });
     }
     expect(calls).toHaveLength(0);
@@ -100,47 +105,52 @@ describe("admitRequest", () => {
 
   it("accepts `[::1]` and case-folds the Host", async () => {
     const { policy: p } = policy();
-    expect(await admitRequest(request({ host: "[::1]:5320", peerIsLoopback: true }), p)).toEqual({ outcome: "allow", client: null });
-    expect(await admitRequest(request({ host: "LOCALHOST:5320", peerIsLoopback: true }), p)).toEqual({ outcome: "allow", client: null });
+    expect(await admitRequest(request({ host: "[::1]:5320", peerIsLoopback: true }), p)).toEqual({ outcome: "allow", client: null, scope: null, sessionId: null });
+    expect(await admitRequest(request({ host: "LOCALHOST:5320", peerIsLoopback: true }), p)).toEqual({ outcome: "allow", client: null, scope: null, sessionId: null });
     expect(await admitRequest(request({ host: `BreakDown.Tail.Example:${PORT}`, credential: bearer("bdt_phone") }), p)).toEqual({
       outcome: "allow",
       client: "phone",
+      scope: "human",
+      sessionId: null,
     });
   });
 
   it("answers 401 for a missing token", async () => {
     const { policy: p, calls } = policy();
-    expect(await admitRequest(request(), p)).toEqual({ outcome: "unauthorized" });
+    expect(await admitRequest(request(), p)).toEqual({ outcome: "unauthorized", byCredential: false });
     expect(calls).toHaveLength(0);
   });
 
   it("answers 401 for an unknown or revoked token, exactly as for a missing one", async () => {
     const { policy: p } = policy();
-    expect(await admitRequest(request({ credential: bearer("bdt_unknown") }), p)).toEqual({ outcome: "unauthorized" });
-    expect(await admitRequest(request({ credential: cookie("bdt_revoked") }), p)).toEqual({ outcome: "unauthorized" });
+    expect(await admitRequest(request({ credential: bearer("bdt_unknown") }), p)).toEqual({ outcome: "unauthorized", byCredential: true });
+    expect(await admitRequest(request({ credential: cookie("bdt_revoked") }), p)).toEqual({ outcome: "unauthorized", byCredential: true });
   });
 
   it("requires a token from a loopback peer that sends a tailnet Host", async () => {
     const { policy: p } = policy();
-    expect(await admitRequest(request({ peerIsLoopback: true }), p)).toEqual({ outcome: "unauthorized" });
+    expect(await admitRequest(request({ peerIsLoopback: true }), p)).toEqual({ outcome: "unauthorized", byCredential: false });
     expect(await admitRequest(request({ peerIsLoopback: true, credential: bearer("bdt_worker") }), p)).toEqual({
       outcome: "allow",
       client: "worker-1",
+      scope: "agent",
+      sessionId: null,
     });
   });
 
   it("requires a token from a non-loopback peer that sends a loopback Host", async () => {
     const { policy: p } = policy();
-    expect(await admitRequest(request({ host: "127.0.0.1:5320" }), p)).toEqual({ outcome: "unauthorized" });
+    expect(await admitRequest(request({ host: "127.0.0.1:5320" }), p)).toEqual({ outcome: "unauthorized", byCredential: false });
   });
 
   it("refuses a foreign Origin on a POST under both policies", async () => {
     for (const originCheck of ["unsafe-methods", "all-methods"] as const) {
       const { policy: p, calls } = policy({ originCheck });
       const req = request({ method: "POST", origin: "https://evil.example", credential: bearer("bdt_worker") });
-      expect(await admitRequest(req, p), originCheck).toEqual({ outcome: "forbidden" });
+      expect(await admitRequest(req, p), originCheck).toEqual({ outcome: "forbidden", byCredential: false });
       expect(await admitRequest({ ...req, host: "127.0.0.1:5320", peerIsLoopback: true }, p), originCheck).toEqual({
         outcome: "forbidden",
+        byCredential: false,
       });
       expect(calls).toHaveLength(0);
     }
@@ -148,15 +158,15 @@ describe("admitRequest", () => {
 
   it("lets a foreign Origin GET through on the web policy but not on MCP's", async () => {
     const req = request({ method: "GET", origin: "https://evil.example", credential: bearer("bdt_worker") });
-    expect(await admitRequest(req, policy({ originCheck: "unsafe-methods" }).policy)).toEqual({ outcome: "allow", client: "worker-1" });
-    expect(await admitRequest(req, policy({ originCheck: "all-methods" }).policy)).toEqual({ outcome: "forbidden" });
+    expect(await admitRequest(req, policy({ originCheck: "unsafe-methods" }).policy)).toEqual({ outcome: "allow", client: "worker-1", scope: "agent", sessionId: null });
+    expect(await admitRequest(req, policy({ originCheck: "all-methods" }).policy)).toEqual({ outcome: "forbidden", byCredential: false });
   });
 
   it("refuses `Origin: null` and an unparseable or non-http Origin", async () => {
     const { policy: p } = policy();
     for (const origin of ["null", "not a url", "file:///etc", "ftp://localhost:21", "http://localhost:1/path", "http://127.0.0.1.evil.example:80"]) {
       const req = request({ method: "POST", host: "127.0.0.1:5320", peerIsLoopback: true, origin });
-      expect(await admitRequest(req, p), origin).toEqual({ outcome: "forbidden" });
+      expect(await admitRequest(req, p), origin).toEqual({ outcome: "forbidden", byCredential: false });
     }
   });
 
@@ -164,7 +174,7 @@ describe("admitRequest", () => {
     const { policy: p } = policy();
     for (const origin of ["http://localhost:5173", "http://127.0.0.1:1", "http://[::1]:5320", "HTTP://LOCALHOST:5173", "http://[0:0:0:0:0:0:0:1]:9"]) {
       const req = request({ method: "POST", origin, credential: bearer("bdt_worker") });
-      expect(await admitRequest(req, p), origin).toEqual({ outcome: "allow", client: "worker-1" });
+      expect(await admitRequest(req, p), origin).toEqual({ outcome: "allow", client: "worker-1", scope: "agent", sessionId: null });
     }
   });
 
@@ -172,98 +182,129 @@ describe("admitRequest", () => {
     const { policy: p } = policy();
     for (const origin of [`http://${TAILNET}:${PORT}`, `https://${TAILNET}:${PORT}`, `https://${TAILNET}`, `https://${TAILNET}:443`]) {
       const req = request({ method: "POST", origin, credential: bearer("bdt_worker") });
-      expect(await admitRequest(req, p), origin).toEqual({ outcome: "allow", client: "worker-1" });
+      expect(await admitRequest(req, p), origin).toEqual({ outcome: "allow", client: "worker-1", scope: "agent", sessionId: null });
     }
     for (const origin of [`http://${TAILNET}:8080`, `http://${TAILNET}:443`, `https://${TAILNET}:80`, `http://${TAILNET}:5321`, `http://${TAILNET}`, `http://${TAILNET}:80`]) {
       const req = request({ method: "POST", origin, credential: cookie("bdt_phone") });
-      expect(await admitRequest(req, p), origin).toEqual({ outcome: "forbidden" });
+      expect(await admitRequest(req, p), origin).toEqual({ outcome: "forbidden", byCredential: false });
     }
   });
 
   it("admits POST /auth/connect from a tailnet Host with no token", async () => {
     const { policy: p, calls } = policy();
     const req = request({ method: "POST", path: "/auth/connect", origin: `http://${TAILNET}:${PORT}` });
-    expect(await admitRequest(req, p)).toEqual({ outcome: "allow", client: null });
+    expect(await admitRequest(req, p)).toEqual({ outcome: "allow", client: null, scope: null, sessionId: null });
     expect(calls).toHaveLength(0);
   });
 
   it("does not treat GET /auth/connect as public", async () => {
     const { policy: p } = policy();
-    expect(await admitRequest(request({ method: "GET", path: "/auth/connect" }), p)).toEqual({ outcome: "unauthorized" });
+    expect(await admitRequest(request({ method: "GET", path: "/auth/connect" }), p)).toEqual({ outcome: "unauthorized", byCredential: false });
   });
 
   it("still refuses a public path under a foreign Host or Origin", async () => {
     const { policy: p } = policy();
     expect(await admitRequest(request({ method: "POST", path: "/auth/connect", host: `evil.example:${PORT}` }), p)).toEqual({
       outcome: "forbidden",
+      byCredential: false,
     });
     expect(await admitRequest(request({ method: "POST", path: "/auth/connect", origin: "https://evil.example" }), p)).toEqual({
       outcome: "forbidden",
+      byCredential: false,
     });
   });
 
   it("upper-cases the method it hands isPublic", async () => {
     const { policy: p } = policy();
-    expect(await admitRequest(request({ method: "post", path: "/auth/connect" }), p)).toEqual({ outcome: "allow", client: null });
+    expect(await admitRequest(request({ method: "post", path: "/auth/connect" }), p)).toEqual({ outcome: "allow", client: null, scope: null, sessionId: null });
   });
 
   it("refuses a cookie on a checked method that carries no Origin", async () => {
     const { policy: p, calls } = policy();
-    expect(await admitRequest(request({ method: "POST", credential: cookie("bdt_phone") }), p)).toEqual({ outcome: "forbidden" });
+    expect(await admitRequest(request({ method: "POST", credential: cookie("bdt_phone") }), p)).toEqual({ outcome: "forbidden", byCredential: false });
     expect(calls).toHaveLength(0);
     const mcp = policy({ originCheck: "all-methods" });
-    expect(await admitRequest(request({ method: "GET", credential: cookie("bdt_phone") }), mcp.policy)).toEqual({ outcome: "forbidden" });
+    expect(await admitRequest(request({ method: "GET", credential: cookie("bdt_phone") }), mcp.policy)).toEqual({ outcome: "forbidden", byCredential: false });
   });
 
   it("admits a cookie on a GET without Origin on the web policy, and on a POST with an allowed Origin", async () => {
     const { policy: p } = policy();
-    expect(await admitRequest(request({ method: "GET", credential: cookie("bdt_phone") }), p)).toEqual({ outcome: "allow", client: "phone" });
+    expect(await admitRequest(request({ method: "GET", credential: cookie("bdt_phone") }), p)).toEqual({ outcome: "allow", client: "phone", scope: "human", sessionId: null });
     expect(
       await admitRequest(request({ method: "POST", origin: `http://${TAILNET}:${PORT}`, credential: cookie("bdt_phone") }), p),
-    ).toEqual({ outcome: "allow", client: "phone" });
+    ).toEqual({ outcome: "allow", client: "phone", scope: "human", sessionId: null });
   });
 
   it("admits a bearer POST with no Origin", async () => {
     const { policy: p } = policy({ originCheck: "all-methods" });
-    expect(await admitRequest(request({ method: "POST", credential: bearer("bdt_worker") }), p)).toEqual({ outcome: "allow", client: "worker-1" });
+    expect(await admitRequest(request({ method: "POST", credential: bearer("bdt_worker") }), p)).toEqual({ outcome: "allow", client: "worker-1", scope: "agent", sessionId: null });
   });
 
   it("admits an allowed name with no port (a fronting proxy), never a bare loopback name", async () => {
     const { policy: p } = policy();
-    expect(await admitRequest(request({ host: TAILNET, credential: bearer("bdt_phone") }), p)).toEqual({ outcome: "allow", client: "phone" });
-    expect(await admitRequest(request({ host: TAILNET.toUpperCase() }), p)).toEqual({ outcome: "unauthorized" });
+    expect(await admitRequest(request({ host: TAILNET, credential: bearer("bdt_phone") }), p)).toEqual({ outcome: "allow", client: "phone", scope: "human", sessionId: null });
+    expect(await admitRequest(request({ host: TAILNET.toUpperCase() }), p)).toEqual({ outcome: "unauthorized", byCredential: false });
     const listsLoopback = policy({ allowedHosts: [TAILNET, "localhost", "127.0.0.1"] }).policy;
     for (const host of ["localhost", "127.0.0.1"]) {
-      expect(await admitRequest(request({ host, peerIsLoopback: true }), listsLoopback), host).toEqual({ outcome: "forbidden" });
+      expect(await admitRequest(request({ host, peerIsLoopback: true }), listsLoopback), host).toEqual({ outcome: "forbidden", byCredential: false });
     }
   });
 
   it("canonicalizes a bracketed IPv6 Host before matching", async () => {
     const { policy: p } = policy({ allowedHosts: ["[fd7a:115c::1]"] });
-    expect(await admitRequest(request({ host: "[0:0:0:0:0:0:0:1]:5320", peerIsLoopback: true }), p)).toEqual({ outcome: "allow", client: null });
+    expect(await admitRequest(request({ host: "[0:0:0:0:0:0:0:1]:5320", peerIsLoopback: true }), p)).toEqual({ outcome: "allow", client: null, scope: null, sessionId: null });
     expect(await admitRequest(request({ host: "[FD7A:115C:0:0:0:0:0:1]:5320", credential: bearer("bdt_phone") }), p)).toEqual({
       outcome: "allow",
       client: "phone",
+      scope: "human",
+      sessionId: null,
     });
-    expect(await admitRequest(request({ host: "[fd7a:115c::1]", credential: bearer("bdt_phone") }), p)).toEqual({ outcome: "allow", client: "phone" });
+    expect(await admitRequest(request({ host: "[fd7a:115c::1]", credential: bearer("bdt_phone") }), p)).toEqual({ outcome: "allow", client: "phone", scope: "human", sessionId: null });
     for (const host of ["[fd7a:115c::2]:5320", "[not-v6]:5320", "[::1:5320", "::1:5320", "[fe80::1%25en0]:5320"]) {
-      expect(await admitRequest(request({ host, peerIsLoopback: true, credential: bearer("bdt_phone") }), p), host).toEqual({ outcome: "forbidden" });
+      expect(await admitRequest(request({ host, peerIsLoopback: true, credential: bearer("bdt_phone") }), p), host).toEqual({ outcome: "forbidden", byCredential: false });
     }
   });
 
   it("refuses a live token outside the policy's scopes with 403", async () => {
     const { policy: p, calls } = policy({ scopes: ["human"] });
-    expect(await admitRequest(request({ credential: bearer("bdt_worker") }), p)).toEqual({ outcome: "forbidden" });
-    expect(await admitRequest(request({ credential: cookie("bdt_worker") }), p)).toEqual({ outcome: "forbidden" });
-    expect(await admitRequest(request({ credential: bearer("bdt_phone") }), p)).toEqual({ outcome: "allow", client: "phone" });
-    expect(await admitRequest(request({ credential: bearer("bdt_unknown") }), p)).toEqual({ outcome: "unauthorized" });
+    expect(await admitRequest(request({ credential: bearer("bdt_worker") }), p)).toEqual({ outcome: "forbidden", byCredential: true, client: "worker-1" });
+    expect(await admitRequest(request({ credential: cookie("bdt_worker") }), p)).toEqual({ outcome: "forbidden", byCredential: true, client: "worker-1" });
+    expect(await admitRequest(request({ credential: bearer("bdt_phone") }), p)).toEqual({ outcome: "allow", client: "phone", scope: "human", sessionId: null });
+    expect(await admitRequest(request({ credential: bearer("bdt_unknown") }), p)).toEqual({ outcome: "unauthorized", byCredential: true });
     expect(calls).toEqual(["bdt_worker", "bdt_worker", "bdt_phone", "bdt_unknown"]);
+  });
+
+  it("passes a session token's bound session through on allow", async () => {
+    const { policy: p } = policy();
+    expect(await admitRequest(request({ credential: bearer("bdt_session") }), p)).toEqual({
+      outcome: "allow",
+      client: `session-${SESSION}`,
+      scope: "agent",
+      sessionId: SESSION,
+    });
+  });
+
+  it("marks a refusal byCredential only when the presented token caused it", async () => {
+    const { policy: p } = policy({ scopes: ["human"] });
+    const refusals: [AdmissionRequest, boolean][] = [
+      [request(), false],
+      [request({ host: `evil.example:${PORT}`, credential: bearer("bdt_phone") }), false],
+      [request({ method: "POST", origin: "https://evil.example", credential: bearer("bdt_phone") }), false],
+      [request({ method: "POST", credential: cookie("bdt_phone") }), false],
+      [request({ credential: bearer("bdt_unknown") }), true],
+      [request({ credential: bearer("bdt_worker") }), true],
+    ];
+    for (const [req, byCredential] of refusals) {
+      const admission = await admitRequest(req, p);
+      expect(admission.outcome, JSON.stringify(req)).not.toBe("allow");
+      expect(admission, JSON.stringify(req)).toMatchObject({ byCredential });
+    }
   });
 
   it("keeps loopback trust when every forwarded address is loopback", async () => {
     const { policy: p, calls } = policy();
     for (const forwardedFor of [["127.0.0.1"], ["::1", "127.0.0.1"]]) {
-      expect(await admitRequest(request({ host: "127.0.0.1:5320", peerIsLoopback: true, forwardedFor }), p)).toEqual({ outcome: "allow", client: null });
+      expect(await admitRequest(request({ host: "127.0.0.1:5320", peerIsLoopback: true, forwardedFor }), p)).toEqual({ outcome: "allow", client: null, scope: null, sessionId: null });
     }
     expect(calls).toHaveLength(0);
   });
@@ -272,8 +313,8 @@ describe("admitRequest", () => {
     const { policy: p } = policy();
     for (const forwardedFor of [["100.64.0.9"], ["127.0.0.1", "100.64.0.9"], ["unknown"], ["_hidden"], [""]]) {
       const req = request({ host: "127.0.0.1:5320", peerIsLoopback: true, forwardedFor });
-      expect(await admitRequest(req, p), forwardedFor.join(",")).toEqual({ outcome: "unauthorized" });
-      expect(await admitRequest({ ...req, credential: bearer("bdt_phone") }, p)).toEqual({ outcome: "allow", client: "phone" });
+      expect(await admitRequest(req, p), forwardedFor.join(",")).toEqual({ outcome: "unauthorized", byCredential: false });
+      expect(await admitRequest({ ...req, credential: bearer("bdt_phone") }, p)).toEqual({ outcome: "allow", client: "phone", scope: "human", sessionId: null });
     }
   });
 
@@ -282,6 +323,8 @@ describe("admitRequest", () => {
     expect(await admitRequest(request({ method: undefined, origin: "https://evil.example", credential: bearer("bdt_worker") }), p)).toEqual({
       outcome: "allow",
       client: "worker-1",
+      scope: "agent",
+      sessionId: null,
     });
   });
 });

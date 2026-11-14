@@ -37,11 +37,21 @@ export {
   InvalidInboxItemError,
   InboxDecisionConflictError,
   InboxCardChangedError,
+  InboxItemNotThisSessionError,
+  InboxItemSessionEndedError,
   InvalidViewError,
   InvalidEventTimeError,
   InvalidClientNameError,
+  ReservedClientNameError,
   ClientTokenExistsError,
   ClientTokenNotFoundError,
+  InvalidHangarSessionError,
+  HangarSessionNotFoundError,
+  HangarTransitionError,
+  HangarSessionNotClaimedByError,
+  ReservedHangarNodeError,
+  ReservedHangarEdgeError,
+  HangarSessionMergeError,
 } from "./errors.js";
 
 // `asPgError`/`PgErrorLike` are re-exported (not just used internally) so
@@ -51,7 +61,7 @@ export {
 // the drizzle/node-postgres error-unwrapping this package already does —
 // that unwrapping is infrastructure, not business logic, and duplicating
 // it at the MCP boundary would be the actual layering violation.
-export { asPgError, isDrizzleQueryError, type PgErrorLike } from "./sql-helpers.js";
+export { asPgError, isDrizzleQueryError, type PgErrorLike, type Tx } from "./sql-helpers.js";
 
 export {
   openIngestRun,
@@ -569,7 +579,10 @@ export {
   listInbox,
   decideInboxItem,
   carryForwardInboxDecisions,
+  PERSON_DECIDED_INBOX_STATUSES,
   requestInboxItem,
+  assertSessionCreatedAbsentKeys,
+  assertSessionMayWriteInboxItems,
   completeInboxItem,
   handOffInboxItem,
   INBOX_FEEDBACK_KINDS,
@@ -601,6 +614,8 @@ export {
   type DecideInboxItemInput,
   type InboxWriteOptions,
   type DecideInboxItemResult,
+  inboxNotifyText,
+  type RequestInboxItemResult,
 } from "./inbox.js";
 
 export {
@@ -616,12 +631,17 @@ export {
   listClientTokens,
   revokeClientToken,
   verifyClientToken,
+  hasLiveToken,
+  createSessionToken,
+  revokeSessionTokens,
+  sessionTokenClient,
   isClientTokenScope,
   CLIENT_TOKEN_PREFIX,
   CLIENT_NAME_PATTERN,
   type CreatedClientToken,
   type ClientTokenListing,
   type VerifiedClientToken,
+  type CreatedSessionToken,
 } from "./client-tokens.js";
 export type { ClientTokenScope } from "@breakdown/db";
 
@@ -639,3 +659,62 @@ export {
   type AdmissionPolicy,
   type Admission,
 } from "./admission.js";
+
+// The hangar queue (hangar-queue change): hangar_session nodes, their
+// contract and state machine, claiming with session tokens, check-ins and
+// status, and per-session messages. See hangar.ts's module header.
+export {
+  HANGAR_SESSION_NODE_TYPE,
+  HANGAR_SOURCE_SYSTEM,
+  RUN_BY_EDGE_TYPE,
+  HANGAR_FLAVORS,
+  HANGAR_SESSION_STATES,
+  HANGAR_CHECK_IN_INTERVAL_S,
+  MAX_HANGAR_WAIT_S,
+  MAX_HANGAR_MESSAGES,
+  DEFAULT_HANGAR_SESSIONS_LIMIT,
+  MAX_HANGAR_SESSIONS_LIMIT,
+  MAX_HANGAR_NAME_LENGTH,
+  MAX_HANGAR_REPO_LENGTH,
+  MAX_HANGAR_FIELD_LENGTH,
+  MAX_HANGAR_DISK_PATH_LENGTH,
+  MAX_HANGAR_REQUEUE_REASON_LENGTH,
+  MAX_HANGAR_FAILURE_REASON_LENGTH,
+  MAX_CLAIM_CANDIDATES,
+  MAX_HANGAR_MESSAGE_KIND_LENGTH,
+  MAX_HANGAR_CAPACITY_CHARS,
+  MAX_HANGAR_MESSAGE_BODY_CHARS,
+  normalizeHangarSessionMetadata,
+  checkHangarTransition,
+  requestSession,
+  claimSession,
+  updateSession,
+  requeueSession,
+  listSessions,
+  recordCheckIn,
+  getHangarStatus,
+  classifyHangarStatus,
+  appendHangarMessage,
+  readHangarMessages,
+  assertNoReservedHangarEdges,
+  type HangarFlavor,
+  type HangarSessionState,
+  type HangarSession,
+  type NormalizeHangarSessionOptions,
+  type RequestSessionInput,
+  type RequestSessionResult,
+  type ClaimSessionInput,
+  type ClaimedSession,
+  type UpdateSessionInput,
+  type RequeueSessionInput,
+  type SessionWriteResult,
+  type ListSessionsOptions,
+  type ListSessionsResult,
+  type RecordCheckInInput,
+  type HangarLiveness,
+  type HangarStatus,
+  type HangarMessage,
+  type AppendHangarMessageInput,
+  type ReadHangarMessagesInput,
+  type ReadHangarMessagesResult,
+} from "./hangar.js";

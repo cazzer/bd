@@ -19,14 +19,22 @@
 // session it initializes (decision 4): the session's Server records it in
 // each write's actor, and a later request on that session presenting any
 // other client — another token, or none — is refused, so one client cannot
-// continue another's session. A refused request (401/403) naming a session
-// a token opened closes that session, so once its token is revoked, the
-// client's next request also ends its open SSE stream.
+// continue another's session. A request refused because of the token it
+// presented — unknown or revoked (401), or a scope MCP does not accept
+// (403) — closes the token-opened session it names, but only when the
+// refusal speaks for that session's own client: its client no longer holds
+// a live token, or the scope refusal was of that same client's token. So
+// once a session's token is revoked, the client's next request also ends
+// its open SSE stream, while a garbage or unknown token naming someone
+// else's session id cannot end it. A refusal the credential did not cause
+// (no token, a foreign Host or Origin) leaves the session open
+// (hangar-queue decision 9).
 //
 // Requests are dispatched in this order:
 //   1. admission: a foreign Host or Origin → 403; no usable token where
-//      one is needed → 401 with WWW-Authenticate: Bearer; either refusal
-//      closes the token-opened session its Mcp-Session-Id names;
+//      one is needed → 401 with WWW-Authenticate: Bearer; a refusal the
+//      presented token caused closes the token-opened session its
+//      Mcp-Session-Id names, when it speaks for that session's client;
 //   2. a declared body over MAX_BODY_BYTES → 413;
 //   3. GET /healthz → 200 or 503 (no session, never writes);
 //   4. /mcp with a method other than GET/POST/DELETE → 405;
@@ -68,6 +76,7 @@ import {
   forwardedAddressesFrom,
   isLoopbackAddress,
   UNAUTHORIZED_HEADERS,
+  hasLiveToken,
   verifyClientToken,
   type AdmissionPolicy,
   type ClientTokenScope,
@@ -336,8 +345,8 @@ export async function startHttpServer(options: StartHttpServerOptions): Promise<
     });
   }
 
-  async function openSession(req: IncomingMessage, res: ServerResponse, parsedBody: unknown, tokenClient: string | null): Promise<void> {
-    const server = createServer(db, { readOnly, ...(tokenClient === null ? {} : { tokenClient }) });
+  async function openSession(req: IncomingMessage, res: ServerResponse, parsedBody: unknown, tokenClient: string | null, hangarSessionId: string | null): Promise<void> {
+    const server = createServer(db, { readOnly, ...(tokenClient === null ? {} : { tokenClient }), ...(hangarSessionId === null ? {} : { hangarSessionId }) });
     const pending = new Set<ServerResponse>();
     const transport: StreamableHTTPServerTransport = new StreamableHTTPServerTransport({
       sessionIdGenerator: randomUUID,
@@ -364,16 +373,31 @@ export async function startHttpServer(options: StartHttpServerOptions): Promise<
   }
 
   /**
-   * Closes the token-opened session a refused request names (module
-   * header). A tokenless loopback session is left alone: only a token can
-   * be revoked, and a remote caller holding a leaked id must not be able
-   * to end a local session.
+   * Closes the token-opened session a request refused by its credential
+   * names, when the refusal speaks for the session's own client (module
+   * header): that client holds no live token any more, or `refusedClient`
+   * — the client whose live token was refused for its scope — is that
+   * client. A tokenless loopback session is left alone: only a token can be
+   * revoked, and a remote caller holding a leaked id must not be able to end
+   * a local session. A failed token lookup leaves the session open.
    */
-  function closeRefusedTokenSession(req: IncomingMessage): void {
+  async function closeRefusedTokenSession(req: IncomingMessage, refusedClient: string | null): Promise<void> {
     const sessionId = sessionIdOf(req);
     if (sessionId === undefined) return;
     const session = registry.get(sessionId);
     if (session === undefined || session.tokenClient === null) return;
+    if (refusedClient !== session.tokenClient) {
+      let live: boolean;
+      try {
+        live = await hasLiveToken(db, session.tokenClient);
+      } catch (err) {
+        console.error(`[breakdown-brain] checking session ${sessionId}'s token failed: ${describeConnectionError(err)}`);
+        return;
+      }
+      if (live) return;
+    }
+    // The lookup awaited: the session may have closed or been replaced meanwhile.
+    if (registry.get(sessionId) !== session) return;
     registry.remove(sessionId);
     void closeQuietly(sessionId, session, "refused");
   }
@@ -396,7 +420,9 @@ export async function startHttpServer(options: StartHttpServerOptions): Promise<
       },
       policy,
     );
-    if (admission.outcome !== "allow") closeRefusedTokenSession(req);
+    if (admission.outcome !== "allow" && admission.byCredential) {
+      await closeRefusedTokenSession(req, admission.outcome === "forbidden" ? admission.client : null);
+    }
     if (admission.outcome === "forbidden") {
       sendJsonRpcError(res, 403, -32000, "Forbidden: this server accepts requests only for its own or an allowed host, from local or allowed origins");
       return;
@@ -467,7 +493,7 @@ export async function startHttpServer(options: StartHttpServerOptions): Promise<
       return;
     }
     if (method === "POST") {
-      await openSession(req, res, parsedBody, admission.client);
+      await openSession(req, res, parsedBody, admission.client, admission.sessionId);
       return;
     }
     sendJsonRpcError(res, 400, -32000, "Bad Request: Mcp-Session-Id header is required");

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { filterBySource, groupByWork, needsMeRows, reviewKey, sourcesOf } from "./inboxRows.js";
+import { filterBySource, groupByWork, hangarOriginLabel, needsMeRows, reviewKey, sourcesOf } from "./inboxRows.js";
 
 const item = (id: string, priority: number, at: string, extra: Partial<{ status: string; parentId: string | null; source: string }> = {}) => ({
   id,
@@ -96,5 +96,12 @@ describe("groupByWork with reviews (split-review-decisions)", () => {
     const grouped = groupByWork(filterBySource(rows, "review"));
     expect(grouped.rows.map((r) => r.key)).toEqual(["shlo/shlo-btp.1"]);
     expect(grouped.slots.size).toBe(0);
+  });
+});
+
+describe("hangarOriginLabel", () => {
+  it("labels an item a hangar session filed, in words, and nothing else", () => {
+    expect(hangarOriginLabel({ hangarSession: "0b6f2c1e-6d2a-4c1f-9a51-3f1c1b2e7d10" })).toBe("from hangar session");
+    expect(hangarOriginLabel({ hangarSession: null })).toBeNull();
   });
 });

@@ -14,7 +14,12 @@ import {
   InvalidEdgeInputError,
   InvalidEdgeWeightError,
   InvalidEventTimeError,
+  InvalidHangarSessionError,
   InvalidIngestRunError,
+  HangarTransitionError,
+  ReservedHangarNodeError,
+  ReservedHangarEdgeError,
+  HangarSessionMergeError,
   InvalidLookupIdError,
   InvalidLookupOptionError,
   NotAWorkItemError,
@@ -272,6 +277,49 @@ describe("mapError: work-items change", () => {
   });
 });
 
+
+describe("mapError: hangar", () => {
+  it("maps ReservedHangarNodeError to the item, nothing persisted, and the hangar tools to use instead", () => {
+    const text = textOf(mapError("brain_write", new ReservedHangarNodeError("at batch index 1 (hangar/x)")));
+    expect(text).toContain("batch index 1 (hangar/x)");
+    expect(text).toMatch(/nothing from this call was persisted/i);
+    expect(text).toContain("brain_hangar_request");
+    expect(text).not.toMatch(STACK_LINE);
+  });
+
+  it("maps ReservedHangarEdgeError to the edge, nothing persisted, and where run_by comes from", () => {
+    const text = textOf(mapError("brain_link", new ReservedHangarEdgeError("at batch index 2", "its source is a hangar session")));
+    expect(text).toContain("batch index 2");
+    expect(text).toMatch(/nothing from this call was persisted/i);
+    expect(text).toContain("brain_hangar_request");
+    expect(text).not.toMatch(STACK_LINE);
+  });
+
+  it("maps HangarSessionMergeError to the session and says not to merge sessions", () => {
+    const text = textOf(mapError("brain_merge", new HangarSessionMergeError("a", "b", "a")));
+    expect(text).toContain("node a is a hangar session");
+    expect(text).toMatch(/nothing was merged/i);
+    expect(text).not.toMatch(STACK_LINE);
+  });
+
+  it("maps InvalidHangarSessionError to the field and the allowed flavors", () => {
+    const text = textOf(mapError("brain_hangar_request", new InvalidHangarSessionError("flavor", "gpu", "must be one of headless, display-godot, display-browser")));
+    expect(text).toMatch(/flavor \(got "gpu"\)/);
+    expect(text).toMatch(/nothing was queued/i);
+  });
+
+  it("says a session state refusal is not something to retry through MCP", () => {
+    const text = textOf(mapError("brain_hangar_sessions", new HangarTransitionError("stopped", "running")));
+    expect(text).toMatch(/reported by hangar itself/);
+  });
+
+  it("points brain_hangar_request's NotAWorkItemError at work items, not at brain_update_work_item", () => {
+    const text = textOf(mapError("brain_hangar_request", new NotAWorkItemError("00000000-0000-4000-8000-000000000000", "doc")));
+    expect(text).toMatch(/work_item/);
+    expect(text).toMatch(/nothing was queued/i);
+    expect(text).not.toContain("brain_update_work_item");
+  });
+});
 
 describe("mapError: driver errors that escaped core", () => {
   it("never echoes drizzle's SQL-and-params message; it emits only the retry hint", () => {

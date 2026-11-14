@@ -57,6 +57,13 @@
       "when": 1794604945974,
       "tag": "0007_client_token_scope",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1794683465307,
+      "tag": "0008_hangar_queue",
+      "breakpoints": true
     }
   ]
 }

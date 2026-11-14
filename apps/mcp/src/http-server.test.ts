@@ -28,7 +28,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { createClientToken, revokeClientToken } from "@breakdown/core";
+import { createClientToken, createSessionToken, revokeClientToken, sessionTokenClient } from "@breakdown/core";
 import { clientTokens, createDb, createPool, ingestRuns, nodes, resolveDatabaseUrl, type Database } from "@breakdown/db";
 import { and, eq, inArray } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -207,7 +207,7 @@ function rawSocketRequest(port: number, head: string): Promise<string> {
 }
 
 /** A live token for a client name unique to this test file (deleted in afterAll). */
-async function newToken(label: string, scope: "human" | "agent" = "human"): Promise<{ client: string; token: string }> {
+async function newToken(label: string, scope: "human" | "agent" | "hangar" = "human"): Promise<{ client: string; token: string }> {
   const client = `mcpt-${label}-${suffix.slice(0, 16)}`;
   tokenClients.push(client);
   const { token } = await createClientToken(db!, client, scope);
@@ -466,6 +466,35 @@ describe("client tokens behind a tailnet Host", () => {
     expect(run?.actor).toBe(`${client} via ${RAW_CLIENT.name} ${RAW_CLIENT.version}`);
   }, 30_000);
 
+  it("narrows a hangar session's token: brain_merge and brain_hangar_request are neither listed nor callable; a host agent token keeps them", async () => {
+    const { running, host } = await startTailnet();
+    const hangarSession = randomUUID();
+    tokenClients.push(sessionTokenClient(hangarSession));
+    const { token } = await db!.transaction((tx) => createSessionToken(tx, hangarSession));
+    const session = await rawInitialize(running.url, { host, authorization: `Bearer ${token}` });
+
+    const listed = await rawRequest(running.url, { method: "POST", headers: session, body: JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/list" }) });
+    const names = (JSON.parse(listed.body) as { result: { tools: { name: string }[] } }).result.tools.map((t) => t.name);
+    expect(names).toContain("brain_write");
+    expect(names).not.toContain("brain_merge");
+    expect(names).not.toContain("brain_hangar_request");
+
+    for (const [name, args] of [["brain_merge", { loserId: randomUUID(), survivorId: randomUUID() }], ["brain_hangar_request", { repo: "cazzer/bd", workItemId: randomUUID(), flavor: "headless" }]] as const) {
+      const called = await rawRequest(running.url, { method: "POST", headers: session, body: JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name, arguments: args } }) });
+      const result = (JSON.parse(called.body) as { result: { isError: boolean; content: { text: string }[] } }).result;
+      expect(result.isError).toBe(true);
+      expect(result.content[0]!.text).toContain(`'${name}' is not available to a hangar session's token`);
+    }
+    const map = await rawRequest(running.url, { method: "POST", headers: session, body: BRAIN_MAP_CALL });
+    expect((JSON.parse(map.body) as { result: { isError?: boolean } }).result.isError).toBeFalsy();
+
+    const { token: hostAgent } = await newToken("host-agent", "agent");
+    const hostSession = await rawInitialize(running.url, { host, authorization: `Bearer ${hostAgent}` });
+    const hostListed = await rawRequest(running.url, { method: "POST", headers: hostSession, body: JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/list" }) });
+    const hostNames = (JSON.parse(hostListed.body) as { result: { tools: { name: string }[] } }).result.tools.map((t) => t.name);
+    expect(hostNames).toEqual(expect.arrayContaining(["brain_merge", "brain_hangar_request"]));
+  }, 30_000);
+
   it("ends a revoked token's open SSE stream on the session's next request", async () => {
     const { running, host } = await startTailnet();
     const { client, token } = await newToken("stream");
@@ -496,6 +525,70 @@ describe("client tokens behind a tailnet Host", () => {
     const { token: reissued } = await createClientToken(db!, client, "human");
     const after = await rawRequest(running.url, { method: "POST", headers: { ...session, authorization: `Bearer ${reissued}` }, body: BRAIN_MAP_CALL });
     expect(after.status).toBe(404);
+  }, 30_000);
+
+  it("leaves a token session open when a request naming it is refused without a credential, or from a foreign Origin", async () => {
+    const { running, host } = await startTailnet();
+    const { token } = await newToken("kept");
+    const session = await rawInitialize(running.url, { host, authorization: `Bearer ${token}` });
+    const { authorization: _drop, ...tokenless } = session;
+
+    const noCredential = await rawRequest(running.url, { method: "POST", headers: tokenless, body: BRAIN_MAP_CALL });
+    expect(noCredential.status).toBe(401);
+    const foreignOrigin = await rawRequest(running.url, { method: "POST", headers: { ...session, origin: "https://evil.example" }, body: BRAIN_MAP_CALL });
+    expect(foreignOrigin.status).toBe(403);
+
+    const still = await rawRequest(running.url, { method: "POST", headers: session, body: BRAIN_MAP_CALL });
+    expect(still.status).toBe(200);
+  }, 30_000);
+
+  it("closes a token session when a request naming it presents a revoked token", async () => {
+    const { running, host } = await startTailnet();
+    const { client, token } = await newToken("closed");
+    const session = await rawInitialize(running.url, { host, authorization: `Bearer ${token}` });
+    await revokeClientToken(db!, client);
+    expect((await rawRequest(running.url, { method: "POST", headers: session, body: BRAIN_MAP_CALL })).status).toBe(401);
+
+    tokenClients.push(client);
+    const { token: reissued } = await createClientToken(db!, client, "human");
+    const after = await rawRequest(running.url, { method: "POST", headers: { ...session, authorization: `Bearer ${reissued}` }, body: BRAIN_MAP_CALL });
+    expect(after.status).toBe(404);
+  }, 30_000);
+
+  it("leaves a token session open when an unknown token or another client's refused token names it", async () => {
+    const { running, host } = await startTailnet();
+    const { token } = await newToken("victim");
+    const session = await rawInitialize(running.url, { host, authorization: `Bearer ${token}` });
+
+    const garbage = await rawRequest(running.url, { method: "POST", headers: { ...session, authorization: "Bearer garbage" }, body: BRAIN_MAP_CALL });
+    expect(garbage.status).toBe(401);
+    const unknown = `bdt_${Buffer.alloc(32, 9).toString("base64url")}`;
+    expect((await rawRequest(running.url, { method: "POST", headers: { ...session, authorization: `Bearer ${unknown}` }, body: BRAIN_MAP_CALL })).status).toBe(401);
+    const hangar = await newToken("hangar-other", "hangar");
+    expect((await rawRequest(running.url, { method: "POST", headers: { ...session, authorization: `Bearer ${hangar.token}` }, body: BRAIN_MAP_CALL })).status).toBe(403);
+
+    const still = await rawRequest(running.url, { method: "POST", headers: session, body: BRAIN_MAP_CALL });
+    expect(still.status).toBe(200);
+  }, 30_000);
+
+  it("closes a token session on any credential refusal naming it once its client's token is revoked", async () => {
+    const { running, host } = await startTailnet();
+    const { client, token } = await newToken("garbage-after");
+    const session = await rawInitialize(running.url, { host, authorization: `Bearer ${token}` });
+    await revokeClientToken(db!, client);
+    expect((await rawRequest(running.url, { method: "POST", headers: { ...session, authorization: "Bearer garbage" }, body: BRAIN_MAP_CALL })).status).toBe(401);
+
+    tokenClients.push(client);
+    const { token: reissued } = await createClientToken(db!, client, "human");
+    const after = await rawRequest(running.url, { method: "POST", headers: { ...session, authorization: `Bearer ${reissued}` }, body: BRAIN_MAP_CALL });
+    expect(after.status).toBe(404);
+  }, 30_000);
+
+  it("refuses a hangar token on /mcp with 403", async () => {
+    const { running, host } = await startTailnet();
+    const { token } = await newToken("hangar", "hangar");
+    const res = await rawRequest(running.url, { method: "POST", headers: { ...MCP_POST_HEADERS, host, authorization: `Bearer ${token}` }, body: initializeBody() });
+    expect(res.status).toBe(403);
   }, 30_000);
 
   it("leaves a tokenless loopback session open when a refused request names it", async () => {

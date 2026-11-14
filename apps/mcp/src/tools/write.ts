@@ -1,4 +1,5 @@
-// The three write tools: brain_write, brain_link, brain_merge. Every
+// The four write tools: brain_write, brain_link, brain_merge,
+// brain_update_work_item (brain_hangar_request lives in hangar.ts). Every
 // argument here is untrusted model output — validated by `schema` before
 // the handler runs (server.ts), and never interpolated as anything but
 // literal text/parameter values by the `@breakdown/core` functions these
@@ -13,7 +14,12 @@
 
 import type { EdgeInput, NodeInput } from "@breakdown/core";
 import {
+  assertNoReservedHangarEdges,
+  assertSessionCreatedAbsentKeys,
+  assertSessionMayWriteInboxItems,
   DEFAULT_MAX_METADATA_LENGTH,
+  HANGAR_SESSION_NODE_TYPE,
+  HANGAR_SOURCE_SYSTEM,
   MAX_ASSIGNEE_LENGTH,
   MAX_CLOSED_REASON_LENGTH,
   MAX_SPEC_ID_LENGTH,
@@ -28,6 +34,7 @@ import {
   INBOX_ITEM_NODE_TYPE,
   normalizeWorkItemMetadata,
   patchWorkItem,
+  ReservedHangarNodeError,
   upsertEdges,
   upsertNodes,
   VIEW_NODE_TYPE,
@@ -93,7 +100,7 @@ const writeSchema = z.object({
 export const writeTool: ToolDef<typeof writeSchema> = {
   name: "brain_write",
   description:
-    "Create or update one node, or a batch of nodes in one call (pass items as a single object or an array, up to 1000 items). Each item is upserted on (sourceSystem, externalId) — re-writing identical content is a no-op reported as 'unchanged'; changed content is 'updated'; a new key is 'created'. sourceSystem defaults to \"agent\" when omitted. All items in one call share a single ingest run attributed to source_system='agent' and to this client as actor, so this call's writes are identifiable and revertible as a unit. Items with nodeType \"work_item\" are validated against the work-item contract (metadata status/priority/assignee/closed_at/closed_reason/spec_id/project, where project is 1-64 characters of [a-z0-9._-]; missing status defaults to open, priority to 2; optional decisions [{at, decision, note, item?}] and signals [{at, title, url?, gist}], the work's memory of what the person decided and what arrived about it, capped at the newest 50 each; a write replaces the node, so resend the whole metadata when appending) and one bad item rejects the whole batch. Items with nodeType \"view\" are validated against the view contract (metadata renderer is one of graph, feed, code, timeline, board; filter is the same selection brain_list accepts, without limit or cursor), and a node's default view is declared by linking a default_view edge from it to the view with brain_link — its child_of descendants inherit it. Items with nodeType \"inbox_item\" are things waiting on the person's decision (see the inbox-ingest skill): use sourceSystem \"inbox\" and externalId = the canonical artifact key (e.g. asana:task/<gid>, gmail:thread/<id>) so signals about the same artifact dedupe; content is the markdown the person reads (context, then the proposed draft); metadata is validated against the inbox contract (source required; status one of pending, changes, accepted, dismissed, done, default pending; action e.g. reply/create_task/comment/review/ignore; url; from; priority 0-4; verdict; links [{label,url}]; feedback is the person's decision history — carry it forward unchanged; revision is the one-line note an agent leaves when it re-queues an item after the person's note; close_reason is why it closed one on the note). Link an inbox item to the work_item it is a decision about with brain_link edgeType \"about\" (weight = match confidence). A batch's candidates link child_of the batch item. Any item's metadata may carry occurred_at — the moment the item belongs at on a timeline — as an ISO-8601 timestamp carrying a zone (Z or ±HH:MM) or a date alone (UTC); it is stored canonically (UTC, milliseconds, e.g. 2026-03-04T08:00:00.000Z), null removes it, and an unparseable value rejects the whole batch naming the item.",
+    "Create or update one node, or a batch of nodes in one call (pass items as a single object or an array, up to 1000 items). Each item is upserted on (sourceSystem, externalId) — re-writing identical content is a no-op reported as 'unchanged'; changed content is 'updated'; a new key is 'created'. sourceSystem defaults to \"agent\" when omitted. All items in one call share a single ingest run attributed to source_system='agent' and to this client as actor, so this call's writes are identifiable and revertible as a unit. Items with nodeType \"work_item\" are validated against the work-item contract (metadata status/priority/assignee/closed_at/closed_reason/spec_id/project, where project is 1-64 characters of [a-z0-9._-]; missing status defaults to open, priority to 2; optional decisions [{at, decision, note, item?}] and signals [{at, title, url?, gist}], the work's memory of what the person decided and what arrived about it, capped at the newest 50 each; a write replaces the node, so resend the whole metadata when appending) and one bad item rejects the whole batch. Items with nodeType \"view\" are validated against the view contract (metadata renderer is one of graph, feed, code, timeline, board; filter is the same selection brain_list accepts, without limit or cursor), and a node's default view is declared by linking a default_view edge from it to the view with brain_link — its child_of descendants inherit it. Items with nodeType \"inbox_item\" are things waiting on the person's decision (see the inbox-ingest skill); with a hangar session's token, only a new key or an item this session filed may be written (any other rejects the whole batch), and the item is bound to the session: use sourceSystem \"inbox\" and externalId = the canonical artifact key (e.g. asana:task/<gid>, gmail:thread/<id>) so signals about the same artifact dedupe; content is the markdown the person reads (context, then the proposed draft); metadata is validated against the inbox contract (source required; status one of pending, changes, accepted, dismissed, done — a new item is always stored pending (undigested until its url is read), and accepted, changes, and dismissed are the person's decisions, which no agent write sets: sending one leaves the stored status as it is; action e.g. reply/create_task/comment/review/ignore; url; from; priority 0-4; verdict; links [{label,url}]; feedback is the person's decision history, written only by their decisions — whatever you send is ignored and the stored history kept; revision is the one-line note an agent leaves when it re-queues an item after the person's note; close_reason is why it closed one on the note). Link an inbox item to the work_item it is a decision about with brain_link edgeType \"about\" (weight = match confidence). A batch's candidates link child_of the batch item. Hangar sessions are reserved: an item with nodeType \"hangar_session\" or sourceSystem \"hangar\" rejects the whole batch, since only the hangar queue writes them; queue one with brain_hangar_request instead. Any item's metadata may carry occurred_at — the moment the item belongs at on a timeline — as an ISO-8601 timestamp carrying a zone (Z or ±HH:MM) or a date alone (UTC); it is stored canonically (UTC, milliseconds, e.g. 2026-03-04T08:00:00.000Z), null removes it, and an unparseable value rejects the whole batch naming the item.",
   schema: writeSchema,
   isWrite: true,
   async handler(ctx: ToolContext, args) {
@@ -101,6 +108,14 @@ export const writeTool: ToolDef<typeof writeSchema> = {
     const input: NodeInput[] = items.map((item, index) => {
       const nodeType = item.nodeType.trim();
       const sourceSystem = item.sourceSystem ?? AGENT_SOURCE_SYSTEM;
+      // Hangar sessions are written only by packages/core/src/hangar.ts, so
+      // no agent can forge a session or its state. Refused before any run
+      // opens, so the batch persists nothing. The type and the source system
+      // are each reserved on their own; hangar.ts's reads also require the
+      // source system, as defense in depth.
+      if (nodeType === HANGAR_SESSION_NODE_TYPE || sourceSystem.trim() === HANGAR_SOURCE_SYSTEM) {
+        throw new ReservedHangarNodeError(`at batch index ${index} (${sourceSystem}/${item.externalId})`);
+      }
       // The event-time, work-item, and view contracts are enforced here,
       // at the tool boundary, not in upsertNodes (knowledge-store spec,
       // work-items spec, node-views spec): a bad item rejects the whole
@@ -118,15 +133,27 @@ export const writeTool: ToolDef<typeof writeSchema> = {
             : nodeType === INBOX_ITEM_NODE_TYPE
               ? normalizeInboxItemMetadata(timed, { itemLabel })
               : timed;
+      // Keys as the upsert stores them (trimmed), so every pre-read below
+      // reads the row the upsert will write.
       return {
         nodeType: item.nodeType,
-        externalId: item.externalId,
-        sourceSystem,
+        externalId: item.externalId.trim(),
+        sourceSystem: sourceSystem.trim(),
         title: item.title,
         content: item.content,
         metadata,
       };
     });
+
+    // A session-bound caller (a hangar session's token) writes only new
+    // inbox keys and its own session's items, never another session's, a
+    // local pane's, or an ingested one (hangar-queue decision 9). Checked
+    // before the run opens, so a refused batch writes nothing. That read
+    // takes no lock, so the keys it found absent are checked again inside
+    // the upsert's transaction (`beforeCommit`): one another writer inserted
+    // in between comes back `updated`, and the batch rolls back.
+    const session = ctx.hangarSessionId;
+    const absent = session === null ? null : await assertSessionMayWriteInboxItems(ctx.db, session, input.map((n) => ({ nodeType: n.nodeType, sourceSystem: n.sourceSystem!, externalId: n.externalId })));
 
     // Inbox items: the person's decisions survive a re-ingest (inbox.ts,
     // carryForwardInboxDecisions) — read before the run opens, like every
@@ -136,10 +163,18 @@ export const writeTool: ToolDef<typeof writeSchema> = {
       const stored = await loadStoredInboxMetadata(ctx.db, inboxInputs.map((n) => ({ sourceSystem: n.sourceSystem!, externalId: n.externalId })));
       for (const n of inboxInputs) {
         n.metadata = carryForwardInboxDecisions(n.metadata ?? {}, stored.get(`${n.sourceSystem}\u0000${n.externalId}`) ?? null);
+        // Bound to the writing session, as requestInboxItem binds it, so the
+        // person's decision reaches that session's messages, not a pane.
+        if (session !== null) {
+          const { pane: _pane, socket: _socket, ...rest } = n.metadata;
+          n.metadata = normalizeInboxItemMetadata({ ...rest, session });
+        }
       }
     }
 
-    const { ingestRunId, result } = await withAgentIngestRun(ctx.db, ctx.actor(), (run) => upsertNodes(ctx.db, run, input));
+    const { ingestRunId, result } = await withAgentIngestRun(ctx.db, ctx.actor(), (run) =>
+      upsertNodes(ctx.db, run, input, session === null || absent === null ? {} : { beforeCommit: (r) => assertSessionCreatedAbsentKeys(session, absent, r.rows) }),
+    );
 
     return boundResponse(
       result.rows,
@@ -189,7 +224,7 @@ const linkSchema = z.object({
 export const linkTool: ToolDef<typeof linkSchema> = {
   name: "brain_link",
   description:
-    "Assert one edge, or a batch of edges in one call (pass items as a single object or an array, up to 1000 items), between existing node ids. Each edge is upserted on (srcId, dstId, edgeType, sourceSystem) — re-asserting the same edge just updates its weight/props. A `blocks` edge that would make a node transitively block itself is refused with the path, and nothing from the call is stored. weight defaults to 1.0 when omitted; sourceSystem defaults to \"agent\". All edges in one call share a single ingest run attributed to source_system='agent' and to this client as actor.",
+    "Assert one edge, or a batch of edges in one call (pass items as a single object or an array, up to 1000 items), between existing node ids. Each edge is upserted on (srcId, dstId, edgeType, sourceSystem) — re-asserting the same edge just updates its weight/props. A `blocks` edge that would make a node transitively block itself is refused with the path, and nothing from the call is stored. weight defaults to 1.0 when omitted; sourceSystem defaults to \"agent\". All edges in one call share a single ingest run attributed to source_system='agent' and to this client as actor. Hangar sessions' edges are reserved: an edge under sourceSystem \"hangar\", or one whose srcId is a hangar session, rejects the whole call.",
   schema: linkSchema,
   isWrite: true,
   async handler(ctx: ToolContext, args) {
@@ -202,6 +237,10 @@ export const linkTool: ToolDef<typeof linkSchema> = {
       weight: item.weight,
       props: item.props,
     }));
+    // A session's work item is its `run_by` edge, written only by the hangar
+    // queue (hangar.ts selectSessions counts only those). Refused before any
+    // run opens, so the call persists nothing.
+    await assertNoReservedHangarEdges(ctx.db, input.map((e) => ({ srcId: e.srcId, sourceSystem: e.sourceSystem! })));
 
     const { ingestRunId, result } = await withAgentIngestRun(ctx.db, ctx.actor(), (run) => upsertEdges(ctx.db, run, input));
 
@@ -239,7 +278,7 @@ const mergeSchema = z.object({
 export const mergeTool: ToolDef<typeof mergeSchema> = {
   name: "brain_merge",
   description:
-    "Merge a duplicate node (loserId) into a survivor (survivorId) — for when you notice two nodes describe the same thing (no similarity scoring runs automatically). Idempotent: merging a node that is already merged into the same survivor succeeds and changes nothing. Afterward, brain_get/brain_neighbors/brain_search on loserId resolve to survivorId. The merge is attributed to an ingest run (source_system 'agent', actor = this client), whose id is returned.",
+    "Merge a duplicate node (loserId) into a survivor (survivorId) — for when you notice two nodes describe the same thing (no similarity scoring runs automatically). Hangar sessions are never merged, as either id. Idempotent: merging a node that is already merged into the same survivor succeeds and changes nothing. Afterward, brain_get/brain_neighbors/brain_search on loserId resolve to survivorId. The merge is attributed to an ingest run (source_system 'agent', actor = this client), whose id is returned.",
   schema: mergeSchema,
   isWrite: true,
   async handler(ctx: ToolContext, args) {
