@@ -96,6 +96,11 @@ export const MAX_REVIEW_SOCKET_PATH_LENGTH = 512;
 export const MAX_REVIEW_SUMMARY_LENGTH = 2000;
 export const MAX_REVIEW_COMMENTS = 100;
 export const MAX_REVIEW_COMMENT_LENGTH = 4000;
+/** A review decision's message: room left in a comment for its prefix, `Changes requested: ` (19) or `Accepted: <option> — ` (at most 29 with a 16-character id). */
+export const MAX_REVIEW_DECISION_MESSAGE_LENGTH = MAX_REVIEW_COMMENT_LENGTH - 32;
+/** What a review decision's message refuses: C0 controls but newline and tab, DEL, C1 controls, and the bidi embedding/override/isolate characters. */
+// eslint-disable-next-line no-control-regex
+export const REVIEW_DECISION_MESSAGE_REFUSED_CHARS = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/;
 export const MAX_REVIEW_COMMENT_AUTHOR_LENGTH = 200;
 export const MAX_REVIEW_COMMENT_ID_LENGTH = 200;
 /** Cap on `JSON.stringify(review_comments).length`; see the module header. */

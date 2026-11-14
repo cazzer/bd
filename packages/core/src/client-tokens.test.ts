@@ -215,6 +215,13 @@ describe("verifyClientToken", () => {
     expect(listed?.scope).toBe("agent");
   });
 
+  it("returns a relay token's scope", async () => {
+    const client = clientName("relay");
+    const created = await createClientToken(db, client, "relay");
+    expect(created.scope).toBe("relay");
+    expect(await verifyClientToken(db, created.token)).toEqual({ client, scope: "relay", sessionId: null });
+  });
+
   it("after a re-issue, the old token is refused and the new one admitted", async () => {
     const client = clientName();
     const first = await createClientToken(db, client, "human");

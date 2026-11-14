@@ -13,6 +13,12 @@ export {
   clientTokens,
   hangarCheckIns,
   hangarMessages,
+  relayActions,
+  relayCheckIns,
   CLIENT_TOKEN_SCOPES,
   type ClientTokenScope,
+  RELAY_ACTION_KINDS,
+  RELAY_ACTION_STATES,
+  type RelayActionKind,
+  type RelayActionState,
 } from "./schema.js";

@@ -18,7 +18,8 @@
   },
   "dependencies": {
     "@breakdown/db": "workspace:*",
-    "drizzle-orm": "0.45.2"
+    "drizzle-orm": "0.45.2",
+    "zod": "4.5.4"
   },
   "devDependencies": {
     "tsx": "4.23.13",

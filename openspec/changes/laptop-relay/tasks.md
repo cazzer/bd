@@ -1,7 +1,7 @@
 ## 1. Laptop relay (bd-d38.11)
 
-- [ ] 1.1 Migration 0009: `relay_actions` (+ queued partial index), `relay_check_ins`, `relay` in the token scope check; schema tests
-- [ ] 1.2 `packages/core/src/relay.ts` (action payload schemas, enqueue with allowlist validation, claim with SKIP LOCKED + 5-minute reclaim, report, check-in, status) and `relay-allowlist.ts`; tests incl. racing claims, reclaim, forged actions refused
+- [x] 1.1 Migration 0009: `relay_actions` (+ queued partial index), `relay_check_ins`, `relay` in the token scope check; schema tests
+- [x] 1.2 `packages/core/src/relay.ts` (action payload schemas, enqueue with allowlist validation, claim with SKIP LOCKED + 5-minute reclaim, report, check-in, status) and `relay-allowlist.ts`; tests incl. racing claims, reclaim, forged actions refused
 - [ ] 1.3 Split `ingestBeadsCheckout` into compute + apply with no behavior change for local ingest; beads-watcher gets an injected sink; tests
 - [ ] 1.4 `/relay/v1` handler (check-in, claim long-poll, result, beads-ingest push, projects) reusing hangar's request plumbing, `RELAY_ENDPOINTS`, dispatcher route + `relay` scope; tests per endpoint/scope; `docs/relay.md` + contract test
 - [ ] 1.5 Queue instead of 412: reviewDecision, inbox herdr notify, refreshBoard/boardEvents when binaries are missing; direct path unchanged when present; tests for both modes
