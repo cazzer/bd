@@ -8,7 +8,8 @@
 // (auth-connect.ts), `/healthz` to the health handler (health.ts), a
 // request under REVIEW_IMAGES_PREFIX to the review image handler
 // (review-images.ts), a request under `/hangar/v1/` to hangar's REST API
-// (hangar-api.ts), `/trpc` to tRPC's standalone handler — the same
+// (hangar-api.ts), a request under `/relay/v1/` to the laptop relay's REST
+// API (relay-api.ts), `/trpc` to tRPC's standalone handler — the same
 // `createHTTPHandler` that `createHTTPServer` wraps, so tRPC sees exactly
 // what it saw before — and, with `--client-dir`, everything else to the
 // built client (static-client.ts). Without it, everything else goes to tRPC
@@ -47,6 +48,7 @@ import { createContextFactory } from "./context.js";
 import { createRequestDispatcher } from "./dispatch.js";
 import { createHangarHandler } from "./hangar-api.js";
 import { createHealthHandler } from "./health.js";
+import { createRelayHandler } from "./relay-api.js";
 import { createReviewImageHandler } from "./review-images.js";
 import { createStaticClientHandler, loadClientManifest } from "./static-client.js";
 import { createHerdrJsonRunner, resolveHerdrSocket } from "./herdr-session.js";
@@ -155,6 +157,7 @@ async function main(): Promise<void> {
       health: createHealthHandler(pool),
       reviewImages: createReviewImageHandler({ root: reviewImageRoot }),
       hangar: createHangarHandler({ db, readOnly, shutdownSignal: shutdown.signal }),
+      relay: createRelayHandler({ db, readOnly, shutdownSignal: shutdown.signal, watcher, missingBinaries }),
       trpc: trpcHandler,
       ...(staticClient !== undefined ? { staticClient } : {}),
     }),

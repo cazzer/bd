@@ -21,7 +21,7 @@ const RESULT = (over: Partial<LoadResult> = {}): LoadResult => ({
 function watcherWith(ingest: (project: string) => Promise<LoadResult>) {
   return createBeadsWatcher({
     db: {} as never,
-    ingest: (_db, o) => ingest(o.project),
+    ingest: (o) => ingest(o.project),
     readRegistry: async () => [
       { project: "ok", dir: "/nowhere/ok" },
       { project: "bad", dir: "/nowhere/bad" },

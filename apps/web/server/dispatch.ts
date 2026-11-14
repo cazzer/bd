@@ -15,6 +15,7 @@
 //   exactly HEALTH_PATH                → the health handler (health.ts)
 //   under REVIEW_IMAGES_PREFIX         → the review image route (review-images.ts)
 //   under HANGAR_API_PREFIX            → hangar's REST API (hangar-api.ts)
+//   under RELAY_API_PREFIX             → the laptop relay's REST API (relay-api.ts)
 //   `/trpc` or under `/trpc/`          → tRPC's standalone handler
 //   anything else                      → the built client (static-client.ts)
 //                                        when one is configured, else tRPC
@@ -22,10 +23,10 @@
 // to the built client (it holds no data; client-access spec). Because the
 // client is an exact manifest lookup, a path that only resolves to a data
 // route after normalization (`/x/../trpc/a`, `/%74rpc/a`) is classified as
-// client and can only get index.html or a 404; the hangar API is classified
-// ahead of the client, so its paths never fall to the client's index
-// fallback, and a spelling of them that only normalizes to the prefix is
-// the client's too. `/healthz` is not public.
+// client and can only get index.html or a 404; the hangar and relay APIs
+// are classified ahead of the client, so their paths never fall to the
+// client's index fallback, and a spelling of them that only normalizes to
+// the prefix is the client's too. `/healthz` is not public.
 //
 // Admission scopes are per route (hangar-queue decision 1): connect, the
 // review images, and the built client take only `human` tokens; the health
@@ -34,9 +35,11 @@
 // and completes inbox requests, a person decides. The hangar API takes
 // `hangar` and `agent` tokens, and each endpoint narrows that further
 // (hangar-api.ts): the hangar token reaches the service endpoints, a
-// worker's session token only its messages. On that route the
-// dispatcher's own 401 and 403 use the API's JSON error body, so a client
-// built against docs/hangar-api.md parses one shape.
+// worker's session token only its messages. The relay API takes `relay`
+// tokens only (laptop-relay decision 5), and no other route takes them but
+// the health check. On those two routes the dispatcher's own 401 and 403
+// use the API's JSON error body, so a client built against
+// docs/hangar-api.md or docs/relay.md parses one shape.
 //
 // The admitted token client, scope, and bound session are handed to tRPC through
 // `admittedClients` (context.ts), keyed on the request object, so a write's
@@ -57,6 +60,7 @@ import {
 import { AUTH_CONNECT_PATH } from "./auth-connect.js";
 import { admittedClients, type AdmittedClient } from "./context.js";
 import { HANGAR_API_PREFIX } from "./hangar-api.js";
+import { RELAY_API_PREFIX } from "./relay-api.js";
 import { REVIEW_IMAGES_PREFIX } from "./review-images.js";
 
 export const HEALTH_PATH = "/healthz";
@@ -76,12 +80,14 @@ export interface RequestDispatcherOptions {
   reviewImages: Handler;
   /** The hangar REST API (hangar-api.ts), handed what admission established; null for a tokenless request. */
   hangar: (req: IncomingMessage, res: ServerResponse, admitted: AdmittedClient | null) => Promise<void>;
+  /** The relay REST API (relay-api.ts), handed what admission established; null for a tokenless request. Without it, a relay path answers a JSON 404 (a test server that serves no relay). */
+  relay?: (req: IncomingMessage, res: ServerResponse, admitted: AdmittedClient | null) => Promise<void>;
   trpc: (req: IncomingMessage, res: ServerResponse) => void;
   /** The built client (static-client.ts), when `--client-dir` is given; without it every unclassified path goes to tRPC as before. */
   staticClient?: Handler;
 }
 
-export type WebRoute = "connect" | "health" | "reviewImages" | "hangar" | "trpc" | "static";
+export type WebRoute = "connect" | "health" | "reviewImages" | "hangar" | "relay" | "trpc" | "static";
 
 /**
  * Where a raw request path goes (module header), decided before admission
@@ -95,6 +101,7 @@ export function routeFor(path: string, hasStaticClient: boolean): WebRoute {
   if (path === HEALTH_PATH) return "health";
   if (path.startsWith(REVIEW_IMAGES_PREFIX)) return "reviewImages";
   if (path.startsWith(HANGAR_API_PREFIX)) return "hangar";
+  if (path.startsWith(RELAY_API_PREFIX)) return "relay";
   if (path === TRPC_PATH || path.startsWith(`${TRPC_PATH}/`)) return "trpc";
   return hasStaticClient ? "static" : "trpc";
 }
@@ -112,14 +119,14 @@ function isPublicRoute(method: string, route: WebRoute): boolean {
 const PLAIN_HEADERS = { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } as const;
 const JSON_HEADERS = { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } as const;
 
-/** An admission refusal: plain text everywhere but the hangar API, which gets its JSON error body (docs/hangar-api.md). */
+/** An admission refusal: plain text everywhere but the hangar and relay APIs, which get their JSON error body (docs/hangar-api.md, docs/relay.md). */
 function refuse(res: ServerResponse, route: WebRoute, status: 401 | 403, byCredential = false): void {
   const extra = status === 401 ? UNAUTHORIZED_HEADERS : {};
-  if (route === "hangar") {
+  if (route === "hangar" || route === "relay") {
     const error =
       status === 401
         ? { code: "unauthorized", message: "A live token is required: send Authorization: Bearer <token>." }
-        : { code: "forbidden", message: byCredential ? "This token's scope cannot use the hangar API." : "Refused: this Host or Origin is not allowed." };
+        : { code: "forbidden", message: byCredential ? `This token's scope cannot use the ${route} API.` : "Refused: this Host or Origin is not allowed." };
     res.writeHead(status, { ...JSON_HEADERS, ...extra });
     res.end(JSON.stringify({ error }));
     return;
@@ -128,16 +135,17 @@ function refuse(res: ServerResponse, route: WebRoute, status: 401 | 403, byCrede
   res.end(status === 401 ? "Unauthorized\n" : "Forbidden\n");
 }
 
-export function createRequestDispatcher({ port, allowedHosts, verifyToken, connect, health, reviewImages, hangar, trpc, staticClient }: RequestDispatcherOptions): (req: IncomingMessage, res: ServerResponse) => void {
+export function createRequestDispatcher({ port, allowedHosts, verifyToken, connect, health, reviewImages, hangar, relay, trpc, staticClient }: RequestDispatcherOptions): (req: IncomingMessage, res: ServerResponse) => void {
   const hasStaticClient = staticClient !== undefined;
   const isPublic = (method: string, path: string) => isPublicRoute(method, routeFor(path, hasStaticClient));
   const policyFor = (scopes: readonly ClientTokenScope[]): AdmissionPolicy => ({ port, allowedHosts, originCheck: "unsafe-methods", scopes, isPublic, verifyToken });
   // The token scopes each route admits (module header).
   const policies: Readonly<Record<WebRoute, AdmissionPolicy>> = {
     connect: policyFor(["human"]),
-    health: policyFor(["human", "agent", "hangar"]),
+    health: policyFor(["human", "agent", "hangar", "relay"]),
     reviewImages: policyFor(["human"]),
     hangar: policyFor(["hangar", "agent"]),
+    relay: policyFor(["relay"]),
     trpc: policyFor(["human", "agent"]),
     static: policyFor(["human"]),
   };
@@ -186,6 +194,14 @@ export function createRequestDispatcher({ port, allowedHosts, verifyToken, conne
         return;
       case "hangar":
         await hangar(req, res, admitted);
+        return;
+      case "relay":
+        if (relay === undefined) {
+          res.writeHead(404, JSON_HEADERS);
+          res.end(JSON.stringify({ error: { code: "not_found", message: "This server serves no relay API." } }));
+          return;
+        }
+        await relay(req, res, admitted);
         return;
       case "static":
         await staticClient!(req, res);

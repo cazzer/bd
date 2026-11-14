@@ -54,6 +54,17 @@
 // decision 8) the watcher is inert: it says so once at start and never
 // reads the registry, ticks, or loads.
 //
+// A load can also arrive from outside (laptop-relay decisions 4 and 9): the
+// relay runs the ingest on the Mac and pushes it, the server applies it,
+// and `record(project, outcome, result)` reports it exactly as a load of
+// the watcher's own would be reported — the same events, the same log
+// line, the same outcome kept — through the one `reportOutcome` both
+// paths share. It works in the inert mode too, which is the mode a server
+// without `bd` runs in and the one the relay's pushes reach.
+//
+// `db` is needed only by the default `ingest` and registry read; a watcher
+// given both (the relay's, which has no database) may omit it.
+//
 // Emitted on `events` under the single name `BEADS_WATCHER_EVENT` (never
 // `'error'`, which Node throws on when unhandled): `changed` only when the
 // load's `changed` flag is set — `edges.updated` is non-zero on every load
@@ -299,10 +310,23 @@ export interface BeadsRegistration {
   dir: string;
 }
 
+export interface BeadsIngestRequest {
+  dir: string;
+  project: string;
+  /** Aborts the `bd` call at shutdown. */
+  signal?: AbortSignal;
+}
+
+/** What `record` is told: a load's outcome without the project (an argument) and, optionally, without the time (the watcher's clock). */
+export type RecordedOutcome =
+  | { ok: true; changed: boolean; nodes: LoadResult["nodes"]; edges: LoadResult["edges"]; at?: string }
+  | { ok: false; error: string; at?: string };
+
 export interface BeadsWatcherOptions {
-  db: Database;
-  /** Replaces `ingestBeadsCheckout` (tests). `signal` aborts the `bd` call at shutdown. */
-  ingest?: (db: Database, opts: { dir: string; project: string; signal?: AbortSignal }) => Promise<LoadResult>;
+  /** The store the default `ingest` and registry read use; required unless both are given (module header). */
+  db?: Database;
+  /** Replaces `ingestBeadsCheckout` (tests, and the relay's push sink). */
+  ingest?: (opts: BeadsIngestRequest) => Promise<LoadResult>;
   /** Replaces the registry read (tests). */
   readRegistry?: () => Promise<BeadsRegistration[]>;
   /** Replaces `fs.watch` on one directory (tests). Must call `onWake` on any event and `onError` if the watch dies. */
@@ -332,6 +356,18 @@ export interface BeadsWatcher {
   outcomes(): ProjectOutcome[];
   /** Ask one project to load now, as its safety tick would (module header). False for a project not tracked, or once `stop()` has begun. */
   wake(project: string): boolean;
+  /**
+   * Load one project now regardless of fingerprint and resolve with its
+   * outcome. A project not tracked re-reads the registry first; null when
+   * it is still not there, when the watcher is inert, or once `stop()` has begun.
+   */
+  reloadProject(project: string): Promise<ProjectOutcome | null>;
+  /**
+   * Report a load that ran elsewhere (a relay push; module header) exactly
+   * as one of this watcher's own loads is reported, and keep it as the
+   * project's outcome. Returns the outcome reported, or null once `stop()` has begun.
+   */
+  record(project: string, outcome: RecordedOutcome, result: LoadResult | null): ProjectOutcome | null;
   /** Close watchers and the tick, then await in-flight loads. Idempotent. */
   stop(): Promise<void>;
 }
@@ -357,6 +393,23 @@ function defaultWatchDir(dir: string, onWake: () => void, onError: () => void): 
   return w;
 }
 
+/** How one load's outcome is told: `changed` only when the load moved something, `error` (and a log line) when it failed. Shared by the watcher's own loads and `record`. */
+function reportOutcome(emit: (event: BeadsWatcherEvent) => void, log: (message: string) => void, outcome: ProjectOutcome, result: LoadResult | null): void {
+  const { project } = outcome;
+  if (outcome.ok) {
+    if (result?.changed) emit({ kind: "changed", project, changedNodeIds: result.changedNodeIds, at: outcome.at });
+  } else {
+    log(`beads watcher: load of ${project} failed: ${outcome.error}`);
+    emit({ kind: "error", project, message: outcome.error, at: outcome.at });
+  }
+}
+
+function toProjectOutcome(project: string, outcome: RecordedOutcome, at: string): ProjectOutcome {
+  return outcome.ok
+    ? { project, ok: true, at: outcome.at ?? at, changed: outcome.changed, nodes: outcome.nodes, edges: outcome.edges }
+    : { project, ok: false, at: outcome.at ?? at, error: outcome.error };
+}
+
 interface Tracked {
   registration: BeadsRegistration;
   scheduler: ProjectScheduler;
@@ -370,9 +423,13 @@ export function createBeadsWatcher(options: BeadsWatcherOptions): BeadsWatcher {
   const fingerprint = options.fingerprint ?? fingerprintCheckout;
   const watchDir = options.watchDir ?? defaultWatchDir;
   const stopGraceMs = options.stopGraceMs ?? 5_000;
-  const ingest =
-    options.ingest ?? ((db: Database, opts: { dir: string; project: string; signal?: AbortSignal }) => ingestBeadsCheckout(db, opts));
-  const readRegistry = options.readRegistry ?? (() => readRegistryFromStore(options.db));
+  const inert = options.bdAvailable === false;
+  const { db } = options;
+  if (!inert && db === undefined && (options.ingest === undefined || options.readRegistry === undefined)) {
+    throw new Error("createBeadsWatcher: db is required unless both ingest and readRegistry are given");
+  }
+  const ingest = options.ingest ?? ((opts: BeadsIngestRequest) => ingestBeadsCheckout(db!, opts));
+  const readRegistry = options.readRegistry ?? (() => readRegistryFromStore(db!));
 
   const events = new EventEmitter();
   // Every open board tab holds a listener; the default cap of 10 would warn spuriously.
@@ -439,18 +496,13 @@ export function createBeadsWatcher(options: BeadsWatcherOptions): BeadsWatcher {
     const scheduler = createProjectScheduler({
       project,
       fingerprint: () => fingerprint(dir),
-      load: () => ingest(options.db, { dir, project, signal: abortLoads.signal }),
+      load: () => ingest({ dir, project, signal: abortLoads.signal }),
       onNullFingerprint: () => log(`beads watcher: no usable fingerprint for ${project} (${dir}); loading on the safety tick only`),
       onOutcome: (outcome, result) => {
         // A scheduler dropped or re-pointed by a registry sync, or a stopped watcher, reports nothing.
         if (stopped || self === undefined || tracked.get(project) !== self) return;
         lastOutcomes.set(project, outcome);
-        if (outcome.ok) {
-          if (result?.changed) emit({ kind: "changed", project, changedNodeIds: result.changedNodeIds, at: outcome.at });
-        } else {
-          log(`beads watcher: load of ${project} failed: ${outcome.error}`);
-          emit({ kind: "error", project, message: outcome.error, at: outcome.at });
-        }
+        reportOutcome(emit, log, outcome, result);
       },
       clock,
       now,
@@ -509,7 +561,15 @@ export function createBeadsWatcher(options: BeadsWatcherOptions): BeadsWatcher {
     }, SAFETY_TICK_MS);
   }
 
-  if (options.bdAvailable === false) {
+  function record(project: string, outcome: RecordedOutcome, result: LoadResult | null): ProjectOutcome | null {
+    if (stopped) return null;
+    const reported = toProjectOutcome(project, outcome, now().toISOString());
+    lastOutcomes.set(project, reported);
+    reportOutcome(emit, log, reported, result);
+    return reported;
+  }
+
+  if (inert) {
     return {
       events,
       async start() {
@@ -519,12 +579,18 @@ export function createBeadsWatcher(options: BeadsWatcherOptions): BeadsWatcher {
         return [];
       },
       outcomes() {
-        return [];
+        return [...lastOutcomes.values()];
       },
       wake() {
         return false;
       },
-      async stop() {},
+      async reloadProject() {
+        return null;
+      },
+      record,
+      async stop() {
+        stopped = true;
+      },
     };
   }
 
@@ -555,6 +621,17 @@ export function createBeadsWatcher(options: BeadsWatcherOptions): BeadsWatcher {
       t.scheduler.tick();
       return true;
     },
+    async reloadProject(project) {
+      if (stopped) return null;
+      let t = tracked.get(project);
+      if (t === undefined) {
+        await syncRegistry();
+        t = tracked.get(project);
+        if (t === undefined) return null;
+      }
+      return t.scheduler.loadNow();
+    },
+    record,
     async stop() {
       stopped = true;
       if (tickHandle !== null) {

@@ -360,10 +360,21 @@ export {
 // See beads-ingest.ts.
 export {
   ingestBeadsCheckout,
+  computeBeadsIngest,
+  applyBeadsIngest,
+  parseBeadsIssues,
+  createIngestBdRunner,
+  defaultRunBd,
   BEADS_PROJECT_NODE_TYPE,
   BEADS_INGEST_ACTOR,
   BD_TIMEOUT_MS,
   type RunBd,
+  type IngestBdRunnerOptions,
+  type PriorReviewThread,
+  type PriorReviewThreads,
+  type ComputeBeadsIngestOptions,
+  type ComputedBeadsIngest,
+  type ApplyBeadsIngestOptions,
   type IngestBeadsCheckoutOptions,
   type IngestBeadsCheckoutResult,
 } from "./beads-ingest.js";

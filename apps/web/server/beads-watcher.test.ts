@@ -326,7 +326,7 @@ describe("beads watcher", () => {
     const registryReads = { fail: false };
     const watcher = createBeadsWatcher({
       db: {} as never,
-      ingest: (_db, o) => opts.ingest(o.project),
+      ingest: (o) => opts.ingest(o.project),
       readRegistry: async () => {
         if (registryReads.fail) throw new Error("db down");
         return registry.map((r) => ({ ...r }));
@@ -509,7 +509,7 @@ describe("beads watcher", () => {
     let signal: AbortSignal | undefined;
     const watcher = createBeadsWatcher({
       db: {} as never,
-      ingest: (_db, o) => {
+      ingest: (o) => {
         signal = o.signal;
         return new Promise<LoadResult>((_, reject) => o.signal!.addEventListener("abort", () => reject(new Error("aborted"))));
       },
@@ -696,5 +696,97 @@ describe("beads watcher without bd on PATH (tailnet-hosting decision 8)", () => 
     expect(watchDir).not.toHaveBeenCalled();
     expect(setInterval).not.toHaveBeenCalled();
     expect(log.mock.calls).toEqual([["beads watcher: bd not found on PATH; no beads project is watched by this server"]]);
+  });
+});
+
+describe("record(): a load that ran elsewhere (laptop-relay decision 9)", () => {
+  const AT = "2026-11-14T09:00:00.000Z";
+
+  function build(bdAvailable: boolean) {
+    const log = vi.fn();
+    const ingest = vi.fn(async () => RESULT({ changed: true, changedNodeIds: ["own"] }));
+    const watcher = createBeadsWatcher({
+      bdAvailable,
+      ingest,
+      readRegistry: async () => [{ project: "a", dir: "/x/a" }],
+      watchDir: () => ({ close() {} }),
+      fingerprint: () => "A",
+      now: () => new Date(AT),
+      log,
+    });
+    const events: BeadsWatcherEvent[] = [];
+    watcher.events.on(BEADS_WATCHER_EVENT, (e: BeadsWatcherEvent) => events.push(e));
+    return { watcher, events, log, ingest };
+  }
+
+  for (const bdAvailable of [true, false]) {
+    describe(bdAvailable ? "with bd" : "inert (no bd)", () => {
+      it("emits changed for a changed load, nothing for an unchanged one, and keeps the outcome", async () => {
+        const { watcher, events } = build(bdAvailable);
+        const changed = RESULT({ changed: true, changedNodeIds: ["n1", "n2"] });
+        const reported = watcher.record("pushed", { ok: true, changed: true, nodes: changed.nodes, edges: changed.edges }, changed);
+        expect(reported).toEqual({ project: "pushed", ok: true, at: AT, changed: true, nodes: changed.nodes, edges: changed.edges });
+        expect(events).toEqual([{ kind: "changed", project: "pushed", changedNodeIds: ["n1", "n2"], at: AT }]);
+
+        const quiet = RESULT();
+        watcher.record("pushed", { ok: true, changed: false, nodes: quiet.nodes, edges: quiet.edges }, quiet);
+        expect(events).toHaveLength(1);
+        expect(watcher.outcomes()).toEqual([{ project: "pushed", ok: true, at: AT, changed: false, nodes: quiet.nodes, edges: quiet.edges }]);
+        await watcher.stop();
+      });
+
+      it("emits error and logs the failure exactly as its own load's failure", async () => {
+        const { watcher, events, log } = build(bdAvailable);
+        watcher.record("pushed", { ok: false, error: "conflict" }, null);
+        expect(events).toEqual([{ kind: "error", project: "pushed", message: "conflict", at: AT }]);
+        expect(log).toHaveBeenCalledWith("beads watcher: load of pushed failed: conflict");
+        await watcher.stop();
+      });
+
+      it("reports nothing once stop() has begun", async () => {
+        const { watcher, events } = build(bdAvailable);
+        await watcher.stop();
+        expect(watcher.record("pushed", { ok: false, error: "late" }, null)).toBeNull();
+        expect(events).toEqual([]);
+      });
+    });
+  }
+
+  it("matches what the watcher's own load emits for the same result", async () => {
+    const own = build(true);
+    await own.watcher.start();
+    await vi.advanceTimersByTimeAsync(0);
+    const pushed = build(false);
+    const result = RESULT({ changed: true, changedNodeIds: ["own"] });
+    pushed.watcher.record("a", { ok: true, changed: true, nodes: result.nodes, edges: result.edges }, result);
+    expect(pushed.events).toEqual(own.events);
+    expect(pushed.watcher.outcomes()).toEqual(own.watcher.outcomes());
+    await own.watcher.stop();
+  });
+});
+
+describe("reloadProject()", () => {
+  it("loads a tracked project regardless of fingerprint, re-reads the registry for an unknown one, and is null when inert", async () => {
+    const registry = [{ project: "a", dir: "/x/a" }];
+    const ingest = vi.fn(async (o: { project: string }) => RESULT({ changed: o.project === "b" }));
+    const watcher = createBeadsWatcher({ ingest, readRegistry: async () => registry.map((r) => ({ ...r })), watchDir: () => ({ close() {} }), fingerprint: () => "A", log: () => {} });
+    await watcher.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ingest).toHaveBeenCalledTimes(1);
+    expect(await watcher.reloadProject("a")).toMatchObject({ project: "a", ok: true });
+    expect(ingest).toHaveBeenCalledTimes(2);
+    expect(await watcher.reloadProject("b")).toBeNull();
+    registry.push({ project: "b", dir: "/x/b" });
+    expect(await watcher.reloadProject("b")).toMatchObject({ project: "b", ok: true, changed: true });
+    await watcher.stop();
+    expect(await watcher.reloadProject("a")).toBeNull();
+
+    const inert = createBeadsWatcher({ bdAvailable: false, log: () => {} });
+    expect(await inert.reloadProject("a")).toBeNull();
+  });
+
+  it("refuses to build without a db while a default seam would need one", () => {
+    expect(() => createBeadsWatcher({ ingest: async () => RESULT() })).toThrow("db is required");
+    expect(() => createBeadsWatcher({ readRegistry: async () => [] })).toThrow("db is required");
   });
 });

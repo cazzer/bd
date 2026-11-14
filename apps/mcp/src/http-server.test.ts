@@ -207,7 +207,7 @@ function rawSocketRequest(port: number, head: string): Promise<string> {
 }
 
 /** A live token for a client name unique to this test file (deleted in afterAll). */
-async function newToken(label: string, scope: "human" | "agent" | "hangar" = "human"): Promise<{ client: string; token: string }> {
+async function newToken(label: string, scope: "human" | "agent" | "hangar" | "relay" = "human"): Promise<{ client: string; token: string }> {
   const client = `mcpt-${label}-${suffix.slice(0, 16)}`;
   tokenClients.push(client);
   const { token } = await createClientToken(db!, client, scope);
@@ -587,6 +587,13 @@ describe("client tokens behind a tailnet Host", () => {
   it("refuses a hangar token on /mcp with 403", async () => {
     const { running, host } = await startTailnet();
     const { token } = await newToken("hangar", "hangar");
+    const res = await rawRequest(running.url, { method: "POST", headers: { ...MCP_POST_HEADERS, host, authorization: `Bearer ${token}` }, body: initializeBody() });
+    expect(res.status).toBe(403);
+  }, 30_000);
+
+  it("refuses a relay token on /mcp with 403", async () => {
+    const { running, host } = await startTailnet();
+    const { token } = await newToken("relay", "relay");
     const res = await rawRequest(running.url, { method: "POST", headers: { ...MCP_POST_HEADERS, host, authorization: `Bearer ${token}` }, body: initializeBody() });
     expect(res.status).toBe(403);
   }, 30_000);
