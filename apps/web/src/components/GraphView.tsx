@@ -83,9 +83,11 @@
 // shape lives in lib/route.ts, pure and tested; this component owns
 // when it is read and written, through exactly two kinds of site rather
 // than an effect that mirrors state (design.md decision 2):
-//   - `runSearch`'s landed-result branch is the ONE `pushState` — a
-//     query that matched nothing leaves the URL naming the search whose
-//     result is actually drawn.
+//   - the search bar's submit is the ONE `pushState`, and it leaves this
+//     view: it opens the search results view (search-results-view,
+//     design.md decision 7), whose "Open in graph" comes back with the
+//     query in the address for `applyRoute` to draw. `runSearch` itself
+//     writes no history — every search it runs was navigated to.
 //   - every site that changes the selection (`handleNodeClick`, the
 //     panel's close, `handleNoteCreated`, `handleShowUnlinkedNote`)
 //     does a `replaceState` — a click is the most frequent gesture here
@@ -139,6 +141,7 @@ import { drawnTypeCounts, rankNeighborTypes, topStoreTypes, typeColorsForStore, 
 import { endpointId } from "../graph/nodeEdges.js";
 import { navigate } from "../lib/navigate.js";
 import { graphRouteFromSearch, parseRoute, type GraphRoute } from "../lib/route.js";
+import { searchRouteFor } from "../lib/searchRow.js";
 import { matchNodeTypes } from "../lib/typeMatch.js";
 import { trpc } from "../trpc.js";
 
@@ -369,14 +372,14 @@ export function GraphView() {
    * `types` is an explicit argument rather than `chips` read from the
    * closure (url-addressable-views): the deep-link and popstate paths
    * run a search whose chips have not yet been committed to state. The
-   * submit path passes `chips`. `history: "push"` is the one place a
-   * history entry is added; `"none"` is for a search that was NAVIGATED
-   * to, which must not push again. Returns the landed result, or `null`
+   * search bar's submit no longer comes here: it opens the results view
+   * (search-results-view), so every search this runs was NAVIGATED to
+   * and writes no history. Returns the landed result, or `null`
    * when nothing landed (empty query, no match, or failure), so
    * `applyRoute` can tell "graph replaced" from "nothing changed"
    * without waiting for state to commit.
    */
-  async function runSearch(submittedQuery: string, types: string[], opts: { history: "push" | "none" }): Promise<SearchResult | null> {
+  async function runSearch(submittedQuery: string, types: string[]): Promise<SearchResult | null> {
     const trimmed = submittedQuery.trim();
     if (trimmed.length === 0) {
       return null;
@@ -441,14 +444,11 @@ export function GraphView() {
         // bd-e9n, design.md decision 5: a landed search result fits and
         // centres the view — see GraphCanvas.tsx's `fitRequestId`.
         setFitRequestId((id) => id + 1);
-        // url-addressable-views: the address names the search whose
-        // result is drawn — set here, and pushed here, nowhere else. An
-        // empty result never reaches this branch, so it leaves the URL
-        // (and `submittedSearch`) naming the search still on screen.
+        // url-addressable-views: `submittedSearch` names the search whose
+        // result is drawn — set here, nowhere else. An empty result never
+        // reaches this branch, so it leaves `submittedSearch` naming the
+        // search still on screen.
         setSubmittedSearch({ q: trimmed, types });
-        if (opts.history === "push") {
-          navigate({ view: "graph", q: trimmed, types, node: null }, "push");
-        }
         return result;
       }
       return null;
@@ -751,9 +751,9 @@ export function GraphView() {
    *      step 4 to find it in. Same search as drawn (a VALUE comparison
    *      against `submittedSearch`, never a URL string): skip it — this
    *      is the "only the selection changed" scenario, and why back/
-   *      forward between selections is cheap. Otherwise run it with
-   *      `history: "none"` (it was navigated to; pushing again would
-   *      double the entry), and read the RESULT for the node lookup:
+   *      forward between selections is cheap. Otherwise run it (it was
+   *      navigated to, and `runSearch` writes no history), and read the
+   *      RESULT for the node lookup:
    *      `setGraph` has not committed when `runSearch` returns — the same
    *      reason `handleAnnotated` captures `target.degree` before its
    *      updater runs. An empty result stops here: the spec's "nothing
@@ -805,7 +805,7 @@ export function GraphView() {
         setStatus({ kind: "idle" });
       }
     } else if (!isSameSearch(submittedSearch, route)) {
-      const result = await runSearch(route.q, route.types, { history: "none" });
+      const result = await runSearch(route.q, route.types);
       if (stale(generation, routeGeneration) || !result) {
         return;
       }
@@ -1167,7 +1167,7 @@ export function GraphView() {
           <SearchBar
             query={query}
             onQueryChange={setQuery}
-            onSubmit={(q) => void runSearch(q, chips, { history: "push" })}
+            onSubmit={(q) => navigate(searchRouteFor(q, { types: chips }), "push")}
             status={status}
             suggestions={typeSuggestions}
             chips={chips}

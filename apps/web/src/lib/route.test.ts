@@ -9,7 +9,7 @@
 // parameters and nothing else).
 
 import { describe, expect, it } from "vitest";
-import { BOARD_VIEW_PATH, CODE_VIEW_PATH, FEED_VIEW_PATH, formatRoute, GRAPH_VIEW_PATH, graphRouteFromSearch, parseRoute, TIMELINE_VIEW_PATH, type BoardRoute, type CodeRoute, type FeedRoute, type GraphRoute, type Route, type TimelineRoute } from "./route.js";
+import { BOARD_VIEW_PATH, CODE_VIEW_PATH, FEED_VIEW_PATH, formatRoute, GRAPH_VIEW_PATH, graphRouteFromSearch, parseRoute, SEARCH_VIEW_PATH, TIMELINE_VIEW_PATH, type BoardRoute, type CodeRoute, type FeedRoute, type GraphRoute, type Route, type SearchRoute, type TimelineRoute } from "./route.js";
 
 function graph(partial: Partial<Omit<GraphRoute, "view">> = {}): GraphRoute {
   return { view: "graph", q: null, types: [], node: null, ...partial };
@@ -25,6 +25,10 @@ function code(viewId: string | null = null, node: string | null = null): CodeRou
 
 function timeline(viewId: string | null = null, node: string | null = null, types: string[] = []): TimelineRoute {
   return { view: "timeline", viewId, node, types };
+}
+
+function search(partial: Partial<Omit<SearchRoute, "view">> = {}): SearchRoute {
+  return { view: "search", q: null, types: [], projects: [], reviewsOnly: false, ...partial };
 }
 
 function board(viewId: string | null = null, projects: string[] = [], item: string | null = null): BoardRoute {
@@ -426,5 +430,58 @@ describe("board route", () => {
     for (const r of [board(null, [], "bd-1"), board("v1", ["tides"], "tides-r1"), board(null, ["a"], "x y&z=#?")]) {
       expect(roundTrip(r)).toEqual(r);
     }
+  });
+});
+
+describe("search route (search-results-view)", () => {
+  it("parses /search with its text, types, projects, and reviews-only flag", () => {
+    expect(parseRoute("/search", "?q=island%20cuts&type=work_item&type=gh-pr&project=collective&project=bd&review=1")).toEqual(
+      search({ q: "island cuts", types: ["work_item", "gh-pr"], projects: ["collective", "bd"], reviewsOnly: true }),
+    );
+    expect(parseRoute("/search", "")).toEqual(search());
+    expect(SEARCH_VIEW_PATH).toBe("/search");
+  });
+
+  it("accepts one trailing slash, and /search/x is unknown", () => {
+    expect(parseRoute("/search/", "?q=cuts")).toEqual(search({ q: "cuts" }));
+    expect(parseRoute("/search/x", "?q=cuts")).toBeNull();
+  });
+
+  it("trims q, drops empty types and projects, and collapses duplicates to their first occurrence", () => {
+    expect(parseRoute("/search", "?q=%20%20cuts%20&type=&type=%20a%20&type=a&type=b&project=%20&project=p&project=%20p&project=q")).toEqual(
+      search({ q: "cuts", types: ["a", "b"], projects: ["p", "q"] }),
+    );
+    expect(parseRoute("/search", "?q=%20%20")).toEqual(search());
+  });
+
+  it("reads reviews only as true for review=1 alone", () => {
+    expect(parseRoute("/search", "?review=1")).toEqual(search({ reviewsOnly: true }));
+    for (const value of ["0", "true", "", "yes", "11"]) {
+      expect(parseRoute("/search", `?review=${value}`)).toEqual(search());
+    }
+  });
+
+  it("formats with a fixed parameter order: q, each type, each project, then review", () => {
+    expect(formatRoute(search({ reviewsOnly: true, projects: ["p"], types: ["b", "a"], q: "x y" }))).toBe("/search?q=x+y&type=b&type=a&project=p&review=1");
+    expect(formatRoute(search())).toBe("/search");
+    expect(formatRoute(search({ projects: ["collective"] }))).toBe("/search?project=collective");
+    expect(formatRoute(search({ reviewsOnly: false, q: "cuts" }))).toBe("/search?q=cuts");
+  });
+
+  it("round-trips", () => {
+    for (const r of [
+      search(),
+      search({ q: "cuts" }),
+      search({ types: ["work_item", "gh-pr"] }),
+      search({ projects: ["collective", "bd"] }),
+      search({ reviewsOnly: true }),
+      search({ q: "x y&z=#?", types: ["a"], projects: ["p", "q"], reviewsOnly: true }),
+    ]) {
+      expect(roundTrip(r)).toEqual(r);
+    }
+  });
+
+  it("ignores unknown parameters", () => {
+    expect(parseRoute("/search", "?q=x&node=n&view=v1&item=i&zoom=1")).toEqual(search({ q: "x" }));
   });
 });

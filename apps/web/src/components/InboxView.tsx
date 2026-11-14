@@ -34,6 +34,7 @@ import { trpc } from "../trpc.js";
 import { cardShortcut, DecisionCardBody, DecisionFooter, primaryDecision, type CardOutcome, type DecisionCardData, type Refusal } from "./DecisionCard.js";
 import { EvidenceView } from "./EvidenceView.js";
 import { ReviewItemPanel } from "./ReviewItemPanel.js";
+import { HeaderSearch } from "./HeaderSearch.js";
 import { ReviewQueuePill, storeDraft, useReviewQueue, useShellDrawer } from "./ReviewQueue.js";
 import { SessionLinks, type SessionLinkResult } from "./SessionLinks.js";
 
@@ -312,6 +313,7 @@ export function InboxView({ item: selectedKey, source }: { item: string | null; 
             <kbd className="rounded border border-hairline px-1">a</kbd> accept · <kbd className="rounded border border-hairline px-1">c</kbd> message ·{" "}
             <kbd className="rounded border border-hairline px-1">d</kbd> dismiss · <kbd className="rounded border border-hairline px-1">o</kbd> open session
           </p>
+          <HeaderSearch />
           <ReviewQueuePill />
         </div>
       </header>

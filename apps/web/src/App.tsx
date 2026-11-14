@@ -3,7 +3,8 @@
 // (src/components/GraphView.tsx, where everything this file used to be
 // now lives, verbatim), FeedView under `/feed`, CodeView under `/code`,
 // or TimelineView under `/timeline` (the last two lazy — see their
-// imports below). It re-reads `location`
+// imports below), and the board, the inbox, and SearchView under `/search`
+// (search-results-view), lazy too. It re-reads `location`
 // on `popstate` and whenever a view calls the shared `navigate`
 // (lib/navigate.ts), which notifies the subscriber registered below
 // after it has written history. Nothing else: each view keeps its own
@@ -72,6 +73,9 @@ const BoardView = lazy(async () => ({ default: (await import("./components/Board
 
 // The inbox: lazy like the board.
 const InboxView = lazy(async () => ({ default: (await import("./components/InboxView.js")).InboxView }));
+
+// The search results view (search-results-view): lazy like the inbox.
+const SearchView = lazy(async () => ({ default: (await import("./components/SearchView.js")).SearchView }));
 
 const LOADING_VIEW = (
   <main className="flex h-dvh w-screen items-center justify-center">
@@ -152,6 +156,12 @@ function renderView(route: Route) {
       return (
         <Suspense fallback={LOADING_VIEW}>
           <InboxView key="inbox" item={route.item} source={route.source ?? null} />
+        </Suspense>
+      );
+    case "search":
+      return (
+        <Suspense fallback={LOADING_VIEW}>
+          <SearchView key="search" route={route} />
         </Suspense>
       );
   }

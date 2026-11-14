@@ -134,6 +134,7 @@ import {
 } from "../lib/timelineRow.js";
 import { viewFilterOf, type ViewFilter, type ViewNode } from "../lib/viewFilter.js";
 import { trpc } from "../trpc.js";
+import { HeaderSearch } from "./HeaderSearch.js";
 import { ReviewQueuePill, useShellDrawer } from "./ReviewQueue.js";
 
 type TimelineResult = Awaited<ReturnType<typeof trpc.timeline.query>>;
@@ -541,6 +542,7 @@ export function TimelineView({ viewId, node, types }: TimelineViewProps) {
             <a href={formatRoute(graphRoute)} onClick={pushOnPlainClick(graphRoute)} className="shrink-0 rounded text-sm text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-accent">
               {graphRoute.node === null ? "Open the graph" : "Open in graph"}
             </a>
+            <HeaderSearch />
             <ReviewQueuePill />
           </div>
         </header>

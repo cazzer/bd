@@ -68,6 +68,7 @@ import { formatRoute, type BoardRoute, type GraphRoute } from "../lib/route.js";
 import { viewFilterOf, type ViewNode } from "../lib/viewFilter.js";
 import { trpc } from "../trpc.js";
 import { ReviewDrawer, useWideDrawer } from "./ReviewDrawer.js";
+import { HeaderSearch } from "./HeaderSearch.js";
 import { ReviewQueuePill, storeDraft, useShellDrawer } from "./ReviewQueue.js";
 
 const GRAPH_HOME: GraphRoute = { view: "graph", q: null, types: [], node: null };
@@ -390,6 +391,7 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
           </div>
         )}
         <div className="ml-auto flex items-center gap-3 text-xs text-fg-muted">
+          <HeaderSearch />
           <ReviewQueuePill />
           {view && (
             <button

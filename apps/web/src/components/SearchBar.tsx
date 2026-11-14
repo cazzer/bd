@@ -107,13 +107,6 @@ export function SearchBar({ query, onQueryChange, onSubmit, status, trailing, su
   const showSuggestions = suggestions.length > 0 && !dismissed;
   const activeSuggestion = activeIndex !== null && activeIndex < suggestions.length ? suggestions[activeIndex] : undefined;
 
-  // graph-explorer/spec.md's own hint (design.md: "chips alone ... cannot
-  // search, because the server's search procedure requires query to be
-  // at least one character; the bar shows a hint ... rather than
-  // attempting the call") — replaces the ordinary status line while true,
-  // and the form's own onSubmit below refuses to call `onSubmit` too.
-  const showTextHint = chips.length > 0 && query.trim().length === 0;
-
   function chooseSuggestion(nodeType: string) {
     onChooseSuggestion(nodeType);
     setActiveIndex(null);
@@ -177,9 +170,9 @@ export function SearchBar({ query, onQueryChange, onSubmit, status, trailing, su
             // now-submitted query's leftover list.
             setDismissed(true);
             setActiveIndex(null);
-            if (showTextHint) {
-              return; // server requires a non-empty query — chips alone can't search (design.md)
-            }
+            // Chips with no text submit too (search-results-view): the
+            // submit opens the results view, which lists every node of
+            // the chosen types when there is no text.
             onSubmit(query);
           }}
         >
@@ -248,11 +241,11 @@ export function SearchBar({ query, onQueryChange, onSubmit, status, trailing, su
         {trailing}
       </div>
       <p
-        className={`mt-2 min-h-[1.25rem] text-xs ${!showTextHint && tone === "error" ? "text-red-300" : "text-fg-muted"}`}
+        className={`mt-2 min-h-[1.25rem] text-xs ${tone === "error" ? "text-red-300" : "text-fg-muted"}`}
         // `status` when not an error (url-addressable-views review follow-up): a route-applied search — a deep link, a back step — changes this line with no keystroke or click to cue a screen reader, so "Searching…" → "exact match — …" is announced politely; `alert` stays assertive for an error.
-        role={!showTextHint && tone === "error" ? "alert" : "status"}
+        role={tone === "error" ? "alert" : "status"}
       >
-        {showTextHint ? "add search text" : text}
+        {text}
       </p>
     </div>
   );

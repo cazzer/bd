@@ -46,6 +46,7 @@ import { navigate } from "../lib/navigate.js";
 import { formatRoute, type GraphRoute } from "../lib/route.js";
 import { viewFilterOf, type ViewFilter, type ViewNode } from "../lib/viewFilter.js";
 import { trpc } from "../trpc.js";
+import { HeaderSearch } from "./HeaderSearch.js";
 import { ReviewQueuePill, useShellDrawer } from "./ReviewQueue.js";
 
 type ListResult = Awaited<ReturnType<typeof trpc.list.query>>;
@@ -211,6 +212,7 @@ export function FeedView({ viewId }: { viewId: string | null }) {
             >
               Open the graph
             </a>
+            <HeaderSearch />
             <ReviewQueuePill />
           </div>
         </header>
