@@ -5,37 +5,88 @@
 
 import { describe, expect, it } from "vitest";
 import { formatRoute, type SearchRoute } from "./route.js";
-import { facetOptions, findInputFor, openInGraphRoute, resultRoute, rowStatus, searchRouteFor, toggleProject, toggleType, withReviewsOnly } from "./searchRow.js";
+import {
+  approximateSearchRoute,
+  FACET_PREVIEW_COUNT,
+  facetOptions,
+  findInputFor,
+  isNoSearchableTermsMessage,
+  openInGraphLink,
+  resultRoute,
+  rowStatus,
+  searchRouteFor,
+  toggleProject,
+  toggleType,
+  visibleFacetOptions,
+  withReviewsOnly,
+  type FacetOption,
+} from "./searchRow.js";
 
 function search(partial: Partial<Omit<SearchRoute, "view">> = {}): SearchRoute {
   return { view: "search", q: null, types: [], projects: [], reviewsOnly: false, ...partial };
 }
 
 describe("resultRoute", () => {
-  it("opens a review with a project in its board drawer, keyed by the bead id", () => {
-    const route = resultRoute({ id: "n1", externalId: "collective-sx4.20.10.1", project: "collective", isReview: true });
+  it("opens a review work item with a project in its board drawer, keyed by the bead id", () => {
+    const route = resultRoute({ id: "n1", nodeType: "work_item", externalId: "collective-sx4.20.10.1", project: "collective", isReview: true });
     expect(formatRoute(route)).toBe("/board?project=collective&item=collective-sx4.20.10.1");
   });
 
   it("opens a review without a project in the graph", () => {
-    expect(formatRoute(resultRoute({ id: "n2", externalId: "owner/repo#4", project: null, isReview: true }))).toBe("/graph?node=n2");
+    expect(formatRoute(resultRoute({ id: "n2", nodeType: "work_item", externalId: "owner/repo#4", project: null, isReview: true }))).toBe("/graph?node=n2");
+  });
+
+  it("opens a review-labelled node that is not a work item in the graph, even with a project", () => {
+    expect(formatRoute(resultRoute({ id: "n5", nodeType: "gh-issue", externalId: "owner/repo#7", project: "collective", isReview: true }))).toBe("/graph?node=n5");
   });
 
   it("opens anything else, a gh-pr included, in the graph with it selected", () => {
-    expect(formatRoute(resultRoute({ id: "n3", externalId: "owner/repo#12", project: null, isReview: false }))).toBe("/graph?node=n3");
-    expect(formatRoute(resultRoute({ id: "n4", externalId: "bd-1", project: "bd", isReview: false }))).toBe("/graph?node=n4");
+    expect(formatRoute(resultRoute({ id: "n3", nodeType: "gh-pr", externalId: "owner/repo#12", project: null, isReview: false }))).toBe("/graph?node=n3");
+    expect(formatRoute(resultRoute({ id: "n4", nodeType: "work_item", externalId: "bd-1", project: "bd", isReview: false }))).toBe("/graph?node=n4");
   });
 });
 
-describe("openInGraphRoute", () => {
-  it("carries the text and chosen types, never projects or reviews only", () => {
-    const route = openInGraphRoute(search({ q: "cuts", types: ["work_item", "gh-pr"], projects: ["p"], reviewsOnly: true }));
-    expect(route).toEqual({ view: "graph", q: "cuts", types: ["work_item", "gh-pr"], node: null });
-    expect(formatRoute(route!)).toBe("/graph?q=cuts&type=work_item&type=gh-pr");
+describe("openInGraphLink", () => {
+  it("carries the text and chosen types, and says so when projects or reviews only stay behind", () => {
+    const link = openInGraphLink(search({ q: "cuts", types: ["work_item", "gh-pr"], projects: ["p"], reviewsOnly: true }));
+    expect(link.route).toEqual({ view: "graph", q: "cuts", types: ["work_item", "gh-pr"], node: null });
+    expect(formatRoute(link.route)).toBe("/graph?q=cuts&type=work_item&type=gh-pr");
+    expect(link.label).toBe("Open in graph (text and types only)");
+    expect(openInGraphLink(search({ q: "cuts", reviewsOnly: true })).label).toBe("Open in graph (text and types only)");
+    expect(openInGraphLink(search({ q: "cuts", types: ["a"] })).label).toBe("Open in graph");
   });
 
-  it("is null with no text", () => {
-    expect(openInGraphRoute(search({ types: ["a"] }))).toBeNull();
+  it("opens the bare graph with no text", () => {
+    const link = openInGraphLink(search({ types: ["a"], projects: ["p"] }));
+    expect(formatRoute(link.route)).toBe("/graph");
+    expect(link.label).toBe("Open the graph");
+  });
+});
+
+describe("approximateSearchRoute", () => {
+  it("is the graph's search for the text alone, or null with no text", () => {
+    expect(formatRoute(approximateSearchRoute(search({ q: "cuts", types: ["a"], projects: ["p"] }))!)).toBe("/graph?q=cuts");
+    expect(approximateSearchRoute(search())).toBeNull();
+  });
+});
+
+describe("visibleFacetOptions", () => {
+  const options: FacetOption[] = Array.from({ length: 12 }, (_, i) => ({ value: `v${i}`, count: 12 - i, chosen: i === 10 }));
+
+  it("shows the first few plus any chosen option past them, in order", () => {
+    const shown = visibleFacetOptions(options, false).map((o) => o.value);
+    expect(shown).toEqual([...Array.from({ length: FACET_PREVIEW_COUNT }, (_, i) => `v${i}`), "v10"]);
+  });
+
+  it("shows every option when asked", () => {
+    expect(visibleFacetOptions(options, true)).toHaveLength(12);
+  });
+});
+
+describe("isNoSearchableTermsMessage", () => {
+  it("recognises the server's stopword-only refusal and nothing else", () => {
+    expect(isNoSearchableTermsMessage('query text "the" contains no searchable terms Provide at least one meaningful search term')).toBe(true);
+    expect(isNoSearchableTermsMessage("invalid list option limit (got 0): must be an integer")).toBe(false);
   });
 });
 

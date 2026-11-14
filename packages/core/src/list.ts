@@ -232,7 +232,7 @@ function validatePredicates(where: readonly MetadataPredicate[] | null | undefin
 /**
  * The `nodeTypes` / `sourceSystems` rule, shared: `null`/absent means
  * "all"; otherwise a non-empty array of at most `MAX_LIST_NAMES` non-empty
- * strings, copied. Throws `InvalidListOptionError` naming `option`.
+ * strings of at most `MAX_PREDICATE_STRING_LENGTH` characters, copied. Throws `InvalidListOptionError` naming `option`.
  * Exported for `getTimeline` (timeline.ts), whose narrowing is this one —
  * a second copy would drift from it.
  */
@@ -243,6 +243,10 @@ export function validateListNames(option: string, values: readonly string[] | nu
   }
   if (values.length > MAX_LIST_NAMES) {
     throw new InvalidListOptionError(option, values.length, `must contain at most ${MAX_LIST_NAMES} entries`);
+  }
+  const tooLong = values.findIndex((v) => v.length > MAX_PREDICATE_STRING_LENGTH);
+  if (tooLong !== -1) {
+    throw new InvalidListOptionError(`${option}[${tooLong}]`, values[tooLong]!.length, `must be at most ${MAX_PREDICATE_STRING_LENGTH} characters`);
   }
   return [...values];
 }

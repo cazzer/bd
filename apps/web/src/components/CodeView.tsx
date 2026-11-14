@@ -444,7 +444,7 @@ export function CodeView({ viewId, node }: { viewId: string | null; node: string
               </h2>
             )}
           </div>
-          <div className="flex shrink-0 flex-wrap items-center justify-end gap-3">
+          <div className="flex min-w-0 flex-wrap items-center justify-end gap-3">
             <a href={formatRoute(graphRoute)} onClick={handleGraphLink(graphRoute)} className="shrink-0 rounded text-sm text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-accent">
               {graphRoute.node === null ? "Open the graph" : "Open in graph"}
             </a>

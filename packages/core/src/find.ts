@@ -36,12 +36,15 @@
 // is no text): O(store), bounded by the pool's statement timeout. Each facet
 // list is capped at `MAX_FACET_VALUES`, chosen values first, then count
 // desc, then value, so a chosen value is never pushed off the list. A chosen
-// value with no matches is absent; the caller back-fills it at zero.
+// value with no matches is absent; the caller back-fills it at zero. Only a
+// string `project` counts as one, and the project facet lists only values
+// of at most `MAX_PREDICATE_STRING_LENGTH` characters — the longest a
+// caller could send back as a chosen project.
 
 import { sql, type SQL } from "drizzle-orm";
 import type { Database } from "@breakdown/db";
 import { EmptyQueryError, InvalidListOptionError, LookupFailedError } from "./errors.js";
-import { validateListNames } from "./list.js";
+import { MAX_PREDICATE_STRING_LENGTH, validateListNames } from "./list.js";
 import { DEFAULT_MIN_RELEVANCE } from "./retrieval.js";
 import { REVIEW_LABEL } from "./reviews.js";
 import { asPgError, formatPgInfo, sqlArray } from "./sql-helpers.js";
@@ -152,10 +155,10 @@ export function buildFindNodesQuery(params: BuildFindNodesQueryParams): SQL {
 
   const tsq = hasText ? sql`SELECT websearch_to_tsquery('english', ${params.text}) AS q` : sql`SELECT NULL::tsquery AS q`;
   const relevance = hasText ? sql`ts_rank_cd(n.search, t.q)::double precision` : sql`0::double precision`;
-  const textMatch = hasText
-    ? sql`WHERE n.search @@ t.q
-    AND ts_rank_cd(n.search, t.q) >= ${DEFAULT_MIN_RELEVANCE}::double precision`
-    : sql``;
+  const textMatch = hasText ? sql`WHERE n.search @@ t.q` : sql``;
+  // The relevance floor is applied to the computed column, so each matched
+  // row is ranked once.
+  const relevanceFloor = hasText ? sql`WHERE relevance >= ${DEFAULT_MIN_RELEVANCE}::double precision` : sql``;
   // Copied verbatim from retrieval.ts: the client's snippet parser depends
   // on the `[[`/`]]` markers.
   const snippet = hasText
@@ -171,16 +174,23 @@ tsq AS (
 ),
 
 -- The text match alone: never narrowed by type, project, or review here,
--- because every facet is counted over this set.
-base AS (
+-- because every facet is counted over this set. A project that is not a
+-- JSON string reads as none, so it can neither match a chosen project nor
+-- appear as a facet value.
+matched AS (
   SELECT n.id, n.node_type, n.source_system, n.external_id, n.title, n.updated_at,
-         n.metadata->>'project'   AS project,
+         CASE WHEN jsonb_typeof(n.metadata->'project') = 'string' THEN n.metadata->>'project' END AS project,
          n.metadata->>'status'    AS status,
          n.metadata->>'closed_at' AS closed_at,
          (n.metadata @> ${reviewContainment}::jsonb) AS is_review,
          ${relevance} AS relevance
   FROM resolved_nodes n CROSS JOIN tsq t
   ${textMatch}
+),
+
+base AS (
+  SELECT * FROM matched
+  ${relevanceFloor}
 ),
 
 flagged AS (
@@ -198,10 +208,16 @@ page AS (
   OFFSET ${params.offset}::int LIMIT ${params.limit + 1}::int
 ),
 
--- Snippets for page rows only: highlighting re-parses the whole document.
+-- Snippets for the rows returned only, never the probe row past the limit:
+-- highlighting re-parses the whole document.
+numbered AS (
+  SELECT p.*, row_number() OVER (ORDER BY relevance DESC, updated_at DESC, id DESC) AS page_ord
+  FROM page p
+),
+
 page_rows AS (
-  SELECT p.*, ${snippet} AS snippet
-  FROM page p JOIN resolved_nodes r ON r.id = p.id CROSS JOIN tsq t
+  SELECT p.*, CASE WHEN p.page_ord <= ${params.limit}::int THEN ${snippet} END AS snippet
+  FROM numbered p JOIN resolved_nodes r ON r.id = p.id CROSS JOIN tsq t
 ),
 
 totals AS (
@@ -224,7 +240,7 @@ project_facets AS (
   SELECT project AS value, count(*)::int AS count,
          row_number() OVER (ORDER BY (project = ANY(${chosenProjects})) DESC, count(*) DESC, project) AS ord
   FROM flagged
-  WHERE type_ok AND review_ok AND project IS NOT NULL
+  WHERE type_ok AND review_ok AND project IS NOT NULL AND length(project) <= ${MAX_PREDICATE_STRING_LENGTH}::int
   GROUP BY project
   ORDER BY ord
   LIMIT ${MAX_FACET_VALUES}::int

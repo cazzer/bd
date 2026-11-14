@@ -390,7 +390,7 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
             })}
           </div>
         )}
-        <div className="ml-auto flex items-center gap-3 text-xs text-fg-muted">
+        <div className="ml-auto flex flex-wrap items-center justify-end gap-3 text-xs text-fg-muted">
           <HeaderSearch />
           <ReviewQueuePill />
           {view && (

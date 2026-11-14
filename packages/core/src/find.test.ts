@@ -6,7 +6,7 @@ import { ingestRuns, nodes } from "@breakdown/db";
 import { EmptyQueryError, InvalidListOptionError } from "./errors.js";
 import { buildFindNodesQuery, findNodes, MAX_FIND_LIMIT, MAX_FIND_OFFSET, MAX_FIND_TEXT_LENGTH, type FindNodesOptions, type FoundNode } from "./find.js";
 import { openIngestRun, type IngestRunHandle } from "./ingest-runs.js";
-import { MAX_LIST_NAMES } from "./list.js";
+import { MAX_LIST_NAMES, MAX_PREDICATE_STRING_LENGTH } from "./list.js";
 import { mergeNodes } from "./merge.js";
 import { upsertNodes, type NodeInput } from "./nodes.js";
 import { connectTestDb, type TestPool, uniqueSuffix } from "./test-helpers.js";
@@ -30,6 +30,9 @@ const TIE = word();
 const MERGED_ONLY = word();
 const SHARED = word();
 const PAGE = word();
+const ODD = word();
+const R = `find-r-${SUFFIX}`;
+const LONG_PROJECT = `find-long-${SUFFIX}-${"l".repeat(MAX_PREDICATE_STRING_LENGTH)}`;
 
 let pool: TestPool;
 let db: Database;
@@ -65,6 +68,10 @@ beforeAll(async () => {
     { key: "tie-new", nodeType: TA, title: `${TIE} same`, content: "same", metadata: {} },
     { key: "merged-x", nodeType: TA, title: `${MERGED_ONLY} ${SHARED}`, content: "loser", metadata: {} },
     { key: "merged-y", nodeType: TA, title: `${SHARED}`, content: "survivor", metadata: {} },
+    // Malformed projects: a number, and a string longer than any caller may send back.
+    { key: "odd-num", nodeType: TB, title: `${ODD} number`, content: "numeric project", metadata: { project: 5 } },
+    { key: "odd-long", nodeType: TB, title: `${ODD} long`, content: "over-long project", metadata: { project: LONG_PROJECT } },
+    { key: "odd-ok", nodeType: TB, title: `${ODD} ok`, content: "ordinary project", metadata: { project: R } },
   ];
   for (const f of main) await write([f]);
   // One batch: identical text and one shared updated_at, so only id breaks the tie.
@@ -224,6 +231,14 @@ describe("findNodes", () => {
     expect(blank.total).toBe(5);
   });
 
+  it("reads a non-string project as none and leaves an over-long one out of the project facet", async () => {
+    const result = await findNodes(db, { text: ODD });
+    expect(result.nodes.find((n) => n.externalId === "odd-num")?.project).toBeNull();
+    expect(result.nodes.find((n) => n.externalId === "odd-long")?.project).toBe(LONG_PROJECT);
+    expect(result.facets.projects).toEqual([{ value: R, count: 1 }]);
+    expect((await findNodes(db, { text: ODD, projects: ["5"] })).total).toBe(0);
+  });
+
   it("rejects malformed options before any SQL runs", async () => {
     let executed = 0;
     const spy = { execute: async () => { executed += 1; return { rows: [] }; } } as unknown as Database;
@@ -240,6 +255,8 @@ describe("findNodes", () => {
       { nodeTypes: names(MAX_LIST_NAMES + 1) },
       { nodeTypes: [""] },
       { projects: names(MAX_LIST_NAMES + 1) },
+      { nodeTypes: ["x".repeat(MAX_PREDICATE_STRING_LENGTH + 1)] },
+      { projects: ["ok", "x".repeat(MAX_PREDICATE_STRING_LENGTH + 1)] },
       { reviewsOnly: "yes" as unknown as boolean },
     ];
     for (const options of cases) {

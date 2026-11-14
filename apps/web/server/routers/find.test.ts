@@ -15,6 +15,7 @@ import { eq, inArray } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Context } from "../context.js";
 import { appRouter } from "../router.js";
+import { nextFindOffset } from "./read.js";
 import { createCallerFactory } from "../trpc.js";
 
 const SUFFIX = randomUUID().replace(/-/g, "");
@@ -143,10 +144,28 @@ describe("find (local-web-api spec, 'Finding nodes serves the search results vie
       ["offset", { offset: 5001 }],
       ["projects", { projects: [] }],
       ["text", { text: "x".repeat(501) }],
+      ["nodeTypes", { nodeTypes: ["x".repeat(501)] }],
+      ["projects", { projects: ["ok", "x".repeat(501)] }],
     ];
     for (const [field, input] of cases) {
       await expect(bad.find(input)).rejects.toMatchObject({ code: "BAD_REQUEST", message: expect.stringContaining(field) });
     }
+    const listCases: Array<[string, Parameters<typeof bad.list>[0]]> = [
+      ["nodeTypes", { nodeTypes: ["x".repeat(501)] }],
+      ["sourceSystems", { sourceSystems: ["x".repeat(501)] }],
+    ];
+    for (const [field, input] of listCases) {
+      await expect(bad.list(input)).rejects.toMatchObject({ code: "BAD_REQUEST", message: expect.stringContaining(field) });
+    }
+  });
+
+  it("reports capped instead of a next offset past MAX_FIND_OFFSET", async () => {
+    expect(nextFindOffset(0, 50, false)).toEqual({ nextOffset: null, capped: false });
+    expect(nextFindOffset(0, 50, true)).toEqual({ nextOffset: 50, capped: false });
+    expect(nextFindOffset(4950, 50, true)).toEqual({ nextOffset: 5000, capped: false });
+    expect(nextFindOffset(4960, 50, true)).toEqual({ nextOffset: null, capped: true });
+    const page = await caller().find({ projects: [P] });
+    expect(page.capped).toBe(false);
   });
 
   it("serves when the server is read-only", async () => {

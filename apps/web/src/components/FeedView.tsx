@@ -204,7 +204,7 @@ export function FeedView({ viewId }: { viewId: string | null }) {
               </p>
             )}
           </div>
-          <div className="flex shrink-0 flex-wrap items-center justify-end gap-3">
+          <div className="flex min-w-0 flex-wrap items-center justify-end gap-3">
             <a
               href={formatRoute(GRAPH_HOME)}
               onClick={handleOpenGraph}

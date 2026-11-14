@@ -50,7 +50,7 @@ export interface SearchBarProps {
 function statusLine(status: SearchBarStatus): { text: string; tone: "muted" | "error" } {
   switch (status.kind) {
     case "idle":
-      return { text: "Search to see the graph.", tone: "muted" };
+      return { text: "Search to list matches; open any in the graph.", tone: "muted" };
     case "loading":
       return { text: "Searching…", tone: "muted" };
     case "error":

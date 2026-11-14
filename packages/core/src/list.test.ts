@@ -184,11 +184,22 @@ describe("listNodes", () => {
       { cursor: { updatedAt: "yesterday", id: "nope" } },
       { updatedSince: "not a date" },
       { nodeTypes: [] },
+      { nodeTypes: ["work_item", "x".repeat(MAX_PREDICATE_STRING_LENGTH + 1)] },
+      { sourceSystems: ["x".repeat(MAX_PREDICATE_STRING_LENGTH + 1)] },
     ];
     for (const options of cases) {
       await expect(listNodes(spy, options)).rejects.toBeInstanceOf(InvalidListOptionError);
     }
     expect(executed).toBe(0);
+  });
+
+  it("names the over-long entry of a name list", async () => {
+    const spy = { execute: async () => ({ rows: [] }) } as unknown as Database;
+    await expect(listNodes(spy, { nodeTypes: ["work_item", "x".repeat(MAX_PREDICATE_STRING_LENGTH + 1)] })).rejects.toMatchObject({
+      option: "nodeTypes[1]",
+      value: MAX_PREDICATE_STRING_LENGTH + 1,
+    });
+    await expect(listNodes(spy, { nodeTypes: ["x".repeat(MAX_PREDICATE_STRING_LENGTH)] })).resolves.toBeDefined();
   });
 
   it("buildListNodesQuery is pure and binds every value as a parameter", () => {

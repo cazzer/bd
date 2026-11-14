@@ -359,9 +359,14 @@ const predicateSchema = z.union([
   z.object({ key: predicateKeySchema, op: z.literal("contains"), value: scalarSchema }),
 ]);
 
+/** A `list`/`find` name filter: 1–`MAX_LIST_NAMES` names, each non-empty and at most `MAX_PREDICATE_STRING_LENGTH` characters (core's `validateListNames` rule). */
+function listNamesSchema() {
+  return z.array(z.string().min(1).max(MAX_PREDICATE_STRING_LENGTH)).min(1).max(MAX_LIST_NAMES);
+}
+
 export const listInputSchema = z.object({
-  nodeTypes: z.array(z.string().min(1)).min(1).max(MAX_LIST_NAMES).optional(),
-  sourceSystems: z.array(z.string().min(1)).min(1).max(MAX_LIST_NAMES).optional(),
+  nodeTypes: listNamesSchema().optional(),
+  sourceSystems: listNamesSchema().optional(),
   /** ISO-8601 instant; only nodes updated at or after this are listed. */
   updatedSince: z.string().datetime({ offset: true }).optional(),
   where: z.array(predicateSchema).max(MAX_LIST_PREDICATES).optional(),
@@ -417,14 +422,26 @@ const listProcedure = publicProcedure.input(listInputSchema).query(async ({ ctx,
 // the facet counts in one statement. Rows are summary fields only (core
 // never selects content or full metadata), so review comments and card
 // metadata never travel. The budget pass drops from the tail, so the next
-// page starts at `offset + rows kept`, never `offset + limit`. Public and
-// read-only, so it serves under BRAIN_READ_ONLY too.
+// page starts at `offset + rows kept`, never `offset + limit` — unless that
+// is past `MAX_FIND_OFFSET`, which no request may ask for: then
+// `nextOffset` is null and `capped` says the rest is out of reach until the
+// filters narrow. Public and read-only, so it serves under BRAIN_READ_ONLY
+// too.
+
+/** Where the next page starts, or `null` with `capped` when there is more but its offset would exceed `MAX_FIND_OFFSET`. */
+export function nextFindOffset(offset: number, kept: number, hasMore: boolean): { nextOffset: number | null; capped: boolean } {
+  if (!hasMore) {
+    return { nextOffset: null, capped: false };
+  }
+  const next = offset + kept;
+  return next > MAX_FIND_OFFSET ? { nextOffset: null, capped: true } : { nextOffset: next, capped: false };
+}
 
 export const findInputSchema = z.object({
   /** Trimmed; empty means no text. */
   text: z.string().trim().max(MAX_FIND_TEXT_LENGTH).optional(),
-  nodeTypes: z.array(z.string().min(1)).min(1).max(MAX_LIST_NAMES).optional(),
-  projects: z.array(z.string().min(1)).min(1).max(MAX_LIST_NAMES).optional(),
+  nodeTypes: listNamesSchema().optional(),
+  projects: listNamesSchema().optional(),
   reviewsOnly: z.boolean().optional(),
   limit: z.number().int().positive().max(MAX_FIND_LIMIT).optional(),
   offset: z.number().int().min(0).max(MAX_FIND_OFFSET).optional(),
@@ -451,10 +468,12 @@ const findProcedure = publicProcedure.input(findInputSchema).query(async ({ ctx,
     (n) => n.id,
     (kept, meta) => {
       const hasMore = result.hasMore || meta.droppedIds.length > 0;
+      const { nextOffset, capped } = nextFindOffset(offset, kept.length, hasMore);
       return {
         nodes: kept,
         hasMore,
-        nextOffset: hasMore ? offset + kept.length : null,
+        nextOffset,
+        capped,
         total: result.total,
         facets: result.facets,
         defaultsUsed: { limit: input.limit ?? DEFAULT_FIND_LIMIT },

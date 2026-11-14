@@ -307,7 +307,7 @@ export function InboxView({ item: selectedKey, source }: { item: string | null; 
             ))}
           </nav>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center justify-end gap-3">
           <p className="hidden text-xs text-fg-muted lg:block">
             <kbd className="rounded border border-hairline px-1">j</kbd>/<kbd className="rounded border border-hairline px-1">k</kbd> move ·{" "}
             <kbd className="rounded border border-hairline px-1">a</kbd> accept · <kbd className="rounded border border-hairline px-1">c</kbd> message ·{" "}

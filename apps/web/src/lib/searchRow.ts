@@ -6,9 +6,10 @@
 // pin it without a browser. The only import from the client is its types.
 //
 // A result opens where it is best read (search-results/spec.md): a review
-// with a project opens its board drawer in that project, which loads the
-// item through `boardItem` whether or not its card made the closed
-// column; anything else opens the graph with the node selected.
+// work item with a project opens its board drawer in that project, which
+// loads the item through `boardItem` whether or not its card made the
+// closed column; anything else — a GitHub issue labelled `review` included,
+// which the board cannot show — opens the graph with the node selected.
 
 import type { trpc } from "../trpc.js";
 import type { GraphRoute, Route, SearchRoute } from "./route.js";
@@ -57,20 +58,34 @@ export function findInputFor(route: SearchRoute, offset: number, limit: number):
   };
 }
 
-/** Where activating a result goes: a review with a project to its board drawer (keyed by its external id, the bead id), anything else to the graph with it selected. */
-export function resultRoute(row: Pick<FoundRow, "id" | "externalId" | "project" | "isReview">): Route {
-  if (row.isReview && row.project !== null) {
+/** Where activating a result goes: a review work item with a project to its board drawer (keyed by its external id, the bead id), anything else to the graph with it selected. */
+export function resultRoute(row: Pick<FoundRow, "id" | "nodeType" | "externalId" | "project" | "isReview">): Route {
+  if (row.isReview && row.project !== null && row.nodeType === "work_item") {
     return { view: "board", viewId: null, projects: [row.project], item: row.externalId };
   }
   return { view: "graph", q: null, types: [], node: row.id };
 }
 
-/** The graph drawing the current text's matches with the chosen types, or `null` when there is no text — the graph draws only from a query, so the link is hidden. */
-export function openInGraphRoute(route: SearchRoute): GraphRoute | null {
+/** The bare graph — no search, nothing selected. */
+export const GRAPH_HOME: GraphRoute = { view: "graph", q: null, types: [], node: null };
+
+/**
+ * The header's graph link: the graph drawing the current text's matches
+ * with the chosen types, labelled to say the project and reviews-only
+ * filters do not travel (the graph has neither); with no text, the bare
+ * graph, since the graph draws only from a query.
+ */
+export function openInGraphLink(route: SearchRoute): { route: GraphRoute; label: string } {
   if (route.q === null) {
-    return null;
+    return { route: GRAPH_HOME, label: "Open the graph" };
   }
-  return { view: "graph", q: route.q, types: route.types, node: null };
+  const dropsFilters = route.projects.length > 0 || route.reviewsOnly;
+  return { route: { view: "graph", q: route.q, types: route.types, node: null }, label: dropsFilters ? "Open in graph (text and types only)" : "Open in graph" };
+}
+
+/** The graph's own search for the text alone, whose approximate fallback may find what exact matching did not; `null` with no text. */
+export function approximateSearchRoute(route: SearchRoute): GraphRoute | null {
+  return route.q === null ? null : { view: "graph", q: route.q, types: [], node: null };
 }
 
 function toggled(values: readonly string[], value: string): string[] {
@@ -106,6 +121,27 @@ export function facetOptions(counts: readonly FacetCount[], chosen: readonly str
     }
   }
   return options;
+}
+
+/** Options shown per facet group before "Show all". */
+export const FACET_PREVIEW_COUNT = 8;
+
+/** The options a facet group shows: every one when `showAll`, else the first `FACET_PREVIEW_COUNT` plus any chosen option past them, order kept. */
+export function visibleFacetOptions(options: readonly FacetOption[], showAll: boolean): FacetOption[] {
+  if (showAll) {
+    return [...options];
+  }
+  return options.filter((option, index) => index < FACET_PREVIEW_COUNT || option.chosen);
+}
+
+/**
+ * Whether a `find` failure is the server refusing text with no searchable
+ * terms (core's `EmptyQueryError`, stopwords only). The server sends no
+ * structured kind for it, so this matches the message core builds; a miss
+ * only means the failure shows as an ordinary error.
+ */
+export function isNoSearchableTermsMessage(message: string): boolean {
+  return message.includes("contains no searchable terms");
 }
 
 /** The status line for a row: `closed YYYY-MM-DD` when `closedAt` is a readable time, else its status, else `null`. */
