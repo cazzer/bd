@@ -1,10 +1,10 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDb, createPool, type Database } from "./client.js";
 import { resolveDatabaseUrl } from "./env.js";
-import { edges, ingestRuns, nodeRevisions, nodes, resolvedNodes } from "./schema.js";
+import { clientTokens, edges, ingestRuns, nodeRevisions, nodes, resolvedNodes } from "./schema.js";
 
 /**
  * Integration tests against the real Postgres instance (no mocking) —
@@ -800,6 +800,95 @@ describe("edges.blocks trigger: cycles that already exist through a merge", () =
     } finally {
       await db.delete(nodes).where(inArray(nodes.id, [b, c]));
       await db.delete(nodes).where(eq(nodes.id, a));
+    }
+  });
+});
+
+describe("client_tokens", () => {
+  /** Runs `fn` and returns the driver error it threw (drizzle wraps it as `.cause`). */
+  async function pgErrorOf(fn: () => Promise<unknown>): Promise<{ code?: string; constraint?: string }> {
+    try {
+      await fn();
+    } catch (err) {
+      return ((err as { cause?: unknown }).cause ?? err) as { code?: string; constraint?: string };
+    }
+    throw new Error("expected the statement to be refused");
+  }
+
+  function clientName(): string {
+    return `schema-test-${randomUUID()}`;
+  }
+
+  it("refuses a second live token for the same client", async () => {
+    const client = clientName();
+    try {
+      await db.insert(clientTokens).values({ client, tokenHash: randomBytes(32), scope: "human" });
+      const refused = await pgErrorOf(() => db.insert(clientTokens).values({ client, tokenHash: randomBytes(32), scope: "human" }));
+      expect(refused.code).toBe("23505");
+      expect(refused.constraint).toBe("client_tokens_live_client_idx");
+    } finally {
+      await db.delete(clientTokens).where(eq(clientTokens.client, client));
+    }
+  });
+
+  it("re-issues a client after its token is revoked, keeping the revoked row", async () => {
+    const client = clientName();
+    try {
+      await db.insert(clientTokens).values({ client, tokenHash: randomBytes(32), scope: "human" });
+      await db.update(clientTokens).set({ revokedAt: sql`now()` }).where(eq(clientTokens.client, client));
+      await db.insert(clientTokens).values({ client, tokenHash: randomBytes(32), scope: "human" });
+      const rows = await db.select().from(clientTokens).where(eq(clientTokens.client, client));
+      expect(rows).toHaveLength(2);
+      expect(rows.filter((r) => r.revokedAt === null)).toHaveLength(1);
+    } finally {
+      await db.delete(clientTokens).where(eq(clientTokens.client, client));
+    }
+  });
+
+  it("requires a scope of human or agent, with no default", async () => {
+    const client = clientName();
+    try {
+      const missing = await pgErrorOf(() => db.execute(sql`INSERT INTO client_tokens (client, token_hash) VALUES (${client}, ${randomBytes(32)})`));
+      expect(missing.code).toBe("23502");
+      const unknown = await pgErrorOf(() => db.execute(sql`INSERT INTO client_tokens (client, token_hash, scope) VALUES (${client}, ${randomBytes(32)}, 'admin')`));
+      expect(unknown.code).toBe("23514");
+      expect(unknown.constraint).toBe("client_tokens_scope_check");
+      await db.insert(clientTokens).values({ client, tokenHash: randomBytes(32), scope: "agent" });
+      const [row] = await db.select({ scope: clientTokens.scope }).from(clientTokens).where(eq(clientTokens.client, client));
+      expect(row?.scope).toBe("agent");
+    } finally {
+      await db.delete(clientTokens).where(eq(clientTokens.client, client));
+    }
+  });
+
+  it("refuses a duplicate token_hash, even across clients", async () => {
+    const a = clientName();
+    const b = clientName();
+    const hash = randomBytes(32);
+    try {
+      await db.insert(clientTokens).values({ client: a, tokenHash: hash, scope: "human" });
+      const refused = await pgErrorOf(() => db.insert(clientTokens).values({ client: b, tokenHash: hash, scope: "human" }));
+      expect(refused.code).toBe("23505");
+      expect(refused.constraint).toBe("client_tokens_token_hash_unique");
+    } finally {
+      await db.delete(clientTokens).where(inArray(clientTokens.client, [a, b]));
+    }
+  });
+
+  it("defaults id and created_at, and leaves last_used_at and revoked_at null", async () => {
+    const client = clientName();
+    const hash = randomBytes(32);
+    try {
+      const [row] = await db.insert(clientTokens).values({ client, tokenHash: hash, scope: "human" }).returning();
+      if (!row) throw new Error("insert returned no row");
+      expect(row.id).toMatch(/^[0-9a-f-]{36}$/);
+      expect(row.createdAt).toBeInstanceOf(Date);
+      expect(Math.abs(row.createdAt.getTime() - Date.now())).toBeLessThan(60_000);
+      expect(row.lastUsedAt).toBeNull();
+      expect(row.revokedAt).toBeNull();
+      expect(Buffer.compare(row.tokenHash, hash)).toBe(0);
+    } finally {
+      await db.delete(clientTokens).where(eq(clientTokens.client, client));
     }
   });
 });

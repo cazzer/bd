@@ -1,14 +1,15 @@
 // HTTP entrypoint (design.md decision 1): flags (http-config.ts), the
 // shared fail-fast startup (bootstrap.ts), then the brain_* tools over
 // Streamable HTTP (http-server.ts). Started by `pnpm mcp:serve` or, under a
-// supervisor, `tsx apps/mcp/src/http.ts --port <n> --host <addr>`.
+// supervisor, `tsx apps/mcp/src/http.ts --port <n> --host <addr>
+// [--allow-host <name>]...`.
 //
 // Flags are parsed before bootstrap, so a bad flag exits without touching
 // the database. Everything is logged to stderr, as in stdio mode. Nothing
 // above main() reads the environment or opens a connection.
 
 import { bootstrap } from "./bootstrap.js";
-import { parseHttpArgs, type HttpConfig } from "./http-config.js";
+import { bindWarning, parseHttpArgs, type HttpConfig } from "./http-config.js";
 import { startHttpServer, type RunningHttpServer } from "./http-server.js";
 
 /** Covers close() (at most SHUTDOWN_GRACE_MS plus a flush) and pool.end(). */
@@ -31,7 +32,7 @@ async function main(): Promise<void> {
 
   let running: RunningHttpServer;
   try {
-    running = await startHttpServer({ db, pool, readOnly, target, port: config.port, host: config.host });
+    running = await startHttpServer({ db, pool, readOnly, target, port: config.port, host: config.host, allowedHosts: config.allowedHosts });
   } catch (err) {
     await pool.end().catch(() => {});
     if ((err as NodeJS.ErrnoException).code === "EADDRINUSE") {
@@ -68,6 +69,8 @@ async function main(): Promise<void> {
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
 
+  const warning = bindWarning(config);
+  if (warning) console.error(`[breakdown-brain] warning: ${warning}`);
   console.error(`[breakdown-brain] ready on ${running.url}${readOnly ? " (read-only)" : ""} — database ${target}`);
 }
 

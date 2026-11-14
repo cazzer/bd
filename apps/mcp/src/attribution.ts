@@ -2,11 +2,12 @@
 // tool for duplicates the agent notices"): every write made through this
 // server is attributed to an ingest run with source_system = "agent" and
 // the connected client — as it introduced itself in its initialize
-// handshake — as actor, so agent-authored content is separable from
-// content loaded any other way, one client's writes are separable from
-// another's, and a bad session's writes are identifiable/revertible as a
-// unit via that run's id. No configuration is involved in recording the
-// actor (see ToolContext.actor).
+// handshake, prefixed by the client token's name when an HTTP session was
+// opened with one ("<client> via <name> <version>") — as actor, so
+// agent-authored content is separable from content loaded any other way,
+// one client's writes are separable from another's, and a bad session's
+// writes are identifiable/revertible as a unit via that run's id. No
+// configuration is involved in recording the actor (see ToolContext.actor).
 
 import { closeIngestRun, openIngestRun, type IngestRunHandle } from "@breakdown/core";
 import type { Database } from "@breakdown/db";

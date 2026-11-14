@@ -1,6 +1,7 @@
 // The real HTTP entrypoint (src/http.ts) spawned as a child process
-// (brain-mcp spec, "HTTP mode is local only" → "Non-loopback bind
-// requested"; "Fail fast on misconfiguration" → "Port already in use").
+// (brain-mcp spec, "Fail fast on misconfiguration" → "Port already in
+// use"). No test here binds off loopback: a 0.0.0.0 listener raises the
+// macOS firewall prompt.
 // http-server.test.ts drives the server itself in-process.
 //
 // A child still running when a test ends gets SIGTERM, never SIGKILL: tsx
@@ -61,11 +62,11 @@ async function holdPort(): Promise<number> {
 }
 
 describe("http entrypoint", () => {
-  it("exits before listening when --host is not loopback", async () => {
-    const { exited } = spawnHttp(["--host", "0.0.0.0"]);
+  it("exits naming the value for a malformed --allow-host, before listening", async () => {
+    const { exited } = spawnHttp(["--port", "0", "--allow-host", "breakdown.tail.example:80"]);
     const { code, stderr } = await exited;
     expect(code).toBe(1);
-    expect(stderr).toContain("network exposure is not supported");
+    expect(stderr).toContain('cannot start: --allow-host: invalid allowed host "breakdown.tail.example:80"');
     expect(stderr).not.toContain("ready on");
   }, 30_000);
 

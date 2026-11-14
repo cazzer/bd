@@ -619,3 +619,30 @@ export class NotAnInboxItemError extends KnowledgeStoreError {
     super(`node ${nodeId} is not an inbox item: its node_type is ${JSON.stringify(nodeType)}, not "inbox_item"`);
   }
 }
+
+// --- Client tokens -----------------------------------------------------
+
+/** A client name is not a short identifier (client-tokens.ts, `CLIENT_NAME_PATTERN`). */
+export class InvalidClientNameError extends KnowledgeStoreError {
+  constructor(readonly client: string) {
+    super(
+      `invalid client name ${JSON.stringify(client)}: it must start with a letter or digit and hold at most 64 letters, digits, ".", "_", or "-"`,
+    );
+  }
+}
+
+/** A token was asked for a client that already holds a live one. */
+export class ClientTokenExistsError extends KnowledgeStoreError {
+  constructor(readonly client: string) {
+    super(
+      `client ${JSON.stringify(client)} already has a live token; revoke it first with \`pnpm -s client-token revoke ${client}\``,
+    );
+  }
+}
+
+/** A revoke named a client with no live token. */
+export class ClientTokenNotFoundError extends KnowledgeStoreError {
+  constructor(readonly client: string) {
+    super(`client ${JSON.stringify(client)} has no live token`);
+  }
+}

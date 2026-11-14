@@ -16,6 +16,7 @@
     "ingest:github": "pnpm --filter @breakdown/core ingest:github",
     "ingest:beads": "INGEST_BEADS_CWD=\"$INIT_CWD\" pnpm --filter @breakdown/core ingest:beads",
     "ingest:repo": "INGEST_REPO_CWD=\"$INIT_CWD\" pnpm --filter @breakdown/core ingest:repo",
+    "client-token": "pnpm -s --filter @breakdown/core client-token",
     "mcp:serve": "pnpm --filter @breakdown/mcp serve",
     "mcp:service": "node bin/mcp-service.mjs",
     "typecheck": "pnpm -r run typecheck",

@@ -39,6 +39,9 @@ export {
   InboxCardChangedError,
   InvalidViewError,
   InvalidEventTimeError,
+  InvalidClientNameError,
+  ClientTokenExistsError,
+  ClientTokenNotFoundError,
 } from "./errors.js";
 
 // `asPgError`/`PgErrorLike` are re-exported (not just used internally) so
@@ -188,6 +191,7 @@ export {
   type RetractEdgeResult,
   type ReweightEdgeInput,
   type ReweightEdgeResult,
+  type HumanWriteOptions,
 } from "./human-writes.js";
 
 // Pure helpers for the repo-markdown seed script (bd-vt2.6, task 6.1) —
@@ -592,6 +596,7 @@ export {
   type InboxList,
   type ListInboxOptions,
   type DecideInboxItemInput,
+  type InboxWriteOptions,
   type DecideInboxItemResult,
 } from "./inbox.js";
 
@@ -602,3 +607,32 @@ export {
   type WorkDecision,
   type WorkSignal,
 } from "./work-context.js";
+
+export {
+  createClientToken,
+  listClientTokens,
+  revokeClientToken,
+  verifyClientToken,
+  isClientTokenScope,
+  CLIENT_TOKEN_PREFIX,
+  CLIENT_NAME_PATTERN,
+  type CreatedClientToken,
+  type ClientTokenListing,
+  type VerifiedClientToken,
+} from "./client-tokens.js";
+export type { ClientTokenScope } from "@breakdown/db";
+
+export {
+  admitRequest,
+  credentialFrom,
+  forwardedAddressesFrom,
+  isLoopbackAddress,
+  normalizeAllowedHost,
+  LOOPBACK_HOST_NAMES,
+  TOKEN_COOKIE_NAME,
+  UNAUTHORIZED_HEADERS,
+  type PresentedCredential,
+  type AdmissionRequest,
+  type AdmissionPolicy,
+  type Admission,
+} from "./admission.js";

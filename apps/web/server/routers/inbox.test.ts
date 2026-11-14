@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { requestInboxItem } from "@breakdown/core";
-import { createDb, createPool, nodes, resolveDatabaseUrl, type Database } from "@breakdown/db";
+import { createDb, createPool, ingestRuns, nodes, resolveDatabaseUrl, type Database } from "@breakdown/db";
 import { TRPCError } from "@trpc/server";
-import { and, eq, like } from "drizzle-orm";
+import { and, eq, inArray, like } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { appRouter } from "../router.js";
 import { createCallerFactory } from "../trpc.js";
@@ -56,6 +56,49 @@ describe("inboxRelease", () => {
     expect((await caller().inbox({ statuses: ["undigested"] })).items.some((i) => i.id === id)).toBe(true);
     await expect(caller(true).inboxRelease({ id })).rejects.toThrow(/read-only/);
     expect(await caller().inboxRelease({ id })).toMatchObject({ before: "undigested", after: "pending" });
+  });
+
+  it("records the context's client as the release's actor", async () => {
+    const { id } = await requestInboxItem(db, { externalId: `${KEY}-held-phone`, title: "PR", content: "x", metadata: { source: "github", url: "https://github.com/a/b/pull/2" } });
+    expect(await createCallerFactory(appRouter)({ db, client: "phone" }).inboxRelease({ id })).toMatchObject({ after: "pending" });
+    // The procedure returns no run id; the released row names the run that wrote it.
+    const [run] = await db
+      .select({ actor: ingestRuns.actor, sourceSystem: ingestRuns.sourceSystem })
+      .from(nodes)
+      .innerJoin(ingestRuns, eq(ingestRuns.id, nodes.ingestRunId))
+      .where(eq(nodes.id, id));
+    expect(run).toEqual({ actor: "phone", sourceSystem: "human" });
+  });
+});
+
+// tailnet-hosting decision 4: the admitted token client is the run's
+// actor; without one, decisions stay `human` and request/complete keep
+// core's own default.
+describe("the actor an inbox write records", () => {
+  async function actorsOf(ids: string[]): Promise<Map<string, { actor: string | null; sourceSystem: string }>> {
+    const rows = await db.select({ id: ingestRuns.id, actor: ingestRuns.actor, sourceSystem: ingestRuns.sourceSystem }).from(ingestRuns).where(inArray(ingestRuns.id, ids));
+    return new Map(rows.map((r) => [r.id, { actor: r.actor, sourceSystem: r.sourceSystem }]));
+  }
+
+  it("is the context's client on a decision, a request, and a completion", async () => {
+    const phone = createCallerFactory(appRouter)({ db, client: "phone" });
+    const requested = await phone.inboxRequest({ key: `${KEY}-actor-phone`, title: "Ask", content: "draft", metadata: { source: "session" } });
+    const decided = await phone.inboxDecision({ id: requested.id, decision: "accept" });
+    const completed = await phone.inboxComplete({ id: requested.id, note: "sent" });
+    const actors = await actorsOf([requested.ingestRunId, decided.ingestRunId, completed.ingestRunId]);
+    expect(actors.get(requested.ingestRunId)).toEqual({ actor: "phone", sourceSystem: "agent" });
+    expect(actors.get(decided.ingestRunId)).toEqual({ actor: "phone", sourceSystem: "human" });
+    expect(actors.get(completed.ingestRunId)).toEqual({ actor: "phone", sourceSystem: "agent" });
+  });
+
+  it("keeps today's actors with no client", async () => {
+    const requested = await caller().inboxRequest({ key: `${KEY}-actor-local`, title: "Ask", content: "draft", metadata: { source: "session" } });
+    const decided = await caller().inboxDecision({ id: requested.id, decision: "accept" });
+    const completed = await caller().inboxComplete({ id: requested.id, note: "sent" });
+    const actors = await actorsOf([requested.ingestRunId, decided.ingestRunId, completed.ingestRunId]);
+    expect(actors.get(requested.ingestRunId)?.actor).toBe("inbox-cli");
+    expect(actors.get(decided.ingestRunId)).toEqual({ actor: "human", sourceSystem: "human" });
+    expect(actors.get(completed.ingestRunId)?.actor).toBe("inbox-cli");
   });
 });
 

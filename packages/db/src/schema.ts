@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import {
   type AnyPgColumn,
   check,
+  customType,
   index,
   integer,
   jsonb,
@@ -11,6 +12,7 @@ import {
   text,
   timestamp,
   unique,
+  uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
 
@@ -344,3 +346,54 @@ export const resolvedNodes = pgView("resolved_nodes", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
 }).existing();
+
+/** `bytea` as a Node `Buffer`; pg-core has no built-in builder for it. */
+const bytea = customType<{ data: Buffer; driverData: Buffer }>({
+  dataType() {
+    return "bytea";
+  },
+});
+
+/**
+ * `client_tokens` — per-client credentials for requests from off the local
+ * machine (tailnet-hosting, design decision 3). Only `sha256(token)` is
+ * stored; the token itself is printed once by the host-side CLI
+ * (packages/core/src/cli/token.ts) and never persisted. A slow hash is not
+ * needed: a token carries 256 bits of entropy.
+ *
+ * No tRPC procedure or MCP tool touches this table. Minting, listing, and
+ * revoking a credential is something only a command run on the host does,
+ * so no model can grant itself access.
+ *
+ * Revocation sets `revoked_at` rather than deleting, so the history stays;
+ * the partial unique index allows one live token per client while letting a
+ * revoked client be re-issued.
+ *
+ * `scope` says what a token may reach (design decision 9): `human` tokens
+ * (a phone, a laptop) are accepted by the web API and MCP, `agent` tokens
+ * (workers, a driver) by MCP only, so a worker cannot decide its own
+ * inbox request. It has no default: every token states its scope.
+ */
+export const CLIENT_TOKEN_SCOPES = ["human", "agent"] as const;
+export type ClientTokenScope = (typeof CLIENT_TOKEN_SCOPES)[number];
+
+export const clientTokens = pgTable(
+  "client_tokens",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    client: text("client").notNull(),
+    tokenHash: bytea("token_hash").notNull().unique(),
+    scope: text("scope").$type<ClientTokenScope>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  },
+  (table) => [
+    uniqueIndex("client_tokens_live_client_idx")
+      .on(table.client)
+      .where(sql`${table.revokedAt} IS NULL`),
+    check("client_tokens_scope_check", sql`${table.scope} IN ('human', 'agent')`),
+  ],
+);

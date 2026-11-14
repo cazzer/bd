@@ -1,8 +1,12 @@
 // The six write procedures (bd-hmd.3, tasks.md 3.4): createNote,
 // annotateNode, updateNodeContent, assertEdge, retractEdge, reweightEdge.
 // Thin handlers over packages/core/src/human-writes.ts, which already
-// attributes every write to an ingest run with source_system: "human" —
-// nothing here manages attribution itself. Every argument is untrusted
+// attributes every write to an ingest run with source_system: "human".
+// The one attribution this layer adds is the run's actor: the admitted
+// token client (`ctx.client`, set by the dispatcher, never from input),
+// passed as core's trailing option. On a read-only server
+// (BRAIN_READ_ONLY, `ctx.readOnly`) every procedure is refused before it
+// touches the database, as the inbox procedures are. Every argument is untrusted
 // input from the browser, validated by `.input(schema)` before the
 // resolver runs, and never interpolated as anything but a literal
 // value/parameter by the core functions these call (there is no SQL
@@ -20,9 +24,15 @@
 //     use `uuidField`.
 
 import { annotateNode, assertEdge, createNote, DEFAULT_MAX_METADATA_LENGTH, DEFAULT_MAX_TITLE_LENGTH, retractEdge, reweightEdge, updateNodeContent } from "@breakdown/core";
+import { TRPCError } from "@trpc/server";
 import { z } from "zod";
+import type { Context } from "../context.js";
 import { mapCoreError } from "../errors.js";
 import { publicProcedure, router } from "../trpc.js";
+
+function refuseIfReadOnly(ctx: Context): void {
+  if (ctx.readOnly) throw new TRPCError({ code: "FORBIDDEN", message: "The server is read-only (BRAIN_READ_ONLY)." });
+}
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const uuidField = z.string().regex(UUID_RE, "must be a valid uuid");
@@ -54,8 +64,9 @@ export const createNoteInputSchema = z.object({
 });
 
 const createNoteProcedure = publicProcedure.input(createNoteInputSchema).mutation(async ({ ctx, input }) => {
+  refuseIfReadOnly(ctx);
   try {
-    return await createNote(ctx.db, input);
+    return await createNote(ctx.db, input, { actor: ctx.client ?? undefined });
   } catch (err) {
     throw mapCoreError("createNote", err);
   }
@@ -71,8 +82,9 @@ export const annotateNodeInputSchema = z.object({
 });
 
 const annotateNodeProcedure = publicProcedure.input(annotateNodeInputSchema).mutation(async ({ ctx, input }) => {
+  refuseIfReadOnly(ctx);
   try {
-    return await annotateNode(ctx.db, input.targetNodeId, { title: input.title, content: input.content, metadata: input.metadata });
+    return await annotateNode(ctx.db, input.targetNodeId, { title: input.title, content: input.content, metadata: input.metadata }, { actor: ctx.client ?? undefined });
   } catch (err) {
     throw mapCoreError("annotateNode", err);
   }
@@ -88,8 +100,9 @@ export const updateNodeContentInputSchema = z.object({
 });
 
 const updateNodeContentProcedure = publicProcedure.input(updateNodeContentInputSchema).mutation(async ({ ctx, input }) => {
+  refuseIfReadOnly(ctx);
   try {
-    return await updateNodeContent(ctx.db, input.nodeId, { title: input.title, content: input.content, metadata: input.metadata });
+    return await updateNodeContent(ctx.db, input.nodeId, { title: input.title, content: input.content, metadata: input.metadata }, { actor: ctx.client ?? undefined });
   } catch (err) {
     throw mapCoreError("updateNodeContent", err);
   }
@@ -106,8 +119,9 @@ const assertEdgeInputSchema = z.object({
 });
 
 const assertEdgeProcedure = publicProcedure.input(assertEdgeInputSchema).mutation(async ({ ctx, input }) => {
+  refuseIfReadOnly(ctx);
   try {
-    return await assertEdge(ctx.db, input);
+    return await assertEdge(ctx.db, input, { actor: ctx.client ?? undefined });
   } catch (err) {
     throw mapCoreError("assertEdge", err);
   }
@@ -122,6 +136,7 @@ const retractEdgeInputSchema = z.object({
 });
 
 const retractEdgeProcedure = publicProcedure.input(retractEdgeInputSchema).mutation(async ({ ctx, input }) => {
+  refuseIfReadOnly(ctx);
   try {
     return await retractEdge(ctx.db, input);
   } catch (err) {
@@ -139,8 +154,9 @@ const reweightEdgeInputSchema = z.object({
 });
 
 const reweightEdgeProcedure = publicProcedure.input(reweightEdgeInputSchema).mutation(async ({ ctx, input }) => {
+  refuseIfReadOnly(ctx);
   try {
-    return await reweightEdge(ctx.db, input);
+    return await reweightEdge(ctx.db, input, { actor: ctx.client ?? undefined });
   } catch (err) {
     throw mapCoreError("reweightEdge", err);
   }

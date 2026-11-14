@@ -4,6 +4,12 @@
 // `true`/`0.0.0.0`: the client dev server should be as loopback-only as
 // the tRPC server it proxies to (the ticket's "not reachable from another
 // host on the network" applies to the whole local tool, not just the API).
+//
+// Every proxy entry sets `xfwd`, so the API server sees the browser's
+// address in X-Forwarded-For (tailnet-hosting decision 9): local dev
+// forwards 127.0.0.1 and stays tokenless, while `pnpm dev --host` makes a
+// phone's request carry a token instead of inheriting the proxy's loopback
+// trust.
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
@@ -25,11 +31,19 @@ export default defineConfig({
       "/trpc": {
         target: `http://127.0.0.1:${serverPort}`,
         changeOrigin: true,
+        xfwd: true,
       },
       // Review screenshots (board-visual-reviews, design.md decision 4), served by the same server.
       "/review-images": {
         target: `http://127.0.0.1:${serverPort}`,
         changeOrigin: true,
+        xfwd: true,
+      },
+      // The connect screen's token-for-cookie exchange (tailnet-hosting decision 5).
+      "/auth/connect": {
+        target: `http://127.0.0.1:${serverPort}`,
+        changeOrigin: true,
+        xfwd: true,
       },
     },
   },
