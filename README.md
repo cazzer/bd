@@ -164,7 +164,9 @@ pnpm -s client-token list                           # client, scope, created, la
 pnpm -s client-token revoke phone
 ```
 
-The scope is required. `human` is for a person's devices (phone, laptop): it works on the web API and MCP. `agent` is for workers and the driver: it works on MCP only, and the web API refuses it with 403, so an agent can't approve its own inbox request or decide a review.
+The scope is required. `human` is for a person's devices (phone, laptop): it works on the web API and MCP. `agent` is for workers and the driver: it works on MCP, and on the web API it reaches only what `bin/inbox`, `bin/inbox-watch`, and `bin/review-request` call — filing an inbox request (`inboxRequest`), completing one a person accepted (`inboxComplete`), listing the inbox (`inbox`), and listing beads projects (`beadsProjects`). Every other procedure, and the review images, answer an `agent` token with 403, so an agent can't approve its own inbox request, decide a review, or edit the graph from the web API. Each tRPC procedure declares the scopes it accepts. A tokenless loopback request counts as `human`.
+
+The inbox scripts send `$BREAKDOWN_TOKEN` as `Authorization: Bearer` when it is set, so a worker on another tailnet machine runs them with `BREAKDOWN_API=https://<host> BREAKDOWN_TOKEN=bdt_… bin/inbox request …`. Both variables belong to the scripts; the server reads neither.
 
 `-s` keeps pnpm's `> pkg@version` banner off stdout, so `TOKEN=$(pnpm -s client-token create phone --scope human)` captures the token alone. The token is shown once and can't be recovered; lose it and revoke and re-create. Tokens can only be managed here: no MCP tool and no web API procedure creates, lists, or revokes one. A revoked token is refused on its next request, with no cache to wait out. `last_used_at` is updated at most once a minute per client, and still is when the server runs with `BRAIN_READ_ONLY=1`.
 

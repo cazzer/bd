@@ -498,6 +498,34 @@ describe("client tokens behind a tailnet Host", () => {
     expect(after.status).toBe(404);
   }, 30_000);
 
+  it("leaves a token session open when a request naming it is refused without a credential, or from a foreign Origin", async () => {
+    const { running, host } = await startTailnet();
+    const { token } = await newToken("kept");
+    const session = await rawInitialize(running.url, { host, authorization: `Bearer ${token}` });
+    const { authorization: _drop, ...tokenless } = session;
+
+    const noCredential = await rawRequest(running.url, { method: "POST", headers: tokenless, body: BRAIN_MAP_CALL });
+    expect(noCredential.status).toBe(401);
+    const foreignOrigin = await rawRequest(running.url, { method: "POST", headers: { ...session, origin: "https://evil.example" }, body: BRAIN_MAP_CALL });
+    expect(foreignOrigin.status).toBe(403);
+
+    const still = await rawRequest(running.url, { method: "POST", headers: session, body: BRAIN_MAP_CALL });
+    expect(still.status).toBe(200);
+  }, 30_000);
+
+  it("closes a token session when a request naming it presents a revoked token", async () => {
+    const { running, host } = await startTailnet();
+    const { client, token } = await newToken("closed");
+    const session = await rawInitialize(running.url, { host, authorization: `Bearer ${token}` });
+    await revokeClientToken(db!, client);
+    expect((await rawRequest(running.url, { method: "POST", headers: session, body: BRAIN_MAP_CALL })).status).toBe(401);
+
+    tokenClients.push(client);
+    const { token: reissued } = await createClientToken(db!, client, "human");
+    const after = await rawRequest(running.url, { method: "POST", headers: { ...session, authorization: `Bearer ${reissued}` }, body: BRAIN_MAP_CALL });
+    expect(after.status).toBe(404);
+  }, 30_000);
+
   it("leaves a tokenless loopback session open when a refused request names it", async () => {
     const { running, host } = await startTailnet();
     const { client, transport } = await connect(running.url, "loopback-kept", suffix);

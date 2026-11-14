@@ -5,7 +5,7 @@
 
 import type { IncomingMessage } from "node:http";
 import type { HostBinary } from "@breakdown/core";
-import type { Database } from "@breakdown/db";
+import type { ClientTokenScope, Database } from "@breakdown/db";
 import type { BeadsWatcher } from "./beads-watcher.js";
 import type { RunHerdrJson } from "./herdr-session.js";
 import type { ReviewWriter, RunHerdr } from "./review-writer.js";
@@ -51,17 +51,34 @@ export interface Context {
    * need not set it; absent means the same as null.
    */
   client?: string | null;
+  /**
+   * The admitted token's scope (dispatch.ts), or null for a tokenless
+   * loopback request. Each procedure declares the scopes it accepts
+   * (trpc.ts `scopeGate`); null and absent both count as `human`, since a
+   * tokenless request is the local person (hangar-queue decision 5).
+   */
+  scope?: ClientTokenScope | null;
+}
+
+/** What admission established about a tokened request (dispatch.ts). */
+export interface AdmittedClient {
+  client: string;
+  scope: ClientTokenScope;
 }
 
 /**
- * The admitted token client per request, written by the dispatcher after
- * admission and read by the context factory. A WeakMap keyed on the request
- * object rather than a header or a property on `req`, so nothing a client
- * sends can set it, and an entry goes away with its request.
+ * The admitted token client and scope per request, written by the
+ * dispatcher after admission and read by the context factory. A WeakMap
+ * keyed on the request object rather than a header or a property on `req`,
+ * so nothing a client sends can set it, and an entry goes away with its
+ * request. A tokenless request has no entry.
  */
-export const admittedClients = new WeakMap<IncomingMessage, string>();
+export const admittedClients = new WeakMap<IncomingMessage, AdmittedClient>();
 
 /** Builds the per-request context factory tRPC's HTTP adapter calls. `db` is created once, at startup, and shared across every request. */
 export function createContextFactory(db: Database, live: Pick<Context, "watcher" | "shutdownSignal" | "readOnly" | "reviewWriter" | "runHerdr" | "herdrJson" | "herdrSocket" | "sessionCwd" | "missingBinaries" | "reviewImageRoot"> = {}) {
-  return async ({ req }: { req: IncomingMessage }): Promise<Context> => ({ db, ...live, client: admittedClients.get(req) ?? null });
+  return async ({ req }: { req: IncomingMessage }): Promise<Context> => {
+    const admitted = admittedClients.get(req);
+    return { db, ...live, client: admitted?.client ?? null, scope: admitted?.scope ?? null };
+  };
 }

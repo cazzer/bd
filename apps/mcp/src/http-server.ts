@@ -19,14 +19,18 @@
 // session it initializes (decision 4): the session's Server records it in
 // each write's actor, and a later request on that session presenting any
 // other client — another token, or none — is refused, so one client cannot
-// continue another's session. A refused request (401/403) naming a session
-// a token opened closes that session, so once its token is revoked, the
-// client's next request also ends its open SSE stream.
+// continue another's session. A request refused because of the token it
+// presented — unknown or revoked (401), or a scope MCP does not accept
+// (403) — closes the token-opened session it names, so once its token is
+// revoked, the client's next request also ends its open SSE stream. A
+// refusal the credential did not cause (no token, a foreign Host or
+// Origin) leaves the session open (hangar-queue decision 9).
 //
 // Requests are dispatched in this order:
 //   1. admission: a foreign Host or Origin → 403; no usable token where
-//      one is needed → 401 with WWW-Authenticate: Bearer; either refusal
-//      closes the token-opened session its Mcp-Session-Id names;
+//      one is needed → 401 with WWW-Authenticate: Bearer; a refusal the
+//      presented token caused closes the token-opened session its
+//      Mcp-Session-Id names;
 //   2. a declared body over MAX_BODY_BYTES → 413;
 //   3. GET /healthz → 200 or 503 (no session, never writes);
 //   4. /mcp with a method other than GET/POST/DELETE → 405;
@@ -364,10 +368,10 @@ export async function startHttpServer(options: StartHttpServerOptions): Promise<
   }
 
   /**
-   * Closes the token-opened session a refused request names (module
-   * header). A tokenless loopback session is left alone: only a token can
-   * be revoked, and a remote caller holding a leaked id must not be able
-   * to end a local session.
+   * Closes the token-opened session a request refused by its credential
+   * names (module header). A tokenless loopback session is left alone:
+   * only a token can be revoked, and a remote caller holding a leaked id
+   * must not be able to end a local session.
    */
   function closeRefusedTokenSession(req: IncomingMessage): void {
     const sessionId = sessionIdOf(req);
@@ -396,7 +400,7 @@ export async function startHttpServer(options: StartHttpServerOptions): Promise<
       },
       policy,
     );
-    if (admission.outcome !== "allow") closeRefusedTokenSession(req);
+    if (admission.outcome !== "allow" && admission.byCredential) closeRefusedTokenSession(req);
     if (admission.outcome === "forbidden") {
       sendJsonRpcError(res, 403, -32000, "Forbidden: this server accepts requests only for its own or an allowed host, from local or allowed origins");
       return;

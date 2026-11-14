@@ -1,9 +1,9 @@
 ## 1. Per-procedure token scopes on the web API (bd-d38.8)
 
-- [ ] 1.1 Admission scopes per route in the web dispatcher (trpc: human|agent; health: any; static/connect as today); verifyClientToken returns scope through to the tRPC context
-- [ ] 1.2 `.meta({ scopes })` + scope middleware; `humanProcedure`/`agentProcedure` replace `publicProcedure` in every router; agent gets inbox.request, inbox.complete and the reads bin/inbox, bin/inbox-watch, bin/review-request use
-- [ ] 1.3 Test enumerating every procedure's declared scopes (none undeclared); router tests: agent token files and completes, 403 on decide/release/handOff/review/write; MCP closes a session on refusal only when a credential was presented
-- [ ] 1.4 README token section updated (what an agent token can do on the web API)
+- [x] 1.1 Admission scopes per route in the web dispatcher (trpc: human|agent; health: any; static/connect as today); verifyClientToken returns scope through to the tRPC context
+- [x] 1.2 `.meta({ scopes })` + scope middleware; `humanProcedure`/`agentProcedure` replace `publicProcedure` in every router; agent gets inbox.request, inbox.complete and the reads bin/inbox, bin/inbox-watch, bin/review-request use
+- [x] 1.3 Test enumerating every procedure's declared scopes (none undeclared); router tests: agent token files and completes, 403 on decide/release/handOff/review/write; MCP closes a session on refusal only when a credential was presented
+- [x] 1.4 README token section updated (what an agent token can do on the web API)
 
 ## 2. Hangar queue, sessions, check-ins, messages (bd-d38.3)
 

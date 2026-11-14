@@ -17,6 +17,11 @@
 // asking — the approval was your Accept. Stop it with Ctrl-C.
 //
 //   inbox-watch [--interval 30] [--once] [--dry-run]
+//
+// $BREAKDOWN_API points it at another server (default the local one). When
+// $BREAKDOWN_TOKEN is set, each poll sends it as `Authorization: Bearer`
+// (needed off loopback; an `agent` token may read the inbox). Both are this
+// script's variables, not the server's.
 
 import { spawn } from "node:child_process";
 import path from "node:path";
@@ -24,6 +29,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
 const API = process.env.BREAKDOWN_API ?? `http://127.0.0.1:${process.env.WEB_SERVER_PORT ?? "4310"}`;
+const AUTH = process.env.BREAKDOWN_TOKEN ? { authorization: `Bearer ${process.env.BREAKDOWN_TOKEN}` } : {};
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 const { values } = parseArgs({
@@ -48,7 +54,7 @@ function log(message) {
 
 async function query(statuses) {
   const url = `${API}/trpc/inbox?input=${encodeURIComponent(JSON.stringify({ statuses }))}`;
-  const res = await fetch(url);
+  const res = await fetch(url, { headers: AUTH });
   const body = await res.json();
   if (!res.ok || body?.error) throw new Error(body?.error?.message ?? `HTTP ${res.status}`);
   return body.result.data.items;

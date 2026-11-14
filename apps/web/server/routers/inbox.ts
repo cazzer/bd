@@ -30,7 +30,7 @@ import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { mapCoreError, refuseMissingBinary } from "../errors.js";
 import { openInboxSession } from "../inbox-session.js";
-import { publicProcedure, router } from "../trpc.js";
+import { agentProcedure, humanProcedure, router } from "../trpc.js";
 
 export interface InboxItemDto extends Omit<InboxItem, "receivedAt" | "updatedAt"> {
   receivedAt: string;
@@ -47,7 +47,7 @@ export const inboxInputSchema = z
   })
   .optional();
 
-const inboxProcedure = publicProcedure.input(inboxInputSchema).query(async ({ ctx, input }) => {
+const inboxProcedure = agentProcedure.input(inboxInputSchema).query(async ({ ctx, input }) => {
   try {
     const list = await listInbox(ctx.db, input?.statuses === undefined ? {} : { statuses: input.statuses });
     return { items: list.items.map(toDto), total: list.total, truncated: list.truncated };
@@ -87,7 +87,7 @@ export function inboxNotifyText(result: DecideInboxItemResult, message: string, 
 
 type Notified = { ok: true; pane: string } | { ok: false; reason: string };
 
-const inboxDecisionProcedure = publicProcedure.input(inboxDecisionInputSchema).mutation(async ({ ctx, input }) => {
+const inboxDecisionProcedure = humanProcedure.input(inboxDecisionInputSchema).mutation(async ({ ctx, input }) => {
   if (ctx.readOnly) {
     throw new TRPCError({ code: "FORBIDDEN", message: "The server is read-only (BRAIN_READ_ONLY); inbox decisions are refused." });
   }
@@ -111,7 +111,7 @@ const inboxDecisionProcedure = publicProcedure.input(inboxDecisionInputSchema).m
 });
 
 /** Moves an undigested item to Needs me as it is (the person will decide without the agent's reading); recorded as `release`. */
-const inboxReleaseProcedure = publicProcedure.input(z.object({ id: z.string().uuid() })).mutation(async ({ ctx, input }) => {
+const inboxReleaseProcedure = humanProcedure.input(z.object({ id: z.string().uuid() })).mutation(async ({ ctx, input }) => {
   if (ctx.readOnly) {
     throw new TRPCError({ code: "FORBIDDEN", message: "The server is read-only (BRAIN_READ_ONLY); releasing an item is refused." });
   }
@@ -124,7 +124,7 @@ const inboxReleaseProcedure = publicProcedure.input(z.object({ id: z.string().uu
 });
 
 /** The person's "not this" on an item's work context: removes its `about` link; status and feedback stay. */
-const inboxUnlinkWorkProcedure = publicProcedure.input(z.object({ id: z.string().uuid() })).mutation(async ({ ctx, input }) => {
+const inboxUnlinkWorkProcedure = humanProcedure.input(z.object({ id: z.string().uuid() })).mutation(async ({ ctx, input }) => {
   if (ctx.readOnly) {
     throw new TRPCError({ code: "FORBIDDEN", message: "The server is read-only (BRAIN_READ_ONLY); unlinking an item's work is refused." });
   }
@@ -142,7 +142,7 @@ export const inboxRequestInputSchema = z.object({
   metadata: z.record(z.string(), z.unknown()),
 });
 
-const inboxRequestProcedure = publicProcedure.input(inboxRequestInputSchema).mutation(async ({ ctx, input }) => {
+const inboxRequestProcedure = agentProcedure.input(inboxRequestInputSchema).mutation(async ({ ctx, input }) => {
   if (ctx.readOnly) throw new TRPCError({ code: "FORBIDDEN", message: "The server is read-only (BRAIN_READ_ONLY)." });
   try {
     return await requestInboxItem(ctx.db, { externalId: input.key, title: input.title, content: input.content, metadata: input.metadata, actor: ctx.client ?? undefined });
@@ -153,7 +153,7 @@ const inboxRequestProcedure = publicProcedure.input(inboxRequestInputSchema).mut
 
 export const inboxCompleteInputSchema = z.object({ id: z.string().uuid(), note: z.string().trim().min(1).max(MAX_INBOX_FEEDBACK_LENGTH) });
 
-const inboxCompleteProcedure = publicProcedure.input(inboxCompleteInputSchema).mutation(async ({ ctx, input }) => {
+const inboxCompleteProcedure = agentProcedure.input(inboxCompleteInputSchema).mutation(async ({ ctx, input }) => {
   if (ctx.readOnly) throw new TRPCError({ code: "FORBIDDEN", message: "The server is read-only (BRAIN_READ_ONLY)." });
   try {
     return await completeInboxItem(ctx.db, input.id, input.note, { actor: ctx.client ?? undefined });
@@ -177,7 +177,7 @@ async function loadItem(ctx: { db: Parameters<typeof listInbox>[0] }, id: string
 
 const NO_HERDR = "herdr isn't reachable from the breakdown server. Start `pnpm dev` from inside a herdr pane (or keep herdr's default socket) and try again.";
 
-const inboxOpenSessionProcedure = publicProcedure.input(inboxIdSchema).mutation(async ({ ctx, input }) => {
+const inboxOpenSessionProcedure = humanProcedure.input(inboxIdSchema).mutation(async ({ ctx, input }) => {
   if (ctx.readOnly) throw new TRPCError({ code: "FORBIDDEN", message: "The server is read-only (BRAIN_READ_ONLY)." });
   refuseMissingBinary(ctx.missingBinaries, "herdr");
   if (ctx.herdrJson === undefined || ctx.herdrSocket === undefined || ctx.herdrSocket === null) throw new TRPCError({ code: "PRECONDITION_FAILED", message: NO_HERDR });
@@ -200,7 +200,7 @@ const inboxOpenSessionProcedure = publicProcedure.input(inboxIdSchema).mutation(
   return opened;
 });
 
-const inboxFocusSessionProcedure = publicProcedure.input(inboxIdSchema).mutation(async ({ ctx, input }) => {
+const inboxFocusSessionProcedure = humanProcedure.input(inboxIdSchema).mutation(async ({ ctx, input }) => {
   refuseMissingBinary(ctx.missingBinaries, "herdr");
   if (ctx.herdrJson === undefined || ctx.herdrSocket === undefined || ctx.herdrSocket === null) throw new TRPCError({ code: "PRECONDITION_FAILED", message: NO_HERDR });
   const item = await loadItem(ctx, input.id);

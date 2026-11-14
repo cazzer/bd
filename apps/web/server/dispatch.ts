@@ -1,15 +1,16 @@
-// The API server's one request listener (index.ts). Every request first
-// passes the shared admission function (packages/core admission.ts;
-// tailnet-hosting decision 2): a foreign Host, or an unsafe method from a
-// foreign Origin, is 403; a request that needs a client token and lacks a
-// live one is 401 with `WWW-Authenticate: Bearer`. A loopback peer with a
-// loopback Host needs no token, as before, unless a forwarding header names
-// a remote address. The web accepts only `human` tokens: its writes are a
-// person's decisions, so an `agent` token is 403 here (decision 9).
+// The API server's one request listener (index.ts). Every request is first
+// given a route by `routeFor`, then passes the shared admission function
+// (packages/core admission.ts; tailnet-hosting decision 2) under that
+// route's policy: a foreign Host, or an unsafe method from a foreign
+// Origin, is 403; a request that needs a client token and lacks a live one
+// is 401 with `WWW-Authenticate: Bearer`. A loopback peer with a loopback
+// Host needs no token, as before, unless a forwarding header names a remote
+// address. Then it is dispatched on the same route value, so the policy
+// that admitted a request is always the one for the handler it reaches.
 //
-// One classifier, `routeFor`, names where a path goes, and both the
-// routing and the public-path rule read it, so they cannot disagree. On
-// the raw path (query dropped, never URL-normalized):
+// One classifier, `routeFor`, names where a path goes, and the routing,
+// the per-route policy, and the public-path rule all read it, so they
+// cannot disagree. On the raw path (query dropped, never URL-normalized):
 //   exactly AUTH_CONNECT_PATH          → the connect handler (auth-connect.ts)
 //   exactly HEALTH_PATH                → the health handler (health.ts)
 //   under REVIEW_IMAGES_PREFIX         → the review image route (review-images.ts)
@@ -22,9 +23,16 @@
 // route after normalization (`/x/../trpc/a`, `/%74rpc/a`) is classified as
 // client and can only get index.html or a 404. `/healthz` is not public.
 //
-// The admitted token client is handed to tRPC through `admittedClients`
-// (context.ts), keyed on the request object, so a write's run names the
-// client that made it (decision 4). Nothing here logs a token.
+// Admission scopes are per route (hangar-queue decision 1): connect, the
+// review images, and the built client take only `human` tokens; the health
+// check takes any scope; tRPC takes `human` and `agent`, and each procedure
+// narrows that further (trpc.ts `scopeGate`, decision 5) — an agent files
+// and completes inbox requests, a person decides.
+//
+// The admitted token client and scope are handed to tRPC through
+// `admittedClients` (context.ts), keyed on the request object, so a write's
+// run names the client that made it (tailnet-hosting decision 4) and a
+// procedure can check the scope. Nothing here logs a token.
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 import {
@@ -60,13 +68,19 @@ export interface RequestDispatcherOptions {
   staticClient?: Handler;
 }
 
-export type Route = "connect" | "health" | "review-images" | "trpc" | "static";
+export type WebRoute = "connect" | "health" | "reviewImages" | "trpc" | "static";
 
-/** Where a raw request path goes (module header). `static` only when a client handler is configured. */
-export function routeFor(path: string, hasStaticClient: boolean): Route {
+/**
+ * Where a raw request path goes (module header), decided before admission
+ * so the route's own policy admits it. `path` is the raw request-target
+ * with the query stripped, never URL-normalized (admission.ts header): a
+ * different spelling of the connect path is not the connect path. `static`
+ * only when a client handler is configured.
+ */
+export function routeFor(path: string, hasStaticClient: boolean): WebRoute {
   if (path === AUTH_CONNECT_PATH) return "connect";
   if (path === HEALTH_PATH) return "health";
-  if (path.startsWith(REVIEW_IMAGES_PREFIX)) return "review-images";
+  if (path.startsWith(REVIEW_IMAGES_PREFIX)) return "reviewImages";
   if (path === TRPC_PATH || path.startsWith(`${TRPC_PATH}/`)) return "trpc";
   return hasStaticClient ? "static" : "trpc";
 }
@@ -76,26 +90,32 @@ export function routeFor(path: string, hasStaticClient: boolean): Route {
  * public surface is named: the connect endpoint, where a token is
  * obtained, and reads of the built client.
  */
-function isPublicPath(method: string, path: string, hasStaticClient: boolean): boolean {
-  if (method === "POST" && path === AUTH_CONNECT_PATH) return true;
-  return (method === "GET" || method === "HEAD") && routeFor(path, hasStaticClient) === "static";
+function isPublicRoute(method: string, route: WebRoute): boolean {
+  if (method === "POST" && route === "connect") return true;
+  return (method === "GET" || method === "HEAD") && route === "static";
 }
-
-/** A person's tokens only (module header). */
-const WEB_SCOPES: readonly ClientTokenScope[] = ["human"];
 
 const PLAIN_HEADERS = { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } as const;
 
 export function createRequestDispatcher({ port, allowedHosts, verifyToken, connect, health, reviewImages, trpc, staticClient }: RequestDispatcherOptions): (req: IncomingMessage, res: ServerResponse) => void {
   const hasStaticClient = staticClient !== undefined;
-  const isPublic = (method: string, path: string) => isPublicPath(method, path, hasStaticClient);
-  const policy: AdmissionPolicy = { port, allowedHosts, originCheck: "unsafe-methods", scopes: WEB_SCOPES, isPublic, verifyToken };
+  const isPublic = (method: string, path: string) => isPublicRoute(method, routeFor(path, hasStaticClient));
+  const policyFor = (scopes: readonly ClientTokenScope[]): AdmissionPolicy => ({ port, allowedHosts, originCheck: "unsafe-methods", scopes, isPublic, verifyToken });
+  // The token scopes each route admits (module header).
+  const policies: Readonly<Record<WebRoute, AdmissionPolicy>> = {
+    connect: policyFor(["human"]),
+    health: policyFor(["human", "agent"]),
+    reviewImages: policyFor(["human"]),
+    trpc: policyFor(["human", "agent"]),
+    static: policyFor(["human"]),
+  };
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     // The raw request-target, deliberately not URL-normalized (admission.ts header).
     const rawUrl = req.url ?? "/";
     const queryAt = rawUrl.indexOf("?");
     const path = queryAt === -1 ? rawUrl : rawUrl.slice(0, queryAt);
+    const route = routeFor(path, hasStaticClient);
     const admission = await admitRequest(
       {
         method: req.method,
@@ -106,7 +126,7 @@ export function createRequestDispatcher({ port, allowedHosts, verifyToken, conne
         credential: credentialFrom(req.headers),
         forwardedFor: forwardedAddressesFrom(req.headers),
       },
-      policy,
+      policies[route],
     );
     if (admission.outcome === "forbidden") {
       res.writeHead(403, PLAIN_HEADERS);
@@ -118,16 +138,16 @@ export function createRequestDispatcher({ port, allowedHosts, verifyToken, conne
       res.end("Unauthorized\n");
       return;
     }
-    if (admission.client !== null) admittedClients.set(req, admission.client);
+    if (admission.client !== null && admission.scope !== null) admittedClients.set(req, { client: admission.client, scope: admission.scope });
 
-    switch (routeFor(path, hasStaticClient)) {
+    switch (route) {
       case "connect":
         await connect(req, res);
         return;
       case "health":
         await health(req, res);
         return;
-      case "review-images":
+      case "reviewImages":
         await reviewImages(req, res);
         return;
       case "static":

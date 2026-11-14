@@ -77,13 +77,23 @@ export interface AdmissionPolicy {
   verifyToken: (token: string) => Promise<{ client: string; scope: ClientTokenScope } | null>;
 }
 
+/**
+ * `scope` is null exactly when `client` is: a trusted loopback request or a
+ * public path, admitted with no token. `byCredential` on a refusal is true
+ * only when the presented token itself caused it — unknown or revoked
+ * (401), or live but outside the policy's scopes (403) — so an adapter can
+ * act on the token (MCP closes the session it opened) without letting a
+ * request that merely names a session, with no credential or from a
+ * foreign Host, do the same.
+ */
 export type Admission =
-  | { outcome: "allow"; client: string | null }
-  | { outcome: "forbidden" }
-  | { outcome: "unauthorized" };
+  | { outcome: "allow"; client: string | null; scope: ClientTokenScope | null }
+  | { outcome: "forbidden"; byCredential: boolean }
+  | { outcome: "unauthorized"; byCredential: boolean };
 
-const FORBIDDEN: Admission = { outcome: "forbidden" };
-const UNAUTHORIZED: Admission = { outcome: "unauthorized" };
+const FORBIDDEN: Admission = { outcome: "forbidden", byCredential: false };
+const UNAUTHORIZED: Admission = { outcome: "unauthorized", byCredential: false };
+const TOKENLESS: Admission = { outcome: "allow", client: null, scope: null };
 const LOOPBACK_NAMES: ReadonlySet<string> = new Set(LOOPBACK_HOST_NAMES);
 
 /** Decides whether a request may reach a handler (module header). */
@@ -96,15 +106,15 @@ export async function admitRequest(req: AdmissionRequest, policy: AdmissionPolic
   if (originChecked && req.origin !== undefined && !isAllowedOrigin(req.origin, policy)) return FORBIDDEN;
 
   const forwardedLocal = req.forwardedFor === undefined || req.forwardedFor.every(isLoopbackAddress);
-  if (req.peerIsLoopback && LOOPBACK_NAMES.has(hostName) && forwardedLocal) return { outcome: "allow", client: null };
-  if (policy.isPublic?.(method, req.path)) return { outcome: "allow", client: null };
+  if (req.peerIsLoopback && LOOPBACK_NAMES.has(hostName) && forwardedLocal) return TOKENLESS;
+  if (policy.isPublic?.(method, req.path)) return TOKENLESS;
 
   if (req.credential === undefined) return UNAUTHORIZED;
   if (req.credential.source === "cookie" && originChecked && req.origin === undefined) return FORBIDDEN;
   const verified = await policy.verifyToken(req.credential.token);
-  if (verified === null) return UNAUTHORIZED;
-  if (!policy.scopes.includes(verified.scope)) return FORBIDDEN;
-  return { outcome: "allow", client: verified.client };
+  if (verified === null) return { outcome: "unauthorized", byCredential: true };
+  if (!policy.scopes.includes(verified.scope)) return { outcome: "forbidden", byCredential: true };
+  return { outcome: "allow", client: verified.client, scope: verified.scope };
 }
 
 /**

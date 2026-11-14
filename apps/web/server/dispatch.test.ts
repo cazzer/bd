@@ -1,6 +1,7 @@
 // The server's request dispatcher over real HTTP: admission refuses before
-// any handler runs, an admitted request reaches the right one, and the
-// admitted token client reaches tRPC through `admittedClients`. The
+// any handler runs, an admitted request reaches the right one under that
+// route's scopes, and the admitted token client and scope reach tRPC
+// through `admittedClients`. The
 // handlers and the token store are stand-ins that record the call;
 // packages/core admission.test.ts, auth-connect.test.ts, and
 // review-images.test.ts prove the pieces themselves.
@@ -13,7 +14,7 @@ import { createServer, request, type IncomingHttpHeaders, type IncomingMessage, 
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { admittedClients } from "./context.js";
-import { createRequestDispatcher } from "./dispatch.js";
+import { createRequestDispatcher, routeFor } from "./dispatch.js";
 
 const TAILNET = "breakdown.tail.example";
 const PHONE_TOKEN = "bdt_phone-token";
@@ -45,15 +46,15 @@ async function startDispatcher(withStatic: boolean): Promise<{ server: Server; p
       res.end("connect");
     },
     health: async (req, res) => {
-      calls.push(`health ${req.method} ${req.url} client=${admittedClients.get(req) ?? null}`);
+      calls.push(`health ${req.method} ${req.url} ${admitted(req)}`);
       res.end("health");
     },
     reviewImages: async (req, res) => {
-      calls.push(`images ${req.url} client=${admittedClients.get(req) ?? null}`);
+      calls.push(`images ${req.url} ${admitted(req)}`);
       res.end("image");
     },
     trpc: (req, res) => {
-      calls.push(`trpc ${req.url} client=${admittedClients.get(req) ?? null}`);
+      calls.push(`trpc ${req.url} ${admitted(req)}`);
       res.end("trpc");
     },
     ...(withStatic
@@ -75,6 +76,13 @@ beforeAll(async () => {
   ({ server, port } = await startDispatcher(false));
   ({ server: staticServer, port: staticPort } = await startDispatcher(true));
 });
+
+/** `client=phone` for a tokened request (its scope after a slash when not human), `client=null` for a tokenless one. */
+function admitted(req: Parameters<typeof admittedClients.get>[0]): string {
+  const entry = admittedClients.get(req);
+  if (entry === undefined) return "client=null";
+  return entry.scope === "human" ? `client=${entry.client}` : `client=${entry.client}/${entry.scope}`;
+}
 
 afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -234,9 +242,16 @@ describe("createRequestDispatcher: client tokens", () => {
     expect(calls).toEqual(["trpc /trpc/createNote client=phone"]);
   });
 
-  it("refuses an agent token with 403, by bearer or cookie, and calls nothing", async () => {
-    expect(await send("/trpc/board", { Host: tailnetHost(), ...bearer(WORKER_TOKEN) })).toMatchObject({ status: 403, body: "Forbidden\n" });
-    expect(await send("/trpc/createNote", { Host: tailnetHost(), Origin: `http://${tailnetHost()}`, ...cookie(WORKER_TOKEN) }, "POST")).toMatchObject({ status: 403 });
+  it("admits an agent token to tRPC, handing over its scope for the procedure to check", async () => {
+    expect(await send("/trpc/inbox", { Host: tailnetHost(), ...bearer(WORKER_TOKEN) })).toMatchObject({ status: 200, body: "trpc" });
+    expect(await send("/trpc/inboxRequest", { Host: tailnetHost(), ...bearer(WORKER_TOKEN) }, "POST")).toMatchObject({ status: 200, body: "trpc" });
+    expect(calls).toEqual(["trpc /trpc/inbox client=worker-1/agent", "trpc /trpc/inboxRequest client=worker-1/agent"]);
+  });
+
+  it("refuses an agent token on the review images and the connect endpoint with 403, by bearer or cookie, and calls nothing", async () => {
+    expect(await send("/review-images/rv/r1/a.png", { Host: tailnetHost(), ...bearer(WORKER_TOKEN) })).toMatchObject({ status: 403, body: "Forbidden\n" });
+    expect(await send("/review-images/rv/r1/a.png", { Host: tailnetHost(), ...cookie(WORKER_TOKEN) })).toMatchObject({ status: 403, body: "Forbidden\n" });
+    expect(await send("/auth/connect", { Host: tailnetHost(), ...bearer(WORKER_TOKEN) })).toMatchObject({ status: 403, body: "Forbidden\n" });
     expect(calls).toEqual([]);
   });
 
@@ -266,12 +281,12 @@ describe("createRequestDispatcher: client tokens", () => {
 });
 
 describe("createRequestDispatcher: health", () => {
-  it("routes /healthz to the health handler, which needs a token off loopback", async () => {
+  it("routes /healthz to the health handler, which needs a token of any scope off loopback", async () => {
     expect(await send("/healthz", { Host: `127.0.0.1:${port}` })).toMatchObject({ status: 200, body: "health" });
     expect(await send("/healthz", { Host: tailnetHost() })).toMatchObject({ status: 401 });
     expect(await send("/healthz", { Host: tailnetHost(), ...bearer() })).toMatchObject({ status: 200, body: "health" });
-    expect(await send("/healthz", { Host: tailnetHost(), ...bearer(WORKER_TOKEN) })).toMatchObject({ status: 403 });
-    expect(calls).toEqual(["health GET /healthz client=null", "health GET /healthz client=phone"]);
+    expect(await send("/healthz", { Host: tailnetHost(), ...bearer(WORKER_TOKEN) })).toMatchObject({ status: 200, body: "health" });
+    expect(calls).toEqual(["health GET /healthz client=null", "health GET /healthz client=phone", "health GET /healthz client=worker-1/agent"]);
   });
 
   it("without a built client, GET / off loopback still needs a token and goes to tRPC", async () => {
@@ -333,5 +348,23 @@ describe("createRequestDispatcher: the built client", () => {
     expect(await toStatic("/", { Host: `localhost:${staticPort}` })).toMatchObject({ status: 200, body: "static" });
     expect(await toStatic("/trpc/board", { Host: `localhost:${staticPort}` })).toMatchObject({ status: 200, body: "trpc" });
     expect(calls).toEqual(["static GET /", "trpc /trpc/board client=null"]);
+  });
+});
+
+describe("routeFor", () => {
+  it("routes the exact connect and health paths, the review image prefix, and /trpc on the raw path; the rest to the client when there is one", () => {
+    for (const hasStatic of [false, true]) {
+      expect(routeFor("/auth/connect", hasStatic)).toBe("connect");
+      expect(routeFor("/healthz", hasStatic)).toBe("health");
+      expect(routeFor("/review-images/rv/r1/a.png", hasStatic)).toBe("reviewImages");
+      expect(routeFor("/trpc", hasStatic)).toBe("trpc");
+      expect(routeFor("/trpc/board", hasStatic)).toBe("trpc");
+    }
+    const fallback = { false: "trpc", true: "static" } as const;
+    for (const hasStatic of [false, true]) {
+      for (const path of ["/auth/connect/", "//auth/connect", "/AUTH/connect", "/healthz/", "http://127.0.0.1:1/review-images/a.png", "/x/../trpc/a", "/%74rpc/a", "/trpcx", "/"]) {
+        expect(routeFor(path, hasStatic), path).toBe(fallback[`${hasStatic}`]);
+      }
+    }
   });
 });
