@@ -83,6 +83,14 @@ describe("parseArgs", () => {
     assert.match(parseArgs(["scr-1", "--summary", "s", "--board-url", "nope", "a.png"]).error, /http\(s\) URL/);
     assert.ok(parseArgs(["scr-1", "--summary", "s", "--bogus", "a.png"]).error);
   });
+  it("takes the board URL from BREAKDOWN_UI unless --board-url is given, and checks both env URLs", () => {
+    const env = { BREAKDOWN_UI: "http://jetson.test:4310" };
+    assert.equal(parseArgs(["scr-1", "--summary", "s", "a.png"], env).args.boardUrl, "http://jetson.test:4310");
+    assert.equal(parseArgs(["scr-1", "card.md"], env).args.boardUrl, "http://jetson.test:4310");
+    assert.equal(parseArgs(["scr-1", "--summary", "s", "--board-url", "https://b.test", "a.png"], env).args.boardUrl, "https://b.test");
+    assert.match(parseArgs(["scr-1", "--summary", "s", "a.png"], { BREAKDOWN_UI: "nope" }).error, /^BREAKDOWN_UI must be an http\(s\) URL/);
+    assert.match(parseArgs(["scr-1", "--summary", "s", "a.png"], { BREAKDOWN_API: "ftp://x" }).error, /^BREAKDOWN_API must be an http\(s\) URL/);
+  });
 });
 
 describe("helpers", () => {
@@ -98,6 +106,10 @@ describe("helpers", () => {
     assert.equal(apiBase({ WEB_SERVER_PORT: "4313" }), "http://127.0.0.1:4313");
     assert.equal(apiBase({ WEB_SERVER_PORT: "4313@evil.test" }), "http://127.0.0.1:4310");
     assert.equal(apiBase({ WEB_SERVER_PORT: "" }), "http://127.0.0.1:4310");
+  });
+  it("apiBase prefers BREAKDOWN_API, without its trailing slash", () => {
+    assert.equal(apiBase({ BREAKDOWN_API: "http://jetson.test:4310/", WEB_SERVER_PORT: "4313" }), "http://jetson.test:4310");
+    assert.equal(apiBase({ BREAKDOWN_API: "" }), "http://127.0.0.1:4310");
   });
   it("findProject matches through a symlink", async () => {
     const tmp = await tempDir("rr-find-");
@@ -267,6 +279,18 @@ describe("requestReview refusals", () => {
     });
     assert.deepEqual(h.warn, [
       `review-request: cannot reach the breakdown server at http://127.0.0.1:4313/trpc/beadsProjects (HTTP 500). Start it with \`pnpm dev\` in ${BREAKDOWN_ROOT}, then retry. Nothing was filed.`,
+    ]);
+    await assertNothingFiled(fx, h);
+  });
+
+  it("refuses an unreachable remote server, naming the URL but never the token", async () => {
+    const fx = await fixture();
+    const h = await harness(fx, {
+      env: { BREAKDOWN_API: "http://jetson.test:4310", BREAKDOWN_TOKEN: "bdt_secret" },
+      fetch: async () => ({ ok: false, status: 401, json: async () => ({}) }),
+    });
+    assert.deepEqual(h.warn, [
+      "review-request: cannot reach the breakdown server at http://jetson.test:4310/trpc/beadsProjects (HTTP 401). Check BREAKDOWN_API and BREAKDOWN_TOKEN and that the server is up, then retry. Nothing was filed.",
     ]);
     await assertNothingFiled(fx, h);
   });
@@ -529,6 +553,30 @@ describe("requestReview writes", () => {
       "Review queued in the open breakdown tab.",
       `End your turn now and wait for a prompt in this pane with the decision (Review ${REVIEW} accepted|changes requested: …). If none arrives, read \`bd comments ${REVIEW}\`.`,
     ]);
+  });
+
+  it("talks to a remote server with BREAKDOWN_API, BREAKDOWN_TOKEN and BREAKDOWN_UI; none set means local, no token", async () => {
+    const seen = [];
+    const recording = (projectPath) => async (url, init) => {
+      seen.push({ url, auth: init?.headers?.authorization });
+      return { ok: true, status: 200, json: async () => ({ result: { data: { projects: [{ key: "scratch", path: projectPath }] } } }) };
+    };
+    const local = await fixture();
+    const l = await harness(local, { fetch: recording(local.repo) });
+    assert.equal(l.result.exitCode, 0);
+    assert.deepEqual(seen, [{ url: "http://127.0.0.1:4310/trpc/beadsProjects", auth: undefined }]);
+
+    seen.length = 0;
+    const fx = await fixture();
+    const env = { HERDR_PANE_ID: "w1:p2", HERDR_SOCKET_PATH: SOCKET, BREAKDOWN_API: "http://jetson.test:4310/",
+      BREAKDOWN_TOKEN: "bdt_secret", BREAKDOWN_UI: "http://jetson.test:4310" };
+    const h = await harness(fx, { env, fetch: recording(fx.repo) });
+    assert.equal(h.result.exitCode, 0);
+    assert.deepEqual(seen, [{ url: "http://jetson.test:4310/trpc/beadsProjects", auth: "Bearer bdt_secret" }]);
+    const link = `http://jetson.test:4310/board?project=scratch&item=${REVIEW}`;
+    assert.deepEqual(h.calls.find((c) => c.cmd === "open").args, ["-a", "Google Chrome", link]);
+    assert.ok(h.out.includes(`Board: ${link}`));
+    assert.equal([...h.out, ...h.warn, ...h.calls.flatMap((c) => c.args)].some((x) => String(x).includes("bdt_secret")), false);
   });
 
   it("opens the board link when no app tab is open or Chrome is not running", async () => {
