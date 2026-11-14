@@ -160,11 +160,11 @@ Give Breakdown a dedicated hostname: browsers send a host's cookies to every por
 ```bash
 pnpm -s client-token create phone --scope human     # prints bdt_… once on stdout; only its hash is stored
 pnpm -s client-token create worker-1 --scope agent
-pnpm -s client-token list                           # client, scope, created, last used, live/revoked; never the token
+pnpm -s client-token list                           # client, scope, bound session, created, last used, live/revoked; never the token
 pnpm -s client-token revoke phone
 ```
 
-The scope is required. `human` is for a person's devices (phone, laptop): it works on the web API and MCP. `agent` is for workers and the driver: it works on MCP, and on the web API it reaches only what `bin/inbox`, `bin/inbox-watch`, and `bin/review-request` call — filing an inbox request (`inboxRequest`), completing one a person accepted (`inboxComplete`), listing the inbox (`inbox`), and listing beads projects (`beadsProjects`). Every other procedure, and the review images, answer an `agent` token with 403, so an agent can't approve its own inbox request, decide a review, or edit the graph from the web API. Each tRPC procedure declares the scopes it accepts. A tokenless loopback request counts as `human`.
+The scope is required. `human` is for a person's devices (phone, laptop): it works on the web API and MCP. `agent` is for workers and the driver: it works on MCP, and on the web API it reaches only what `bin/inbox`, `bin/inbox-watch`, and `bin/review-request` call — filing an inbox request (`inboxRequest`), completing one a person accepted (`inboxComplete`), listing the inbox (`inbox`), and listing beads projects (`beadsProjects`). Every other procedure, and the review images, answer an `agent` token with 403, so an agent can't approve its own inbox request, decide a review, or edit the graph from the web API. Each tRPC procedure declares the scopes it accepts. A tokenless loopback request counts as `human`. The third scope, `hangar`, belongs to the hangar service alone and reaches only its endpoints under `/hangar/v1/` (see [Hangar](#hangar)).
 
 The inbox scripts send `$BREAKDOWN_TOKEN` as `Authorization: Bearer` when it is set, so a worker on another tailnet machine runs them with `BREAKDOWN_API=https://<host> BREAKDOWN_TOKEN=bdt_… bin/inbox request …`. Both variables belong to the scripts; the server reads neither.
 
@@ -331,6 +331,28 @@ For a decision rather than a look (an architecture choice, a risky operational s
 One card is one decision. Several decisions about one item are several cards in one call, `review-request <item-id> city.md budget.md logos.md` (up to six). Each card becomes its own review under the item, with its own Accept and its own prompt back to the requesting pane. Every card is validated, and every image copied, before anything is filed, and one notification and one board link cover the call. A review is found again by its card's key: the frontmatter `key`, else the filename stem (`budget.md` → `budget`). Re-running one card replaces only that review, so keep a card's filename, or set `key`, across revisions. A review filed before keys existed (and every `--summary` review) has none: a single card or the image form still reuses it, and a multi-card call leaves it alone and says so. A card review's title is its question. In the inbox's Needs me, reviews under the same item show together, grouped like inbox items about the same work item, and with them. Never render text, tables, or code to an image: put them in the card.
 
 A card can carry video too: `{ kind: video, path: reel.mp4, poster: reel.jpg, caption: "Cut 1", option: A }`, where `path` and the optional `poster` image are relative to the card, as images are. Videos are mp4 or webm, at most 200 MB each (a `.mov` is refused with the `ffmpeg -i reel.mov -c copy reel.mp4` remux that fixes it); encode with `-movflags +faststart` so playback starts before the whole file loads. `option` names the card option the video is the cut of: the board shows every option's cut side by side in option order, the recommended one marked, so "which cut" is one card with one video per option. Each plays as a muted vertical reel with a Loop toggle and an Enlarge button, and while the review is open a "Note 0:07" button beside it adds its time (`B 0:07 ` for option B's cut) on a new line of the changes-requested message.
+
+## Hangar
+
+Hangar (`cazzer/hangar`) runs remote Claude sessions on a machine that only connects out and is often offline. Breakdown is its control plane: a session is requested here, queues until hangar polls for it, and is tracked here as it runs. Breakdown never connects to hangar. The HTTP contract between them is [`docs/hangar-api.md`](docs/hangar-api.md).
+
+**Mint the hangar's token** on the Breakdown host and give it to the hangar service:
+
+```bash
+pnpm -s client-token create hangar-desktop --scope hangar   # the client name is the hangar's identity
+pnpm -s client-token revoke hangar-desktop                  # stops it at once
+```
+
+**What the service does** with it, over the web server's `/hangar/v1/` API: it checks in every 30 seconds (version and capacity), claims the oldest queued session of a flavor it can run by long-poll, reports each session `running`, then `stopped` or `failed`, with its container, host, and disk path, requeues one it can't start with a reason, and lists what it holds to reconcile after a restart. It must reach Breakdown off loopback (the tailnet hostname, or a proxy that sets `X-Forwarded-For`): a loopback request is the local person and its token is never read, so every hangar endpoint refuses it.
+
+**Session tokens.** Each claim returns a new `agent` token bound to that session, once. Hangar hands it to the worker it starts, and it dies when the session stops, fails, or is requeued. With it, the worker:
+
+- uses MCP with `Authorization: Bearer <session token>`; its writes are attributed to `session-<id> via <client>`;
+- files and completes inbox requests: `BREAKDOWN_API=https://<host> BREAKDOWN_TOKEN=<session token> bin/inbox request …`. The item is bound to the session, so the person's decision goes to the worker as a message, read with `GET /hangar/v1/messages`, instead of into a herdr pane.
+
+**Asking for a session and watching it.** An agent queues one with the MCP tool `brain_hangar_request` (repo, work item, flavor `headless`, `display-godot`, or `display-browser`), which answers hangar's status, and reads with `brain_hangar_status` and `brain_hangar_sessions`; none of the three claims, changes a session, or returns a token. The board's header shows a chip, "hangar online", "hangar offline since 09:00", or "hangar never checked in", with the hangar's version and the queued, claimed, and running counts in its tooltip. Hangar counts as offline once its last check-in is older than three intervals (90 seconds).
+
+**End-to-end check.** `pnpm hangar:e2e --web http://127.0.0.1:<port> --mcp http://127.0.0.1:<port>/mcp` drives the whole loop against running servers with a throwaway hangar token: check-in, a request over MCP claimed by long-poll, a session-token write over MCP, an inbox request and decision delivered as a message, and the token dying with the session. It refuses to start while real requests are queued, since it would claim one. It is not part of `pnpm check`.
 
 ## Working on it
 

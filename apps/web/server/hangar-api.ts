@@ -15,8 +15,10 @@
 // Every response is JSON; every error is `{ "error": { "code", "message" } }`.
 // A write (POST, PATCH) needs `application/json`, at most
 // MAX_HANGAR_BODY_BYTES (declared or streamed), strict UTF-8, and a body the
-// endpoint's strict schema accepts. A read-only server answers reads and
-// refuses every write.
+// endpoint's schema accepts. Unknown fields are dropped, not refused, so a
+// hangar built against a later v1 keeps working against this server; every
+// known field is still checked for type and range. A read-only server
+// answers reads and refuses every write.
 //
 // Long-poll (claim, messages) re-runs its query once a second until it finds
 // something, its bound passes, the client's socket closes, or the server
@@ -193,12 +195,12 @@ async function readJsonBody<T extends z.ZodType>(req: IncomingMessage, schema: T
   return result.data;
 }
 
-const checkInSchema = z.strictObject({
+const checkInSchema = z.object({
   version: z.string().trim().min(1).max(MAX_HANGAR_FIELD_LENGTH),
   capacity: z.record(z.string(), z.unknown()).nullable().optional(),
 });
 
-const claimSchema = z.strictObject({
+const claimSchema = z.object({
   flavors: z
     .array(z.enum(HANGAR_FLAVORS))
     .min(1)
@@ -207,14 +209,14 @@ const claimSchema = z.strictObject({
   wait_s: z.number().int().min(0).max(MAX_HANGAR_WAIT_S).default(0),
 });
 
-const updateSchema = z.strictObject({
+const updateSchema = z.object({
   state: z.enum(HANGAR_SESSION_STATES).optional(),
   container: z.string().max(MAX_HANGAR_FIELD_LENGTH).nullable().optional(),
   host: z.string().max(MAX_HANGAR_FIELD_LENGTH).nullable().optional(),
   disk_path: z.string().max(MAX_HANGAR_DISK_PATH_LENGTH).nullable().optional(),
 });
 
-const requeueSchema = z.strictObject({
+const requeueSchema = z.object({
   reason: z.string().trim().min(1).max(MAX_HANGAR_REQUEUE_REASON_LENGTH),
 });
 

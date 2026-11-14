@@ -24,7 +24,7 @@ https://<breakdown-host>/hangar/v1/...            # behind a TLS proxy such as `
 - **Scopes.** Each endpoint takes exactly one scope: `hangar` for the service endpoints, and `agent` with a bound session for `GET /hangar/v1/messages`. Breakdown's other scope, `human`, is refused on every endpoint here. The `hangar` token is refused everywhere else in Breakdown: the web API's other routes and MCP.
 - **Requests must arrive off loopback.** Breakdown trusts a request from its own machine (loopback peer, loopback `Host`) without reading any token, and treats it as the local person (`human`), so every endpoint here refuses it with `403`. Hangar reaches Breakdown over the tailnet, from another machine. If a proxy on Breakdown's machine fronts the server, it must set `X-Forwarded-For` (or `X-Real-IP` / `Forwarded`) to the remote address, which `tailscale serve` does. A forwarder that adds no such header (socat, `ssh -R`, a bare nginx `proxy_pass`) makes remote requests look local, and they will be refused here.
 - **Host.** The `Host` header must be a name the operator allowed with `--allow-host`, either at the server's port or bare (a proxy on 443). Any other `Host` gets `403`, token or not. Use the tailnet hostname Breakdown is served under.
-- **Content.** Every response body is JSON (`Content-Type: application/json; charset=utf-8`, `Cache-Control: no-store`). `POST` and `PATCH` requests must send `Content-Type: application/json` and a UTF-8 JSON body of at most 64 KiB (65,536 bytes). `GET` requests send no body.
+- **Content.** Every response body is JSON (`Content-Type: application/json; charset=utf-8`, `Cache-Control: no-store`). `POST` and `PATCH` requests must send `Content-Type: application/json` and a UTF-8 JSON body of at most 64 KiB (65,536 bytes). `GET` requests send no body. Unknown request fields are ignored, and responses may carry fields this document does not list yet; ignore those (see [Versioning](#versioning)).
 - **Read-only servers.** A Breakdown started with `BRAIN_READ_ONLY` answers `GET`s and refuses every `POST` and `PATCH` with `403 read_only`. That includes check-in and claim, so to hangar a read-only Breakdown has no work.
 
 ## Endpoints
@@ -343,7 +343,7 @@ Branch on `code`, which is stable within v1. `message` is for people, and its wo
 | Status | `code` | When |
 | --- | --- | --- |
 | 400 | `invalid_json` | The body is not valid UTF-8 JSON. |
-| 400 | `invalid_request` | The JSON or query string breaks the endpoint's schema. The message lists each problem as `field: reason`. Request bodies are strict: an unknown field is refused. |
+| 400 | `invalid_request` | The JSON or query string breaks the endpoint's schema: a required field is missing, or a documented field has the wrong type or is out of range. The message lists each problem as `field: reason`. An unknown field is not an error (see [Versioning](#versioning)). |
 | 401 | `unauthorized` | No token, or an unknown or revoked one. Sent with `WWW-Authenticate: Bearer`. |
 | 403 | `forbidden` | The token's scope cannot call this endpoint, the request arrived over loopback with no token honored, or the `Host` / `Origin` is not allowed. |
 | 403 | `read_only` | The server is read-only and this is a `POST` or `PATCH`. |
@@ -358,5 +358,7 @@ Branch on `code`, which is stable within v1. `message` is for people, and its wo
 ## Versioning
 
 - Everything here is under `/hangar/v1/`. A breaking change gets a new prefix (`/hangar/v2/`), served alongside v1 until hangar moves.
-- Within v1, responses may gain fields, messages may gain kinds, and error messages may be reworded. Ignore fields and kinds you don't know.
-- Request bodies are strict in v1 (an unknown field is a `400`). Send only the fields documented here.
+- Hangar and Breakdown are deployed independently, so either side may be newer than the other. Within v1, both directions tolerate what they don't know:
+  - **Requests.** Breakdown ignores a request body field it does not know. A newer hangar can send a field this server predates, and the request still succeeds as if the field were absent. Documented fields are still checked: a missing required field, a wrong type, or an out-of-range value is a `400 invalid_request`. So check a field's name against this document: a misspelled optional field is ignored, not refused.
+  - **Responses.** Responses may gain fields, messages may gain kinds, and error messages may be reworded. Clients must ignore fields and kinds they don't know.
+- A field changes meaning or type only under a new prefix.

@@ -703,9 +703,13 @@ export class HangarSessionNotClaimedByError extends KnowledgeStoreError {
   }
 }
 
-/** A generic writer (brain_write) was given a node of a type only the hangar paths write. */
+/**
+ * A generic writer (brain_write) was given a node only the hangar paths
+ * write: node_type `hangar_session`, or anything under source system
+ * `hangar`. Nothing was written.
+ */
 export class ReservedHangarNodeError extends KnowledgeStoreError {
   constructor(readonly itemLabel: string) {
-    super(`node ${itemLabel} has node_type "hangar_session", which only the hangar queue writes; request a session instead`);
+    super(`node ${itemLabel} is reserved for the hangar queue (node_type "hangar_session" and source_system "hangar" are written only by it)`);
   }
 }

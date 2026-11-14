@@ -14,7 +14,7 @@ import { createCallerFactory, type ProcedureMeta } from "./trpc.js";
 const procedures = Object.entries(appRouter._def.procedures as Record<string, { _def: { meta?: ProcedureMeta } }>);
 const scopesOf = (name: string): readonly string[] => procedures.find(([path]) => path === name)?.[1]._def.meta?.scopes ?? [];
 
-const AGENT_PROCEDURES = ["beadsProjects", "inbox", "inboxComplete", "inboxRequest"];
+const AGENT_PROCEDURES = ["beadsProjects", "hangarStatus", "inbox", "inboxComplete", "inboxRequest"];
 
 const caller = (scope: Context["scope"]) => createCallerFactory(appRouter)({ db: {} as Database, scope });
 

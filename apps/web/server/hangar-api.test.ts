@@ -196,13 +196,20 @@ describe("POST /hangar/v1/check-in", () => {
     expect(row).toMatchObject({ version: "0.4.1", capacity: { slots: 2 } });
   });
 
-  it("refuses a missing version and an unknown field with invalid_request naming them", async () => {
+  it("refuses a missing or mistyped version with invalid_request naming it", async () => {
     const missing = await send("/hangar/v1/check-in", { token: tokens[HANGAR_A], body: {} });
     expect(missing.status).toBe(400);
     expect(missing.json.error).toMatchObject({ code: "invalid_request", message: expect.stringContaining("version") });
-    const unknown = await send("/hangar/v1/check-in", { token: tokens[HANGAR_A], body: { version: "1", slots: 3 } });
-    expect(unknown.status).toBe(400);
-    expect(unknown.json.error?.message).toContain("slots");
+    const mistyped = await send("/hangar/v1/check-in", { token: tokens[HANGAR_A], body: { version: 4 } });
+    expect(mistyped.status).toBe(400);
+    expect(mistyped.json.error).toMatchObject({ code: "invalid_request", message: expect.stringContaining("version") });
+  });
+
+  it("ignores an unknown field, so a newer hangar keeps working", async () => {
+    const sent = await send("/hangar/v1/check-in", { token: tokens[HANGAR_A], body: { version: "0.5.0", slots: 3, capacity: { slots: 1 } } });
+    expect(sent.status, sent.body).toBe(200);
+    const [row] = await db.select().from(hangarCheckIns).where(eq(hangarCheckIns.hangar, HANGAR_A));
+    expect(row).toMatchObject({ version: "0.5.0", capacity: { slots: 1 } });
   });
 });
 
