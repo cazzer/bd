@@ -1,6 +1,7 @@
 // The server's request dispatcher over real HTTP: admission refuses before
-// any handler runs, an admitted request reaches the right one, and the
-// admitted token client reaches tRPC through `admittedClients`. The
+// any handler runs, an admitted request reaches the right one under that
+// route's scopes, and the admitted token client and scope reach tRPC
+// through `admittedClients`. The
 // handlers and the token store are stand-ins that record the call;
 // packages/core admission.test.ts, auth-connect.test.ts, and
 // review-images.test.ts prove the pieces themselves.
@@ -13,11 +14,12 @@ import { createServer, request, type IncomingHttpHeaders, type IncomingMessage, 
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { admittedClients } from "./context.js";
-import { createRequestDispatcher } from "./dispatch.js";
+import { createRequestDispatcher, routeFor } from "./dispatch.js";
 
 const TAILNET = "breakdown.tail.example";
 const PHONE_TOKEN = "bdt_phone-token";
 const WORKER_TOKEN = "bdt_worker-token";
+const HANGAR_TOKEN = "bdt_hangar-token";
 const THROWING_TOKEN = "bdt_throws";
 
 let server: Server;
@@ -37,23 +39,28 @@ async function startDispatcher(withStatic: boolean): Promise<{ server: Server; p
     verifyToken: async (token) => {
       verified += 1;
       if (token === THROWING_TOKEN) throw new Error("token store unavailable");
-      if (token === WORKER_TOKEN) return { client: "worker-1", scope: "agent" };
-      return token === PHONE_TOKEN ? { client: "phone", scope: "human" } : null;
+      if (token === WORKER_TOKEN) return { client: "worker-1", scope: "agent", sessionId: null };
+      if (token === HANGAR_TOKEN) return { client: "hangar-desktop", scope: "hangar", sessionId: null };
+      return token === PHONE_TOKEN ? { client: "phone", scope: "human", sessionId: null } : null;
     },
     connect: async (req, res) => {
       calls.push(`connect ${req.method} ${req.url}`);
       res.end("connect");
     },
     health: async (req, res) => {
-      calls.push(`health ${req.method} ${req.url} client=${admittedClients.get(req) ?? null}`);
+      calls.push(`health ${req.method} ${req.url} ${admitted(req)}`);
       res.end("health");
     },
     reviewImages: async (req, res) => {
-      calls.push(`images ${req.url} client=${admittedClients.get(req) ?? null}`);
+      calls.push(`images ${req.url} ${admitted(req)}`);
       res.end("image");
     },
+    hangar: async (req, res, client) => {
+      calls.push(`hangar ${req.method} ${req.url} ${client === null ? "client=null" : `client=${client.client}/${client.scope}`}`);
+      res.end("hangar");
+    },
     trpc: (req, res) => {
-      calls.push(`trpc ${req.url} client=${admittedClients.get(req) ?? null}`);
+      calls.push(`trpc ${req.url} ${admitted(req)}`);
       res.end("trpc");
     },
     ...(withStatic
@@ -75,6 +82,13 @@ beforeAll(async () => {
   ({ server, port } = await startDispatcher(false));
   ({ server: staticServer, port: staticPort } = await startDispatcher(true));
 });
+
+/** `client=phone` for a tokened request (its scope after a slash when not human), `client=null` for a tokenless one. */
+function admitted(req: Parameters<typeof admittedClients.get>[0]): string {
+  const entry = admittedClients.get(req);
+  if (entry === undefined) return "client=null";
+  return entry.scope === "human" ? `client=${entry.client}` : `client=${entry.client}/${entry.scope}`;
+}
 
 afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -234,9 +248,16 @@ describe("createRequestDispatcher: client tokens", () => {
     expect(calls).toEqual(["trpc /trpc/createNote client=phone"]);
   });
 
-  it("refuses an agent token with 403, by bearer or cookie, and calls nothing", async () => {
-    expect(await send("/trpc/board", { Host: tailnetHost(), ...bearer(WORKER_TOKEN) })).toMatchObject({ status: 403, body: "Forbidden\n" });
-    expect(await send("/trpc/createNote", { Host: tailnetHost(), Origin: `http://${tailnetHost()}`, ...cookie(WORKER_TOKEN) }, "POST")).toMatchObject({ status: 403 });
+  it("admits an agent token to tRPC, handing over its scope for the procedure to check", async () => {
+    expect(await send("/trpc/inbox", { Host: tailnetHost(), ...bearer(WORKER_TOKEN) })).toMatchObject({ status: 200, body: "trpc" });
+    expect(await send("/trpc/inboxRequest", { Host: tailnetHost(), ...bearer(WORKER_TOKEN) }, "POST")).toMatchObject({ status: 200, body: "trpc" });
+    expect(calls).toEqual(["trpc /trpc/inbox client=worker-1/agent", "trpc /trpc/inboxRequest client=worker-1/agent"]);
+  });
+
+  it("refuses an agent token on the review images and the connect endpoint with 403, by bearer or cookie, and calls nothing", async () => {
+    expect(await send("/review-images/rv/r1/a.png", { Host: tailnetHost(), ...bearer(WORKER_TOKEN) })).toMatchObject({ status: 403, body: "Forbidden\n" });
+    expect(await send("/review-images/rv/r1/a.png", { Host: tailnetHost(), ...cookie(WORKER_TOKEN) })).toMatchObject({ status: 403, body: "Forbidden\n" });
+    expect(await send("/auth/connect", { Host: tailnetHost(), ...bearer(WORKER_TOKEN) })).toMatchObject({ status: 403, body: "Forbidden\n" });
     expect(calls).toEqual([]);
   });
 
@@ -265,13 +286,59 @@ describe("createRequestDispatcher: client tokens", () => {
   });
 });
 
+describe("createRequestDispatcher: the hangar API", () => {
+  it("hands a hangar or agent token to the hangar handler with what admission established", async () => {
+    expect(await send("/hangar/v1/sessions", { Host: tailnetHost(), ...bearer(HANGAR_TOKEN) })).toMatchObject({ status: 200, body: "hangar" });
+    expect(await send("/hangar/v1/messages?after=0", { Host: tailnetHost(), ...bearer(WORKER_TOKEN) })).toMatchObject({ status: 200, body: "hangar" });
+    expect(calls).toEqual(["hangar GET /hangar/v1/sessions client=hangar-desktop/hangar", "hangar GET /hangar/v1/messages?after=0 client=worker-1/agent"]);
+  });
+
+  it("refuses a human token with a JSON 403, and a missing token with a JSON 401 that keeps WWW-Authenticate", async () => {
+    const forbidden = await send("/hangar/v1/claim", { Host: tailnetHost(), ...bearer() }, "POST");
+    expect(forbidden.status).toBe(403);
+    expect(forbidden.headers["content-type"]).toBe("application/json; charset=utf-8");
+    expect(JSON.parse(forbidden.body)).toMatchObject({ error: { code: "forbidden" } });
+    const unauthorized = await send("/hangar/v1/claim", { Host: tailnetHost() }, "POST");
+    expect(unauthorized.status).toBe(401);
+    expect(unauthorized.headers["www-authenticate"]).toBe("Bearer");
+    expect(JSON.parse(unauthorized.body)).toMatchObject({ error: { code: "unauthorized" } });
+    expect(calls).toEqual([]);
+  });
+
+  it("refuses the hangar token everywhere but the hangar API and the health check", async () => {
+    expect(await send("/trpc/board", { Host: tailnetHost(), ...bearer(HANGAR_TOKEN) })).toMatchObject({ status: 403, body: "Forbidden\n" });
+    expect(await send("/review-images/rv/r1/a.png", { Host: tailnetHost(), ...bearer(HANGAR_TOKEN) })).toMatchObject({ status: 403, body: "Forbidden\n" });
+    expect(await send("/auth/connect", { Host: tailnetHost(), ...bearer(HANGAR_TOKEN) })).toMatchObject({ status: 403, body: "Forbidden\n" });
+    expect(await send("/healthz", { Host: tailnetHost(), ...bearer(HANGAR_TOKEN) })).toMatchObject({ status: 200, body: "health" });
+    expect(calls).toEqual(["health GET /healthz client=hangar-desktop/hangar"]);
+  });
+
+  it("goes to the hangar API ahead of the built client, so a hangar path never gets the client's index fallback", async () => {
+    const host = `${TAILNET}:${staticPort}`;
+    expect(await send("/hangar/v1/sessions", { Host: host, ...bearer(HANGAR_TOKEN) }, "GET", staticPort)).toMatchObject({ status: 200, body: "hangar" });
+    const unauthorized = await send("/hangar/v1/sessions", { Host: host }, "GET", staticPort);
+    expect(unauthorized.status).toBe(401);
+    expect(JSON.parse(unauthorized.body)).toMatchObject({ error: { code: "unauthorized" } });
+    expect(calls).toEqual(["hangar GET /hangar/v1/sessions client=hangar-desktop/hangar"]);
+  });
+
+  it("classifies a spelling that only normalizes to a hangar path as client, never calling the hangar handler", async () => {
+    const host = `${TAILNET}:${staticPort}`;
+    for (const path of ["/x/../hangar/v1/claim", "/%68angar/v1/claim", "//hangar/v1/claim", "/hangar/v1", "/HANGAR/v1/claim"]) {
+      expect(await send(path, { Host: host, ...bearer(HANGAR_TOKEN) }, "GET", staticPort), path).toMatchObject({ status: 200, body: "static" });
+    }
+    expect(calls.every((c) => c.startsWith("static "))).toBe(true);
+    expect(calls).toHaveLength(5);
+  });
+});
+
 describe("createRequestDispatcher: health", () => {
-  it("routes /healthz to the health handler, which needs a token off loopback", async () => {
+  it("routes /healthz to the health handler, which needs a token of any scope off loopback", async () => {
     expect(await send("/healthz", { Host: `127.0.0.1:${port}` })).toMatchObject({ status: 200, body: "health" });
     expect(await send("/healthz", { Host: tailnetHost() })).toMatchObject({ status: 401 });
     expect(await send("/healthz", { Host: tailnetHost(), ...bearer() })).toMatchObject({ status: 200, body: "health" });
-    expect(await send("/healthz", { Host: tailnetHost(), ...bearer(WORKER_TOKEN) })).toMatchObject({ status: 403 });
-    expect(calls).toEqual(["health GET /healthz client=null", "health GET /healthz client=phone"]);
+    expect(await send("/healthz", { Host: tailnetHost(), ...bearer(WORKER_TOKEN) })).toMatchObject({ status: 200, body: "health" });
+    expect(calls).toEqual(["health GET /healthz client=null", "health GET /healthz client=phone", "health GET /healthz client=worker-1/agent"]);
   });
 
   it("without a built client, GET / off loopback still needs a token and goes to tRPC", async () => {
@@ -333,5 +400,24 @@ describe("createRequestDispatcher: the built client", () => {
     expect(await toStatic("/", { Host: `localhost:${staticPort}` })).toMatchObject({ status: 200, body: "static" });
     expect(await toStatic("/trpc/board", { Host: `localhost:${staticPort}` })).toMatchObject({ status: 200, body: "trpc" });
     expect(calls).toEqual(["static GET /", "trpc /trpc/board client=null"]);
+  });
+});
+
+describe("routeFor", () => {
+  it("routes the exact connect and health paths, the review image and hangar prefixes, and /trpc on the raw path; the rest to the client when there is one", () => {
+    for (const hasStatic of [false, true]) {
+      expect(routeFor("/auth/connect", hasStatic)).toBe("connect");
+      expect(routeFor("/healthz", hasStatic)).toBe("health");
+      expect(routeFor("/review-images/rv/r1/a.png", hasStatic)).toBe("reviewImages");
+      expect(routeFor("/trpc", hasStatic)).toBe("trpc");
+      expect(routeFor("/trpc/board", hasStatic)).toBe("trpc");
+      expect(routeFor("/hangar/v1/claim", hasStatic)).toBe("hangar");
+    }
+    const fallback = { false: "trpc", true: "static" } as const;
+    for (const hasStatic of [false, true]) {
+      for (const path of ["/auth/connect/", "//auth/connect", "/AUTH/connect", "/healthz/", "http://127.0.0.1:1/review-images/a.png", "/x/../trpc/a", "/%74rpc/a", "/trpcx", "/hangar/v1", "/hangar/v2/claim", "/HANGAR/v1/claim", "/x/../hangar/v1/claim", "/"]) {
+        expect(routeFor(path, hasStatic), path).toBe(fallback[`${hasStatic}`]);
+      }
+    }
   });
 });

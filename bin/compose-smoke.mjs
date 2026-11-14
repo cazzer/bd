@@ -109,7 +109,7 @@ async function checkHealth(human, agent) {
   const webHuman = await request(WEB_PORT, { path: "/healthz", token: human });
   check("web /healthz with the human token → 200", webHuman.status === 200, `${webHuman.status}`);
   const webAgent = await request(WEB_PORT, { path: "/healthz", token: agent });
-  check("web /healthz with the agent token → 403", webAgent.status === 403, `${webAgent.status}`);
+  check("web /healthz with the agent token → 200 (health admits any scope)", webAgent.status === 200, `${webAgent.status}`);
   const mcpAnon = await request(MCP_PORT, { path: "/healthz" });
   check("mcp /healthz without a token → 401 + WWW-Authenticate: Bearer", mcpAnon.status === 401 && mcpAnon.headers["www-authenticate"] === "Bearer", `${mcpAnon.status}`);
   const mcpAgent = await request(MCP_PORT, { path: "/healthz", token: agent });

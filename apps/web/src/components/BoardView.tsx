@@ -67,6 +67,7 @@ import { drawerProject } from "../lib/reviewDrawer.js";
 import { formatRoute, type BoardRoute, type GraphRoute } from "../lib/route.js";
 import { viewFilterOf, type ViewNode } from "../lib/viewFilter.js";
 import { trpc } from "../trpc.js";
+import { HangarStatusPill } from "./HangarStatusPill.js";
 import { ReviewDrawer, useWideDrawer } from "./ReviewDrawer.js";
 import { HeaderSearch } from "./HeaderSearch.js";
 import { ReviewQueuePill, storeDraft, useShellDrawer } from "./ReviewQueue.js";
@@ -392,6 +393,7 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
         )}
         <div className="ml-auto flex flex-wrap items-center justify-end gap-3 text-xs text-fg-muted">
           <HeaderSearch />
+          <HangarStatusPill />
           <ReviewQueuePill />
           {view && (
             <button

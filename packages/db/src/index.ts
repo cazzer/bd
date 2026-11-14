@@ -11,6 +11,8 @@ export {
   edges,
   resolvedNodes,
   clientTokens,
+  hangarCheckIns,
+  hangarMessages,
   CLIENT_TOKEN_SCOPES,
   type ClientTokenScope,
 } from "./schema.js";

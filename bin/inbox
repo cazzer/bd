@@ -15,19 +15,29 @@
 // hand): read the artifact before asking the person about it.
 //
 // `request` records this session's herdr pane ($HERDR_PANE_ID, $HERDR_SOCKET_PATH),
-// so the person's decision is prompted straight back into this session.
+// so the person's decision is prompted straight back into this session. A
+// remote hangar worker's session token ($BREAKDOWN_TOKEN) binds the item to
+// its session instead: the decision arrives in that session's messages
+// (docs/hangar-api.md, GET /hangar/v1/messages), and any pane is dropped.
+//
+// $BREAKDOWN_API points it at another server (default the local one). When
+// $BREAKDOWN_TOKEN is set, every call sends it as `Authorization: Bearer`:
+// needed off loopback (a tailnet host), where an `agent` token can request,
+// complete, and list but never decide. Both are this script's variables,
+// not the server's.
 
 import { readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 
 const API = process.env.BREAKDOWN_API ?? `http://127.0.0.1:${process.env.WEB_SERVER_PORT ?? "4310"}`;
 const UI = process.env.BREAKDOWN_UI ?? "http://localhost:5310";
+const AUTH = process.env.BREAKDOWN_TOKEN ? { authorization: `Bearer ${process.env.BREAKDOWN_TOKEN}` } : {};
 
 async function call(kind, procedure, input) {
   const url = kind === "query" ? `${API}/trpc/${procedure}?input=${encodeURIComponent(JSON.stringify(input ?? {}))}` : `${API}/trpc/${procedure}`;
   let res;
   try {
-    res = await fetch(url, kind === "query" ? {} : { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) });
+    res = await fetch(url, kind === "query" ? { headers: AUTH } : { method: "POST", headers: { "content-type": "application/json", ...AUTH }, body: JSON.stringify(input) });
   } catch (err) {
     throw new Error(`cannot reach the breakdown server at ${API} (${err.message}); start it with \`pnpm dev\` in the breakdown checkout`);
   }
@@ -90,7 +100,8 @@ try {
     const r = await call("mutation", "inboxRequest", { key: values.key, title: values.title, content, metadata });
     console.log(`queued ${r.id} (${r.action}) → ${UI}/inbox?item=${r.id}`);
     if (r.status === "undigested") console.error(`held as undigested: no --read covers --url ${values.url}. Read it, then re-run with --read 'full|${values.url}' (same --key) to put it in front of the person.`);
-    if (!process.env.HERDR_PANE_ID) console.error("note: not in a herdr pane, so the decision won't be prompted back here; check the inbox");
+    if (r.session) console.error("the decision will arrive in this session's messages");
+    else if (!process.env.HERDR_PANE_ID) console.error("note: not in a herdr pane, so the decision won't be prompted back here; check the inbox");
   } else if (command === "done") {
     const [id, ...note] = rest;
     if (!id || note.length === 0) throw new Error("usage: inbox done <id> <what you did, with link>");

@@ -73,7 +73,7 @@ import { z } from "zod";
 import { boundResponse } from "../budget.js";
 import { toFoundNodeDto, toListedNodeDto, toLookedUpNodeDto, toNeighborDto, toRecentNodeDto, toRetrievedNodeDto } from "../dto.js";
 import { mapCoreError } from "../errors.js";
-import { publicProcedure, router } from "../trpc.js";
+import { humanProcedure, router } from "../trpc.js";
 
 /** See the module header — bounds the nodeTypes/sourceSystems/edgeTypes filter arrays. */
 const MAX_FILTER_VALUES = 50;
@@ -99,7 +99,7 @@ export const searchInputSchema = z.object({
   updatedSince: z.string().datetime({ offset: true }).optional(),
 });
 
-const searchProcedure = publicProcedure.input(searchInputSchema).query(async ({ ctx, input }) => {
+const searchProcedure = humanProcedure.input(searchInputSchema).query(async ({ ctx, input }) => {
   const defaultsUsed = {
     seedLimit: input.seedLimit ?? DEFAULT_SEED_LIMIT,
     minRelevance: input.minRelevance ?? DEFAULT_MIN_RELEVANCE,
@@ -177,7 +177,7 @@ export const getNeighborsInputSchema = z.object({
   cursor: neighborsCursorSchema.optional(),
 });
 
-const getNeighborsProcedure = publicProcedure.input(getNeighborsInputSchema).query(async ({ ctx, input }) => {
+const getNeighborsProcedure = humanProcedure.input(getNeighborsInputSchema).query(async ({ ctx, input }) => {
   try {
     const result = await getNeighbors(ctx.db, input.id, { limit: input.limit, cursor: input.cursor ?? null });
     return {
@@ -199,7 +199,7 @@ export const getNodesInputSchema = z.object({
   ids: z.array(z.string().min(1)).min(1, "must contain at least one id").max(1000, "must contain at most 1000 ids"),
 });
 
-const getNodesProcedure = publicProcedure.input(getNodesInputSchema).query(async ({ ctx, input }) => {
+const getNodesProcedure = humanProcedure.input(getNodesInputSchema).query(async ({ ctx, input }) => {
   let result;
   try {
     result = await getNodes(ctx.db, input.ids);
@@ -231,7 +231,7 @@ export const getStoreSummaryInputSchema = z
   })
   .optional();
 
-const getStoreSummaryProcedure = publicProcedure.input(getStoreSummaryInputSchema).query(async ({ ctx, input }) => {
+const getStoreSummaryProcedure = humanProcedure.input(getStoreSummaryInputSchema).query(async ({ ctx, input }) => {
   const recentNodesLimit = input?.recentNodesLimit;
   let summary;
   try {
@@ -306,7 +306,7 @@ const getStoreSummaryProcedure = publicProcedure.input(getStoreSummaryInputSchem
 // candidate that's still perfectly fine to report.
 export const listUnlinkedNotesInputSchema = z.object({}).optional();
 
-const listUnlinkedNotesProcedure = publicProcedure.input(listUnlinkedNotesInputSchema).query(async ({ ctx }) => {
+const listUnlinkedNotesProcedure = humanProcedure.input(listUnlinkedNotesInputSchema).query(async ({ ctx }) => {
   let summary;
   try {
     summary = await getStoreSummary(ctx.db, { recentNodesLimit: MAX_RECENT_NODES_LIMIT });
@@ -375,7 +375,7 @@ export const listInputSchema = z.object({
   cursor: z.object({ updatedAt: z.string().min(1).max(64), id: z.string().min(1).max(64) }).optional(),
 });
 
-const listProcedure = publicProcedure.input(listInputSchema).query(async ({ ctx, input }) => {
+const listProcedure = humanProcedure.input(listInputSchema).query(async ({ ctx, input }) => {
   let result;
   try {
     result = await listNodes(ctx.db, {
@@ -447,7 +447,7 @@ export const findInputSchema = z.object({
   offset: z.number().int().min(0).max(MAX_FIND_OFFSET).optional(),
 });
 
-const findProcedure = publicProcedure.input(findInputSchema).query(async ({ ctx, input }) => {
+const findProcedure = humanProcedure.input(findInputSchema).query(async ({ ctx, input }) => {
   const offset = input.offset ?? 0;
   let result;
   try {
@@ -506,7 +506,7 @@ export const resolveDefaultViewsInputSchema = z.object({
     .max(MAX_RESOLVE_IDS, `must contain at most ${MAX_RESOLVE_IDS} ids`),
 });
 
-const resolveDefaultViewsProcedure = publicProcedure.input(resolveDefaultViewsInputSchema).query(async ({ ctx, input }) => {
+const resolveDefaultViewsProcedure = humanProcedure.input(resolveDefaultViewsInputSchema).query(async ({ ctx, input }) => {
   try {
     const results = await resolveDefaultViews(ctx.db, input.ids);
     return { results };
@@ -544,7 +544,7 @@ export const treeInputSchema = z.object({
   rootId: z.string().min(1, "must not be empty"),
 });
 
-const treeProcedure = publicProcedure.input(treeInputSchema).query(async ({ ctx, input }) => {
+const treeProcedure = humanProcedure.input(treeInputSchema).query(async ({ ctx, input }) => {
   try {
     const result = await getSubtree(ctx.db, input.rootId);
     return { rootId: result.rootId, nodes: result.nodes, truncated: result.truncated };
@@ -583,7 +583,7 @@ export const timelineInputSchema = z.object({
   cursor: z.object({ occurredAt: z.string().min(1).max(64), id: z.string().min(1).max(64) }).optional(),
 });
 
-const timelineProcedure = publicProcedure.input(timelineInputSchema).query(async ({ ctx, input }) => {
+const timelineProcedure = humanProcedure.input(timelineInputSchema).query(async ({ ctx, input }) => {
   let result;
   try {
     result = await getTimeline(ctx.db, input.anchorId, {

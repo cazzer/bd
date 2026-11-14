@@ -1,5 +1,5 @@
 // Stdio entrypoint: the shared fail-fast startup (bootstrap.ts), then the
-// eleven brain_* tools over stdio. Every startup step lives in bootstrap.ts
+// fourteen brain_* tools over stdio. Every startup step lives in bootstrap.ts
 // so this entrypoint and the HTTP one differ only in transport (design.md
 // decision 1).
 //

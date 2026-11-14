@@ -24,7 +24,7 @@
 // string.
 
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { isLoopbackAddress, TOKEN_COOKIE_NAME, UNAUTHORIZED_HEADERS, type ClientTokenScope } from "@breakdown/core";
+import { isLoopbackAddress, TOKEN_COOKIE_NAME, UNAUTHORIZED_HEADERS, type VerifiedClientToken } from "@breakdown/core";
 
 export const AUTH_CONNECT_PATH = "/auth/connect";
 /** A token is 47 characters; a JSON body carrying one is far below this. */
@@ -34,8 +34,8 @@ const COOKIE_MAX_AGE_SECONDS = 365 * 24 * 60 * 60;
 const COOKIE_VALUE = /^[\x21\x23-\x2B\x2D-\x3A\x3C-\x5B\x5D-\x7E]+$/;
 
 export interface ConnectHandlerOptions {
-  /** The client and scope of a live token, or null. A throw propagates to the dispatcher (500). */
-  verifyToken: (token: string) => Promise<{ client: string; scope: ClientTokenScope } | null>;
+  /** The client, scope, and bound session of a live token, or null. A throw propagates to the dispatcher (500). */
+  verifyToken: (token: string) => Promise<VerifiedClientToken | null>;
 }
 
 function sendText(res: ServerResponse, status: number, body: string, headers: Record<string, string> = {}): void {

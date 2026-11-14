@@ -7,7 +7,8 @@
 // with 401, then `POST /auth/connect` goes to the connect handler
 // (auth-connect.ts), `/healthz` to the health handler (health.ts), a
 // request under REVIEW_IMAGES_PREFIX to the review image handler
-// (review-images.ts), `/trpc` to tRPC's standalone handler — the same
+// (review-images.ts), a request under `/hangar/v1/` to hangar's REST API
+// (hangar-api.ts), `/trpc` to tRPC's standalone handler — the same
 // `createHTTPHandler` that `createHTTPServer` wraps, so tRPC sees exactly
 // what it saw before — and, with `--client-dir`, everything else to the
 // built client (static-client.ts). Without it, everything else goes to tRPC
@@ -44,6 +45,7 @@ import { createBeadsWatcher } from "./beads-watcher.js";
 import { parseReadOnly } from "./config.js";
 import { createContextFactory } from "./context.js";
 import { createRequestDispatcher } from "./dispatch.js";
+import { createHangarHandler } from "./hangar-api.js";
 import { createHealthHandler } from "./health.js";
 import { createReviewImageHandler } from "./review-images.js";
 import { createStaticClientHandler, loadClientManifest } from "./static-client.js";
@@ -152,6 +154,7 @@ async function main(): Promise<void> {
       connect: createConnectHandler({ verifyToken }),
       health: createHealthHandler(pool),
       reviewImages: createReviewImageHandler({ root: reviewImageRoot }),
+      hangar: createHangarHandler({ db, readOnly, shutdownSignal: shutdown.signal }),
       trpc: trpcHandler,
       ...(staticClient !== undefined ? { staticClient } : {}),
     }),

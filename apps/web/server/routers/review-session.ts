@@ -23,7 +23,7 @@ import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { mapCoreError, refuseMissingBinary } from "../errors.js";
 import { focusPane, openAgentSession } from "../herdr-session.js";
-import { publicProcedure, router } from "../trpc.js";
+import { humanProcedure, router } from "../trpc.js";
 import { REVIEW_ITEM_ID_PATTERN } from "./review.js";
 
 export const REVIEW_SESSION_WORKSPACE = "reviews";
@@ -67,7 +67,7 @@ export function reviewSessionPrompt(input: { project: string; externalId: string
   return lines.join("\n");
 }
 
-const reviewSessionProcedure = publicProcedure.input(reviewSessionInputSchema).mutation(async ({ ctx, input }): Promise<ReviewSessionResult> => {
+const reviewSessionProcedure = humanProcedure.input(reviewSessionInputSchema).mutation(async ({ ctx, input }): Promise<ReviewSessionResult> => {
   const run = ctx.herdrJson;
   if (run === undefined) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "This server has no herdr runner configured; review sessions are unavailable." });
   refuseMissingBinary(ctx.missingBinaries, "herdr");

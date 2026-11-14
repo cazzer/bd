@@ -68,7 +68,7 @@ import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { mapCoreError, refuseMissingBinary } from "../errors.js";
 import { ReviewDecisionInFlightError, ReviewRecordRefusedError, type ReviewNotified, type ReviewStep } from "../review-writer.js";
-import { publicProcedure, router } from "../trpc.js";
+import { humanProcedure, router } from "../trpc.js";
 
 /** Room left in a comment for its prefix: `Changes requested: ` (19), or `Accepted: <option> — ` (at most 29 with a 16-character id). */
 export const MAX_REVIEW_MESSAGE_LENGTH = MAX_REVIEW_COMMENT_LENGTH - 32;
@@ -125,7 +125,7 @@ export interface ReviewDecisionResult {
   notified: ReviewNotified;
 }
 
-const reviewDecisionProcedure = publicProcedure.input(reviewDecisionInputSchema).mutation(async ({ ctx, input }): Promise<ReviewDecisionResult> => {
+const reviewDecisionProcedure = humanProcedure.input(reviewDecisionInputSchema).mutation(async ({ ctx, input }): Promise<ReviewDecisionResult> => {
   if (ctx.readOnly) {
     throw new TRPCError({ code: "FORBIDDEN", message: "The server is read-only (BRAIN_READ_ONLY); review decisions are refused." });
   }

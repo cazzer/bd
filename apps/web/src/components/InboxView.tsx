@@ -26,7 +26,7 @@
 // requests changes, as in the board's run.
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
-import { filterBySource, groupByWork, needsMeRows, REVIEW_SOURCE, sourcesOf, type NeedsMeRow, type WorkGroupSlot } from "../lib/inboxRows.js";
+import { filterBySource, groupByWork, hangarOriginLabel, needsMeRows, REVIEW_SOURCE, sourcesOf, type NeedsMeRow, type WorkGroupSlot } from "../lib/inboxRows.js";
 import { navigate } from "../lib/navigate.js";
 import { CARD_MOVED_TEXT, cardActions, chosenOption, describeChosen, isCardMovedRefusal, type CardOption } from "../lib/reviewCard.js";
 import { decisionBlocked } from "../lib/reviewDrawer.js";
@@ -412,7 +412,10 @@ function RowButton({ row, active, now, candidates, onPick }: { row: Row; active:
             <span className="rounded-full border border-hairline px-2 py-0.5">{row.review.project}</span>
           </>
         ) : (
-          <span className="rounded-full border border-hairline px-2 py-0.5">{SOURCE_LABEL[row.item.source] ?? row.item.source}</span>
+          <>
+            <span className="rounded-full border border-hairline px-2 py-0.5">{SOURCE_LABEL[row.item.source] ?? row.item.source}</span>
+            {hangarOriginLabel(row.item) !== null && <span className="rounded-full border border-hairline px-2 py-0.5">{hangarOriginLabel(row.item)}</span>}
+          </>
         )}
         {row.priority <= 1 && row.kind === "inbox" && <span className="rounded-full bg-red-500/15 px-2 py-0.5 text-red-300">P{row.priority}</span>}
         {row.kind === "inbox" && row.item.options.length > 0 && <span>{row.item.options.length} options</span>}
@@ -555,8 +558,13 @@ function InboxDetail({ item, parent, candidates, now, messageRef, keyed, onDecid
     />
   );
 
+  const origin = hangarOriginLabel(item);
   const recipient =
-    item.pane !== null ? `Will prompt the session that queued it (pane ${item.pane}).` : "Accepted items are carried out by the inbox watcher (or /inbox-execute).";
+    item.hangarSession !== null
+      ? "Will be sent to the hangar session that filed it."
+      : item.pane !== null
+        ? `Will prompt the session that queued it (pane ${item.pane}).`
+        : "Accepted items are carried out by the inbox watcher (or /inbox-execute).";
   const pendingIgnores = candidates.filter((c) => c.status === "pending" && (c.action === "ignore" || c.action === "none"));
 
   return (
@@ -569,6 +577,7 @@ function InboxDetail({ item, parent, candidates, now, messageRef, keyed, onDecid
       <header className="space-y-2">
         <div className="flex flex-wrap items-center gap-2 text-[11px] text-fg-muted">
           <span className="rounded-full border border-hairline px-2 py-0.5">{SOURCE_LABEL[item.source] ?? item.source}</span>
+          {origin !== null && <span className="rounded-full border border-hairline px-2 py-0.5">{origin}</span>}
           <span className={`rounded-full border px-2 py-0.5 ${item.status === "undigested" ? "border-amber-400/50 bg-amber-400/10 text-amber-200" : "border-hairline"}`}>{STATUS_LABEL[item.status]}</span>
           {item.verdict !== null && <span className="rounded-full border border-hairline px-2 py-0.5">verdict: {item.verdict.replaceAll("_", " ")}</span>}
           <span>{ago(item.receivedAt, now)}</span>

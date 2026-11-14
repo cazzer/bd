@@ -1,4 +1,5 @@
-// End-to-end coverage of the eight brain_* tools, driven through the real
+// End-to-end coverage of the brain_* tools (the hangar tools are in
+// hangar-tools.test.ts), driven through the real
 // MCP protocol (a Client talking to the Server built by createServer())
 // rather than by calling tool handlers directly — this is what actually
 // proves argument validation, tool advertisement, and error mapping work
@@ -133,11 +134,26 @@ const BOGUS_ID = "00000000-0000-0000-0000-000000000000";
 // --- Tool listing (spec: "No arbitrary SQL from the model", "Read-only mode") ---
 
 describe("tool listing", () => {
-  it("advertises all eleven tools with object-shaped input schemas, and no SQL passthrough tool", async () => {
+  it("advertises all fourteen tools with object-shaped input schemas, and no SQL passthrough tool", async () => {
     const { client } = await connectClient();
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
-    expect(names).toEqual(["brain_get", "brain_history", "brain_link", "brain_list", "brain_map", "brain_merge", "brain_neighbors", "brain_ready", "brain_search", "brain_update_work_item", "brain_write"]);
+    expect(names).toEqual([
+      "brain_get",
+      "brain_hangar_request",
+      "brain_hangar_sessions",
+      "brain_hangar_status",
+      "brain_history",
+      "brain_link",
+      "brain_list",
+      "brain_map",
+      "brain_merge",
+      "brain_neighbors",
+      "brain_ready",
+      "brain_search",
+      "brain_update_work_item",
+      "brain_write",
+    ]);
     for (const tool of tools) {
       expect(tool.inputSchema.type).toBe("object");
     }
@@ -686,11 +702,11 @@ describe("brain_history", () => {
 // --- Read-only mode (spec: "Read-only mode") -----------------------------------
 
 describe("read-only mode", () => {
-  it("does not advertise brain_write/brain_link/brain_merge", async () => {
+  it("does not advertise brain_write/brain_link/brain_merge/brain_update_work_item/brain_hangar_request", async () => {
     const { client } = await connectClient({ readOnly: true });
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
-    expect(names).toEqual(["brain_get", "brain_history", "brain_list", "brain_map", "brain_neighbors", "brain_ready", "brain_search"]);
+    expect(names).toEqual(["brain_get", "brain_hangar_sessions", "brain_hangar_status", "brain_history", "brain_list", "brain_map", "brain_neighbors", "brain_ready", "brain_search"]);
   });
 
   it("refuses brain_write with an explanatory error and persists nothing", async () => {

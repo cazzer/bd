@@ -2,7 +2,7 @@ import { eq, inArray } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database } from "@breakdown/db";
 import { ingestRuns, nodes, resolvedNodes } from "@breakdown/db";
-import { MergeFailedError, NodeNotFoundError, SelfMergeError } from "./errors.js";
+import { HangarSessionMergeError, MergeFailedError, NodeNotFoundError, SelfMergeError } from "./errors.js";
 import { openIngestRun, type IngestRunHandle } from "./ingest-runs.js";
 import { mergeNodes } from "./merge.js";
 import { upsertNodes } from "./nodes.js";
@@ -248,5 +248,31 @@ describe("mergeNodes", () => {
       .where(eq(nodes.id, loser));
     expect(row?.content).toBe("v2");
     expect(row?.mergedInto).toBe(survivor);
+  });
+});
+
+// hangar-queue security review: a session's identity is its token's binding
+// and its inbox items' `session`, so no merge may move one.
+describe("mergeNodes refuses hangar sessions", () => {
+  async function mergedIntoOf(ids: string[]) {
+    return db.select({ id: nodes.id, mergedInto: nodes.mergedInto }).from(nodes).where(inArray(nodes.id, ids));
+  }
+
+  it("refuses a hangar_session as loser or survivor, and a node under source system hangar, writing nothing", async () => {
+    const run = await newRun();
+    const [plain, other] = await makeNodes(run, 2);
+    const session = (await upsertNodes(db, run, [{ nodeType: "hangar_session", sourceSystem: run.sourceSystem, externalId: `session-${uniqueSuffix()}` }])).rows[0]!.id;
+    const underHangar = (await upsertNodes(db, run, [{ nodeType: "person", sourceSystem: "hangar", externalId: `merge-test-${uniqueSuffix()}` }])).rows[0]!.id;
+    try {
+      await expect(mergeNodes(db, session, plain!, run)).rejects.toBeInstanceOf(HangarSessionMergeError);
+      await expect(mergeNodes(db, plain!, session, run)).rejects.toBeInstanceOf(HangarSessionMergeError);
+      await expect(mergeNodes(db, underHangar, plain!, run)).rejects.toBeInstanceOf(HangarSessionMergeError);
+      await expect(mergeNodes(db, plain!, underHangar, run)).rejects.toBeInstanceOf(HangarSessionMergeError);
+      expect((await mergedIntoOf([plain!, session, underHangar])).every((r) => r.mergedInto === null)).toBe(true);
+      // An ordinary merge still works.
+      expect((await mergeNodes(db, other!, plain!, run)).mergedNodeIds).toEqual([other]);
+    } finally {
+      await db.delete(nodes).where(eq(nodes.id, underHangar));
+    }
   });
 });

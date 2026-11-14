@@ -1,5 +1,9 @@
 import { DrizzleQueryError } from "drizzle-orm";
 import { sql, type SQL } from "drizzle-orm";
+import type { Database } from "@breakdown/db";
+
+/** The handle `db.transaction` passes its callback, for helpers that write inside a caller's transaction. */
+export type Tx = Parameters<Parameters<Database["transaction"]>[0]>[0];
 
 /** Splits `items` into consecutive slices of at most `size` elements. */
 export function chunk<T>(items: readonly T[], size: number): T[][] {

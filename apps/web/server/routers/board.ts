@@ -38,7 +38,7 @@ import { z } from "zod";
 import { boundResponse } from "../budget.js";
 import { toBeadsProjectDto, toBoardCardDto, toBoardItemDto, toPendingReviewDto } from "../dto.js";
 import { mapCoreError } from "../errors.js";
-import { publicProcedure, router } from "../trpc.js";
+import { agentProcedure, humanProcedure, router } from "../trpc.js";
 
 export const boardInputSchema = z.object({
   /** Project keys to read; absent reads every registered project, an empty list reads none. */
@@ -48,7 +48,7 @@ export const boardInputSchema = z.object({
     .optional(),
 });
 
-const boardProcedure = publicProcedure.input(boardInputSchema).query(async ({ ctx, input }) => {
+const boardProcedure = humanProcedure.input(boardInputSchema).query(async ({ ctx, input }) => {
   let board;
   try {
     board = await getWorkBoard(ctx.db, { projects: input.projects });
@@ -74,7 +74,7 @@ export type LastIngest =
   | { ok: true; at: string; changed: boolean; nodes: { created: number; updated: number; unchanged: number } }
   | { ok: false; at: string; error: string };
 
-const beadsProjectsProcedure = publicProcedure.query(async ({ ctx }) => {
+const beadsProjectsProcedure = agentProcedure.query(async ({ ctx }) => {
   try {
     const projects = await listBeadsProjects(ctx.db);
     // Core cannot know a rolled-back failure, so the last-ingest outcome is joined here from the watcher's in-memory record: null with no watcher or no attempt yet.
@@ -101,7 +101,7 @@ export const boardItemInputSchema = z.object({
   item: z.string().min(1).max(MAX_BOARD_ITEM_ID_LENGTH),
 });
 
-const boardItemProcedure = publicProcedure.input(boardItemInputSchema).query(async ({ ctx, input }) => {
+const boardItemProcedure = humanProcedure.input(boardItemInputSchema).query(async ({ ctx, input }) => {
   try {
     const item = await getBoardItem(ctx.db, { project: input.project, externalId: input.item });
     return { item: item === null ? null : toBoardItemDto(item, ctx.reviewImageRoot) };
@@ -110,7 +110,7 @@ const boardItemProcedure = publicProcedure.input(boardItemInputSchema).query(asy
   }
 });
 
-const reviewQueueProcedure = publicProcedure.query(async ({ ctx }) => {
+const reviewQueueProcedure = humanProcedure.query(async ({ ctx }) => {
   try {
     const queue = await listPendingReviews(ctx.db);
     return { reviews: queue.reviews.map(toPendingReviewDto), total: queue.total, truncated: queue.truncated };

@@ -26,6 +26,12 @@ import {
   InvalidViewError,
   InvalidWorkItemError,
   InvalidInboxItemError,
+  InboxItemNotThisSessionError,
+  InvalidHangarSessionError,
+  HangarSessionNotClaimedByError,
+  HangarSessionNotFoundError,
+  HangarTransitionError,
+  HangarSessionMergeError,
   KnowledgeStoreError,
   LookupFailedError,
   MergeFailedError,
@@ -33,6 +39,8 @@ import {
   NodeNotFoundError,
   NodeUpsertFailedError,
   NotAWorkItemError,
+  ReservedHangarEdgeError,
+  ReservedHangarNodeError,
   RetrievalFailedError,
   SelfMergeError,
 } from "@breakdown/core";
@@ -87,8 +95,9 @@ export function formatZodError(toolName: string, err: ZodError): CallToolResult 
 
 /**
  * Maps any error a tool handler can throw to a `CallToolResult` with
- * `isError: true` — see the module header. `toolName` is only used for
- * the unrecognized-error fallback and Zod formatting; every mapped
+ * `isError: true` — see the module header. `toolName` is used for
+ * the unrecognized-error fallback, Zod formatting, and the one hint that
+ * differs by tool (NotAWorkItemError); every mapped
  * `KnowledgeStoreError` already names itself and the offending value.
  */
 export function mapError(toolName: string, err: unknown): CallToolResult {
@@ -143,6 +152,9 @@ export function mapError(toolName: string, err: unknown): CallToolResult {
   if (err instanceof SelfMergeError) {
     return actionable(err, "Choose a different survivorId — these ids already refer to the same node.");
   }
+  if (err instanceof HangarSessionMergeError) {
+    return actionable(err, "Nothing was merged. A hangar session is not a duplicate of anything: it is bound to its token and its inbox items. Merge other nodes; leave sessions as they are.");
+  }
   if (err instanceof MergeFailedError) {
     return actionable(err, RETRY_HINT);
   }
@@ -186,12 +198,34 @@ export function mapError(toolName: string, err: unknown): CallToolResult {
   if (err instanceof InvalidInboxItemError) {
     return actionable(err, "Fix that field on the named item and retry; nothing from this call was persisted. status is one of pending, changes, accepted, dismissed, done; source is required; url and links[].url are http(s); priority is an integer 0-4.");
   }
+  if (err instanceof InboxItemNotThisSessionError) {
+    return actionable(err, "Nothing from this call was persisted. A hangar session's token writes only new inbox keys and the items its own session filed; give your item its own externalId, or leave that item to the session or person who owns it.");
+  }
   // --- Work items (brain_write of a work_item, brain_update_work_item) ---
   if (err instanceof InvalidWorkItemError) {
     return actionable(err, "Fix that field on the named item and retry; nothing from this call was persisted. status is one of open, in_progress, blocked, closed, deferred; priority is an integer 0-4.");
   }
   if (err instanceof NotAWorkItemError) {
+    if (toolName === "brain_hangar_request") {
+      return actionable(err, "A hangar session runs for a work item: pass the id of a node whose nodeType is work_item (find one with brain_list nodeTypes [\"work_item\"]). Nothing was queued.");
+    }
     return actionable(err, "brain_update_work_item only patches nodes whose nodeType is work_item. Use brain_write to change other nodes, or write this one as a work_item first.");
+  }
+
+  // --- Hangar (brain_write of a reserved node, the brain_hangar_* tools) ---
+  if (err instanceof ReservedHangarNodeError) {
+    return actionable(err, "Nothing from this call was persisted. Queue a hangar session with brain_hangar_request and read sessions with brain_hangar_sessions; give any other node a different nodeType and sourceSystem, then retry.");
+  }
+  if (err instanceof ReservedHangarEdgeError) {
+    return actionable(err, "Nothing from this call was persisted. A session's run_by link is written when it is queued (brain_hangar_request); give other edges a sourceSystem other than \"hangar\" and a source that is not a hangar session, then retry.");
+  }
+  if (err instanceof InvalidHangarSessionError) {
+    return actionable(err, "Fix that argument and retry; nothing was queued. flavor is one of headless, display-godot, display-browser; repo is 1-200 characters with no control characters; states are queued, claimed, running, stopped, failed.");
+  }
+  // Only hangar's REST API claims and reports sessions; no MCP tool reaches
+  // these today, but a session-state refusal is never something to retry.
+  if (err instanceof HangarSessionNotFoundError || err instanceof HangarTransitionError || err instanceof HangarSessionNotClaimedByError) {
+    return actionable(err, "Session state is reported by hangar itself, not through MCP; read the session with brain_hangar_sessions instead of retrying.");
   }
 
   // --- Views (brain_write of a view) ---

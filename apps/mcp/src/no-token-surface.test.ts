@@ -11,7 +11,7 @@ import { describe, expect, test } from "vitest";
 import { allTools } from "./tools/index.js";
 
 const SRC = dirname(fileURLToPath(import.meta.url));
-const TOKEN_STORE = /\b(createClientToken|listClientTokens|revokeClientToken|verifyClientToken|clientTokens|client_tokens)\b|token-command/;
+const TOKEN_STORE = /\b(createClientToken|createSessionToken|listClientTokens|revokeClientToken|revokeSessionTokens|verifyClientToken|clientTokens|client_tokens)\b|token-command/;
 
 function sourcesUnder(dir: string): string[] {
   return readdirSync(dir, { recursive: true, encoding: "utf8" })

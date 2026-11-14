@@ -5,6 +5,7 @@
 
 import { boardRouter } from "./routers/board.js";
 import { boardLiveRouter } from "./routers/board-live.js";
+import { hangarRouter } from "./routers/hangar.js";
 import { readRouter } from "./routers/read.js";
 import { inboxRouter } from "./routers/inbox.js";
 import { reviewRouter } from "./routers/review.js";
@@ -12,6 +13,6 @@ import { reviewSessionRouter } from "./routers/review-session.js";
 import { writeRouter } from "./routers/write.js";
 import { mergeRouters } from "./trpc.js";
 
-export const appRouter = mergeRouters(readRouter, writeRouter, boardRouter, boardLiveRouter, reviewRouter, reviewSessionRouter, inboxRouter);
+export const appRouter = mergeRouters(readRouter, writeRouter, boardRouter, boardLiveRouter, reviewRouter, reviewSessionRouter, inboxRouter, hangarRouter);
 
 export type AppRouter = typeof appRouter;

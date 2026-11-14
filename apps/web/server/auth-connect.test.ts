@@ -13,7 +13,7 @@ import { createConnectHandler, MAX_CONNECT_BODY_BYTES } from "./auth-connect.js"
 const TOKEN = "bdt_AbC-123_xyz";
 const AGENT_TOKEN = "bdt_worker-token";
 const verifyToken = async (token: string) =>
-  token === TOKEN ? { client: "phone", scope: "human" as const } : token === AGENT_TOKEN ? { client: "worker-1", scope: "agent" as const } : null;
+  token === TOKEN ? { client: "phone", scope: "human" as const, sessionId: null } : token === AGENT_TOKEN ? { client: "worker-1", scope: "agent" as const, sessionId: null } : null;
 const handler = createConnectHandler({ verifyToken });
 const COOKIE = `breakdown_token=${TOKEN}; HttpOnly; SameSite=Strict; Path=/; Max-Age=31536000`;
 
@@ -98,7 +98,7 @@ describe("POST /auth/connect", () => {
     const guarded = createConnectHandler({
       verifyToken: async () => {
         called = true;
-        return { client: "phone", scope: "human" as const };
+        return { client: "phone", scope: "human" as const, sessionId: null };
       },
     });
     const res = fakeResponse();

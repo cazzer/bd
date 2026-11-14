@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import {
   type AnyPgColumn,
+  bigserial,
   check,
   customType,
   index,
@@ -371,10 +372,18 @@ const bytea = customType<{ data: Buffer; driverData: Buffer }>({
  *
  * `scope` says what a token may reach (design decision 9): `human` tokens
  * (a phone, a laptop) are accepted by the web API and MCP, `agent` tokens
- * (workers, a driver) by MCP only, so a worker cannot decide its own
- * inbox request. It has no default: every token states its scope.
+ * (workers, a driver) by MCP and the agent procedures only, so a worker
+ * cannot decide its own inbox request, and the `hangar` token by the
+ * hangar endpoints only (hangar-queue decision 1). It has no default:
+ * every token states its scope.
+ *
+ * `session_id` binds a token to one `hangar_session` node (hangar-queue
+ * decision 4): a hangar claim mints it, scope `agent`, and the session
+ * ending revokes it. No foreign key: the node may later be merged or
+ * tombstoned, and the token's lifetime follows the session's state, not
+ * the row's existence. Only an `agent` token may carry one.
  */
-export const CLIENT_TOKEN_SCOPES = ["human", "agent"] as const;
+export const CLIENT_TOKEN_SCOPES = ["human", "agent", "hangar"] as const;
 export type ClientTokenScope = (typeof CLIENT_TOKEN_SCOPES)[number];
 
 export const clientTokens = pgTable(
@@ -389,11 +398,53 @@ export const clientTokens = pgTable(
       .defaultNow(),
     lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    sessionId: uuid("session_id"),
   },
   (table) => [
     uniqueIndex("client_tokens_live_client_idx")
       .on(table.client)
       .where(sql`${table.revokedAt} IS NULL`),
-    check("client_tokens_scope_check", sql`${table.scope} IN ('human', 'agent')`),
+    index("client_tokens_session_id_idx").on(table.sessionId),
+    check("client_tokens_scope_check", sql`${table.scope} IN ('human', 'agent', 'hangar')`),
+    check("client_tokens_session_scope_check", sql`${table.sessionId} IS NULL OR ${table.scope} = 'agent'`),
   ],
+);
+
+/**
+ * `hangar_check_ins` — one row per hangar, upserted by every check-in and
+ * every claim (hangar-queue decision 3), so it never grows. Status is
+ * computed on read against the database's own `now()`: online while
+ * `now() - last_seen_at < 3 × interval_s`. Not a node: a check-in is
+ * liveness, not knowledge, and writing one as a revision every 30 s would
+ * bury every real change in the history.
+ */
+export const hangarCheckIns = pgTable("hangar_check_ins", {
+  hangar: text("hangar").primaryKey(),
+  lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+  version: text("version"),
+  // Opaque to this app until bd-d38.5 stores and explains capacity.
+  capacity: jsonb("capacity"),
+  intervalS: integer("interval_s").notNull().default(30),
+});
+
+/**
+ * `hangar_messages` — what a remote session is told (an inbox decision on
+ * an item it filed), read by the worker's long-poll with its session token
+ * (hangar-queue decision 3). The cursor is `id`: a read returns `id >
+ * after`, oldest first. An append takes a per-session advisory lock
+ * (packages/core/src/hangar.ts) so ids commit in order within a session
+ * and a cursor never skips one. `session_id` has no foreign key, like
+ * `client_tokens.session_id`. Kept after the session ends; cleanup is
+ * bd-d38.4's.
+ */
+export const hangarMessages = pgTable(
+  "hangar_messages",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    sessionId: uuid("session_id").notNull(),
+    kind: text("kind").notNull(),
+    body: jsonb("body").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index("hangar_messages_session_id_id_idx").on(table.sessionId, table.id)],
 );
