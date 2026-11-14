@@ -109,7 +109,7 @@ Hangar SHALL check in on an interval, and every claim SHALL count as a check-in.
 
 ### Requirement: Workers receive their messages by long-poll
 
-A worker SHALL fetch its session's messages with its session token, waiting up to a bound (at most 30 seconds) for one to arrive, and SHALL pass back a cursor so that each message is delivered after the last one it acknowledged. A worker SHALL NOT be able to read another session's messages. When a person decides an inbox item or review that a remote session filed, the decision SHALL be queued as a message to that session instead of being typed into a herdr pane. Items filed by a local session SHALL keep herdr delivery. The session an item belongs to SHALL be taken from the token that filed it, never from the request body. When the session that filed an item has ended (stopped or failed) by the time a person decides it, no message SHALL be queued; the item SHALL stop being bound to the session, so it is handled like a local item.
+A worker SHALL fetch its session's messages with its session token, waiting up to a bound (at most 30 seconds) for one to arrive, and SHALL pass back a cursor so that each message is delivered after the last one it acknowledged. A worker SHALL NOT be able to read another session's messages. When a person decides an inbox item or review that a remote session filed, the decision SHALL be queued as a message to that session instead of being typed into a herdr pane. Items filed by a local session SHALL keep herdr delivery. The session an item belongs to SHALL be taken from the token that filed it, never from the request body. When the session that filed an item has ended (stopped or failed) by the time a person decides it, no message SHALL be queued. An accept or a send-back SHALL be refused and SHALL write nothing, so a remote session's proposal never becomes a local execution unasked. A dismissal, a release, or a hand-off to a local session SHALL still be recorded, and SHALL unbind the item from the session, so from then on it is handled like a local item.
 
 #### Scenario: Reply reaches a remote session
 
@@ -123,8 +123,13 @@ A worker SHALL fetch its session's messages with its session token, waiting up t
 
 #### Scenario: Decision after the session ended
 
-- **WHEN** a worker's session is stopped and a person then accepts an item that session filed
-- **THEN** no message is queued, the item is no longer bound to the session, and the decision reports that the session has ended
+- **WHEN** a worker's session is stopped and a person then accepts an item that session filed, or sends it back
+- **THEN** the decision is refused as a conflict telling the person to hand the item off to a local session or dismiss it, nothing is written, no message is queued, and the item stays bound to the session
+
+#### Scenario: Dismissal after the session ended
+
+- **WHEN** a worker's session is stopped and a person then dismisses an item that session filed, releases it, or hands it off to a local session
+- **THEN** the action is recorded, no message is queued, and the item is no longer bound to the session
 
 #### Scenario: Another session's messages
 

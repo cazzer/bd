@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { rm } from "node:fs/promises";
 import { closeIngestRun, HostBinaryUnavailableError, inboxNotifyText, listInbox, openIngestRun, requestInboxItem, upsertNodes, type IngestRunHandle } from "@breakdown/core";
 import { createDb, createPool, hangarMessages, ingestRuns, nodes, resolveDatabaseUrl, type Database } from "@breakdown/db";
 import { TRPCError } from "@trpc/server";
@@ -197,7 +198,7 @@ describe("inbox delivery by where the item came from", () => {
     expect(messages).toEqual([{ kind: "inbox_decision", body: expect.objectContaining({ item_id: filed.id, decision: "accept", outcome: "accepted", message: "ok" }) }]);
   });
 
-  it("tells the person a stopped session's item reached nobody, runs no herdr, and leaves the item to local routing", async () => {
+  it("refuses accept and send-back on a stopped session's item with CONFLICT, writes nothing, and runs no herdr", async () => {
     const session = await sessionNode("stopped");
     const worker = createCallerFactory(appRouter)({ db, client: `session-${session}`, scope: "agent", sessionId: session });
     const filed = await worker.inboxRequest({ key: `${KEY}-ended`, title: "Late ask", content: "x", metadata: { source: "session" } });
@@ -205,13 +206,42 @@ describe("inbox delivery by where the item came from", () => {
     await db.execute(sql`UPDATE nodes SET metadata = metadata || '{"pane": "w1:p9", "socket": "/tmp/herdr.sock"}'::jsonb WHERE id = ${filed.id}::uuid`);
 
     const spy = herdrSpy();
-    const decided = await createCallerFactory(appRouter)({ db, runHerdr: spy.runHerdr }).inboxDecision({ id: filed.id, decision: "accept" });
-    expect(decided.notified).toEqual({ ok: false, reason: "the hangar session that filed it has ended" });
-    expect(decided).toMatchObject({ session: null, endedSession: session });
+    const person = createCallerFactory(appRouter)({ db, runHerdr: spy.runHerdr });
+    for (const decision of ["accept", "changes"] as const) {
+      const refused = await person.inboxDecision({ id: filed.id, decision, message: "go" }).catch((e: unknown) => e);
+      expect(refused).toBeInstanceOf(TRPCError);
+      expect((refused as TRPCError).code).toBe("CONFLICT");
+      expect((refused as TRPCError).message).toBe("The hangar session that filed this has ended. Hand it off to a local session or dismiss it.");
+    }
     expect(spy.calls).toEqual([]);
     expect(await db.select({ id: hangarMessages.id }).from(hangarMessages).where(eq(hangarMessages.sessionId, session))).toEqual([]);
-    const [item] = (await listInbox(db, { ids: [filed.id], statuses: ["accepted"] })).items;
-    expect(item?.hangarSession).toBeNull();
+    expect((await listInbox(db, { ids: [filed.id] })).items[0]).toMatchObject({ status: "pending", hangarSession: session, feedback: [] });
+
+    // Dismiss still works: it tells the person nobody was reached, and clears the session.
+    const dismissed = await person.inboxDecision({ id: filed.id, decision: "dismiss" });
+    expect(dismissed.notified).toEqual({ ok: false, reason: "the hangar session that filed it has ended" });
+    expect(dismissed).toMatchObject({ session: null, endedSession: session, after: "dismissed" });
+    expect(spy.calls).toEqual([]);
+    expect((await listInbox(db, { ids: [filed.id], statuses: ["dismissed"] })).items[0]?.hangarSession).toBeNull();
+  });
+
+  it("hands a stopped session's item to a local session, sending nothing and clearing the session", async () => {
+    const session = await sessionNode("stopped");
+    const worker = createCallerFactory(appRouter)({ db, client: `session-${session}`, scope: "agent", sessionId: session });
+    const filed = await worker.inboxRequest({ key: `${KEY}-ended-handoff`, title: "Late deep one", content: "x", metadata: { source: "session" } });
+    const promptFiles: string[] = [];
+    const herdrJson = async (args: readonly string[]): Promise<Record<string, unknown>> => {
+      if (args[0] === "agent" && args[1] === "start") promptFiles.push(...args.flatMap((a) => /^Read (\S+) and do what it says\.$/.exec(a)?.[1] ?? []));
+      return { workspaces: [], workspace: { workspace_id: "w5" }, tab: { tab_id: "w5:t2" }, root_pane: { pane_id: "w5:p2" } };
+    };
+    try {
+      const opened = await createCallerFactory(appRouter)({ db, herdrJson, herdrSocket: "/tmp/server-herdr.sock" }).inboxOpenSession({ id: filed.id });
+      expect(opened).toMatchObject({ tab: "w5:t2", pane: "w5:p2" });
+    } finally {
+      await Promise.all(promptFiles.map((f) => rm(f, { force: true })));
+    }
+    expect(await db.select({ id: hangarMessages.id }).from(hangarMessages).where(eq(hangarMessages.sessionId, session))).toEqual([]);
+    expect((await listInbox(db, { ids: [filed.id], statuses: ["session"] })).items[0]).toMatchObject({ hangarSession: null, pane: "w5:p2" });
   });
 
   it("prompts a pane item's session through herdr as before", async () => {

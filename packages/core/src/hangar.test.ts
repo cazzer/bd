@@ -45,7 +45,7 @@ import {
 } from "./hangar.js";
 import { getNodeHistory } from "./history.js";
 import { closeIngestRun, openIngestRun, type IngestRunHandle } from "./ingest-runs.js";
-import { upsertNodes } from "./nodes.js";
+import { DEFAULT_MAX_METADATA_LENGTH, upsertNodes } from "./nodes.js";
 import { connectTestDb, uniqueSuffix, type TestPool } from "./test-helpers.js";
 
 let pool: TestPool;
@@ -582,6 +582,41 @@ describe("claimSession passes over a session it cannot claim", () => {
     const failed = await stateOf(broken.id);
     expect(failed["state"]).toBe("failed");
     expect(failed["failure_reason"]).toMatch(/breaks the session contract.*repo/);
+  });
+
+  it("fails an oversized session, dropping the offending fields so the failure writes, and claims the next", async () => {
+    const oversized = await request("headless");
+    const good = await request("headless");
+    // Unknown keys pass the contract, so only the node write's own limit stops this row: the
+    // oversized key is dropped, and a small one kept.
+    await db.execute(sql`
+      UPDATE nodes SET metadata = metadata || jsonb_build_object('notes', ${"x".repeat(DEFAULT_MAX_METADATA_LENGTH)}::text, 'tag', 'keep-me')
+      WHERE id = ${oversized.id}::uuid
+    `);
+    const hangar = hangarNamed("past-oversized");
+    const claimed = await claimSession(db, { hangar, flavors: ["headless"], among: [oversized.id, good.id] });
+    expect(claimed!.session.id).toBe(good.id);
+    const failed = await stateOf(oversized.id);
+    expect(failed).toMatchObject({ state: "failed", flavor: "headless", repo: "cazzer/bd", tag: "keep-me", failure_reason: expect.stringMatching(/past the node limits/) });
+    expect(failed).not.toHaveProperty("notes");
+    expect(JSON.stringify(failed).length).toBeLessThanOrEqual(DEFAULT_MAX_METADATA_LENGTH);
+    // Failed is final: a later claim passes over it.
+    expect(await claimSession(db, { hangar, flavors: ["headless"], among: [oversized.id] })).toBeNull();
+  });
+
+  it("fails a contract-breaking session that is also oversized, rather than aborting the claim", async () => {
+    const broken = await request("headless");
+    const good = await request("headless");
+    await db.execute(sql`
+      UPDATE nodes SET metadata = metadata || jsonb_build_object('repo', 42, 'host', ${"h".repeat(10_000)}::text, 'notes', ${"x".repeat(DEFAULT_MAX_METADATA_LENGTH)}::text)
+      WHERE id = ${broken.id}::uuid
+    `);
+    const claimed = await claimSession(db, { hangar: hangarNamed("past-broken-oversized"), flavors: ["headless"], among: [broken.id, good.id] });
+    expect(claimed!.session.id).toBe(good.id);
+    const failed = await stateOf(broken.id);
+    expect(failed).toMatchObject({ state: "failed", failure_reason: expect.stringMatching(/breaks the session contract.*repo/) });
+    expect(failed).toMatchObject({ flavor: "headless" });
+    for (const dropped of ["repo", "host", "notes"]) expect(failed).not.toHaveProperty(dropped);
   });
 
   it("marks at most MAX_CLAIM_CANDIDATES per attempt, and the next attempt goes on", async () => {

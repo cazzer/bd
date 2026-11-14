@@ -47,6 +47,7 @@ import {
 } from "./edges.js";
 import {
   ClientTokenExistsError,
+  ContentTooLargeError,
   EdgeUpsertFailedError,
   HangarSessionNotClaimedByError,
   HangarSessionNotFoundError,
@@ -54,10 +55,13 @@ import {
   InvalidEventTimeError,
   InvalidHangarSessionError,
   InvalidLookupIdError,
+  InvalidNodeContentError,
+  MetadataTooLargeError,
   NodeNotFoundError,
   NodeUpsertFailedError,
   NotAWorkItemError,
   ReservedHangarEdgeError,
+  TitleTooLargeError,
 } from "./errors.js";
 import { normalizeOccurredAt, OCCURRED_AT_KEY } from "./event-time.js";
 import { fitText } from "./fit-text.js";
@@ -564,6 +568,21 @@ export async function claimSession(db: Database, input: ClaimSessionInput): Prom
           await failUnclaimable(tx, run, row, `could not be claimed: its stored metadata breaks the session contract (${err.message})`);
           continue;
         }
+        // The claim writes the row back whole, so one past the node write's
+        // own limits (oversized metadata, title, or content) can never be
+        // claimed. Checked before the savepoint, like the contract.
+        try {
+          unsafePrepareNodes(
+            [{ nodeType: HANGAR_SESSION_NODE_TYPE, sourceSystem: HANGAR_SOURCE_SYSTEM, externalId: row.external_id, title: row.title, content: row.content, metadata }],
+            DEFAULT_MAX_CONTENT_LENGTH,
+            DEFAULT_MAX_METADATA_LENGTH,
+            DEFAULT_MAX_TITLE_LENGTH,
+          );
+        } catch (err) {
+          if (!isNodeLimitError(err)) throw err;
+          await failUnclaimable(tx, run, row, `could not be claimed: its stored row is past the node limits (${err.message})`);
+          continue;
+        }
         try {
           // A savepoint: a refused token insert must not abort the claim's transaction.
           return await tx.transaction(async (sp) => {
@@ -583,15 +602,81 @@ export async function claimSession(db: Database, input: ClaimSessionInput): Prom
   }
 }
 
+function isNodeLimitError(err: unknown): err is MetadataTooLargeError | TitleTooLargeError | ContentTooLargeError | InvalidNodeContentError {
+  return err instanceof MetadataTooLargeError || err instanceof TitleTooLargeError || err instanceof ContentTooLargeError || err instanceof InvalidNodeContentError;
+}
+
+const UNKNOWN_FIELD = Symbol("unknown field");
+
 /**
- * Marks a locked queued session `failed` with `reason`, its other metadata
- * kept as stored (it may break the contract, which is why it is failing),
- * and revokes its tokens. Failed is final, so no claim takes it again.
+ * `value` under the contract rule for `key`, undefined to drop the key, or
+ * `UNKNOWN_FIELD` for a key the contract does not name. Throws as the
+ * contract does for a value that breaks it.
+ */
+function contractField(key: string, value: unknown): unknown {
+  if (key === KEY.flavor) return oneOf(key, value, HANGAR_FLAVORS);
+  if (key === KEY.repo) return requiredText(key, value, MAX_HANGAR_REPO_LENGTH);
+  const optional = OPTIONAL_TEXT.find(([k]) => k === key);
+  if (optional !== undefined) return optionalText(key, value, optional[1]);
+  if (key === KEY.claimedAt) return optionalInstant(key, value);
+  if (key === OCCURRED_AT_KEY) return normalizeOccurredAt({ [OCCURRED_AT_KEY]: value })[OCCURRED_AT_KEY];
+  return UNKNOWN_FIELD;
+}
+
+/**
+ * What a failing row keeps of its stored metadata: each contract field that
+ * passes the contract on its own (one that breaks it is dropped), then the
+ * unknown keys in stored order while the whole still fits the node write's
+ * metadata limit. Writing the stored metadata back unchanged would have the
+ * write itself refuse an oversized row, aborting every claim behind it. The
+ * stored row is not lost: its revision keeps it (node_revisions).
+ */
+function salvageSessionMetadata(stored: Record<string, unknown>, failed: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  const unknown: [string, unknown][] = [];
+  for (const [key, value] of Object.entries(stored)) {
+    if (key in failed) continue;
+    let kept: unknown;
+    try {
+      kept = contractField(key, value);
+    } catch (err) {
+      if (!(err instanceof InvalidHangarSessionError || err instanceof InvalidEventTimeError)) throw err;
+      continue;
+    }
+    if (kept === UNKNOWN_FIELD) unknown.push([key, value]);
+    else if (kept !== undefined) out[key] = kept;
+  }
+  Object.assign(out, failed);
+  // JSON of an object: braces, one `"key":value` per entry, commas between.
+  const entry = (key: string, value: unknown) => JSON.stringify(key).length + 1 + (JSON.stringify(value) ?? "null").length;
+  let size = 2 + Object.entries(out).reduce((n, [k, v], i) => n + entry(k, v) + (i > 0 ? 1 : 0), 0);
+  for (const [key, value] of unknown) {
+    const grown = size + entry(key, value) + 1;
+    if (grown > DEFAULT_MAX_METADATA_LENGTH) continue;
+    out[key] = value;
+    size = grown;
+  }
+  return out;
+}
+
+/** A failing row's title or content as the node write accepts it: kept as stored when it does, else stripped of control characters and cut to `max`. */
+function fitStored(value: string, max: number): string {
+  return value.length > max || hasControlChar(value) ? fitField(value, max) : value;
+}
+
+/**
+ * Marks a locked queued session `failed` with `reason`, keeping what of its
+ * stored row the session contract and the node limits accept
+ * (`salvageSessionMetadata`, `fitStored`: the row may break them, which is
+ * why it is failing), and revokes its tokens. Failed is final, so no claim
+ * takes it again.
  */
 async function failUnclaimable(tx: Tx, run: IngestRunHandle, row: LockedSessionRow, reason: string): Promise<void> {
   const stored = row.metadata !== null && typeof row.metadata === "object" && !Array.isArray(row.metadata) ? row.metadata : {};
-  const metadata = { ...stored, [KEY.state]: "failed", [KEY.failureReason]: fitField(reason, MAX_HANGAR_FAILURE_REASON_LENGTH) };
-  await writeSessionNode(tx, run, { externalId: row.external_id, title: row.title, content: row.content, metadata }, "claimSession");
+  const metadata = salvageSessionMetadata(stored, { [KEY.state]: "failed", [KEY.failureReason]: fitField(reason, MAX_HANGAR_FAILURE_REASON_LENGTH) });
+  const title = fitStored(row.title, DEFAULT_MAX_TITLE_LENGTH);
+  const content = fitStored(row.content, DEFAULT_MAX_CONTENT_LENGTH);
+  await writeSessionNode(tx, run, { externalId: row.external_id, title, content, metadata }, "claimSession");
   await revokeSessionTokens(tx, row.id);
 }
 

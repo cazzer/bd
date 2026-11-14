@@ -35,6 +35,15 @@ export type NeedsMeRow<I extends InboxRowItem, R extends QueueReviewRow> =
   | { kind: "inbox"; key: string; priority: number; at: string; source: string; item: I }
   | { kind: "review"; key: string; priority: number; at: string; source: typeof REVIEW_SOURCE; review: R };
 
+/**
+ * The card's remote-origin label: an item a hangar session filed says so in
+ * words, so the person knows a remote worker proposed it and its decision
+ * goes back there (hangar-queue). Null for a local item.
+ */
+export function hangarOriginLabel(item: { hangarSession: string | null }): string | null {
+  return item.hangarSession !== null ? "from hangar session" : null;
+}
+
 /** A review's address in the inbox (`?item=`): `<project>/<bead>`. An inbox item's is its uuid, which never holds a slash. */
 export function reviewKey(review: QueueReviewRow): string {
   return `${review.project}/${review.externalId}`;

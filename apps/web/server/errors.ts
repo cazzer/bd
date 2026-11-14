@@ -23,7 +23,7 @@
 // own stderr via `console.error` below, for whoever is running this
 // locally to read — never sent to the client.
 
-import { HostBinaryUnavailableError, InboxCardChangedError, InboxDecisionConflictError, InboxItemNotThisSessionError, InvalidInboxItemError, NotAnInboxItemError, type HostBinary } from "@breakdown/core";
+import { HostBinaryUnavailableError, InboxCardChangedError, InboxDecisionConflictError, InboxItemNotThisSessionError, InboxItemSessionEndedError, InvalidInboxItemError, NotAnInboxItemError, type HostBinary } from "@breakdown/core";
 import {
   asPgError,
   ContentTooLargeError,
@@ -83,6 +83,9 @@ function isForeignKeyViolation(err: EdgeUpsertFailedError): boolean {
  * `.message` (already safe — see the module header) plus a plain-language
  * hint. Deliberately never reads or forwards `err.cause`.
  */
+/** What the person sees when an accept or send-back is refused on an item whose hangar session has ended. */
+export const INBOX_SESSION_ENDED_MESSAGE = "The hangar session that filed this has ended. Hand it off to a local session or dismiss it.";
+
 function actionable(code: TRPCErrorCode, err: KnowledgeStoreError, hint: string): TRPCError {
   return new TRPCError({ code, message: `${err.message} ${hint}` });
 }
@@ -155,6 +158,10 @@ export function mapCoreError(procedureName: string, err: unknown): TRPCError {
   }
   if (err instanceof NotAnInboxItemError) {
     return actionable("BAD_REQUEST", err, "Only inbox items take an inbox decision.");
+  }
+  if (err instanceof InboxItemSessionEndedError) {
+    // Worded for the person at the card; the core message (ids) is for logs.
+    return new TRPCError({ code: "CONFLICT", message: INBOX_SESSION_ENDED_MESSAGE });
   }
   if (err instanceof InboxItemNotThisSessionError) {
     return actionable("FORBIDDEN", err, "A session token completes or re-sends only the items its own session filed.");

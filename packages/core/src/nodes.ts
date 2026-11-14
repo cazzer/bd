@@ -83,6 +83,13 @@ export interface UpsertNodesOptions {
   maxMetadataLength?: number;
   /** Max `title` length, in characters. Default `DEFAULT_MAX_TITLE_LENGTH`. */
   maxTitleLength?: number;
+  /**
+   * Runs inside the batch's transaction after every chunk is written, with
+   * the full result; a throw rolls the whole batch back and propagates. For
+   * a check that needs the rows' actions (brain_write's session-bound
+   * `assertSessionCreatedAbsentKeys`).
+   */
+  beforeCommit?: (result: UpsertNodesResult) => void | Promise<void>;
 }
 
 export type NodeUpsertAction = "created" | "updated" | "unchanged";
@@ -418,6 +425,7 @@ export async function upsertNodes(
         result[row.action] += 1;
       }
     }
+    await options.beforeCommit?.(result);
   });
 
   return result;

@@ -621,6 +621,22 @@ export class NotAnInboxItemError extends KnowledgeStoreError {
 }
 
 /**
+ * An accept or a send-back on an inbox item whose hangar session has ended
+ * (stopped, failed, merged away, or gone): nobody reads that session's
+ * messages, and the decision must not quietly become a local execution on
+ * this host (hangar-queue, security review). Nothing was written. Dismiss,
+ * release, and hand-off still work.
+ */
+export class InboxItemSessionEndedError extends KnowledgeStoreError {
+  constructor(
+    readonly nodeId: string,
+    readonly sessionId: string,
+  ) {
+    super(`inbox item ${nodeId} was filed by hangar session ${sessionId}, which has ended, so an accept or a send-back would reach nobody`);
+  }
+}
+
+/**
  * A session-bound token tried to complete, or re-send, an inbox item another
  * session (or no session: a local pane's or a person's) filed (hangar-queue
  * decision 9). Nothing was written.

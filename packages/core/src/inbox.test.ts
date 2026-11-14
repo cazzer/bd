@@ -3,8 +3,10 @@ import { sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Database } from "@breakdown/db";
 import { upsertEdges } from "./edges.js";
-import { InboxCardChangedError, InboxDecisionConflictError, InboxItemNotThisSessionError, InvalidInboxItemError, NotAnInboxItemError } from "./errors.js";
+import { InboxCardChangedError, InboxDecisionConflictError, InboxItemNotThisSessionError, InboxItemSessionEndedError, InvalidInboxItemError, NotAnInboxItemError } from "./errors.js";
 import {
+  assertSessionCreatedAbsentKeys,
+  assertSessionMayWriteInboxItems,
   carryForwardInboxDecisions,
   completeInboxItem,
   decideInboxItem,
@@ -522,7 +524,7 @@ describe("items a hangar session filed", () => {
     expect(await messagesFor(s)).toHaveLength(1);
   });
 
-  it("sends nothing once the session has ended (stopped, failed, merged away, or gone), and clears it so local routing takes the item", async () => {
+  it("refuses accept and send-back once the session has ended (stopped, failed, merged away, or gone), writing nothing", async () => {
     const survivor = await sessionNode("running");
     const merged = await sessionNode("running");
     await db.execute(sql`UPDATE nodes SET merged_into = ${survivor}::uuid WHERE id = ${merged}::uuid`);
@@ -535,23 +537,64 @@ describe("items a hangar session filed", () => {
     for (const [label, s] of ended) {
       const filed = await requestInboxItem(db, { externalId: `${key}-ended-${label}`, title: `Ended ${label}`, content: "x", metadata: { source: "session" }, session: s });
       expect(filed.session).toBe(s);
-      const decided = await decideInboxItem(db, filed.id, { decision: "accept", message: "go" });
-      expect(decided, label).toMatchObject({ session: null, endedSession: s, after: "accepted" });
+      const revisions = async () => Number((await db.execute<{ n: string }>(sql`SELECT count(*) AS n FROM node_revisions WHERE node_id = ${filed.id}::uuid`)).rows[0]!.n);
+      const before = await revisions();
+      for (const decision of ["accept", "changes"] as const) {
+        const refused = await decideInboxItem(db, filed.id, { decision, message: "go" }).catch((e: unknown) => e);
+        expect(refused, `${label} ${decision}`).toBeInstanceOf(InboxItemSessionEndedError);
+        expect(refused, `${label} ${decision}`).toMatchObject({ nodeId: filed.id, sessionId: s });
+      }
+      expect(await revisions(), label).toBe(before);
       expect(await messagesFor(s), label).toEqual([]);
-      const [item] = (await listInbox(db, { ids: [filed.id], statuses: ["accepted"] })).items;
-      // bin/inbox-watch runs the executor on an accepted item with neither a pane nor a session.
-      expect(item, label).toMatchObject({ status: "accepted", pane: null, hangarSession: null });
-      expect(item!.feedback.at(-1), label).toMatchObject({ decision: "accept", message: "go" });
+      // Still the remote session's, still in front of the person: never routed to a local executor.
+      const [item] = (await listInbox(db, { ids: [filed.id] })).items;
+      expect(item, label).toMatchObject({ status: "pending", hangarSession: s, feedback: [] });
+
+      // Dismiss is the person's explicit choice: it works, sends nothing, and clears the session.
+      expect(await decideInboxItem(db, filed.id, { decision: "dismiss" }), label).toMatchObject({ session: null, endedSession: s, after: "dismissed" });
+      expect(await messagesFor(s), label).toEqual([]);
+      expect((await listInbox(db, { ids: [filed.id], statuses: ["dismissed"] })).items[0], label).toMatchObject({ hangarSession: null });
     }
     expect(await messagesFor(survivor)).toEqual([]);
 
+    // Release clears the session too; a later accept is then an ordinary local accept.
     const stopped = await sessionNode("stopped");
     const held = await requestInboxItem(db, { externalId: `${key}-ended-release`, title: "Held", content: "x", metadata: { source: "github", url: "https://github.com/a/b/pull/7" }, session: stopped });
     expect(await releaseInboxItem(db, held.id)).toMatchObject({ session: null, endedSession: stopped, after: "pending" });
+    expect((await listInbox(db, { ids: [held.id] })).items[0]).toMatchObject({ status: "pending", hangarSession: null });
+    expect(await decideInboxItem(db, held.id, { decision: "accept" })).toMatchObject({ session: null, endedSession: null, after: "accepted" });
+
+    // Hand-off works and takes the item local.
     const handedOver = await requestInboxItem(db, { externalId: `${key}-ended-handoff`, title: "Deep", content: "x", metadata: { source: "session" }, session: stopped });
     expect(await handOffInboxItem(db, handedOver.id, { pane: "w9:p8", socket: "/tmp/herdr.sock", tab: "w9:t8" })).toMatchObject({ session: null });
     expect(await messagesFor(stopped)).toEqual([]);
     expect((await listInbox(db, { ids: [handedOver.id], statuses: ["session"] })).items[0]).toMatchObject({ hangarSession: null, pane: "w9:p8" });
+  });
+
+  it("rolls back a session-bound batch when a key its unlocked pre-read found absent was inserted before the upsert", async () => {
+    const s = await sessionNode("running");
+    const raced = `${key}-race`;
+    const fresh = `${key}-race-fresh`;
+    const keys = [raced, fresh].map((externalId) => ({ nodeType: INBOX_ITEM_NODE_TYPE, sourceSystem: "inbox", externalId }));
+    // brain_write trims keys before the pre-read; the pre-read matches them trimmed either way.
+    const absent = await assertSessionMayWriteInboxItems(db, s, [{ ...keys[0]!, externalId: ` ${raced} ` }, keys[1]!]);
+    expect(absent.size).toBe(2);
+
+    // A local pane files the same key between the read and the write.
+    const local = await requestInboxItem(db, { externalId: raced, title: "Local ask", content: "mine", metadata: { source: "session", pane: "w1:p2", socket: "/tmp/herdr.sock" } });
+    const batch = keys.map((k) => ({ ...k, title: "Taken", content: "x", metadata: normalizeInboxItemMetadata({ source: "session", session: s }) }));
+    const refused = await upsertNodes(db, run, batch, { beforeCommit: (r) => assertSessionCreatedAbsentKeys(s, absent, r.rows) }).catch((e: unknown) => e);
+    expect(refused).toBeInstanceOf(InboxItemNotThisSessionError);
+    expect(refused).toMatchObject({ nodeId: local.id, sessionId: s });
+
+    // Nothing from the batch: the local item as it was, the fresh key never created.
+    expect((await listInbox(db, { ids: [local.id] })).items[0]).toMatchObject({ title: "Local ask", hangarSession: null, pane: "w1:p2" });
+    expect((await db.execute(sql`SELECT 1 FROM nodes WHERE source_system = 'inbox' AND external_id = ${fresh}`)).rows).toEqual([]);
+
+    // Without a racing writer the same check passes and the batch commits.
+    const clean = await assertSessionMayWriteInboxItems(db, s, [keys[1]!]);
+    const written = await upsertNodes(db, run, [batch[1]!], { beforeCommit: (r) => assertSessionCreatedAbsentKeys(s, clean, r.rows) });
+    expect(written.created).toBe(1);
   });
 
   it("appends nothing for a local item", async () => {

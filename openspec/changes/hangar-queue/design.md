@@ -137,7 +137,7 @@ Endpoints:
 
 ### 9. Amendments after planning
 
-- **Routes on this branch.** The web routes are `connect`, `reviewImages`, `hangar`, and `trpc`. `/healthz` and static serving arrive with tailnet-hosting group 2 (PR #3); when it lands, `health` admits any scope.
+- **Routes.** The web routes are `connect`, `health`, `reviewImages`, `hangar`, `trpc`, and `static`; `health` and `static` came with tailnet-hosting group 2 (PR #3). `health` admits any scope, and `hangar` is classified ahead of `static`, so a `/hangar/v1/` path never reaches the client's index fallback.
 - **Procedure names are flat.** The agent set is exactly `inbox`, `inboxRequest`, `inboxComplete`, `beadsProjects`, and `hangarStatus`.
 - **`inboxComplete` from a session-bound token** applies only to items that carry that token's own session.
 - **Delivery points.** Decide and release both go through `writeInboxFeedback`, which appends the message in its transaction. On a session item, hand-off (`inboxOpenSession`) first tells the session it was taken over locally, then clears `session` so later decisions go to the local pane. `bin/inbox-watch` skips session items.
@@ -154,7 +154,7 @@ Endpoints:
   - `createClientToken` refuses `session-` names. A claim marks an unclaimable queued row `failed` and moves on.
   - A session-bound `brain_write` writes only new inbox keys and its own session's items, binding new ones to the session, like `inboxRequest`.
 - **Second review round.**
-  - A decision, release, or hand-off on an item whose session has ended (stopped, failed, merged away, or missing) appends no message. It clears `session` instead, so the item falls to local routing (`bin/inbox-watch`, inbox-execute), and the decision reports `notified: { ok: false }` without trying herdr.
+  - On an item whose session has ended (stopped, failed, merged away, or missing), an accept or send-back is refused (`InboxItemSessionEndedError`, tRPC `CONFLICT`, nothing written): an item with neither a pane nor a session would fall to local routing (`bin/inbox-watch`, inbox-execute) and run a remote worker's proposal on Breakdown's host. A dismiss, release, or hand-off appends no message and clears `session`, the person's explicit choice to take the item local; a dismiss or release reports `notified: { ok: false }` without trying herdr.
   - A claim that commits as its caller's socket closes, or whose answer cannot be built, is requeued at once (`claimer disconnected before receiving the claim`), so it is not stranded claimed with a token nobody holds.
   - `PATCH` and requeue run their lookup and checks before opening an ingest run, then again under the row lock, so a refused update leaves no empty run.
   - One client holds at most 4 long-polls open at once (claim and messages together); a fifth gets `429 too_many_waiters` with `Retry-After: 1`. The recommended `wait_s` is 25; a client polling with 0 sleeps at least a second between polls.

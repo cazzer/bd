@@ -9,9 +9,11 @@
 // told through that session's messages instead, appended by core in the
 // decision's own transaction, so no herdr command runs for it
 // (hangar-queue decision 6). The session comes from the admitted token,
-// never the body. Once that session has ended, core clears it from the item
-// and sends nothing; the decision reports that, and runs no herdr command
-// either, so the item is left to local routing (bin/inbox-watch).
+// never the body. Once that session has ended, an accept or send-back is
+// refused with CONFLICT (nothing written): it must not quietly become a
+// local execution. A dismiss or release clears the session from the item,
+// sends nothing, and runs no herdr command either; the decision reports
+// that. A hand-off (inboxOpenSession) takes the item local explicitly.
 
 import {
   completeInboxItem,

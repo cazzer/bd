@@ -15,6 +15,7 @@
 import type { EdgeInput, NodeInput } from "@breakdown/core";
 import {
   assertNoReservedHangarEdges,
+  assertSessionCreatedAbsentKeys,
   assertSessionMayWriteInboxItems,
   DEFAULT_MAX_METADATA_LENGTH,
   HANGAR_SESSION_NODE_TYPE,
@@ -132,10 +133,12 @@ export const writeTool: ToolDef<typeof writeSchema> = {
             : nodeType === INBOX_ITEM_NODE_TYPE
               ? normalizeInboxItemMetadata(timed, { itemLabel })
               : timed;
+      // Keys as the upsert stores them (trimmed), so every pre-read below
+      // reads the row the upsert will write.
       return {
         nodeType: item.nodeType,
-        externalId: item.externalId,
-        sourceSystem,
+        externalId: item.externalId.trim(),
+        sourceSystem: sourceSystem.trim(),
         title: item.title,
         content: item.content,
         metadata,
@@ -145,11 +148,12 @@ export const writeTool: ToolDef<typeof writeSchema> = {
     // A session-bound caller (a hangar session's token) writes only new
     // inbox keys and its own session's items, never another session's, a
     // local pane's, or an ingested one (hangar-queue decision 9). Checked
-    // before the run opens, so a refused batch writes nothing.
+    // before the run opens, so a refused batch writes nothing. That read
+    // takes no lock, so the keys it found absent are checked again inside
+    // the upsert's transaction (`beforeCommit`): one another writer inserted
+    // in between comes back `updated`, and the batch rolls back.
     const session = ctx.hangarSessionId;
-    if (session !== null) {
-      await assertSessionMayWriteInboxItems(ctx.db, session, input.map((n) => ({ nodeType: n.nodeType, sourceSystem: n.sourceSystem!, externalId: n.externalId })));
-    }
+    const absent = session === null ? null : await assertSessionMayWriteInboxItems(ctx.db, session, input.map((n) => ({ nodeType: n.nodeType, sourceSystem: n.sourceSystem!, externalId: n.externalId })));
 
     // Inbox items: the person's decisions survive a re-ingest (inbox.ts,
     // carryForwardInboxDecisions) — read before the run opens, like every
@@ -168,7 +172,9 @@ export const writeTool: ToolDef<typeof writeSchema> = {
       }
     }
 
-    const { ingestRunId, result } = await withAgentIngestRun(ctx.db, ctx.actor(), (run) => upsertNodes(ctx.db, run, input));
+    const { ingestRunId, result } = await withAgentIngestRun(ctx.db, ctx.actor(), (run) =>
+      upsertNodes(ctx.db, run, input, session === null || absent === null ? {} : { beforeCommit: (r) => assertSessionCreatedAbsentKeys(session, absent, r.rows) }),
+    );
 
     return boundResponse(
       result.rows,

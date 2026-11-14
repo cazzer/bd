@@ -53,8 +53,14 @@
 // the transaction that records it, instead of being typed into a herdr
 // pane (hangar-queue decisions 6 and 9). Only while the session is live: once
 // it has ended (stopped, failed, merged away, or gone), nobody reads its
-// messages, so the decision appends nothing and clears `session` instead,
-// and the item falls to local routing (bin/inbox-watch, inbox-execute).
+// messages. An accept or a send-back is then refused
+// (`InboxItemSessionEndedError`, nothing written): an item with neither a
+// pane nor a session falls to local routing (bin/inbox-watch, inbox-execute),
+// and a remote worker's proposal must not silently become a local execution
+// with the person's credentials. Dismiss, release, and hand-off still work;
+// they append nothing and clear `session`, so the item is local from then on
+// — the person's explicit choice (a released item's later accept is an
+// ordinary local accept).
 // A session-bound caller writes only its own session's items, through
 // `requestInboxItem` or brain_write (`assertSessionMayWriteInboxItems`).
 //
@@ -71,6 +77,7 @@ import {
   InboxCardChangedError,
   InboxDecisionConflictError,
   InboxItemNotThisSessionError,
+  InboxItemSessionEndedError,
   InvalidInboxItemError,
   InvalidLookupIdError,
   InvalidLookupOptionError,
@@ -578,8 +585,9 @@ export interface DecideInboxItemResult {
   session: string | null;
   /**
    * The hangar session that filed the item, when it had ended by the time of
-   * the decision (module header): nothing was sent, and the item's `session`
-   * was cleared. Null otherwise.
+   * a dismiss or release (module header): nothing was sent, and the item's
+   * `session` was cleared. Null otherwise (an accept or send-back on such an
+   * item is refused instead).
    */
   endedSession: string | null;
 }
@@ -648,6 +656,8 @@ async function itemSession(tx: Tx, metadata: Record<string, unknown>): Promise<{
  * from undigested. An accept of an item whose card has options must name
  * one the stored card offers (`InboxCardChangedError` otherwise: an agent
  * rewrote the card after it was opened); the feedback entry records it.
+ * An accept or send-back on an item whose hangar session has ended is
+ * refused (`InboxItemSessionEndedError`, module header).
  * Row-locked, written through the upsert path under a `human` ingest run,
  * so the revision trigger keeps the history. Pure Postgres.
  */
@@ -721,9 +731,11 @@ async function writeInboxFeedback(
       const entry: InboxFeedback = { decision: kind, message, at: (input.now ?? new Date()).toISOString(), ...(input.option === undefined ? {} : { option: input.option }) };
       const feedback = [...(current["feedback"] as InboxFeedback[]), entry];
       const { live: session, ended: endedSession } = await itemSession(tx, current);
+      // An ended session reads nothing more; only the person's explicit
+      // dismiss or release makes its item local (module header).
+      if (endedSession !== null && (kind === "accept" || kind === "changes")) throw new InboxItemSessionEndedError(existing.id, endedSession);
       // A decision answers the agent's hand-back (`needs_you`) and its re-queue note (`revision`).
       const { needs_you: _handedBack, revision: _answered, ...rest } = current;
-      // An ended session reads nothing more: the item becomes local (module header).
       if (endedSession !== null) delete rest["session"];
       const metadata = normalizeInboxItemMetadata({ ...rest, status: after, feedback });
 
@@ -909,36 +921,50 @@ function assertSessionMayResend(target: { row: StoredInboxRow | null; stored: Re
   if (target.stored === null || target.stored["session"] !== session) throw new InboxItemNotThisSessionError(target.row.id, session, "re-send");
 }
 
+/** A node's natural key as the upsert stores it (trimmed), for matching a pre-read against what the upsert returns. */
+function nodeKey(sourceSystem: string, externalId: string): string {
+  return `${sourceSystem.trim()}\u0000${externalId.trim()}`;
+}
+
 /**
  * brain_write's counterpart of `assertSessionMayResend`, for a session-bound
  * caller (hangar-queue decision 9): every item that is an inbox item, or
  * whose key names a stored one, must be a new key or an item `session`
  * filed. One statement for the batch, run before any ingest run opens;
  * throws `InboxItemNotThisSessionError` naming the first offender, so the
- * batch writes nothing.
+ * batch writes nothing. Keys are matched as the upsert stores them
+ * (trimmed). Returns the keys no row held, for
+ * `assertSessionCreatedAbsentKeys` to check inside the write's transaction:
+ * this read takes no lock, so another writer can insert one of them before
+ * the upsert does.
  */
 export async function assertSessionMayWriteInboxItems(
   db: Database,
   session: string,
   items: readonly { nodeType: string; sourceSystem: string; externalId: string }[],
-): Promise<void> {
-  if (items.length === 0) return;
+): Promise<ReadonlySet<string>> {
+  const absent = new Set<string>();
+  if (items.length === 0) return absent;
   const own = session.toLowerCase();
   let result: { rows: { id: string; node_type: string; source_system: string; external_id: string; metadata: Record<string, unknown> }[] };
   try {
     result = await db.execute(sql`
       SELECT id, node_type, source_system, external_id, metadata FROM nodes
       WHERE (source_system, external_id) IN (${sql.join(
-        items.map((i) => sql`(${i.sourceSystem}, ${i.externalId})`),
+        items.map((i) => sql`(${i.sourceSystem.trim()}, ${i.externalId.trim()})`),
         sql.raw(", "),
       )})`);
   } catch (err) {
     throw new LookupFailedError(`assertSessionMayWriteInboxItems query failed${formatPgInfo(asPgError(err))}`, "requestInboxItem", { cause: err });
   }
-  const stored = new Map(result.rows.map((r) => [`${r.source_system}\u0000${r.external_id}`, r]));
+  const stored = new Map(result.rows.map((r) => [nodeKey(r.source_system, r.external_id), r]));
   for (const item of items) {
-    const row = stored.get(`${item.sourceSystem}\u0000${item.externalId}`);
-    if (row === undefined) continue;
+    const key = nodeKey(item.sourceSystem, item.externalId);
+    const row = stored.get(key);
+    if (row === undefined) {
+      absent.add(key);
+      continue;
+    }
     if (item.nodeType.trim() !== INBOX_ITEM_NODE_TYPE && row.node_type !== INBOX_ITEM_NODE_TYPE) continue;
     let metadata: Record<string, unknown> | null = null;
     if (row.node_type === INBOX_ITEM_NODE_TYPE) {
@@ -949,6 +975,25 @@ export async function assertSessionMayWriteInboxItems(
       }
     }
     if (metadata === null || metadata["session"] !== own) throw new InboxItemNotThisSessionError(row.id, own, "re-send");
+  }
+  return absent;
+}
+
+/**
+ * The in-transaction half of `assertSessionMayWriteInboxItems`, mirroring
+ * `requestInboxItem`'s `action !== "created"` check: a key the pre-read found
+ * absent must come back `created`. Anything else means another writer
+ * inserted it in between and the upsert just overwrote that row, so this
+ * throws `InboxItemNotThisSessionError` for it; run as the upsert's
+ * `beforeCommit`, the throw rolls the whole batch back.
+ */
+export function assertSessionCreatedAbsentKeys(
+  session: string,
+  absent: ReadonlySet<string>,
+  rows: readonly { id: string; sourceSystem: string; externalId: string; action: string }[],
+): void {
+  for (const row of rows) {
+    if (row.action !== "created" && absent.has(nodeKey(row.sourceSystem, row.externalId))) throw new InboxItemNotThisSessionError(row.id, session.toLowerCase(), "re-send");
   }
 }
 

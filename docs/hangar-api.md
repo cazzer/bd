@@ -13,15 +13,18 @@ Every request goes from hangar's side to Breakdown. Breakdown never connects to 
 
 ## Base URL, transport, and authentication
 
-The API is served by Breakdown's web server, under the path prefix `/hangar/v1/`:
+The API is served by Breakdown's **web** server (the one that serves the board and tRPC), not the MCP server, under the path prefix `/hangar/v1/`:
 
 ```
 http://<breakdown-host>:<port>/hangar/v1/...      # the web server directly (default port 4310)
 https://<breakdown-host>/hangar/v1/...            # behind a TLS proxy such as `tailscale serve`
 ```
 
+- **Port.** Use the web server's port: `--port`, default 4310. The MCP server (default 5320) has no `/hangar/v1/` routes. When Breakdown runs as the container app (`docker-compose.app.yml`, the SkyOS app), the web port is `BREAKDOWN_WEB_PORT` (default 4310), and compose publishes it at that same number on the host. The hostname hangar uses must be listed in `BREAKDOWN_ALLOW_HOSTS`, which the launcher turns into `--allow-host` (see [Host](#base-url-transport-and-authentication) below).
+- **Health.** `GET /healthz` on the same port takes a token of any scope, including the `hangar` token, so hangar can probe Breakdown before it checks in. It is not part of this API's contract and answers in Breakdown's own format.
+
 - **Authentication.** Every request carries `Authorization: Bearer <token>`. A missing, unknown, or revoked token gets `401` with `WWW-Authenticate: Bearer`. A live token whose scope the endpoint does not accept gets `403`. Tokens never go in a query string, which is ignored.
-- **Scopes.** Each endpoint takes exactly one scope: `hangar` for the service endpoints, and `agent` with a bound session for `GET /hangar/v1/messages`. Breakdown's other scope, `human`, is refused on every endpoint here. The `hangar` token is refused everywhere else in Breakdown: the web API's other routes and MCP.
+- **Scopes.** Each endpoint takes exactly one scope: `hangar` for the service endpoints, and `agent` with a bound session for `GET /hangar/v1/messages`. Breakdown's other scope, `human`, is refused on every endpoint here. The `hangar` token is refused everywhere else in Breakdown, except `GET /healthz`: the web API's other routes and MCP.
 - **Requests must arrive off loopback.** Breakdown trusts a request from its own machine (loopback peer, loopback `Host`) without reading any token, and treats it as the local person (`human`), so every endpoint here refuses it with `403`. Hangar reaches Breakdown over the tailnet, from another machine. If a proxy on Breakdown's machine fronts the server, it must set `X-Forwarded-For` (or `X-Real-IP` / `Forwarded`) to the remote address, which `tailscale serve` does. **A forwarder that adds no such header (socat, `ssh -R`, a bare nginx `proxy_pass`) is unsafe and must not be used.** It makes every remote request look local, so every peer that can reach it is the tokenless local person on the web API (tRPC) and on MCP: it can read the whole store and make every decision a person makes, with no token at all. Its requests to the endpoints here are refused, but that is the least of it.
 - **Host.** The `Host` header must be a name the operator allowed with `--allow-host`, either at the server's port or bare (a proxy on 443). Any other `Host` gets `403`, token or not. Use the tailnet hostname Breakdown is served under.
 - **Content.** Every response body is JSON (`Content-Type: application/json; charset=utf-8`, `Cache-Control: no-store`). `POST` and `PATCH` requests must send `Content-Type: application/json` and a UTF-8 JSON body of at most 64 KiB (65,536 bytes). `GET` requests send no body. Unknown request fields are ignored, and responses may carry fields this document does not list yet; ignore those (see [Versioning](#versioning)).
@@ -72,7 +75,7 @@ Every endpoint that returns a session uses this shape. Times are UTC ISO-8601 wi
 | `id` | uuid | The session id. Use it in `:id` paths. |
 | `state` | string | `queued`, `claimed`, `running`, `stopped`, or `failed` (see [the state machine](#session-state-machine)). |
 | `flavor` | string | `headless`, `display-godot`, or `display-browser`: the kind of environment the session needs. |
-| `repo` | string | The repository to work in, as the requester named it (e.g. `owner/name`). |
+| `repo` | string | The repository to work in, as the requester named it (e.g. `owner/name`). It is free text that Breakdown does not check, so hangar must check it against its allowlist before cloning (see [the claim](#post-hangarv1claim--scope-hangar)). |
 | `work_item` | object or null | The work item the session runs for. `id` is Breakdown's node id. `external_id` and `source_system` say where it came from (for a beads issue, `source_system` is `beads`). `null` only if the link was removed. |
 | `container`, `host`, `disk_path` | string or null | Where it runs, as hangar last reported it. |
 | `requeue_reason` | string or null | Why it was last given back to the queue: the reason hangar sent, or `claimer disconnected before receiving the claim` when Breakdown gave it back itself (see [Long-poll](#long-poll)). Cleared when it is claimed again. |
@@ -133,7 +136,8 @@ Response `200`, nothing to claim within `wait_s`:
 { "session": null }
 ```
 
-- A queued session that cannot be claimed (its stored record breaks the session contract, or a live token already holds its `session-<id>` client name) is set to `failed` with its `failure_reason` recorded, and the claim goes on to the next match. A claim passes over at most a few such sessions per attempt.
+- A queued session that cannot be claimed (its stored record breaks the session contract or Breakdown's size limits, or a live token already holds its `session-<id>` client name) is set to `failed` with its `failure_reason` recorded, and the claim goes on to the next match. Fields that break the contract or the limits are dropped from the failed record. A claim passes over at most a few such sessions per attempt.
+- **Hangar MUST allowlist `repo` before cloning.** Any MCP agent, not only a person, can queue a request (`brain_hangar_request`), and `repo` is whatever text it sent. Breakdown checks only its length. Before you clone anything or start a worker, check `repo` against your own list of repositories you are willing to run. If it is not on the list, report the session `failed` with `PATCH`. Don't requeue it, because another claim would take it again.
 - `token` is the session token, returned **only in this response**. Breakdown stores only its hash, so it cannot be shown again. Store it before anything else, and see [Session tokens](#session-tokens) for what to do if you lose it.
 - A claimed session is `claimed`. Report `running` once the worker starts, or [requeue](#post-hangarv1sessionsidrequeue--scope-hangar) it if you cannot start it.
 
@@ -184,6 +188,8 @@ Request:
 Response `200`: `{ "session": { …, "state": "queued", "requeue_reason": "disk budget full", "claimed_by": null, … } }`
 
 Status codes: `200`, `400 invalid_json` / `invalid_request`, `401`, `403 forbidden` / `read_only` / `not_claimer`, `404 not_found`, `409 invalid_transition` (the session is not `claimed`), `413`, `415`.
+
+A requeued session keeps its id, so whoever claims it next runs the same logical session. That claimer's worker gets a new token bound to the same session id. It reads the same message stream: messages sent to the earlier worker are there, and `after=0` returns all of them. It reads from its own saved cursor, which starts at `0` for a fresh worker. It can also re-send and complete the inbox items the earlier worker filed. This is intended. The session's work and the person's decisions on it belong to the session, not to one container. A worker that starts on a requeued session should read its history before acting.
 
 ### `GET /hangar/v1/sessions` — scope `hangar`
 
@@ -261,7 +267,7 @@ Status codes: `200`, `400 invalid_request` (a bad `after` or `wait_s`), `401` (t
 
 After a `session` message the item belongs to a local session. Later decisions on it do not come here, and the worker must not complete it.
 
-Decisions reach a session only while it is open. Once it is `stopped` or `failed`, a decision on an item it filed sends no message: the item stops being bound to the session and is handled on Breakdown's host like any local item.
+Decisions reach a session only while it is open. Once it is `stopped` or `failed`, nobody reads its messages. An accept or a send-back (`changes`) on an item it filed is then refused with `CONFLICT` and nothing is written: "The hangar session that filed this has ended. Hand it off to a local session or dismiss it." A remote worker's proposal never quietly turns into an execution on Breakdown's host with the person's credentials. The person can still dismiss the item, release it if it is held, or hand it off to a local session. None of these sends a message, and each one unbinds the item from the session. From then on the item is local. That is the person's explicit choice, so a later accept of a released item is an ordinary local accept.
 
 ## Long-poll
 
