@@ -1,11 +1,13 @@
 // The real web entrypoint (server/index.ts) spawned with a PATH that holds
 // neither `bd` nor `herdr` (tailnet-hosting design.md decision 8, task 2.2):
 // it starts, says once per binary that it is unavailable, serves health and
-// the built client, refuses a review decision naming `bd`, and keeps
-// serving. Node itself is `process.execPath` and tsx is loaded with
-// `--import`, so nothing needs PATH. Nothing here writes to the database:
-// the watcher reads no registry without `bd`, and the decision is refused
-// before any lookup.
+// the built client, takes a review decision into the laptop relay's queue
+// path rather than refusing it (laptop-relay decision 6; an unknown project
+// answers NOT_FOUND there), still refuses opening a herdr session naming
+// `herdr`, and keeps serving. Node itself is `process.execPath` and tsx is
+// loaded with `--import`, so nothing needs PATH. Nothing here writes to the
+// database: the watcher reads no registry without `bd`, the decision names
+// a project nobody registered, and the session is refused before any lookup.
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
@@ -41,7 +43,7 @@ async function freePort(): Promise<number> {
 }
 
 describe("web server with neither bd nor herdr on PATH", () => {
-  it("starts, logs each missing binary once, serves, and refuses a review decision naming bd", async () => {
+  it("starts, logs each missing binary once, serves, queues rather than refuses a review decision, and refuses a session naming herdr", async () => {
     mkdirSync(emptyPath, { recursive: true });
     mkdirSync(clientDir, { recursive: true });
     writeFileSync(path.join(clientDir, "index.html"), INDEX);
@@ -82,8 +84,17 @@ describe("web server with neither bd nor herdr on PATH", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ project: "no-such-project-zz", item: "zz-1", decision: "accept", message: "" }),
     });
-    expect(decision.status).toBe(412);
-    expect(JSON.stringify(await decision.json())).toContain("bd is unavailable on this server: not found on PATH");
+    // The queue path's store checks run: no 412, and the unregistered project is NOT_FOUND.
+    expect(decision.status).toBe(404);
+    expect(JSON.stringify(await decision.json())).toContain("no-such-project-zz");
+
+    const session = await fetch(`${origin}/trpc/inboxOpenSession`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: "00000000-0000-4000-8000-000000000000" }),
+    });
+    expect(session.status).toBe(412);
+    expect(JSON.stringify(await session.json())).toContain("herdr is unavailable on this server: not found on PATH");
 
     expect((await fetch(`${origin}/healthz`)).status).toBe(200);
     expect(spawned.exitCode).toBeNull();

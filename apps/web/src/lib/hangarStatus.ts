@@ -25,8 +25,8 @@ function sameLocalDay(a: Date, b: Date): boolean {
   return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
 }
 
-/** "09:00" today, "Nov 12, 09:00" earlier this year, "Nov 12, 2025, 09:00" before that; seconds when asked. */
-function formatInstant(at: Date, now: Date, seconds = false): string {
+/** "09:00" today, "Nov 12, 09:00" earlier this year, "Nov 12, 2025, 09:00" before that; seconds when asked. Shared with the relay pill (relayStatus.ts). */
+export function formatInstant(at: Date, now: Date, seconds = false): string {
   const time = `${pad(at.getHours())}:${pad(at.getMinutes())}${seconds ? `:${pad(at.getSeconds())}` : ""}`;
   if (sameLocalDay(at, now)) return time;
   const day = `${MONTHS[at.getMonth()]} ${at.getDate()}`;

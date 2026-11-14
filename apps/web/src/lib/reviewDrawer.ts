@@ -52,7 +52,8 @@ function stepsText(written: readonly ReviewStepName[]): string {
 }
 
 export interface DecisionOutcome {
-  tone: "ok" | "partial" | "error";
+  /** `pending`: queued for the laptop relay and not yet reported (relayAction.ts). */
+  tone: "ok" | "partial" | "error" | "pending";
   text: string;
   /**
    * Keep the message in the box for a retry: true for a failure, unless the

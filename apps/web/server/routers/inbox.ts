@@ -14,6 +14,13 @@
 // local execution. A dismiss or release clears the session from the item,
 // sends nothing, and runs no herdr command either; the decision reports
 // that. A hand-off (inboxOpenSession) takes the item local explicitly.
+//
+// On a server without `herdr` (the Jetson; laptop-relay design.md decision
+// 6), a pane item's notification is queued as a `herdr_prompt` relay action
+// instead of run, and `notified` is `{ ok: true, relay: <action id> }`; a
+// prompt that cannot be queued is `{ ok: false }` and never fails the
+// decision. Opening or focusing a session still needs herdr here and is
+// refused with PRECONDITION_FAILED naming it.
 
 import {
   completeInboxItem,
@@ -32,8 +39,10 @@ import {
   REVIEW_PANE_PATTERN,
   releaseInboxItem,
   unlinkInboxWorkContext,
+  REVIEW_DECISION_MESSAGE_REFUSED_CHARS,
   REVIEW_OPTION_ID_PATTERN,
   requestInboxItem,
+  enqueueRelayAction,
   type DecideInboxItemResult,
   type InboxItem,
 } from "@breakdown/core";
@@ -67,22 +76,20 @@ const inboxProcedure = agentProcedure.input(inboxInputSchema).query(async ({ ctx
   }
 });
 
-// eslint-disable-next-line no-control-regex
-const REFUSED_MESSAGE_CHARS = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f‪-‮⁦-⁩]/;
-
 export const inboxDecisionInputSchema = z.object({
   id: z.string().uuid(),
   decision: z.enum(INBOX_DECISIONS),
   message: z
     .string()
-    .refine((m) => !REFUSED_MESSAGE_CHARS.test(m), "must not contain control characters (other than newline and tab) or bidirectional override characters")
+    .refine((m) => !REVIEW_DECISION_MESSAGE_REFUSED_CHARS.test(m), "must not contain control characters (other than newline and tab) or bidirectional override characters")
     .max(MAX_INBOX_FEEDBACK_LENGTH)
     .default(""),
   /** For an accept on a card with options: the option chosen (the server checks the stored card offers it). */
   option: z.string().regex(REVIEW_OPTION_ID_PATTERN).optional(),
 });
 
-type Notified = { ok: true; pane: string } | { ok: true; session: string } | { ok: false; reason: string };
+/** How the requester was told: its pane prompted, its hangar session's messages, a herdr prompt queued for the laptop relay (`relay`: the action id), or not at all. */
+type Notified = { ok: true; pane: string } | { ok: true; session: string } | { ok: true; relay: number } | { ok: false; reason: string };
 
 const inboxDecisionProcedure = humanProcedure.input(inboxDecisionInputSchema).mutation(async ({ ctx, input }) => {
   if (ctx.readOnly) {
@@ -101,6 +108,20 @@ const inboxDecisionProcedure = humanProcedure.input(inboxDecisionInputSchema).mu
   } else if (result.session !== null) {
     // Already queued as the session's message, in the decision's transaction.
     notified = { ok: true, session: result.session };
+  } else if (result.pane !== null && REVIEW_PANE_PATTERN.test(result.pane) && result.socket !== null && isReviewSocketPath(result.socket) && ctx.missingBinaries?.includes("herdr")) {
+    // No herdr here (the Jetson): the laptop relay prompts the pane when it next runs (laptop-relay decision 6).
+    try {
+      const { action } = await enqueueRelayAction(ctx.db, {
+        kind: "herdr_prompt",
+        payload: { pane: result.pane, socket: result.socket, text: inboxNotifyText(result, input.message, input.option) },
+        requestedBy: ctx.client ?? "human",
+        originNodeId: result.id,
+      });
+      notified = { ok: true, relay: action.id };
+    } catch (err) {
+      console.error(`[breakdown-web] could not queue the herdr prompt for inbox item ${result.id}:`, err);
+      notified = { ok: false, reason: "could not queue the notification" };
+    }
   } else if (result.pane !== null && REVIEW_PANE_PATTERN.test(result.pane) && result.socket !== null && isReviewSocketPath(result.socket) && ctx.runHerdr !== undefined) {
     try {
       await ctx.runHerdr(["agent", "prompt", result.pane, inboxNotifyText(result, input.message, input.option)], result.socket);

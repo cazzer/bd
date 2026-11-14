@@ -30,6 +30,7 @@ import type { PanelDecisions, ReviewItemPanelProps } from "./ReviewItemPanel.js"
 const trpcMock = vi.hoisted(() => ({
   boardItem: { query: vi.fn() },
   reviewDecision: { mutate: vi.fn() },
+  relayAction: { query: vi.fn() },
 }));
 vi.mock("../trpc.js", () => ({ trpc: trpcMock, HttpStatusError: class HttpStatusError extends Error {} }));
 vi.mock("./EvidenceView.js", async () => {
@@ -103,6 +104,7 @@ beforeEach(() => {
   root = createRoot(container);
   trpcMock.boardItem.query.mockReset();
   trpcMock.reviewDecision.mutate.mockReset();
+  trpcMock.relayAction.query.mockReset();
   trpcMock.reviewDecision.mutate.mockResolvedValue({ ok: true, decision: "accept", item: "shlo-k54.4.1.1", written: ["comment", "close"], notified: { ok: true, pane: "w1:p1" } });
 });
 
@@ -691,5 +693,100 @@ describe("timestamped notes", () => {
     expect(container.querySelectorAll("video")).toHaveLength(3);
     expect(noteButtons()).toEqual([]);
     expect(container.querySelector("textarea")).toBeNull();
+  });
+});
+
+// laptop-relay tasks.md 1.7: on a server without bd the decision comes back
+// queued, and the card follows the relay action until it reports.
+describe("a decision queued for the laptop relay", () => {
+  const QUEUED = { queued: true, actionId: 41, decision: "accept", item: "shlo-k54.4.1.1" };
+  const relay = (state: string, over: Record<string, unknown> = {}) => ({ id: 41, kind: "review_decision", state, result: null, error: null, createdAt: "2026-11-14T10:00:00.000Z", finishedAt: null, ...over });
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    trpcMock.reviewDecision.mutate.mockResolvedValue(QUEUED);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function tick(ms: number) {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+  }
+
+  const status = () => container.querySelector<HTMLElement>("[role=status][data-outcome-tone]");
+  const decisionButtons = () => buttons().filter((b) => /^(Accept|Request|B|C)/.test(b.textContent ?? ""));
+
+  test("shows the pending tone, holds the form with the message kept, and tells nobody it was written", async () => {
+    trpcMock.relayAction.query.mockResolvedValue(relay("queued"));
+    const onWritten = vi.fn();
+    const onDecided = vi.fn();
+    await render(boardItem(fixtureReview("shlo-k54.4.1.1")), { acceptLabel: "Accept", changesLabel: "Request changes", onWritten }, { onDecided });
+    typeMessage("go");
+    await click(button("Accept Track"));
+
+    expect(trpcMock.relayAction.query).toHaveBeenCalledWith({ id: 41 });
+    expect(status()?.getAttribute("data-outcome-tone")).toBe("pending");
+    expect(status()?.textContent).toBe("Pending: waiting for the laptop relay");
+    expect(container.querySelector("[role=alert]")).toBeNull();
+    expect(decisionButtons().length).toBeGreaterThan(0);
+    expect(decisionButtons().every((b) => b.disabled)).toBe(true);
+    expect(container.querySelector("textarea")!.value).toBe("go");
+    expect(container.querySelector("textarea")!.disabled).toBe(true);
+
+    // A press while pending sends nothing.
+    await click(button("Request changes"));
+    expect(trpcMock.reviewDecision.mutate).toHaveBeenCalledTimes(1);
+    await tick(2_000);
+    expect(onWritten).not.toHaveBeenCalled();
+    expect(onDecided).not.toHaveBeenCalled();
+  });
+
+  test("on done reads the relay's writer answer as a direct decision, re-reads, and tells the host", async () => {
+    trpcMock.relayAction.query
+      .mockResolvedValueOnce(relay("queued"))
+      .mockResolvedValueOnce(relay("claimed"))
+      .mockResolvedValue(relay("done", { result: { ok: true, written: ["comment", "remove-changes-label", "close"], notified: { ok: true, pane: "w1:p1" } } }));
+    const onWritten = vi.fn();
+    const onDecided = vi.fn();
+    await render(boardItem(fixtureReview("shlo-k54.4.1.1")), { acceptLabel: "Accept", changesLabel: "Request changes", onWritten }, { onDecided });
+    await click(button("Accept Track"));
+    expect(status()?.textContent).toBe("Pending: waiting for the laptop relay");
+
+    await tick(2_000);
+    expect(status()?.textContent).toBe("Pending: the laptop relay is writing it");
+    await tick(2_000);
+    expect(status()?.getAttribute("data-outcome-tone")).toBe("ok");
+    expect(status()?.textContent).toContain("Accepted A and closed — card moved to Closed.");
+    expect(status()?.textContent).toContain("Agent notified (pane w1:p1)");
+    expect(onDecided).toHaveBeenCalledTimes(1);
+    expect(onWritten).toHaveBeenCalledTimes(1);
+    expect(onWritten.mock.calls[0]![1].option).toEqual({ id: "A", recommended: true });
+    expect(trpcMock.boardItem.query).toHaveBeenCalledTimes(2);
+
+    await tick(10_000);
+    expect(trpcMock.relayAction.query).toHaveBeenCalledTimes(3);
+  });
+
+  test("on a note that it was already applied, says so and re-reads", async () => {
+    trpcMock.relayAction.query.mockResolvedValue(relay("done", { result: { note: "already applied" } }));
+    await render(boardItem(fixtureReview("shlo-k54.4.1.1")));
+    await click(button("Accept Track"));
+    expect(status()?.textContent).toBe("The laptop relay reported it already applied.");
+    expect(trpcMock.boardItem.query).toHaveBeenCalledTimes(2);
+  });
+
+  test("on failure shows the relay's error and gives the form back with the message", async () => {
+    trpcMock.relayAction.query.mockResolvedValueOnce(relay("queued")).mockResolvedValue(relay("failed", { error: "bd: issue not found" }));
+    await render(boardItem(fixtureReview("shlo-k54.4.1.1")));
+    typeMessage("keep me");
+    await click(button("Accept Track"));
+    await tick(2_000);
+    expect(container.querySelector("[role=alert]")!.textContent).toContain("The laptop relay could not write the decision: bd: issue not found.");
+    expect(container.querySelector("textarea")!.value).toBe("keep me");
+    expect(button("Accept Track").disabled).toBe(false);
   });
 });

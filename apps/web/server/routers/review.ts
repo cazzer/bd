@@ -1,16 +1,20 @@
 // The review decision (board-visual-reviews, design.md decision 5; the
 // local-web-api delta's "review decision request"): the board's one write.
-// It runs `bd` in a registered checkout from a browser request, so every
-// refusal happens before any write command, in this order:
+// It runs `bd` in a registered checkout from a browser request, or, on a
+// server without `bd` (the Jetson), queues the decision for the laptop relay
+// (laptop-relay design.md decisions 6 and 9). Every refusal happens before
+// any write command or any queued action, in this order:
 //
 //   1. the server is read-only (BRAIN_READ_ONLY)              → FORBIDDEN
-//   2. no review writer in the context, or no `bd` on PATH
-//      (tailnet-hosting decision 8)                           → PRECONDITION_FAILED
+//   2. `bd` is on PATH but no review writer is in the context  → PRECONDITION_FAILED
 //   3. no checkout registered by a beads ingest for the key    → NOT_FOUND
 //   4. the project holds no such item                          → NOT_FOUND
 //   5. the item folded (merge) to a different bead id          → PRECONDITION_FAILED
 //   6. the item is not a review a tracker loaded               → PRECONDITION_FAILED
 //   7. the review is already closed                            → CONFLICT
+//
+// Then, with `bd` on PATH (direct; unchanged by the relay):
+//
 //   8. the registered path is not a directory                  → PRECONDITION_FAILED
 //   9. a decision on the same item is still being written      → CONFLICT
 //  10. the tracker's own record (`bd show`) is another issue or
@@ -20,6 +24,19 @@
 //      one on a review that does, an option whose question or text differs
 //      from `seen`, or any accept on a card the tracker holds but nobody can
 //      read (PRECONDITION_FAILED)
+//
+// Or, with `bd` missing (queued; `{ queued: true, actionId }`):
+//
+//   8. the bead id is not one the relay's allowlist accepts    → PRECONDITION_FAILED
+//   9. a decision on the same review is already queued or
+//      claimed for the relay (the open-target index)           → CONFLICT
+//
+// The queued path skips the writer check and the `stat` of the checkout:
+// the registered path is the Mac's, not this host's. The relay runs 10 and
+// 11 itself, through the same writer, when it claims the action; the store
+// checks (3–7) still run here. The action's payload is built from the
+// registry's path and the stored item's id, never from the request, and is
+// validated again by core's payload schema and allowlist at enqueue.
 //
 // 1 and 2 touch neither the database nor the disk; 1–9 run no command. The
 // checkout comes from the registry, never from the request, and only from a
@@ -31,15 +48,17 @@
 // refused rather than written to a bead the person did not open. The store
 // is only a first filter: the writer re-reads the record from the tracker
 // (10) before writing. The input schema bounds the message so the comment,
-// prefix included, fits the review contract's comment cap; bounds an
-// option to REVIEW_OPTION_ID_PATTERN, refuses one sent with `changes`, and
-// requires `seen` (what the person saw; caps are core's fitted lengths) with
-// an option and only with one (decision-card-reviews, design.md decision
-// 5); refuses C0
-// controls other than newline and tab, DEL, C1 controls (U+0080–009F), and the bidirectional
-// embedding/override/isolate characters (U+202A–202E, U+2066–2069), which
-// could make the thread read differently from what was written; and
-// requires the item id to start with a letter or digit (never a flag).
+// prefix included, fits the review contract's comment cap (core's
+// MAX_REVIEW_DECISION_MESSAGE_LENGTH, which the relay payload shares);
+// bounds an option to REVIEW_OPTION_ID_PATTERN, refuses one sent with
+// `changes`, and requires `seen` (what the person saw; caps are core's
+// fitted lengths) with an option and only with one (decision-card-reviews,
+// design.md decision 5); refuses core's REVIEW_DECISION_MESSAGE_REFUSED_CHARS
+// — C0 controls other than newline and tab, DEL, C1 controls
+// (U+0080–009F), and the bidirectional embedding/override/isolate
+// characters (U+202A–202E, U+2066–2069), which could make the thread read
+// differently from what was written; and requires the item id to start
+// with a letter or digit (never a flag).
 //
 // A tracker failure is data, not a tRPC error: `{ ok: false, error, partial,
 // uncertain? }` with `written` naming the steps that landed and `uncertain`
@@ -55,27 +74,32 @@
 
 import { stat } from "node:fs/promises";
 import {
+  enqueueRelayAction,
   getBoardItem,
   getRegisteredBeadsProject,
-  MAX_REVIEW_COMMENT_LENGTH,
+  InvalidRelayActionError,
+  isRelayIssueId,
+  MAX_REVIEW_DECISION_MESSAGE_LENGTH,
   MAX_REVIEW_OPTION_LABEL_LENGTH,
   MAX_REVIEW_OPTION_TEXT_LENGTH,
   MAX_REVIEW_QUESTION_LENGTH,
   PROJECT_KEY_PATTERN,
+  RelayActionPendingError,
+  REVIEW_DECISION_MESSAGE_REFUSED_CHARS,
   REVIEW_OPTION_ID_PATTERN,
+  type BeadsProject,
+  type BoardItem,
 } from "@breakdown/core";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
-import { mapCoreError, refuseMissingBinary } from "../errors.js";
+import type { Context } from "../context.js";
+import { mapCoreError } from "../errors.js";
 import { ReviewDecisionInFlightError, ReviewRecordRefusedError, type ReviewNotified, type ReviewStep } from "../review-writer.js";
 import { humanProcedure, router } from "../trpc.js";
 
-/** Room left in a comment for its prefix: `Changes requested: ` (19), or `Accepted: <option> — ` (at most 29 with a 16-character id). */
-export const MAX_REVIEW_MESSAGE_LENGTH = MAX_REVIEW_COMMENT_LENGTH - 32;
+/** Room left in a comment for its prefix: `Changes requested: ` (19), or `Accepted: <option> — ` (at most 29 with a 16-character id). Core's, shared with the relay payload. */
+export const MAX_REVIEW_MESSAGE_LENGTH = MAX_REVIEW_DECISION_MESSAGE_LENGTH;
 export const REVIEW_ITEM_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
-/** C0 controls but newline and tab, DEL, C1 controls, and the bidi embedding/override/isolate characters. */
-// eslint-disable-next-line no-control-regex
-const REFUSED_MESSAGE_CHARS = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/;
 
 export const reviewDecisionInputSchema = z
   .object({
@@ -84,7 +108,7 @@ export const reviewDecisionInputSchema = z
     decision: z.enum(["accept", "changes"]),
     message: z
       .string()
-      .refine((m) => !REFUSED_MESSAGE_CHARS.test(m), "must not contain control characters (other than newline and tab) or bidirectional override characters")
+      .refine((m) => !REVIEW_DECISION_MESSAGE_REFUSED_CHARS.test(m), "must not contain control characters (other than newline and tab) or bidirectional override characters")
       .trim()
       .max(MAX_REVIEW_MESSAGE_LENGTH, `must be at most ${MAX_REVIEW_MESSAGE_LENGTH} characters`),
     option: z.string().regex(REVIEW_OPTION_ID_PATTERN, "must be an option id: a letter or digit, then letters, digits, '_' or '-', at most 16 characters").optional(),
@@ -112,6 +136,8 @@ export const reviewDecisionInputSchema = z
     }
   });
 
+type ReviewDecisionInput = z.infer<typeof reviewDecisionInputSchema>;
+
 export interface ReviewDecisionResult {
   ok: boolean;
   decision: "accept" | "changes";
@@ -125,16 +151,16 @@ export interface ReviewDecisionResult {
   notified: ReviewNotified;
 }
 
-const reviewDecisionProcedure = humanProcedure.input(reviewDecisionInputSchema).mutation(async ({ ctx, input }): Promise<ReviewDecisionResult> => {
-  if (ctx.readOnly) {
-    throw new TRPCError({ code: "FORBIDDEN", message: "The server is read-only (BRAIN_READ_ONLY); review decisions are refused." });
-  }
-  const writer = ctx.reviewWriter;
-  if (writer === undefined) {
-    throw new TRPCError({ code: "PRECONDITION_FAILED", message: "This server has no review writer configured; review decisions are unavailable." });
-  }
-  refuseMissingBinary(ctx.missingBinaries, "bd");
+/** A decision queued for the laptop relay (no `bd` on this server): `relayAction(actionId)` reports how it went. */
+export interface ReviewDecisionQueued {
+  queued: true;
+  actionId: number;
+  decision: "accept" | "changes";
+  item: string;
+}
 
+/** Steps 3–7 of the header: the registered checkout and the stored review the decision is for. */
+async function loadOpenReview(ctx: Context, input: ReviewDecisionInput): Promise<{ project: BeadsProject; item: BoardItem }> {
   let project;
   let item;
   try {
@@ -161,6 +187,51 @@ const reviewDecisionProcedure = humanProcedure.input(reviewDecisionInputSchema).
   if (item.status === "closed") {
     throw new TRPCError({ code: "CONFLICT", message: `Review "${input.item}" is already closed.` });
   }
+  return { project, item };
+}
+
+/** Queue mode (header, steps 8–9 of the queued path): the decision becomes a `review_decision` relay action. */
+async function queueReviewDecision(ctx: Context, input: ReviewDecisionInput): Promise<ReviewDecisionQueued> {
+  const { project, item } = await loadOpenReview(ctx, input);
+  if (!isRelayIssueId(item.externalId)) {
+    throw new TRPCError({
+      code: "PRECONDITION_FAILED",
+      message: `Item "${item.externalId}" is not a beads issue id the laptop relay can run (lowercase letters, digits, '-' and '.', like bd-a1b2); decide it on a server that has bd.`,
+    });
+  }
+  const payload = {
+    project_key: project.key,
+    cwd: project.path,
+    issue_id: item.externalId,
+    decision: input.decision,
+    message: input.message,
+    ...(input.option === undefined ? {} : { option: input.option }),
+    ...(input.seen === undefined ? {} : { seen: input.seen }),
+  };
+  let enqueued;
+  try {
+    enqueued = await enqueueRelayAction(ctx.db, { kind: "review_decision", payload, requestedBy: ctx.client ?? "human", originNodeId: item.id });
+  } catch (err) {
+    if (err instanceof RelayActionPendingError) {
+      throw new TRPCError({ code: "CONFLICT", message: `A decision on this review is already waiting for the laptop relay (action ${err.openActionId}).` });
+    }
+    if (err instanceof InvalidRelayActionError) throw new TRPCError({ code: "PRECONDITION_FAILED", message: `This decision cannot be queued for the laptop relay: ${err.message}` });
+    throw mapCoreError("reviewDecision", err);
+  }
+  return { queued: true, actionId: enqueued.action.id, decision: input.decision, item: item.externalId };
+}
+
+const reviewDecisionProcedure = humanProcedure.input(reviewDecisionInputSchema).mutation(async ({ ctx, input }): Promise<ReviewDecisionResult | ReviewDecisionQueued> => {
+  if (ctx.readOnly) {
+    throw new TRPCError({ code: "FORBIDDEN", message: "The server is read-only (BRAIN_READ_ONLY); review decisions are refused." });
+  }
+  if (ctx.missingBinaries?.includes("bd")) return queueReviewDecision(ctx, input);
+  const writer = ctx.reviewWriter;
+  if (writer === undefined) {
+    throw new TRPCError({ code: "PRECONDITION_FAILED", message: "This server has no review writer configured; review decisions are unavailable." });
+  }
+
+  const { project, item } = await loadOpenReview(ctx, input);
   let isDirectory = false;
   try {
     isDirectory = (await stat(project.path)).isDirectory();

@@ -46,6 +46,15 @@
 // whichever line reports the outcome, and to that line while a write is in
 // flight (so focus never falls out of the panel when the pressed button
 // disables).
+// On a server without `bd` (laptop-relay design.md decision 8) the decision
+// comes back queued for the laptop relay: the outcome line says "Pending:
+// waiting for the laptop relay" (amber), the form is held with the message
+// kept, and the panel follows the action (lib/useRelayAction.ts, every 2 s
+// while the tab is visible). When the relay reports, its answer reads as a
+// direct decision's would (lib/relayAction.ts): the usual outcome, a note
+// such as "already applied", or the relay's error; then the item is
+// re-read, the host told, and a written decision reported to `onWritten`.
+// The run's own controls stay usable meanwhile, so the person can move on.
 // While the decision is open and nothing is being written, each video's
 // Note button (ReviewAttachments.tsx) appends its time to the message on a
 // new line (lib/reviewAttachments.ts `appendNote`; video-review-attachments,
@@ -90,7 +99,9 @@ import { useEffect, useId, useRef, useState, type KeyboardEvent, type MouseEvent
 import { navigate } from "../lib/navigate.js";
 import { appendNote, reviewAttachments } from "../lib/reviewAttachments.js";
 import { CARD_MOVED_TEXT, cardActions, chosenOption, describeChosen, isCardMovedRefusal, seenFor, type CardOption, type ChosenOption } from "../lib/reviewCard.js";
+import { describeRelayDecision, RELAY_PENDING_TEXT } from "../lib/relayAction.js";
 import { canDecide, decisionBlocked, decisionEffects, describeNotified, describeRecipient, describeThrownDecision, type ReviewDecisionKind } from "../lib/reviewDrawer.js";
+import { useRelayAction } from "../lib/useRelayAction.js";
 import { formatRoute, type GraphRoute } from "../lib/route.js";
 import { HttpStatusError, trpc } from "../trpc.js";
 import { ReviewAttachments, SectionTitle, type AttachmentLayout, type AttachmentSlot } from "./ReviewAttachments.js";
@@ -154,6 +165,16 @@ export interface ReviewItemPanelProps {
   compactHeader?: boolean;
   layout?: AttachmentLayout;
   decisions?: PanelDecisions;
+}
+
+/** A decision the server queued for the laptop relay, and what the panel needs to read the relay's answer as it read a direct one. */
+interface QueuedDecision {
+  actionId: number;
+  decision: ReviewDecisionKind;
+  acceptedAs: string | undefined;
+  option: ChosenOption | null;
+  /** The review promised a notice to a recorded pane. */
+  promised: boolean;
 }
 
 function messageOf(err: unknown, fallback: string): string {
@@ -238,6 +259,9 @@ export function ReviewItemPanel({
   const [outcome, setOutcome] = useState<CardOutcome | null>(null);
   const [refusal, setRefusal] = useState<Refusal | null>(null);
   const [needsMessage, setNeedsMessage] = useState(false);
+  /** A decision queued for the laptop relay (no `bd` on the server), followed until the relay reports it. */
+  const [queued, setQueued] = useState<QueuedDecision | null>(null);
+  const relayAction = useRelayAction(queued?.actionId ?? null);
   /** The option whose decision button has focus: its text is shown in full in the list (ReviewCardBody.tsx). */
   const [focusedOption, setFocusedOption] = useState<string | null>(null);
   const optionIdPrefix = useId();
@@ -306,6 +330,22 @@ export function ReviewItemPanel({
     });
   }
 
+  // The relay's answer for a queued decision: pending while it waits, then
+  // the decision's own outcome and effects (re-read, tell the host), once.
+  useEffect(() => {
+    if (queued === null || relayAction === null) return;
+    const reading = describeRelayDecision(relayAction, queued.decision, queued.acceptedAs);
+    setOutcome({ ...reading.outcome, notified: reading.notified });
+    if (!reading.finished) return;
+    setQueued(null);
+    if (!reading.outcome.keepMessage) setMessage("");
+    if (reading.reread) {
+      setRefetch((n) => n + 1);
+      onDecided();
+    }
+    if (reading.written) decisions.onWritten?.(queued.decision, { notified: reading.notified, notifyFailed: queued.promised && reading.notifyFailed, option: queued.option });
+  }, [relayAction]);
+
   const decidable = loaded !== null && canDecide(loaded) && decisions.notice === undefined;
   const card = loaded?.isReview ? loaded.card : null;
   const actions = card !== null ? cardActions(card) : null;
@@ -340,7 +380,7 @@ export function ReviewItemPanel({
 
   /** `option` (an accept on a card with options) is sent with what the person saw of it. */
   async function decide(decision: ReviewDecisionKind, option?: CardOption) {
-    if (!timeArmed || project === null || loaded === null || decisionBlocked(decision, message, pending !== null)) return;
+    if (!timeArmed || project === null || loaded === null || decisionBlocked(decision, message, pending !== null || queued !== null)) return;
     const chosen = option !== undefined && card !== null ? { option: option.id, seen: seenFor(card, option) } : {};
     const named = option !== undefined && card !== null ? chosenOption(card, option) : null;
     setPending(decision);
@@ -351,17 +391,23 @@ export function ReviewItemPanel({
     let written: { decision: ReviewDecisionKind; report: WrittenReport } | null = null;
     try {
       const result = await trpc.reviewDecision.mutate({ project, item: loaded.externalId, decision, message, ...chosen });
-      const effects = decisionEffects(result, named === null ? undefined : describeChosen(named));
-      const notified = describeNotified(result.notified);
-      setOutcome({ ...effects.outcome, notified });
-      if (effects.clearMessage) setMessage("");
-      if (effects.reread) {
-        setRefetch((n) => n + 1);
-        onDecided();
-      }
       // A failed notice matters only where one was promised (a pane and a herdr session recorded); otherwise the recipient line already said the comment is the record.
       const promised = loaded.review !== null && !("invalid" in loaded.review) && loaded.review.pane !== null && loaded.review.socket !== undefined;
-      if (effects.written) written = { decision, report: { notified, notifyFailed: promised && result.notified?.ok === false, option: named } };
+      if ("queued" in result) {
+        // No `bd` on the server: the message stays in the (held) box until the relay reports.
+        setQueued({ actionId: result.actionId, decision, acceptedAs: named === null ? undefined : describeChosen(named), option: named, promised });
+        setOutcome({ tone: "pending", text: RELAY_PENDING_TEXT, keepMessage: true, notified: null });
+      } else {
+        const effects = decisionEffects(result, named === null ? undefined : describeChosen(named));
+        const notified = describeNotified(result.notified);
+        setOutcome({ ...effects.outcome, notified });
+        if (effects.clearMessage) setMessage("");
+        if (effects.reread) {
+          setRefetch((n) => n + 1);
+          onDecided();
+        }
+        if (effects.written) written = { decision, report: { notified, notifyFailed: promised && result.notified?.ok === false, option: named } };
+      }
     } catch (err) {
       const thrown = describeThrownDecision({ message: messageOf(err, "The decision was refused."), httpStatus: httpStatusOf(err) });
       // The card is not the one the person read: show the current one now
@@ -447,6 +493,7 @@ export function ReviewItemPanel({
       optionDescId={optionDescId}
       outcome={outcome}
       refusal={refusal}
+      waiting={queued !== null}
       decide={(d, option) => void decide(d, option)}
     />
   );
