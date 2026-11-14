@@ -263,6 +263,26 @@ export {
   type BuildListNodesQueryParams,
 } from "./list.js";
 
+// Finding (search-results-view change): optional text plus node types,
+// projects, and reviews-only, with facet counts, in one statement. See
+// find.ts's module header.
+export {
+  findNodes,
+  buildFindNodesQuery,
+  resolveFindNodesOptions,
+  DEFAULT_FIND_LIMIT,
+  MAX_FIND_LIMIT,
+  MAX_FIND_OFFSET,
+  MAX_FIND_TEXT_LENGTH,
+  MAX_FACET_VALUES,
+  type FindNodesOptions,
+  type FoundNode,
+  type FacetCount,
+  type FindNodesFacets,
+  type FindNodesResult,
+  type BuildFindNodesQueryParams,
+} from "./find.js";
+
 // Work items (work-items change): the lifecycle contract, the patch
 // primitive, dependency edge conventions, and readiness. See
 // work-items.ts's module header.

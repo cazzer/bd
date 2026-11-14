@@ -5,7 +5,11 @@
 //
 // Every metadata predicate compiles to a jsonb containment test
 // (`metadata @> '{...}'`): `equals` predicates are merged into one object,
-// a `oneOf` predicate becomes a disjunction of one containment per value.
+// a `oneOf` predicate becomes a disjunction of one containment per value,
+// and a `contains` predicate becomes `metadata @> {key: [value]}` on its own
+// — jsonb containment matches a primitive against an array only at the top
+// level, so `{labels: ["review"]} @> {labels: "review"}` is false and no
+// `equals` can say "this array holds that value".
 // That is the only operator ever issued against `metadata`, which is why
 // `nodes_metadata_gin_idx` is a `jsonb_path_ops` index (schema.ts). Keys
 // and values are bound as parameters; there is no path by which a caller
@@ -38,7 +42,9 @@ export type MetadataScalar = string | number | boolean | null;
 
 export type MetadataPredicate =
   | { key: string; op: "equals"; value: MetadataScalar }
-  | { key: string; op: "oneOf"; values: readonly MetadataScalar[] };
+  | { key: string; op: "oneOf"; values: readonly MetadataScalar[] }
+  /** Top-level `key` is an array holding `value`. */
+  | { key: string; op: "contains"; value: MetadataScalar };
 
 /** Opaque to callers: pass a previous result's `nextCursor` back unchanged. */
 export interface ListNodesCursor {
@@ -121,12 +127,14 @@ export function buildListNodesQuery(params: BuildListNodesQueryParams): SQL {
   // is a no-op and JSON.stringify omits it, which would silently widen the
   // list. validatePredicates rejects those keys too; this is the backstop.
   const equalsObject: Record<string, MetadataScalar> = Object.create(null) as Record<string, MetadataScalar>;
-  const oneOfClauses: SQL[] = [];
+  const extraClauses: SQL[] = [];
   for (const predicate of params.where) {
     if (predicate.op === "equals") {
       equalsObject[predicate.key] = predicate.value;
+    } else if (predicate.op === "contains") {
+      extraClauses.push(sql`n.metadata @> ${JSON.stringify({ [predicate.key]: [predicate.value] })}::jsonb`);
     } else {
-      oneOfClauses.push(
+      extraClauses.push(
         sql`(${sql.join(
           predicate.values.map((v) => sql`n.metadata @> ${JSON.stringify({ [predicate.key]: v })}::jsonb`),
           sql.raw(" OR "),
@@ -134,7 +142,7 @@ export function buildListNodesQuery(params: BuildListNodesQueryParams): SQL {
       );
     }
   }
-  const oneOfFilter = oneOfClauses.length === 0 ? sql`TRUE` : sql.join(oneOfClauses, sql.raw(" AND "));
+  const extraFilter = extraClauses.length === 0 ? sql`TRUE` : sql.join(extraClauses, sql.raw(" AND "));
 
   return sql`
 SELECT n.id, n.node_type, n.source_system, n.external_id, n.title, n.metadata, n.content_hash,
@@ -147,7 +155,7 @@ WHERE (${nodeTypesArr} IS NULL OR n.node_type = ANY(${nodeTypesArr}))
   AND (${sourceSystemsArr} IS NULL OR n.source_system = ANY(${sourceSystemsArr}))
   AND (${updatedSince} IS NULL OR n.updated_at >= ${updatedSince})
   AND n.metadata @> ${JSON.stringify(equalsObject)}::jsonb
-  AND ${oneOfFilter}
+  AND ${extraFilter}
   -- Keyset page: strictly after the cursor under the exact ORDER BY below.
   AND (${cursorUpdatedAt} IS NULL
        OR n.updated_at < ${cursorUpdatedAt}
@@ -214,7 +222,10 @@ function validatePredicates(where: readonly MetadataPredicate[] | null | undefin
       }
       return { key, op, values: values.map((v, j) => validateScalar(`${option}.values[${j}]`, v)) };
     }
-    throw new InvalidListOptionError(`${option}.op`, op, 'must be "equals" or "oneOf"');
+    if (op === "contains") {
+      return { key, op, value: validateScalar(`${option}.value`, (predicate as { value?: unknown }).value) };
+    }
+    throw new InvalidListOptionError(`${option}.op`, op, 'must be "equals", "oneOf", or "contains"');
   });
 }
 

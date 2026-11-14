@@ -102,6 +102,12 @@ describe("normalizeViewMetadata", () => {
     expect(normalizeViewMetadata({ renderer: "timeline", filter: { nodeTypes: ["gh-issue", "work_item"] } })).toEqual({ renderer: "timeline", filter: { nodeTypes: ["gh-issue", "work_item"] } });
   });
 
+  it("accepts a filter using contains", () => {
+    const filter = { nodeTypes: ["work_item"], where: [{ key: "labels", op: "contains", value: "review" }] };
+    expect(normalizeViewMetadata({ renderer: "feed", filter })).toEqual({ renderer: "feed", filter });
+    expect(rejection({ renderer: "feed", filter: { where: [{ key: "labels", op: "contains", value: ["review"] }] } }).field).toBe("filter.where[0].value");
+  });
+
   it("rejects an unknown renderer naming the item and the field", () => {
     const e = rejection({ renderer: "kanban", filter: {} }, "at batch index 3 (agent/v)");
     expect(e.field).toBe("renderer");
@@ -121,11 +127,11 @@ describe("normalizeViewMetadata", () => {
   });
 
   it("rejects a malformed predicate naming filter and the offending predicate, keeping the listing error as cause", () => {
-    const e = rejection({ renderer: "feed", filter: { where: [{ key: "status", op: "contains", value: "op" }] } });
+    const e = rejection({ renderer: "feed", filter: { where: [{ key: "status", op: "like", value: "op" }] } });
     expect(e.field).toBe("filter.where[0].op");
-    expect(e.value).toBe("contains");
+    expect(e.value).toBe("like");
     expect(e.cause).toBeInstanceOf(InvalidListOptionError);
-    expect(e.message).toContain('filter.where[0].op (got "contains") must be "equals" or "oneOf"');
+    expect(e.message).toContain('filter.where[0].op (got "like") must be "equals", "oneOf", or "contains"');
     expect(rejection({ renderer: "feed", filter: { where: [{ key: "status", op: "equals", value: { nested: true } }] } }).field).toBe("filter.where[0].value");
     expect(rejection({ renderer: "feed", filter: { nodeTypes: [] } }).field).toBe("filter.nodeTypes");
   });
