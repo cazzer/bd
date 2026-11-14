@@ -1,0 +1,16 @@
+# An allowlist: the build context is what the image build reads and nothing
+# else. The root .env holds the dev DATABASE_URL and .claude/worktrees holds
+# whole checkouts, so everything starts excluded.
+*
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!tsconfig.base.json
+!apps/
+!packages/
+!bin/
+
+**/node_modules
+**/dist
+**/*.test.*
+**/.env*

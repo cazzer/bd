@@ -115,6 +115,7 @@ interface SetupOptions {
   herdrFails?: Error;
   db?: Database;
   readOnly?: boolean;
+  missingBinaries?: Context["missingBinaries"];
 }
 
 function setup(opts: SetupOptions = {}) {
@@ -143,6 +144,7 @@ function setup(opts: SetupOptions = {}) {
     reviewWriter: createReviewWriter({ runBd, runHerdr }),
     watcher: { wake } as unknown as BeadsWatcher,
     ...(opts.readOnly !== undefined ? { readOnly: opts.readOnly } : {}),
+    ...(opts.missingBinaries !== undefined ? { missingBinaries: opts.missingBinaries } : {}),
   };
   const writes = () => calls.filter((c) => c.args[0] !== "show");
   return { caller: createCaller(ctx), calls, writes, wake, herdrCalls, order };
@@ -222,6 +224,21 @@ describe("reviewDecision", () => {
       message: expect.stringContaining("BRAIN_READ_ONLY"),
     });
     expect(calls).toEqual([]);
+  });
+
+  it("refuses naming bd when it is missing from PATH, even for an unknown project, before the database", async () => {
+    for (const target of [{ project: UNREGISTERED, item: id("orphan") }, { project: PROJECT, item: id("r1") }]) {
+      const { caller, calls, wake } = setup({ db: poisonedDb(), missingBinaries: ["bd"] });
+      const err = await caller.reviewDecision({ ...target, decision: "accept", message: "" }).catch((e: unknown) => e);
+      expect(err).toMatchObject({ code: "PRECONDITION_FAILED", message: "bd is unavailable on this server: not found on PATH" });
+      expect(calls).toEqual([]);
+      expect(wake).not.toHaveBeenCalled();
+    }
+  });
+
+  it("still decides when only herdr is missing", async () => {
+    const { caller } = setup({ missingBinaries: ["herdr"] });
+    expect(await caller.reviewDecision({ project: PROJECT, item: id("r2"), decision: "changes", message: "not yet" })).toMatchObject({ ok: true });
   });
 
   it("refuses without a review writer, before the database", async () => {

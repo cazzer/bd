@@ -13,6 +13,7 @@
 
 import { on } from "node:events";
 import { BEADS_WATCHER_EVENT, type BeadsWatcher, type BeadsWatcherEvent } from "../beads-watcher.js";
+import { refuseMissingBinary } from "../errors.js";
 import { publicProcedure, router, TRPCError } from "../trpc.js";
 
 function requireWatcher(watcher: BeadsWatcher | undefined): BeadsWatcher {
@@ -26,6 +27,7 @@ export type RefreshOutcome =
 
 export const boardLiveRouter = router({
   boardEvents: publicProcedure.subscription(async function* (opts): AsyncGenerator<BeadsWatcherEvent> {
+    refuseMissingBinary(opts.ctx.missingBinaries, "bd");
     const watcher = requireWatcher(opts.ctx.watcher);
     const signals = [opts.signal, opts.ctx.shutdownSignal].filter((s): s is AbortSignal => s !== undefined);
     const signal = AbortSignal.any(signals);
@@ -40,6 +42,7 @@ export const boardLiveRouter = router({
   }),
 
   refreshBoard: publicProcedure.mutation(async ({ ctx }): Promise<RefreshOutcome[]> => {
+    refuseMissingBinary(ctx.missingBinaries, "bd");
     const watcher = requireWatcher(ctx.watcher);
     const outcomes = await watcher.reload();
     return outcomes.map((o) =>

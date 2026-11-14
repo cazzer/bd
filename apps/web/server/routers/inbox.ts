@@ -9,6 +9,7 @@ import {
   completeInboxItem,
   decideInboxItem,
   handOffInboxItem,
+  HostBinaryUnavailableError,
   INBOX_HANDOFF_STATUSES,
   DEFAULT_MAX_CONTENT_LENGTH,
   DEFAULT_MAX_TITLE_LENGTH,
@@ -27,7 +28,7 @@ import {
 } from "@breakdown/core";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
-import { mapCoreError } from "../errors.js";
+import { mapCoreError, refuseMissingBinary } from "../errors.js";
 import { openInboxSession } from "../inbox-session.js";
 import { publicProcedure, router } from "../trpc.js";
 
@@ -178,6 +179,7 @@ const NO_HERDR = "herdr isn't reachable from the breakdown server. Start `pnpm d
 
 const inboxOpenSessionProcedure = publicProcedure.input(inboxIdSchema).mutation(async ({ ctx, input }) => {
   if (ctx.readOnly) throw new TRPCError({ code: "FORBIDDEN", message: "The server is read-only (BRAIN_READ_ONLY)." });
+  refuseMissingBinary(ctx.missingBinaries, "herdr");
   if (ctx.herdrJson === undefined || ctx.herdrSocket === undefined || ctx.herdrSocket === null) throw new TRPCError({ code: "PRECONDITION_FAILED", message: NO_HERDR });
   const item = await loadItem(ctx, input.id);
   if (!INBOX_HANDOFF_STATUSES.includes(item.status)) {
@@ -187,6 +189,7 @@ const inboxOpenSessionProcedure = publicProcedure.input(inboxIdSchema).mutation(
   try {
     opened = await openInboxSession(ctx.herdrJson, ctx.herdrSocket, item, { cwd: ctx.sessionCwd ?? process.cwd() });
   } catch (err) {
+    if (err instanceof HostBinaryUnavailableError) throw new TRPCError({ code: "PRECONDITION_FAILED", message: err.message });
     throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: `Couldn't open the session: ${err instanceof Error ? err.message : String(err)}` });
   }
   try {
@@ -198,12 +201,14 @@ const inboxOpenSessionProcedure = publicProcedure.input(inboxIdSchema).mutation(
 });
 
 const inboxFocusSessionProcedure = publicProcedure.input(inboxIdSchema).mutation(async ({ ctx, input }) => {
+  refuseMissingBinary(ctx.missingBinaries, "herdr");
   if (ctx.herdrJson === undefined || ctx.herdrSocket === undefined || ctx.herdrSocket === null) throw new TRPCError({ code: "PRECONDITION_FAILED", message: NO_HERDR });
   const item = await loadItem(ctx, input.id);
   if (item.sessionTab === null) throw new TRPCError({ code: "CONFLICT", message: "This item was never opened in a session." });
   try {
     await ctx.herdrJson(["tab", "focus", item.sessionTab], ctx.herdrSocket);
   } catch (err) {
+    if (err instanceof HostBinaryUnavailableError) throw new TRPCError({ code: "PRECONDITION_FAILED", message: err.message });
     throw new TRPCError({ code: "NOT_FOUND", message: `The session tab is gone (${err instanceof Error ? err.message : String(err)}). Open a new session instead.` });
   }
   return { tab: item.sessionTab };

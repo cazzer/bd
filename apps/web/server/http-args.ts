@@ -16,6 +16,7 @@
 // when the bind is off loopback but no host is allowed. Pure — index.ts
 // owns turning a WebArgsError into an exit and printing the warning.
 
+import path from "node:path";
 import { parseArgs } from "node:util";
 import { isLoopbackAddress, LOOPBACK_HOST_NAMES, normalizeAllowedHost } from "@breakdown/core";
 
@@ -29,6 +30,10 @@ export interface WebArgs {
   port: number;
   /** `--allow-host` values, each normalized by `normalizeAllowedHost`. */
   allowedHosts: string[];
+  /** `--client-dir`, absolute: the built browser client to serve (static-client.ts), or null to serve none (Vite does, under `pnpm dev`). */
+  clientDir: string | null;
+  /** `--media-dir`, absolute: the review media root, or null for core's REVIEW_IMAGE_ROOT. */
+  mediaDir: string | null;
 }
 
 /** A flag (or `WEB_SERVER_PORT`) the server cannot start with; the message names the value and what is accepted. */
@@ -39,7 +44,7 @@ export class WebArgsError extends Error {
   }
 }
 
-const ACCEPTED = "accepted: --port <1-65535> --host <addr> --allow-host <hostname> (repeatable)";
+const ACCEPTED = "accepted: --port <1-65535> --host <addr> --allow-host <hostname> (repeatable) --client-dir <dir> --media-dir <dir>";
 
 // No 0 (an ephemeral port): the dispatcher pins Host to the port it is
 // given before the server listens, so an OS-chosen port would refuse every
@@ -56,17 +61,23 @@ function parsePort(value: string, source: string): number {
 }
 
 /**
- * Parses `--port <n> --host <addr> [--allow-host <name>]...`
- * (process.argv.slice(2)). The port is `--port`, else `envPort`
+ * Parses `--port <n> --host <addr> [--allow-host <name>]...
+ * [--client-dir <dir>] [--media-dir <dir>]` (process.argv.slice(2)). The port is `--port`, else `envPort`
  * (`WEB_SERVER_PORT`), else 4310. Throws WebArgsError naming the
  * offending value.
  */
 export function parseWebArgs(argv: readonly string[], envPort: string | undefined): WebArgs {
-  let values: { port?: string; host?: string; "allow-host"?: string[] };
+  let values: { port?: string; host?: string; "allow-host"?: string[]; "client-dir"?: string; "media-dir"?: string };
   try {
     ({ values } = parseArgs({
       args: [...argv],
-      options: { port: { type: "string" }, host: { type: "string" }, "allow-host": { type: "string", multiple: true } },
+      options: {
+        port: { type: "string" },
+        host: { type: "string" },
+        "allow-host": { type: "string", multiple: true },
+        "client-dir": { type: "string" },
+        "media-dir": { type: "string" },
+      },
       strict: true,
       allowPositionals: false,
     }));
@@ -94,7 +105,14 @@ export function parseWebArgs(argv: readonly string[], envPort: string | undefine
     }
   });
 
-  return { host, port, allowedHosts };
+  return { host, port, allowedHosts, clientDir: directoryFlag(values["client-dir"], "--client-dir"), mediaDir: directoryFlag(values["media-dir"], "--media-dir") };
+}
+
+/** A directory flag as an absolute path, or null when absent. Whether it exists is index.ts's check, not a parse error. */
+function directoryFlag(value: string | undefined, flag: string): string | null {
+  if (value === undefined) return null;
+  if (value.trim() === "") throw new WebArgsError(`${flag} is empty; give a directory`);
+  return path.resolve(value);
 }
 
 /** True for a bind address only reachable from this machine. */
@@ -108,7 +126,7 @@ function isLoopbackBind(host: string): boolean {
  * values, so every remote request gets 403. Said once at startup rather
  * than left for the operator to discover as silent refusals.
  */
-export function bindWarning(args: WebArgs): string | null {
+export function bindWarning(args: Pick<WebArgs, "host" | "port" | "allowedHosts">): string | null {
   if (isLoopbackBind(args.host) || args.allowedHosts.length > 0) return null;
   return (
     `bound to ${args.host} with no --allow-host: only requests whose Host is a loopback name ` +

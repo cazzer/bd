@@ -11,11 +11,11 @@
 - [x] 1.9 Test that no MCP tool and no tRPC procedure creates, lists, or revokes tokens
 - [x] 1.10 Docs: CLAUDE.md architecture line on loopback/authentication and the guard's copy-not-share note; README section on exposing over the tailnet and managing tokens; `pnpm check` green
 
-## 2. arm64 image and capped compose deploy (bd-d38.2)
+## 2. arm64 image as SkyOS apps (bd-d38.2)
 
-- [ ] 2.1 Web server serves the built client statically when the build directory exists (index fallback, immutable hashed assets); `/healthz` on web; tests
-- [ ] 2.2 Host-only binaries: `bd`/`herdr` ENOENT becomes a typed "unavailable" error everywhere they spawn; beads watcher tolerates a missing registry; startup test with neither on PATH
-- [ ] 2.3 Multi-stage `Dockerfile` + `.dockerignore`: esbuild bundles for web, MCP, migrate, token CLI (tsx fallback recorded if needed), non-root runtime; `docker buildx build --platform linux/arm64,linux/amd64` succeeds
-- [ ] 2.4 `docker-compose.jetson.yml`: postgres (tuned flags), migrate (one-shot gate), web, mcp with mem_limit/memswap_limit/cpus per design decision 7; publish address, allowed hosts, data and media paths as compose variables defaulting to loopback and named volumes; in-container healthchecks
-- [ ] 2.5 Smoke test script: build, up, create a token, healthz with/without token from the host (200/401), an MCP initialize with the token, `docker stats` under each cap, down; run it on the Mac and record the measured peaks in the README
-- [ ] 2.6 README deploy section (budget table, variables, token commands in the container); `pnpm check` green
+- [x] 2.1 Web server serves the built client from a `--client-dir` (index fallback, immutable hashed assets) and widens the public paths to it; `/healthz` on web; one media directory flag for review media; tests
+- [x] 2.2 Host-only binaries: `bd`/`herdr` ENOENT becomes a typed "unavailable" error everywhere they spawn; beads watcher tolerates a missing registry; startup test with neither on PATH
+- [x] 2.3 Multi-stage `Dockerfile` + `.dockerignore` + `bin/container-launch.mjs` (env → flags, migrate, two children, signal forwarding, exit on child exit); `docker buildx build --platform linux/arm64,linux/amd64` succeeds
+- [x] 2.4 Postgres settings for `breakdown-db`; `docker-compose.app.yml` running both containers with caps, env, named volumes, loopback publish, own project name
+- [x] 2.5 Smoke test: up, token via the container, healthz 401/200 through the published ports, MCP initialize with the token, `docker stats` under each cap, down; run on the Mac and record peaks in the README
+- [x] 2.6 README deploy section (env table, caps, token commands in the container) and CLAUDE.md note on the launcher; `pnpm check` green

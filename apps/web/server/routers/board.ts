@@ -104,7 +104,7 @@ export const boardItemInputSchema = z.object({
 const boardItemProcedure = publicProcedure.input(boardItemInputSchema).query(async ({ ctx, input }) => {
   try {
     const item = await getBoardItem(ctx.db, { project: input.project, externalId: input.item });
-    return { item: item === null ? null : toBoardItemDto(item) };
+    return { item: item === null ? null : toBoardItemDto(item, ctx.reviewImageRoot) };
   } catch (err) {
     throw mapCoreError("boardItem", err);
   }

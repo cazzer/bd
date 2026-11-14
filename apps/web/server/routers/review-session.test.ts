@@ -115,6 +115,15 @@ describe("reviewSession open", () => {
     await expect(setup({ context: { herdrJson: undefined } }).caller.reviewSession({ project: PROJECT, item: id("card"), mode: "focus" })).rejects.toThrow(/no herdr runner/);
   });
 
+  it("refuses both modes naming herdr when it is missing from PATH, even for an unknown project, before any command", async () => {
+    for (const mode of ["focus", "open"] as const) {
+      const { caller, calls } = setup({ context: { missingBinaries: ["herdr"] } });
+      const err = await caller.reviewSession({ project: `none-${TAG}`, item: id("card"), mode }).catch((e: unknown) => e);
+      expect(err).toMatchObject({ code: "PRECONDITION_FAILED", message: "herdr is unavailable on this server: not found on PATH" });
+      expect(calls).toHaveLength(0);
+    }
+  });
+
   it("reports an agent that won't start as data", async () => {
     const { caller } = setup({ fail: (a) => (a[0] === "agent" && a[1] === "start" ? new Error("unknown agent kind") : undefined) });
     expect(await caller.reviewSession({ project: PROJECT, item: id("card"), mode: "open" })).toEqual({ ok: false, mode: "open", reason: "unknown agent kind" });

@@ -71,6 +71,19 @@ describe("boardEvents", () => {
       })(),
     ).rejects.toMatchObject({ code: "PRECONDITION_FAILED" });
   });
+
+  it("refuses naming bd when it is missing from PATH, before opening the stream", async () => {
+    const watcher = watcherWith(async () => RESULT());
+    const caller = createCaller({ db: {} as never, watcher, missingBinaries: ["bd"] });
+    await expect(
+      (async () => {
+        const it = (await caller.boardEvents())[Symbol.asyncIterator]();
+        await it.next();
+      })(),
+    ).rejects.toMatchObject({ code: "PRECONDITION_FAILED", message: "bd is unavailable on this server: not found on PATH" });
+    expect(watcher.events.listenerCount(BEADS_WATCHER_EVENT)).toBe(0);
+    await watcher.stop();
+  });
 });
 
 describe("refreshBoard", () => {
@@ -93,5 +106,21 @@ describe("refreshBoard", () => {
 
   it("fails clearly when no watcher is configured", async () => {
     await expect(createCaller({ db: {} as never }).refreshBoard()).rejects.toMatchObject({ code: "PRECONDITION_FAILED" });
+  });
+
+  it("refuses naming bd when it is missing from PATH, before re-ingesting anything", async () => {
+    let ingested = 0;
+    const watcher = watcherWith(async () => (ingested++, RESULT()));
+    const caller = createCaller({ db: {} as never, watcher, missingBinaries: ["bd"] });
+    await expect(caller.refreshBoard()).rejects.toMatchObject({ code: "PRECONDITION_FAILED", message: "bd is unavailable on this server: not found on PATH" });
+    expect(ingested).toBe(0);
+    await watcher.stop();
+  });
+
+  it("still refreshes when only herdr is missing", async () => {
+    const watcher = watcherWith(async () => RESULT());
+    const caller = createCaller({ db: {} as never, watcher, missingBinaries: ["herdr"] });
+    expect(await caller.refreshBoard()).toHaveLength(2);
+    await watcher.stop();
   });
 });

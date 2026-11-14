@@ -11,6 +11,7 @@
 // the pane belongs to, and is bounded by a timeout.
 
 import { execFile } from "node:child_process";
+import { HostBinaryUnavailableError } from "@breakdown/core";
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
@@ -52,7 +53,7 @@ export function createHerdrJsonRunner(command = "herdr"): RunHerdrJson {
       execFile(command, [...args], { env: { ...process.env, HERDR_SOCKET_PATH: socket }, timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024, encoding: "utf8" }, (err, stdout, stderr) => {
         if (err) {
           const e = err as NodeJS.ErrnoException & { killed?: boolean };
-          if (e.code === "ENOENT") return reject(new Error("herdr not found on PATH"));
+          if (e.code === "ENOENT") return reject(new HostBinaryUnavailableError("herdr"));
           if (e.killed) return reject(new Error(`herdr ${verb} timed out`));
           const reason = herdrFailure(stderr, stdout) ?? `herdr ${verb} failed`;
           return reject(new Error(reason.length > MAX_REASON_LENGTH ? `${reason.slice(0, MAX_REASON_LENGTH - 1)}…` : reason));

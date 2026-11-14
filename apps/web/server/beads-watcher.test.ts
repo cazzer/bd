@@ -669,3 +669,32 @@ describe("beads watcher wake(project)", () => {
     expect(ingest).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("beads watcher without bd on PATH (tailnet-hosting decision 8)", () => {
+  it("logs once and never reads the registry, ticks, watches, or loads", async () => {
+    const readRegistry = vi.fn(async () => [{ project: "a", dir: "/x/a" }]);
+    const ingest = vi.fn(async () => RESULT());
+    const watchDir = vi.fn(() => ({ close: () => {} }));
+    const setInterval = vi.fn(() => 1);
+    const log = vi.fn();
+    const watcher = createBeadsWatcher({
+      db: {} as never,
+      bdAvailable: false,
+      readRegistry,
+      ingest,
+      watchDir,
+      clock: { setTimeout: () => 1, clearTimeout: () => {}, setInterval, clearInterval: () => {} },
+      log,
+    });
+    await watcher.start();
+    expect(await watcher.reload()).toEqual([]);
+    expect(watcher.wake("a")).toBe(false);
+    expect(watcher.outcomes()).toEqual([]);
+    await watcher.stop();
+    expect(readRegistry).not.toHaveBeenCalled();
+    expect(ingest).not.toHaveBeenCalled();
+    expect(watchDir).not.toHaveBeenCalled();
+    expect(setInterval).not.toHaveBeenCalled();
+    expect(log.mock.calls).toEqual([["beads watcher: bd not found on PATH; no beads project is watched by this server"]]);
+  });
+});

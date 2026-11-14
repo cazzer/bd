@@ -181,6 +181,114 @@ Without the header, a 401 may send Claude Code into OAuth discovery, which this 
 
 Host-side firewall and tailnet ACLs live in skyos (`sky-brx`), not here.
 
+## Deploying as two containers
+
+On a shared host (the SkyOS Jetson), Breakdown runs as two single-container apps configured by env, with data in named volumes:
+
+- **`breakdown-db`**: the stock `pgvector/pgvector:pg16` image, with the Postgres settings below.
+- **`breakdown`**: this repo's image (`Dockerfile`). Its entrypoint, `bin/container-launch.mjs`, runs migrations (retrying while the database starts: up to 30 attempts 2 s apart, each killed after 15 s), then the web server (serving the built client) and the MCP HTTP server as two children. If either one exits, the container exits non-zero so its supervisor restarts it.
+
+The SkyOS app definitions live in skyos (`sky-brx.2`). `docker-compose.app.yml` runs the same two containers locally with the same env, caps, and volumes, under its own compose project (`breakdown`), so the dev database (`docker-compose.yml`, project `bd`) is never touched:
+
+```bash
+export BREAKDOWN_DB_PASSWORD=$(openssl rand -hex 24)   # keep it: it is fixed when the volume is first initialized
+export BREAKDOWN_WEB_PORT=14310 BREAKDOWN_MCP_PORT=15320
+docker compose -f docker-compose.app.yml up -d --build --wait
+docker compose -f docker-compose.app.yml exec -T breakdown node dist/token.mjs create phone --scope human
+```
+
+Always name the file with `-f docker-compose.app.yml`. A bare `docker compose` in this directory is the dev database.
+
+On a development machine the default ports are already taken: 4310 by `pnpm dev`'s API server and 5320 by the launchd MCP service. The two `BREAKDOWN_*_PORT` variables move both what the servers listen on and what compose publishes, which must be the same number (see [Environment](#environment)). On the Jetson the defaults are fine.
+
+**Run it on a bridge network with its ports published**, as `docker-compose.app.yml` does, never with host networking (`network_mode: host`). Inside the container the servers bind `0.0.0.0`, which on a bridge means only the container's own interfaces. Under host networking it means every interface on the host, and every process on the host becomes a loopback peer, which admission trusts without a token. The launcher logs a warning at start when the bind is a wildcard and the container has any non-loopback interface other than `eth<n>` (a bridge network gives a container only those). That is a heuristic, and it warns without refusing.
+
+The compose file also runs `breakdown` with a read-only root filesystem (a `tmpfs` at `/tmp`; only the media volume is writable), every capability dropped, `no-new-privileges`, an init as PID 1, and a 15 s stop grace period, past the launcher's own 10 s deadline for its children. Mirror these in the SkyOS app definition where it allows.
+
+### Caps
+
+| App | memory (`mem_limit` = `memswap_limit`) | cpus | Inside |
+| --- | --- | --- | --- |
+| `breakdown-db` | 384m | 1.0 | Postgres with the settings below; `shm_size: 128m` |
+| `breakdown` | 512m | 1.5 | V8 heap caps set by the launcher: web 160 MB, MCP 128 MB, migrate 96 MB (runs and exits before the servers start) |
+| **total** | **896m** | | under 1 GB |
+
+The heap caps bound the V8 heap only. Buffers and code space sit outside them, which is why they stay well under half the container's cap. Swap equals the memory limit, so a container at its cap is OOM-killed and restarted rather than paged.
+
+`breakdown-db` runs with:
+
+```
+-c shared_buffers=96MB -c effective_cache_size=192MB -c work_mem=4MB
+-c maintenance_work_mem=32MB -c max_connections=30 -c wal_buffers=4MB
+```
+
+`shared_buffers` is a quarter of the cap, and `effective_cache_size` tells the planner to expect half. The live pools (web 10 + MCP 10, plus a one-connection token CLI) stay under `max_connections`.
+
+**Measured** by `pnpm smoke:app` on an Apple-silicon Mac (Docker Desktop, cgroup v2 `memory.peak`), after 51 `brain_map` calls and 100 tRPC reads against an empty store: `breakdown` peaked at 108.4 MiB of 512 MiB (21%) and `breakdown-db` at 87.9 MiB of 384 MiB (23%), with no OOM kills or restarts. This is a Mac measurement on an empty store. The Jetson figures come from `sky-brx`.
+
+### Environment
+
+The launcher reads these on the `breakdown` container and turns them into the servers' flags. The servers themselves still read only `DATABASE_URL`, `BRAIN_READ_ONLY`, and `WEB_SERVER_PORT`. An unset or empty variable takes its default.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `DATABASE_URL` | required | `postgres://breakdown:<password>@breakdown-db:5432/breakdown` |
+| `BREAKDOWN_HOST` | `0.0.0.0` | bind address for both servers |
+| `BREAKDOWN_WEB_PORT` | `4310` | web server port |
+| `BREAKDOWN_MCP_PORT` | `5320` | MCP server port (`/mcp`, `/healthz`) |
+| `BREAKDOWN_ALLOW_HOSTS` | empty | comma-separated hostnames remote clients use; each becomes `--allow-host` on both servers |
+| `BREAKDOWN_MEDIA_DIR` | `/data/media` | review media directory, one volume |
+| `BRAIN_READ_ONLY` | unset | `1` refuses every write, as on the host |
+
+`docker-compose.app.yml` also reads these on the machine running compose:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `BREAKDOWN_DB_PASSWORD` | required | the database password. Use hex (`openssl rand -hex 24`): it goes into `DATABASE_URL` unescaped. Postgres applies it only when the data volume is first initialized, so changing it later means changing it inside the database too. |
+| `BREAKDOWN_PGDATA` | `breakdown-pgdata` | named volume or host path for Postgres data |
+| `BREAKDOWN_MEDIA` | `breakdown-media` | named volume or host path mounted at `/data/media` |
+| `BREAKDOWN_PUBLISH_ADDR` | `127.0.0.1` | host address both ports are published on |
+
+**Publish each port at the number it listens on.** Admission accepts an allowed name only at the server's own listen port (or bare, behind a proxy that sends no port), so a port published as `8080:4310` makes every remote request a 403. To move a port, set `BREAKDOWN_WEB_PORT` or `BREAKDOWN_MCP_PORT`. Compose publishes the same number on both sides.
+
+**Keep loopback in `BREAKDOWN_HOST`.** The image's healthcheck probes `http://127.0.0.1:<port>/healthz` inside the container, which admission trusts without a token. A bind that excludes loopback (a single tailnet address, say) leaves the container permanently unhealthy. The default `0.0.0.0` includes it.
+
+A bind-mounted `BREAKDOWN_MEDIA` must be readable (and, for new reviews, writable) by uid 1000, the image's `node` user.
+
+### Tokens in the container
+
+The image carries the same token CLI, run with `exec` so it uses the container's `DATABASE_URL`:
+
+```bash
+docker compose -f docker-compose.app.yml exec -T breakdown node dist/token.mjs create phone --scope human
+docker compose -f docker-compose.app.yml exec -T breakdown node dist/token.mjs create worker-1 --scope agent
+docker compose -f docker-compose.app.yml exec -T breakdown node dist/token.mjs list
+docker compose -f docker-compose.app.yml exec -T breakdown node dist/token.mjs revoke phone
+```
+
+`-T` keeps a TTY from adding a carriage return, so `TOKEN=$(…)` captures `bdt_…` alone. Requests from the host to the published ports are off loopback as far as the container is concerned, so they need a token too.
+
+### Media
+
+Until review media moves into the database (`bd-d38.6`), seed the media volume from the host's review directory:
+
+```bash
+docker cp ~/.local/share/breakdown/reviews/. "$(docker compose -f docker-compose.app.yml ps -q breakdown)":/data/media/
+```
+
+### Building for the Jetson
+
+The image builds for linux/arm64 and linux/amd64 from one Dockerfile. A multi-platform build needs a `docker-container` builder:
+
+```bash
+docker buildx create --name breakdown-multi --driver docker-container
+docker buildx build --builder breakdown-multi --platform linux/arm64,linux/amd64 -t <registry>/breakdown:<tag> --push .
+```
+
+### Smoke test
+
+`pnpm smoke:app` (not part of `pnpm check`; it needs Docker) builds the image and starts the stack as project `breakdown-smoke` with a random password and ports 14310/15320. It mints a `human` and an `agent` token in the container and checks, from the host: `/healthz` on both servers is 401 with `WWW-Authenticate: Bearer` without a token, the human token gets 200 on the web and the agent token 403 there, and the agent token gets 200 on MCP. It also checks that the board's HTML and hashed assets are public, that the HTML is sent with `X-Frame-Options: DENY` and a `Content-Security-Policy` with `frame-ancestors 'none'` and no inline script (and has none), a tRPC read without a token is 401, and an MCP session initializes, calls `brain_map`, and closes. After some load it inspects both containers (memory limit set, swap equal to it, cpus set, not OOM-killed, never restarted, peak under the cap, total under 1 GB), checks that `breakdown` runs hardened (read-only root it cannot write, all capabilities dropped, `no-new-privileges`, init), and prints the limits-and-peaks table. It always removes its project and volumes at the end, on Ctrl-C or SIGTERM too (exiting 130 or 143). `--keep` leaves them up. It refuses to run against the projects `bd` and `breakdown`.
+
 ## Inbox
 
 A review queue for everything that needs a decision: email, Asana, Slack, Notion, Google Docs comments, GitHub reviews, Fathom action items, drafts from live Claude sessions, and the board's open reviews from every registered project. Open `http://localhost:5310/inbox` (with `pnpm dev` running). Keys: `j`/`k` move, `a` accept (the recommended option on a card), `c` message, `d` dismiss, `o` open session; `Ctrl/⌘+Enter` accepts and `+Shift` requests changes.

@@ -354,6 +354,9 @@ export {
   type IngestBeadsCheckoutResult,
 } from "./beads-ingest.js";
 
+// Host-only binaries (tailnet-hosting decision 8). See host-binaries.ts.
+export { HostBinaryUnavailableError, findOnPath, type HostBinary } from "./host-binaries.js";
+
 // Work board read (live-beads-board change). See board.ts.
 export {
   getWorkBoard,

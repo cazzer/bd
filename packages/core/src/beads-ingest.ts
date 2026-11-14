@@ -12,6 +12,8 @@
 // shells out to `bd list --status=all --limit=0 --json` in `dir`
 // (`--limit=0` is "unlimited": `bd list` defaults to 50 rows, which would
 // silently truncate the export the moment the tracker outgrows that).
+// With no `bd` on PATH (a container) the default runner throws
+// HostBinaryUnavailableError("bd") rather than a spawn error.
 // For each issue labelled `review` with `comment_count > 0`, it then runs
 // `bd comments <id> --json` through the same runner, serially, so the
 // thread lands on the review's work item (board-visual-reviews) — unless
@@ -63,7 +65,7 @@
 // a failed load leaves no run open forever.
 
 import { execFile } from "node:child_process";
-import { realpath } from "node:fs";
+import { realpath, statSync } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import { nodes, type Database } from "@breakdown/db";
@@ -78,6 +80,7 @@ import {
 } from "./beads.js";
 import { reconcileEdges } from "./edges.js";
 import { BeadsProjectConflictError, InvalidWorkItemError } from "./errors.js";
+import { HostBinaryUnavailableError } from "./host-binaries.js";
 import { closeIngestRun, openIngestRun } from "./ingest-runs.js";
 import { upsertNodes, type NodeInput } from "./nodes.js";
 import { BLOCKS_EDGE_TYPE, CHILD_OF_EDGE_TYPE, PROJECT_KEY_PATTERN } from "./work-items.js";
@@ -138,11 +141,21 @@ export const defaultRunBd: RunBd = async (args, cwd, signal) => {
     });
     return stdout;
   } catch (err) {
+    // spawn reports a missing cwd as ENOENT too; only a real cwd means bd itself is missing.
+    if ((err as NodeJS.ErrnoException).code === "ENOENT" && isDirectory(cwd)) throw new HostBinaryUnavailableError("bd");
     const stderr = typeof (err as { stderr?: unknown }).stderr === "string" ? (err as { stderr: string }).stderr.trim() : "";
     const message = err instanceof Error ? err.message : String(err);
     throw new Error(`bd ${args.join(" ")} failed in ${cwd}: ${stderr || message}`);
   }
 };
+
+function isDirectory(dir: string): boolean {
+  try {
+    return statSync(dir).isDirectory();
+  } catch {
+    return false;
+  }
+}
 
 async function fetchIssues(runBd: RunBd, cwd: string, signal?: AbortSignal): Promise<BeadsIssue[]> {
   const stdout = await runBd(["list", "--status=all", "--limit=0", "--json"], cwd, signal);

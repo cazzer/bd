@@ -151,6 +151,24 @@ describe("reviewImageUrl", () => {
     expect(reviewImageUrl(path.join(root, "..", "outside", "secret.png"), root)).toBeNull();
   });
 
+  it("rebases a host-recorded path onto the root from the last reviews marker", () => {
+    const media = "/data/media";
+    expect(reviewImageUrl("/Users/caleb/.local/share/breakdown/reviews/tides/r1/a.png", media)).toBe("/review-images/tides/r1/a.png");
+    expect(reviewImageUrl("/home/x/.local/share/breakdown/reviews/a/.local/share/breakdown/reviews/b.png", media)).toBe("/review-images/b.png");
+    expect(reviewImageUrl("/home/x/.local/share/breakdown/reviews/with space.png", media)).toBe("/review-images/with%20space.png");
+    // Inside the root already: taken as it is, not rebased.
+    expect(reviewImageUrl(path.join(media, "sub", "c.png"), media)).toBe("/review-images/sub/c.png");
+  });
+
+  it("answers null for a host path with .. after the marker, no marker, or nothing after it", () => {
+    const media = "/data/media";
+    expect(reviewImageUrl("/Users/caleb/.local/share/breakdown/reviews/../../secret.png", media)).toBeNull();
+    expect(reviewImageUrl("/Users/caleb/.local/share/breakdown/reviews/sub/../a.png", media)).toBeNull();
+    expect(reviewImageUrl("/Users/caleb/.local/share/breakdown/other/a.png", media)).toBeNull();
+    expect(reviewImageUrl("/Users/caleb/.local/share/breakdown/reviews", media)).toBeNull();
+    expect(reviewImageUrl("/Users/caleb/.local/share/breakdown/reviews/", media)).toBeNull();
+  });
+
   it("round-trips through the resolver", async () => {
     for (const file of [path.join(root, "a.png"), path.join(root, "sub", "b.webp"), path.join(root, "with space #1?.png")]) {
       const resolved = await resolveReviewImage(reviewImageUrl(file, root)!, root);

@@ -10,7 +10,7 @@ import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
-import { MAX_REVIEW_COMMENT_LENGTH, REVIEW_OPTION_ID_PATTERN } from "@breakdown/core";
+import { HostBinaryUnavailableError, MAX_REVIEW_COMMENT_LENGTH, REVIEW_OPTION_ID_PATTERN } from "@breakdown/core";
 import {
   BdUncertainError,
   closeReason,
@@ -338,7 +338,7 @@ describe("pane notification", () => {
     expect(warn).toHaveBeenCalledWith(`[breakdown-web] review tides/tides-r1: agent not notified: ${NOTIFY_UNKNOWN_SESSION}`);
   });
 
-  it.each([["agent target w1:p2 not found (agent_not_found)"], ["herdr timed out after 10 s; the agent may have been notified"], ["herdr not found on PATH"]])(
+  it.each([["agent target w1:p2 not found (agent_not_found)"], ["herdr timed out after 10 s; the agent may have been notified"], ["herdr is unavailable on this server: not found on PATH"]])(
     "a failing herdr (%s) leaves the decision written and reports why",
     async (reason) => {
       const { runBd, writes } = recordingRunner({ show: (id) => withPane("w1:p2")(id) });
@@ -673,8 +673,11 @@ describe("default bd runner", () => {
     expect(err).not.toBeInstanceOf(BdUncertainError);
   });
 
-  it("says bd is not on PATH when the executable is missing", async () => {
-    await expect(createBdRunner({ command: path.join(dir, "missing-bd") })(["close", "x-1"], dir)).rejects.toThrow(/^bd not found on PATH$/);
+  it("says bd is unavailable when the executable is missing", async () => {
+    const err = await createBdRunner({ command: path.join(dir, "missing-bd") })(["close", "x-1"], dir).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(HostBinaryUnavailableError);
+    expect((err as HostBinaryUnavailableError).binary).toBe("bd");
+    expect((err as Error).message).toBe("bd is unavailable on this server: not found on PATH");
   });
 
   it("times out with SIGTERM and reports the command as uncertain", async () => {
@@ -777,8 +780,10 @@ describe("default herdr runner", () => {
     await expect(createHerdrRunner({ command: quiet })(ARGS, SOCK)).rejects.toThrow(/^herdr exited 3$/);
   });
 
-  it("says herdr is not on PATH when the executable is missing", async () => {
-    await expect(createHerdrRunner({ command: path.join(dir, "missing-herdr") })(ARGS, SOCK)).rejects.toThrow(/^herdr not found on PATH$/);
+  it("says herdr is unavailable when the executable is missing", async () => {
+    const err = await createHerdrRunner({ command: path.join(dir, "missing-herdr") })(ARGS, SOCK).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(HostBinaryUnavailableError);
+    expect((err as HostBinaryUnavailableError).binary).toBe("herdr");
   });
 
   it("times out with SIGTERM", async () => {

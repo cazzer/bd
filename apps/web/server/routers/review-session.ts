@@ -6,7 +6,8 @@
 // write; the prompt says so.
 //
 // Refusals, before any command runs:
-//   1. no herdr runner, or (for "open") no herdr socket       → PRECONDITION_FAILED
+//   1. no herdr runner, herdr not on PATH (tailnet-hosting decision 8),
+//      or (for "open") no herdr socket                         → PRECONDITION_FAILED
 //   2. "open" on a read-only server (BRAIN_READ_ONLY)           → FORBIDDEN
 //   3. no checkout registered by a beads ingest for the key    → NOT_FOUND
 //   4. the project holds no such item                          → NOT_FOUND
@@ -20,7 +21,7 @@ import { stat } from "node:fs/promises";
 import { getBoardItem, getRegisteredBeadsProject, PROJECT_KEY_PATTERN, reviewCard, type ReviewMetadata } from "@breakdown/core";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
-import { mapCoreError } from "../errors.js";
+import { mapCoreError, refuseMissingBinary } from "../errors.js";
 import { focusPane, openAgentSession } from "../herdr-session.js";
 import { publicProcedure, router } from "../trpc.js";
 import { REVIEW_ITEM_ID_PATTERN } from "./review.js";
@@ -69,6 +70,7 @@ export function reviewSessionPrompt(input: { project: string; externalId: string
 const reviewSessionProcedure = publicProcedure.input(reviewSessionInputSchema).mutation(async ({ ctx, input }): Promise<ReviewSessionResult> => {
   const run = ctx.herdrJson;
   if (run === undefined) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "This server has no herdr runner configured; review sessions are unavailable." });
+  refuseMissingBinary(ctx.missingBinaries, "herdr");
   if (input.mode === "open" && ctx.readOnly) throw new TRPCError({ code: "FORBIDDEN", message: "The server is read-only (BRAIN_READ_ONLY); opening a session is refused." });
   if (input.mode === "open" && (ctx.herdrSocket === undefined || ctx.herdrSocket === null)) {
     throw new TRPCError({ code: "PRECONDITION_FAILED", message: "No herdr session found for the server. Start `pnpm dev` inside herdr, or keep herdr's default socket, and try again." });

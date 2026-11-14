@@ -4,7 +4,8 @@
 // refusal happens before any write command, in this order:
 //
 //   1. the server is read-only (BRAIN_READ_ONLY)              → FORBIDDEN
-//   2. no review writer in the context                         → PRECONDITION_FAILED
+//   2. no review writer in the context, or no `bd` on PATH
+//      (tailnet-hosting decision 8)                           → PRECONDITION_FAILED
 //   3. no checkout registered by a beads ingest for the key    → NOT_FOUND
 //   4. the project holds no such item                          → NOT_FOUND
 //   5. the item folded (merge) to a different bead id          → PRECONDITION_FAILED
@@ -65,7 +66,7 @@ import {
 } from "@breakdown/core";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
-import { mapCoreError } from "../errors.js";
+import { mapCoreError, refuseMissingBinary } from "../errors.js";
 import { ReviewDecisionInFlightError, ReviewRecordRefusedError, type ReviewNotified, type ReviewStep } from "../review-writer.js";
 import { publicProcedure, router } from "../trpc.js";
 
@@ -132,6 +133,7 @@ const reviewDecisionProcedure = publicProcedure.input(reviewDecisionInputSchema)
   if (writer === undefined) {
     throw new TRPCError({ code: "PRECONDITION_FAILED", message: "This server has no review writer configured; review decisions are unavailable." });
   }
+  refuseMissingBinary(ctx.missingBinaries, "bd");
 
   let project;
   let item;

@@ -1,12 +1,12 @@
 ## Purpose
 
-Packaging Breakdown as a container image and a resource-capped compose deployment, so it runs on a small shared host (the SkyOS Jetson) without starving the host's other services.
+Packaging Breakdown as container images that run as two apps on a small shared host (the SkyOS Jetson: `breakdown-db` and `breakdown`), configured entirely from the environment and capped so they don't starve the host's other services.
 
 ## ADDED Requirements
 
-### Requirement: One multi-arch image runs either server
+### Requirement: One multi-arch app image serves web and MCP
 
-The project SHALL build one container image for linux/arm64 and linux/amd64 that can run the web server (which also serves the built browser client) or the MCP HTTP server, selected by the container's command. The image SHALL run as a non-root user and SHALL contain no credential.
+The project SHALL build one container image for linux/arm64 and linux/amd64 whose single container runs migrations and then serves both the web server (including the built browser client) and the MCP HTTP server. The image SHALL run as a non-root user and SHALL contain no credential. If either server exits, the container SHALL exit non-zero so its supervisor restarts it, and a stop signal SHALL shut both down cleanly.
 
 #### Scenario: Both platforms build
 
@@ -15,31 +15,45 @@ The project SHALL build one container image for linux/arm64 and linux/amd64 that
 
 #### Scenario: Board served without a dev server
 
-- **WHEN** the web container is running and a browser on an allowed host opens its root path
+- **WHEN** the app container is running and a browser on an allowed host opens its root path
 - **THEN** the board loads from the container alone, with no Vite process
 
-### Requirement: The compose stack is capped
+#### Scenario: One server dies
 
-A compose project for the Jetson SHALL run Postgres, a one-shot migration step, the web server, and the MCP server, each with a memory limit, a swap limit equal to its memory limit, and a CPU limit. The sum of the memory limits SHALL be under 1 GB and SHALL be documented beside the per-service numbers. Postgres SHALL be configured for its limit, so that its working memory under normal load stays within it. Each long-running service SHALL restart on failure, and the servers SHALL start only after migrations succeed.
+- **WHEN** the MCP server process inside the container exits unexpectedly
+- **THEN** the container exits non-zero rather than serving the web alone
 
-#### Scenario: Limits in force
+### Requirement: Container configuration comes from the environment
 
-- **WHEN** the stack is up
-- **THEN** every service reports a memory limit, and the limits sum to under 1 GB
+Everything a deployment varies SHALL be set by environment variables on the app container: the database connection string, bind address, web and MCP ports, allowed hosts, and the media directory, each with a documented default. The container's entrypoint SHALL translate them into the servers' command-line flags, so the servers themselves read no environment variable beyond those the project already allows. Media SHALL live under one directory, suitable for a single named volume.
+
+#### Scenario: Configured by env alone
+
+- **WHEN** the app container is started with only `DATABASE_URL` and an allowed host set
+- **THEN** it migrates, serves web and MCP on their default ports bound to all container interfaces, and accepts that host
+
+#### Scenario: Media on a volume
+
+- **WHEN** the media directory is a named volume and a review image is stored and the container is replaced
+- **THEN** the image is still served after the replacement
+
+### Requirement: The database app is tuned for a small cap
+
+The project SHALL supply Postgres settings for the `breakdown-db` app (the stock pgvector Postgres 16 image) that keep its memory within its cap, documented beside the cap. Together with the app container, the total memory limit SHALL be under 1 GB.
 
 #### Scenario: Smoke test under the caps
 
-- **WHEN** the smoke test brings the stack up on a developer machine, creates a token, and exercises both servers
-- **THEN** health checks succeed with the token and get 401 without it from outside the containers, and no service exceeds its memory limit or is killed
+- **WHEN** the smoke test starts both containers with their memory limits on a developer machine, creates a token, and exercises both servers through the published ports
+- **THEN** health checks succeed with the token and get 401 without it, and neither container exceeds its limit or is killed
 
-### Requirement: Data paths are configurable
+### Requirement: A local compose file runs the same two containers
 
-Where Postgres data and review media are stored SHALL be configurable per deployment, defaulting to named volumes, without adding an environment variable the application reads. Inside the compose network the servers SHALL reach Postgres by its service name.
+A compose file SHALL run `breakdown-db` and `breakdown` locally with the same images, environment, caps, and named volumes as on the host, publishing on loopback by default, and without disturbing the development database.
 
-#### Scenario: Data on an external disk
+#### Scenario: Local parity
 
-- **WHEN** the stack is started with the data path pointed at a directory on an attached disk
-- **THEN** Postgres stores its data there and the stack behaves as with the default volume
+- **WHEN** a developer runs the compose file
+- **THEN** the two containers start with the same configuration the Jetson apps use, and the existing development database keeps running untouched
 
 ### Requirement: Host-only features degrade cleanly
 

@@ -17,8 +17,9 @@
 //
 // The default runner's errors never include Node's `err.message`, which
 // echoes the whole command line — the person's message included. They are
-// `bd not found on PATH`, `could not start bd in <cwd>` (the checkout is
-// gone), `bd <verb> timed out after 30 s`,
+// HostBinaryUnavailableError (`bd is unavailable on this server: not found
+// on PATH`; tailnet-hosting decision 8), `could not start bd in <cwd>` (the
+// checkout is gone), `bd <verb> timed out after 30 s`,
 // `bd <verb> was killed (<signal>)`, `bd <verb> failed: <stderr>`, or
 // `bd <verb> exited <code>`. A command that timed out or was killed may
 // have done its work before it died: the runner throws `BdUncertainError`
@@ -111,7 +112,8 @@
 // `herdr` is found on PATH and runs through `execFile` with argv only and no
 // `--wait`: 10 s, then SIGTERM, then SIGKILL after a 5 s grace, settling 1 s
 // later whether or not the pipes have closed, like the bd runner. Its
-// reasons are `herdr not found on PATH`, `herdr timed out after 10 s; the
+// reasons are HostBinaryUnavailableError's (`herdr is unavailable on this
+// server: not found on PATH`), `herdr timed out after 10 s; the
 // agent may have been notified`, `herdr was killed (<signal>)`, herdr's own
 // error (it prints `{"error":{"code","message"}}` on stderr; message and
 // code are kept, nothing else), or `herdr exited <code>`. Node's
@@ -121,7 +123,7 @@
 
 import { execFile } from "node:child_process";
 import { statSync } from "node:fs";
-import { isReviewSocketPath, normalizeReviewMetadata, REVIEW_PANE_PATTERN, reviewCard, type ReviewOption } from "@breakdown/core";
+import { HostBinaryUnavailableError, isReviewSocketPath, normalizeReviewMetadata, REVIEW_PANE_PATTERN, reviewCard, type ReviewOption } from "@breakdown/core";
 
 function isDirectory(dir: string): boolean {
   try {
@@ -396,7 +398,7 @@ export function createBdRunner(options: BdRunnerOptions = {}): RunBd {
         const e = err as NodeJS.ErrnoException & { code?: string | number; signal?: NodeJS.Signals | null };
         if (e.code === "ENOENT") {
           // spawn reports a missing cwd as ENOENT too; say which it was.
-          finish(() => reject(new Error(isDirectory(cwd) ? "bd not found on PATH" : `could not start bd in ${cwd}`)));
+          finish(() => reject(isDirectory(cwd) ? new HostBinaryUnavailableError("bd") : new Error(`could not start bd in ${cwd}`)));
         } else if (timedOut) {
           finish(() => reject(new BdUncertainError(`${verb} timed out after ${seconds}`)));
         } else if (e.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
@@ -495,9 +497,12 @@ export function createHerdrRunner(options: HerdrRunnerOptions = {}): RunHerdr {
           return;
         }
         const e = err as NodeJS.ErrnoException & { code?: string | number; signal?: NodeJS.Signals | null };
+        if (e.code === "ENOENT") {
+          finish(() => reject(new HostBinaryUnavailableError("herdr")));
+          return;
+        }
         let reason: string;
-        if (e.code === "ENOENT") reason = "herdr not found on PATH";
-        else if (timedOut) reason = timedOutReason;
+        if (timedOut) reason = timedOutReason;
         else if (e.signal) reason = `herdr was killed (${e.signal})`;
         else {
           const said = herdrFailure(typeof stderr === "string" ? stderr : "", typeof stdout === "string" ? stdout : "");

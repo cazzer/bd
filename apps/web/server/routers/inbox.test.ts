@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { requestInboxItem } from "@breakdown/core";
+import { HostBinaryUnavailableError, requestInboxItem } from "@breakdown/core";
 import { createDb, createPool, ingestRuns, nodes, resolveDatabaseUrl, type Database } from "@breakdown/db";
 import { TRPCError } from "@trpc/server";
 import { and, eq, inArray, like } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { appRouter } from "../router.js";
+import type { RunHerdrJson } from "../herdr-session.js";
 import { createCallerFactory } from "../trpc.js";
 import { inboxNotifyText } from "./inbox.js";
 
@@ -116,5 +117,41 @@ describe("inboxNotifyText", () => {
     expect(text).toContain('inbox done x "Closed on the note');
     expect(text).toMatch(/Act: .*inbox done x/);
     expect(text).toContain("re-queue with the same --key");
+  });
+});
+
+describe("inbox sessions without herdr (tailnet-hosting decision 8)", () => {
+  const SOCKET = "/tmp/inbox-router-herdr.sock";
+  const noCalls: RunHerdrJson = async () => {
+    throw new Error("herdr should not run");
+  };
+
+  it("refuses both session procedures naming herdr when it is missing from PATH, before the item is looked up", async () => {
+    const missing = createCallerFactory(appRouter)({ db, herdrJson: noCalls, herdrSocket: SOCKET, missingBinaries: ["herdr"] });
+    for (const call of [() => missing.inboxOpenSession({ id: randomUUID() }), () => missing.inboxFocusSession({ id: randomUUID() })]) {
+      const err = await call().catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(TRPCError);
+      expect((err as TRPCError).code).toBe("PRECONDITION_FAILED");
+      expect((err as TRPCError).message).toBe("herdr is unavailable on this server: not found on PATH");
+    }
+  });
+
+  it("maps a runner's HostBinaryUnavailableError to PRECONDITION_FAILED, not a failed or gone session", async () => {
+    const { id } = await requestInboxItem(db, { externalId: `${KEY}-no-herdr`, title: "Ask", content: "x", metadata: { source: "slack" } });
+    const gone: RunHerdrJson = async () => {
+      throw new HostBinaryUnavailableError("herdr");
+    };
+    const opened = await createCallerFactory(appRouter)({ db, herdrJson: gone, herdrSocket: SOCKET }).inboxOpenSession({ id }).catch((e: unknown) => e);
+    expect(opened).toMatchObject({ code: "PRECONDITION_FAILED", message: "herdr is unavailable on this server: not found on PATH" });
+
+    const working: RunHerdrJson = async (args) => {
+      const [group, verb] = args;
+      if (group === "workspace" && verb === "list") return { workspaces: [] };
+      if (group === "workspace" && verb === "create") return { workspace: { workspace_id: "w9" }, tab: { tab_id: "w9:t1" }, root_pane: { pane_id: "w9:p1" } };
+      return {};
+    };
+    await createCallerFactory(appRouter)({ db, herdrJson: working, herdrSocket: SOCKET, sessionCwd: "/tmp" }).inboxOpenSession({ id });
+    const focused = await createCallerFactory(appRouter)({ db, herdrJson: gone, herdrSocket: SOCKET }).inboxFocusSession({ id }).catch((e: unknown) => e);
+    expect(focused).toMatchObject({ code: "PRECONDITION_FAILED", message: "herdr is unavailable on this server: not found on PATH" });
   });
 });
