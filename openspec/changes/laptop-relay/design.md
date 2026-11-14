@@ -125,10 +125,31 @@ The review card and the inbox card show a pending state while their action is `q
 
 A relay status pill sits next to the hangar pill. It shows only when `missingBinaries` isn't empty or there are queued actions, and reads "relay online", "relay offline since …", or "relay never checked in".
 
+### 9. Amendments after planning
+
+- **Where the relay's code lives.** Its TypeScript goes in `apps/web/server/relay/` and runs as `node --import tsx` with working directory `apps/web`. That lets it reuse `createReviewWriter` and `createBeadsWatcher`, which live in `apps/web/server`, not core.
+- **The `review_decision` payload** is `{ project_key, cwd, issue_id, decision, message, option?, seen? }`. It has no `notify` field: the writer takes the recipient only from `bd show`, as it does locally. `seen` is required whenever an option is chosen.
+- **In queue mode, the review router** skips the writer/`bd` presence check and the `stat` of the checkout, because that is a Mac path. The store checks still run.
+- **Ingest split.**
+  - Compute takes an injected `priorThreads` lookup: the database locally, an in-memory cache on the relay.
+  - The wire carries raw `issues` and `comments`, never prepared nodes. The server builds every node with `mapBeadsIssueToNode` and the registry node from the path it already has registered, so a leaked relay token can't re-point the registry.
+  - The push cap is 8 MiB, and pushes are serialized per project.
+- **Allowlist.** It also covers the two read-only ingest commands, `bd list --status=all --limit=0 --json` and `bd comments <id> --json`. No free-text argument may start with `-`. `bd` text is capped at 4000 characters and herdr text at 8000, since an inbox note plus its title can exceed 4000. The socket must be on disk.
+- **Indexes and attempts.**
+  - The partial index is `(created_at, id) WHERE state IN ('queued','claimed')`, so it serves the reclaim predicate too.
+  - An `attempts` column fails an action after 3 claims without a report.
+  - A unique open-target index on `(kind, project_key, issue_id)`, excluding `herdr_prompt`, makes a second pending decision on the same review a CONFLICT.
+- **Board.** `boardEvents` stops refusing when `bd` is missing. The watcher gains `record()`, so a pushed load emits the same events. `refreshBoard` queues one `beads_reingest` per project.
+- **Request plumbing.** Hangar's request plumbing moves to `apps/web/server/json-api.ts`, with the body cap as a parameter. The hangar API's behavior and its contract test stay byte-identical. Relay ids are bigserial: `^\d{1,18}$`.
+- **A relay on the server's own host is never admitted with its token,** because loopback is trusted as the local person. The relay is meant for another host, so the end-to-end test goes through a forwarding proxy.
+- **On the Mac,** the launchd plist sets `PATH` to the directories holding `bd` and `herdr`, resolved when the service is installed. The token file must be 0600, a regular file, and owned by the user.
+- **`relayStatus` and `relayAction`** are `human`-only.
+- **Registering a new beads project after cutover** is out of scope; it needs `bd` on the Jetson, and a follow-up bead covers it.
+
 ## Risks / Trade-offs
 
 - [A decision waits hours while the laptop is asleep] → It shows as pending, the pill says offline, and the action runs when the laptop wakes. A stale decision is guarded by `bd show`.
-- [Double execution after the 5-minute reclaim, if the relay was only slow] → `review_decision` re-checks via `bd show` and reports "already applied". A `herdr_prompt` could be delivered twice, which is acceptable for a notification. Reporting an already-finished action is a no-op.
+- [Double execution after the 5-minute reclaim, if the relay died between `bd` steps and its report] → An accept re-checks via `bd show` and reports "already applied". A `changes` decision leaves the review open, so a re-run posts its comment twice. That needs a relay death mid-decision; a worst-case decision takes about 160 s, against the 300 s reclaim. A `herdr_prompt` could be delivered twice. Reporting an already-finished action is a no-op.
 - [A leaked relay token] → It can claim the person's queued decisions (delay or drop them), read herdr reply text, and push beads batches for registered projects. It can't run anything on the Mac by itself, because the allowlist runs there. Revoke it with the CLI.
 - [A forged beads batch from a leaked relay token] → It can only upsert under source `beads` for registered projects, and the next real ingest overwrites it.
 - [The checkout path differs between Mac and Jetson] → Paths come from the relay's registry, which mirrors the Mac's own registration; Breakdown never needs to resolve them.
