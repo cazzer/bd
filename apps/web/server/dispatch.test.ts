@@ -19,6 +19,7 @@ import { createRequestDispatcher, routeFor } from "./dispatch.js";
 const TAILNET = "breakdown.tail.example";
 const PHONE_TOKEN = "bdt_phone-token";
 const WORKER_TOKEN = "bdt_worker-token";
+const HANGAR_TOKEN = "bdt_hangar-token";
 const THROWING_TOKEN = "bdt_throws";
 
 let server: Server;
@@ -39,6 +40,7 @@ async function startDispatcher(withStatic: boolean): Promise<{ server: Server; p
       verified += 1;
       if (token === THROWING_TOKEN) throw new Error("token store unavailable");
       if (token === WORKER_TOKEN) return { client: "worker-1", scope: "agent", sessionId: null };
+      if (token === HANGAR_TOKEN) return { client: "hangar-desktop", scope: "hangar", sessionId: null };
       return token === PHONE_TOKEN ? { client: "phone", scope: "human", sessionId: null } : null;
     },
     connect: async (req, res) => {
@@ -52,6 +54,10 @@ async function startDispatcher(withStatic: boolean): Promise<{ server: Server; p
     reviewImages: async (req, res) => {
       calls.push(`images ${req.url} ${admitted(req)}`);
       res.end("image");
+    },
+    hangar: async (req, res, client) => {
+      calls.push(`hangar ${req.method} ${req.url} ${client === null ? "client=null" : `client=${client.client}/${client.scope}`}`);
+      res.end("hangar");
     },
     trpc: (req, res) => {
       calls.push(`trpc ${req.url} ${admitted(req)}`);
@@ -280,6 +286,52 @@ describe("createRequestDispatcher: client tokens", () => {
   });
 });
 
+describe("createRequestDispatcher: the hangar API", () => {
+  it("hands a hangar or agent token to the hangar handler with what admission established", async () => {
+    expect(await send("/hangar/v1/sessions", { Host: tailnetHost(), ...bearer(HANGAR_TOKEN) })).toMatchObject({ status: 200, body: "hangar" });
+    expect(await send("/hangar/v1/messages?after=0", { Host: tailnetHost(), ...bearer(WORKER_TOKEN) })).toMatchObject({ status: 200, body: "hangar" });
+    expect(calls).toEqual(["hangar GET /hangar/v1/sessions client=hangar-desktop/hangar", "hangar GET /hangar/v1/messages?after=0 client=worker-1/agent"]);
+  });
+
+  it("refuses a human token with a JSON 403, and a missing token with a JSON 401 that keeps WWW-Authenticate", async () => {
+    const forbidden = await send("/hangar/v1/claim", { Host: tailnetHost(), ...bearer() }, "POST");
+    expect(forbidden.status).toBe(403);
+    expect(forbidden.headers["content-type"]).toBe("application/json; charset=utf-8");
+    expect(JSON.parse(forbidden.body)).toMatchObject({ error: { code: "forbidden" } });
+    const unauthorized = await send("/hangar/v1/claim", { Host: tailnetHost() }, "POST");
+    expect(unauthorized.status).toBe(401);
+    expect(unauthorized.headers["www-authenticate"]).toBe("Bearer");
+    expect(JSON.parse(unauthorized.body)).toMatchObject({ error: { code: "unauthorized" } });
+    expect(calls).toEqual([]);
+  });
+
+  it("refuses the hangar token everywhere but the hangar API and the health check", async () => {
+    expect(await send("/trpc/board", { Host: tailnetHost(), ...bearer(HANGAR_TOKEN) })).toMatchObject({ status: 403, body: "Forbidden\n" });
+    expect(await send("/review-images/rv/r1/a.png", { Host: tailnetHost(), ...bearer(HANGAR_TOKEN) })).toMatchObject({ status: 403, body: "Forbidden\n" });
+    expect(await send("/auth/connect", { Host: tailnetHost(), ...bearer(HANGAR_TOKEN) })).toMatchObject({ status: 403, body: "Forbidden\n" });
+    expect(await send("/healthz", { Host: tailnetHost(), ...bearer(HANGAR_TOKEN) })).toMatchObject({ status: 200, body: "health" });
+    expect(calls).toEqual(["health GET /healthz client=hangar-desktop/hangar"]);
+  });
+
+  it("goes to the hangar API ahead of the built client, so a hangar path never gets the client's index fallback", async () => {
+    const host = `${TAILNET}:${staticPort}`;
+    expect(await send("/hangar/v1/sessions", { Host: host, ...bearer(HANGAR_TOKEN) }, "GET", staticPort)).toMatchObject({ status: 200, body: "hangar" });
+    const unauthorized = await send("/hangar/v1/sessions", { Host: host }, "GET", staticPort);
+    expect(unauthorized.status).toBe(401);
+    expect(JSON.parse(unauthorized.body)).toMatchObject({ error: { code: "unauthorized" } });
+    expect(calls).toEqual(["hangar GET /hangar/v1/sessions client=hangar-desktop/hangar"]);
+  });
+
+  it("classifies a spelling that only normalizes to a hangar path as client, never calling the hangar handler", async () => {
+    const host = `${TAILNET}:${staticPort}`;
+    for (const path of ["/x/../hangar/v1/claim", "/%68angar/v1/claim", "//hangar/v1/claim", "/hangar/v1", "/HANGAR/v1/claim"]) {
+      expect(await send(path, { Host: host, ...bearer(HANGAR_TOKEN) }, "GET", staticPort), path).toMatchObject({ status: 200, body: "static" });
+    }
+    expect(calls.every((c) => c.startsWith("static "))).toBe(true);
+    expect(calls).toHaveLength(5);
+  });
+});
+
 describe("createRequestDispatcher: health", () => {
   it("routes /healthz to the health handler, which needs a token of any scope off loopback", async () => {
     expect(await send("/healthz", { Host: `127.0.0.1:${port}` })).toMatchObject({ status: 200, body: "health" });
@@ -352,17 +404,18 @@ describe("createRequestDispatcher: the built client", () => {
 });
 
 describe("routeFor", () => {
-  it("routes the exact connect and health paths, the review image prefix, and /trpc on the raw path; the rest to the client when there is one", () => {
+  it("routes the exact connect and health paths, the review image and hangar prefixes, and /trpc on the raw path; the rest to the client when there is one", () => {
     for (const hasStatic of [false, true]) {
       expect(routeFor("/auth/connect", hasStatic)).toBe("connect");
       expect(routeFor("/healthz", hasStatic)).toBe("health");
       expect(routeFor("/review-images/rv/r1/a.png", hasStatic)).toBe("reviewImages");
       expect(routeFor("/trpc", hasStatic)).toBe("trpc");
       expect(routeFor("/trpc/board", hasStatic)).toBe("trpc");
+      expect(routeFor("/hangar/v1/claim", hasStatic)).toBe("hangar");
     }
     const fallback = { false: "trpc", true: "static" } as const;
     for (const hasStatic of [false, true]) {
-      for (const path of ["/auth/connect/", "//auth/connect", "/AUTH/connect", "/healthz/", "http://127.0.0.1:1/review-images/a.png", "/x/../trpc/a", "/%74rpc/a", "/trpcx", "/"]) {
+      for (const path of ["/auth/connect/", "//auth/connect", "/AUTH/connect", "/healthz/", "http://127.0.0.1:1/review-images/a.png", "/x/../trpc/a", "/%74rpc/a", "/trpcx", "/hangar/v1", "/hangar/v2/claim", "/HANGAR/v1/claim", "/x/../hangar/v1/claim", "/"]) {
         expect(routeFor(path, hasStatic), path).toBe(fallback[`${hasStatic}`]);
       }
     }

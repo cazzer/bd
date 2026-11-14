@@ -23,7 +23,7 @@
 // own stderr via `console.error` below, for whoever is running this
 // locally to read — never sent to the client.
 
-import { HostBinaryUnavailableError, InboxCardChangedError, InboxDecisionConflictError, InvalidInboxItemError, NotAnInboxItemError, type HostBinary } from "@breakdown/core";
+import { HostBinaryUnavailableError, InboxCardChangedError, InboxDecisionConflictError, InboxItemNotThisSessionError, InvalidInboxItemError, NotAnInboxItemError, type HostBinary } from "@breakdown/core";
 import {
   asPgError,
   ContentTooLargeError,
@@ -155,6 +155,9 @@ export function mapCoreError(procedureName: string, err: unknown): TRPCError {
   }
   if (err instanceof NotAnInboxItemError) {
     return actionable("BAD_REQUEST", err, "Only inbox items take an inbox decision.");
+  }
+  if (err instanceof InboxItemNotThisSessionError) {
+    return actionable("FORBIDDEN", err, "A session token completes only the items its own session filed.");
   }
   if (err instanceof NodeNotFoundError) {
     return actionable("NOT_FOUND", err, "Use search to find a valid node id, or getNodes to verify one you already have.");

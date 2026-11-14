@@ -620,6 +620,16 @@ export class NotAnInboxItemError extends KnowledgeStoreError {
   }
 }
 
+/** A session-bound token tried to complete an inbox item another session (or no session) filed (hangar-queue decision 9). */
+export class InboxItemNotThisSessionError extends KnowledgeStoreError {
+  constructor(
+    readonly nodeId: string,
+    readonly sessionId: string,
+  ) {
+    super(`inbox item ${nodeId} was not filed by hangar session ${sessionId}, so its token cannot complete it`);
+  }
+}
+
 // --- Client tokens -----------------------------------------------------
 
 /** A client name is not a short identifier (client-tokens.ts, `CLIENT_NAME_PATTERN`). */

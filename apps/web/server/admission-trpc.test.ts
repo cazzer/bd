@@ -56,6 +56,7 @@ beforeAll(async () => {
     connect: async (_req, res) => void res.writeHead(500).end(),
     health: async (_req, res) => void res.writeHead(500).end(),
     reviewImages: async (_req, res) => void res.writeHead(500).end(),
+    hangar: async (_req, res) => void res.writeHead(500).end(),
     trpc: createHTTPHandler({ router: appRouter, createContext: createContextFactory(db), basePath: "/trpc/" }),
   });
 });

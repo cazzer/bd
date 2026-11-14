@@ -37,6 +37,7 @@ export {
   InvalidInboxItemError,
   InboxDecisionConflictError,
   InboxCardChangedError,
+  InboxItemNotThisSessionError,
   InvalidViewError,
   InvalidEventTimeError,
   InvalidClientNameError,
@@ -606,6 +607,8 @@ export {
   type DecideInboxItemInput,
   type InboxWriteOptions,
   type DecideInboxItemResult,
+  inboxNotifyText,
+  type RequestInboxItemResult,
 } from "./inbox.js";
 
 export {

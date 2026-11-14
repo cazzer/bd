@@ -9,6 +9,8 @@
 //
 // Items a live session owns (queued with `inbox request`, or opened with
 // "Open session") are skipped: the server already prompted that session.
+// So are items a remote hangar session filed (`hangarSession`): the
+// decision went to that session's messages.
 //
 // This runs outside the app on purpose. breakdown never calls a model; this
 // is a convenience loop on your machine that starts the Claude Code you
@@ -43,9 +45,9 @@ const intervalMs = Math.max(10, Number(values.interval)) * 1000;
 
 const PROMPTS = {
   accepted:
-    "Use the inbox-execute skill: carry out every accepted inbox item that has no `pane`, exactly as accepted (the chosen card option when there is one, and any accept note), then mark each done. Report one line per item.",
+    "Use the inbox-execute skill: carry out every accepted inbox item that has neither a `pane` nor a `session`, exactly as accepted (the chosen card option when there is one, and any accept note), then mark each done. Report one line per item.",
   changes:
-    "Use the inbox-execute skill's Triage section: for every inbox item with status `changes` that has no `pane`, read its latest feedback and close it, act on it, or re-queue it, exactly as the section says. Don't pull any sources. Report one line per item: the outcome and why.",
+    "Use the inbox-execute skill's Triage section: for every inbox item with status `changes` that has neither a `pane` nor a `session`, read its latest feedback and close it, act on it, or re-queue it, exactly as the section says. Don't pull any sources. Report one line per item: the outcome and why.",
 };
 
 function log(message) {
@@ -84,7 +86,7 @@ async function tick() {
     return;
   }
   for (const status of ["accepted", "changes"]) {
-    const due = items.filter((i) => i.status === status && i.pane === null && !tried.has(`${i.id}@${i.updatedAt}`));
+    const due = items.filter((i) => i.status === status && i.pane === null && (i.hangarSession ?? null) === null && !tried.has(`${i.id}@${i.updatedAt}`));
     if (due.length === 0) continue;
     log(`${due.length} ${status}: ${due.map((i) => i.title).join(" · ")}`);
     for (const i of due) tried.add(`${i.id}@${i.updatedAt}`);

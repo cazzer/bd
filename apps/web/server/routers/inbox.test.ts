@@ -1,17 +1,17 @@
 import { randomUUID } from "node:crypto";
-import { HostBinaryUnavailableError, requestInboxItem } from "@breakdown/core";
-import { createDb, createPool, ingestRuns, nodes, resolveDatabaseUrl, type Database } from "@breakdown/db";
+import { HostBinaryUnavailableError, inboxNotifyText, requestInboxItem } from "@breakdown/core";
+import { createDb, createPool, hangarMessages, ingestRuns, nodes, resolveDatabaseUrl, type Database } from "@breakdown/db";
 import { TRPCError } from "@trpc/server";
-import { and, eq, inArray, like } from "drizzle-orm";
+import { and, eq, inArray, like, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { appRouter } from "../router.js";
 import type { RunHerdrJson } from "../herdr-session.js";
 import { createCallerFactory } from "../trpc.js";
-import { inboxNotifyText } from "./inbox.js";
 
 let pool: ReturnType<typeof createPool>;
 let db: Database;
 const KEY = `session:inbox-router-${randomUUID().slice(0, 8)}`;
+const SESSIONS: string[] = [];
 const CARD = { question: "Track or ignore?", options: [{ id: "track", label: "Track" }, { id: "ignore", label: "Ignore" }], recommend: "ignore" };
 
 beforeAll(() => {
@@ -20,6 +20,7 @@ beforeAll(() => {
 });
 
 afterAll(async () => {
+  if (SESSIONS.length > 0) await db.delete(hangarMessages).where(inArray(hangarMessages.sessionId, SESSIONS));
   await db.delete(nodes).where(and(eq(nodes.sourceSystem, "inbox"), like(nodes.externalId, `${KEY}%`)));
   await pool.end();
 });
@@ -153,5 +154,52 @@ describe("inbox sessions without herdr (tailnet-hosting decision 8)", () => {
     await createCallerFactory(appRouter)({ db, herdrJson: working, herdrSocket: SOCKET, sessionCwd: "/tmp" }).inboxOpenSession({ id });
     const focused = await createCallerFactory(appRouter)({ db, herdrJson: gone, herdrSocket: SOCKET }).inboxFocusSession({ id }).catch((e: unknown) => e);
     expect(focused).toMatchObject({ code: "PRECONDITION_FAILED", message: "herdr is unavailable on this server: not found on PATH" });
+  });
+});
+
+// hangar-queue decision 6: a session-bound token's item is told through the
+// session's messages, never herdr; a pane item is prompted exactly as before.
+describe("inbox delivery by where the item came from", () => {
+  function herdrSpy(): { calls: (readonly string[])[]; runHerdr: (args: readonly string[], socket: string) => Promise<void> } {
+    const calls: (readonly string[])[] = [];
+    return { calls, runHerdr: async (args) => void calls.push(args) };
+  }
+
+  it("sends a session item's decision to its messages and never runs herdr, even if a pane got onto it", async () => {
+    const session = randomUUID();
+    SESSIONS.push(session);
+    const worker = createCallerFactory(appRouter)({ db, client: `session-${session}`, scope: "agent", sessionId: session });
+    const filed = await worker.inboxRequest({ key: `${KEY}-remote`, title: "Remote ask", content: "x", metadata: { source: "session", pane: "w1:p1", socket: "/tmp/herdr.sock", session: randomUUID() } });
+    expect(filed.session).toBe(session);
+    await db.execute(sql`UPDATE nodes SET metadata = metadata || '{"pane": "w1:p9", "socket": "/tmp/herdr.sock"}'::jsonb WHERE id = ${filed.id}::uuid`);
+
+    const spy = herdrSpy();
+    const decided = await createCallerFactory(appRouter)({ db, runHerdr: spy.runHerdr }).inboxDecision({ id: filed.id, decision: "accept", message: "ok" });
+    expect(decided.notified).toEqual({ ok: true, session });
+    expect(spy.calls).toEqual([]);
+    const messages = await db.select({ kind: hangarMessages.kind, body: hangarMessages.body }).from(hangarMessages).where(eq(hangarMessages.sessionId, session));
+    expect(messages).toEqual([{ kind: "inbox_decision", body: expect.objectContaining({ item_id: filed.id, decision: "accept", outcome: "accepted", message: "ok" }) }]);
+  });
+
+  it("prompts a pane item's session through herdr as before", async () => {
+    const filed = await caller().inboxRequest({ key: `${KEY}-pane`, title: "Pane ask", content: "x", metadata: { source: "session", pane: "w1:p4", socket: "/tmp/herdr.sock" } });
+    expect(filed.session).toBeNull();
+    const spy = herdrSpy();
+    const decided = await createCallerFactory(appRouter)({ db, runHerdr: spy.runHerdr }).inboxDecision({ id: filed.id, decision: "dismiss" });
+    expect(decided.notified).toEqual({ ok: true, pane: "w1:p4" });
+    expect(spy.calls).toEqual([["agent", "prompt", "w1:p4", inboxNotifyText({ id: filed.id, title: "Pane ask", after: "dismissed" }, "")]]);
+  });
+
+  it("refuses inboxComplete from a session token on another session's item with FORBIDDEN", async () => {
+    const mine = randomUUID();
+    const other = randomUUID();
+    SESSIONS.push(mine, other);
+    const worker = (session: string) => createCallerFactory(appRouter)({ db, client: `session-${session}`, scope: "agent", sessionId: session });
+    const filed = await worker(mine).inboxRequest({ key: `${KEY}-complete`, title: "Finish", content: "x", metadata: { source: "session" } });
+    await caller().inboxDecision({ id: filed.id, decision: "accept" });
+    const refused = await worker(other).inboxComplete({ id: filed.id, note: "not mine" }).catch((e: unknown) => e);
+    expect(refused).toBeInstanceOf(TRPCError);
+    expect((refused as TRPCError).code).toBe("FORBIDDEN");
+    expect(await worker(mine).inboxComplete({ id: filed.id, note: "done" })).toMatchObject({ id: filed.id });
   });
 });

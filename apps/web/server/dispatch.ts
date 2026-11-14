@@ -14,6 +14,7 @@
 //   exactly AUTH_CONNECT_PATH          → the connect handler (auth-connect.ts)
 //   exactly HEALTH_PATH                → the health handler (health.ts)
 //   under REVIEW_IMAGES_PREFIX         → the review image route (review-images.ts)
+//   under HANGAR_API_PREFIX            → hangar's REST API (hangar-api.ts)
 //   `/trpc` or under `/trpc/`          → tRPC's standalone handler
 //   anything else                      → the built client (static-client.ts)
 //                                        when one is configured, else tRPC
@@ -21,13 +22,21 @@
 // to the built client (it holds no data; client-access spec). Because the
 // client is an exact manifest lookup, a path that only resolves to a data
 // route after normalization (`/x/../trpc/a`, `/%74rpc/a`) is classified as
-// client and can only get index.html or a 404. `/healthz` is not public.
+// client and can only get index.html or a 404; the hangar API is classified
+// ahead of the client, so its paths never fall to the client's index
+// fallback, and a spelling of them that only normalizes to the prefix is
+// the client's too. `/healthz` is not public.
 //
 // Admission scopes are per route (hangar-queue decision 1): connect, the
 // review images, and the built client take only `human` tokens; the health
 // check takes any scope; tRPC takes `human` and `agent`, and each procedure
 // narrows that further (trpc.ts `scopeGate`, decision 5) — an agent files
-// and completes inbox requests, a person decides.
+// and completes inbox requests, a person decides. The hangar API takes
+// `hangar` and `agent` tokens, and each endpoint narrows that further
+// (hangar-api.ts): the hangar token reaches the service endpoints, a
+// worker's session token only its messages. On that route the
+// dispatcher's own 401 and 403 use the API's JSON error body, so a client
+// built against docs/hangar-api.md parses one shape.
 //
 // The admitted token client, scope, and bound session are handed to tRPC through
 // `admittedClients` (context.ts), keyed on the request object, so a write's
@@ -46,7 +55,8 @@ import {
   type VerifiedClientToken,
 } from "@breakdown/core";
 import { AUTH_CONNECT_PATH } from "./auth-connect.js";
-import { admittedClients } from "./context.js";
+import { admittedClients, type AdmittedClient } from "./context.js";
+import { HANGAR_API_PREFIX } from "./hangar-api.js";
 import { REVIEW_IMAGES_PREFIX } from "./review-images.js";
 
 export const HEALTH_PATH = "/healthz";
@@ -64,12 +74,14 @@ export interface RequestDispatcherOptions {
   connect: Handler;
   health: Handler;
   reviewImages: Handler;
+  /** The hangar REST API (hangar-api.ts), handed what admission established; null for a tokenless request. */
+  hangar: (req: IncomingMessage, res: ServerResponse, admitted: AdmittedClient | null) => Promise<void>;
   trpc: (req: IncomingMessage, res: ServerResponse) => void;
   /** The built client (static-client.ts), when `--client-dir` is given; without it every unclassified path goes to tRPC as before. */
   staticClient?: Handler;
 }
 
-export type WebRoute = "connect" | "health" | "reviewImages" | "trpc" | "static";
+export type WebRoute = "connect" | "health" | "reviewImages" | "hangar" | "trpc" | "static";
 
 /**
  * Where a raw request path goes (module header), decided before admission
@@ -82,6 +94,7 @@ export function routeFor(path: string, hasStaticClient: boolean): WebRoute {
   if (path === AUTH_CONNECT_PATH) return "connect";
   if (path === HEALTH_PATH) return "health";
   if (path.startsWith(REVIEW_IMAGES_PREFIX)) return "reviewImages";
+  if (path.startsWith(HANGAR_API_PREFIX)) return "hangar";
   if (path === TRPC_PATH || path.startsWith(`${TRPC_PATH}/`)) return "trpc";
   return hasStaticClient ? "static" : "trpc";
 }
@@ -97,8 +110,25 @@ function isPublicRoute(method: string, route: WebRoute): boolean {
 }
 
 const PLAIN_HEADERS = { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } as const;
+const JSON_HEADERS = { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } as const;
 
-export function createRequestDispatcher({ port, allowedHosts, verifyToken, connect, health, reviewImages, trpc, staticClient }: RequestDispatcherOptions): (req: IncomingMessage, res: ServerResponse) => void {
+/** An admission refusal: plain text everywhere but the hangar API, which gets its JSON error body (docs/hangar-api.md). */
+function refuse(res: ServerResponse, route: WebRoute, status: 401 | 403, byCredential = false): void {
+  const extra = status === 401 ? UNAUTHORIZED_HEADERS : {};
+  if (route === "hangar") {
+    const error =
+      status === 401
+        ? { code: "unauthorized", message: "A live token is required: send Authorization: Bearer <token>." }
+        : { code: "forbidden", message: byCredential ? "This token's scope cannot use the hangar API." : "Refused: this Host or Origin is not allowed." };
+    res.writeHead(status, { ...JSON_HEADERS, ...extra });
+    res.end(JSON.stringify({ error }));
+    return;
+  }
+  res.writeHead(status, { ...PLAIN_HEADERS, ...extra });
+  res.end(status === 401 ? "Unauthorized\n" : "Forbidden\n");
+}
+
+export function createRequestDispatcher({ port, allowedHosts, verifyToken, connect, health, reviewImages, hangar, trpc, staticClient }: RequestDispatcherOptions): (req: IncomingMessage, res: ServerResponse) => void {
   const hasStaticClient = staticClient !== undefined;
   const isPublic = (method: string, path: string) => isPublicRoute(method, routeFor(path, hasStaticClient));
   const policyFor = (scopes: readonly ClientTokenScope[]): AdmissionPolicy => ({ port, allowedHosts, originCheck: "unsafe-methods", scopes, isPublic, verifyToken });
@@ -107,6 +137,7 @@ export function createRequestDispatcher({ port, allowedHosts, verifyToken, conne
     connect: policyFor(["human"]),
     health: policyFor(["human", "agent", "hangar"]),
     reviewImages: policyFor(["human"]),
+    hangar: policyFor(["hangar", "agent"]),
     trpc: policyFor(["human", "agent"]),
     static: policyFor(["human"]),
   };
@@ -130,17 +161,17 @@ export function createRequestDispatcher({ port, allowedHosts, verifyToken, conne
       policies[route],
     );
     if (admission.outcome === "forbidden") {
-      res.writeHead(403, PLAIN_HEADERS);
-      res.end("Forbidden\n");
+      refuse(res, route, 403, admission.byCredential);
       return;
     }
     if (admission.outcome === "unauthorized") {
-      res.writeHead(401, { ...PLAIN_HEADERS, ...UNAUTHORIZED_HEADERS });
-      res.end("Unauthorized\n");
+      refuse(res, route, 401);
       return;
     }
+    let admitted: AdmittedClient | null = null;
     if (admission.client !== null && admission.scope !== null) {
-      admittedClients.set(req, { client: admission.client, scope: admission.scope, sessionId: admission.sessionId });
+      admitted = { client: admission.client, scope: admission.scope, sessionId: admission.sessionId };
+      admittedClients.set(req, admitted);
     }
 
     switch (route) {
@@ -152,6 +183,9 @@ export function createRequestDispatcher({ port, allowedHosts, verifyToken, conne
         return;
       case "reviewImages":
         await reviewImages(req, res);
+        return;
+      case "hangar":
+        await hangar(req, res, admitted);
         return;
       case "static":
         await staticClient!(req, res);
