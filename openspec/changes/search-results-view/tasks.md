@@ -7,9 +7,9 @@
 
 ## 2. Web API: `find` procedure
 
-- [ ] 2.1 `routers/read.ts`: `findInputSchema` and the `find` procedure per design decision 5. Summary DTO only (no content, no full metadata), `boundResponse` with the tail-drop next offset, errors through `mapCoreError("find", …)`. Register it alongside `search` and `list`. Do not touch the auth files, `routers/inbox.ts`, `routers/write.ts` or `src/trpc.ts`.
-- [ ] 2.2 `list` procedure's predicate Zod union gains `contains`.
-- [ ] 2.3 Tests (`routers/read` or schema tests): invalid input rejected naming the field; the response carries facets and the summary fields; over-budget responses drop from the tail and report more. `pnpm check` passes.
+- [x] 2.1 `routers/read.ts`: `findInputSchema` and the `find` procedure per design decision 5. Summary DTO only (no content, no full metadata), `boundResponse` with the tail-drop next offset, errors through `mapCoreError("find", …)`. Register it alongside `search` and `list`. Do not touch the auth files, `routers/inbox.ts`, `routers/write.ts` or `src/trpc.ts`.
+- [x] 2.2 `list` procedure's predicate Zod union gains `contains`.
+- [x] 2.3 Tests (`routers/read` or schema tests): invalid input rejected naming the field; the response carries facets and the summary fields; over-budget responses drop from the tail and report more. `pnpm check` passes.
 
 ## 3. Web UI: header search and results view
 

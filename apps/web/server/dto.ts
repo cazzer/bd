@@ -37,6 +37,7 @@ import {
   type BeadsProject,
   type BoardCard,
   type BoardItem,
+  type FoundNode,
   type ListedNode,
   type LookedUpNode,
   type Neighbor,
@@ -55,6 +56,8 @@ export type RetrievedNodeDto = Omit<RetrievedNode, "updatedAt"> & { updatedAt: s
 export type LookedUpNodeDto = Omit<LookedUpNode, "createdAt" | "updatedAt"> & { createdAt: string; updatedAt: string; isEditable: boolean };
 export type RecentNodeDto = Omit<RecentNode, "updatedAt"> & { updatedAt: string; isEditable: boolean };
 export type NeighborDto = Neighbor & { isEditable: boolean };
+/** search-results-view: a `find` row — core already cut it to summary fields; only the date is rendered. No `isEditable`: a result row is never edited in place. */
+export type FoundNodeDto = Omit<FoundNode, "updatedAt"> & { updatedAt: string };
 /** node-views: a `list` row. Keeps core's per-row `cursor` — routers/read.ts's `list` needs the LAST KEPT row's cursor after the response budget has trimmed the page, and strips it from the wire shape itself. */
 export type ListedNodeDto = Omit<ListedNode, "createdAt" | "updatedAt"> & { createdAt: string; updatedAt: string; isEditable: boolean };
 
@@ -68,6 +71,10 @@ export function toLookedUpNodeDto(node: LookedUpNode): LookedUpNodeDto {
 
 export function toRecentNodeDto(node: RecentNode): RecentNodeDto {
   return { ...node, updatedAt: node.updatedAt.toISOString(), isEditable: isEditableSourceSystem(node.sourceSystem) };
+}
+
+export function toFoundNodeDto(node: FoundNode): FoundNodeDto {
+  return { ...node, updatedAt: node.updatedAt.toISOString() };
 }
 
 export function toListedNodeDto(node: ListedNode): ListedNodeDto {

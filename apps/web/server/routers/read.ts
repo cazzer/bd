@@ -29,6 +29,7 @@
 
 import {
   DEFAULT_DECAY,
+  DEFAULT_FIND_LIMIT,
   DEFAULT_FANOUT,
   DEFAULT_MAX_DEPTH,
   DEFAULT_MIN_RELEVANCE,
@@ -36,6 +37,7 @@ import {
   DEFAULT_NODE_BUDGET,
   DEFAULT_RECENT_NODES_LIMIT,
   DEFAULT_SEED_LIMIT,
+  findNodes,
   getNeighbors,
   getNodes,
   getStoreSummary,
@@ -44,6 +46,9 @@ import {
   listNodes,
   MAX_ALLOWED_DEPTH,
   MAX_FANOUT,
+  MAX_FIND_LIMIT,
+  MAX_FIND_OFFSET,
+  MAX_FIND_TEXT_LENGTH,
   MAX_LIST_LIMIT,
   MAX_LIST_NAMES,
   MAX_LIST_PREDICATES,
@@ -66,7 +71,7 @@ import {
 } from "@breakdown/core";
 import { z } from "zod";
 import { boundResponse } from "../budget.js";
-import { toListedNodeDto, toLookedUpNodeDto, toNeighborDto, toRecentNodeDto, toRetrievedNodeDto } from "../dto.js";
+import { toFoundNodeDto, toListedNodeDto, toLookedUpNodeDto, toNeighborDto, toRecentNodeDto, toRetrievedNodeDto } from "../dto.js";
 import { mapCoreError } from "../errors.js";
 import { publicProcedure, router } from "../trpc.js";
 
@@ -351,6 +356,7 @@ const predicateKeySchema = z.string().min(1).max(MAX_PREDICATE_KEY_LENGTH);
 const predicateSchema = z.union([
   z.object({ key: predicateKeySchema, op: z.literal("equals"), value: scalarSchema }),
   z.object({ key: predicateKeySchema, op: z.literal("oneOf"), values: z.array(scalarSchema).min(1).max(MAX_ONE_OF_VALUES) }),
+  z.object({ key: predicateKeySchema, op: z.literal("contains"), value: scalarSchema }),
 ]);
 
 export const listInputSchema = z.object({
@@ -394,6 +400,64 @@ const listProcedure = publicProcedure.input(listInputSchema).query(async ({ ctx,
         nodes: kept.map(({ cursor: _cursor, ...node }) => node),
         hasMore,
         nextCursor: hasMore && last ? last.cursor : null,
+        truncated: meta.truncated,
+        droppedNodeIds: meta.droppedIds,
+        shrunkNodeIds: meta.shrunkIds,
+      };
+    },
+    ctx.responseCharBudget,
+  );
+});
+
+// --- find ------------------------------------------------------------------
+//
+// search-results-view (design.md decision 5): the results view's one read —
+// optional text, node types, projects, reviews-only, offset paging — calling
+// core's `findNodes` (packages/core/src/find.ts), which answers the page and
+// the facet counts in one statement. Rows are summary fields only (core
+// never selects content or full metadata), so review comments and card
+// metadata never travel. The budget pass drops from the tail, so the next
+// page starts at `offset + rows kept`, never `offset + limit`. Public and
+// read-only, so it serves under BRAIN_READ_ONLY too.
+
+export const findInputSchema = z.object({
+  /** Trimmed; empty means no text. */
+  text: z.string().trim().max(MAX_FIND_TEXT_LENGTH).optional(),
+  nodeTypes: z.array(z.string().min(1)).min(1).max(MAX_LIST_NAMES).optional(),
+  projects: z.array(z.string().min(1)).min(1).max(MAX_LIST_NAMES).optional(),
+  reviewsOnly: z.boolean().optional(),
+  limit: z.number().int().positive().max(MAX_FIND_LIMIT).optional(),
+  offset: z.number().int().min(0).max(MAX_FIND_OFFSET).optional(),
+});
+
+const findProcedure = publicProcedure.input(findInputSchema).query(async ({ ctx, input }) => {
+  const offset = input.offset ?? 0;
+  let result;
+  try {
+    result = await findNodes(ctx.db, {
+      text: input.text || null,
+      nodeTypes: input.nodeTypes ?? null,
+      projects: input.projects ?? null,
+      reviewsOnly: input.reviewsOnly ?? false,
+      limit: input.limit,
+      offset,
+    });
+  } catch (err) {
+    throw mapCoreError("find", err);
+  }
+
+  return boundResponse(
+    result.nodes.map(toFoundNodeDto),
+    (n) => n.id,
+    (kept, meta) => {
+      const hasMore = result.hasMore || meta.droppedIds.length > 0;
+      return {
+        nodes: kept,
+        hasMore,
+        nextOffset: hasMore ? offset + kept.length : null,
+        total: result.total,
+        facets: result.facets,
+        defaultsUsed: { limit: input.limit ?? DEFAULT_FIND_LIMIT },
         truncated: meta.truncated,
         droppedNodeIds: meta.droppedIds,
         shrunkNodeIds: meta.shrunkIds,
@@ -541,6 +605,7 @@ export const readRouter = router({
   getStoreSummary: getStoreSummaryProcedure,
   listUnlinkedNotes: listUnlinkedNotesProcedure,
   list: listProcedure,
+  find: findProcedure,
   resolveDefaultViews: resolveDefaultViewsProcedure,
   tree: treeProcedure,
   timeline: timelineProcedure,

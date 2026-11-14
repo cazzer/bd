@@ -171,7 +171,7 @@ describe("list (local-web-api spec, 'Listing a view's selection')", () => {
     await expect(callerWith(poisonedDb()).list({ nodeTypes: [] })).rejects.toMatchObject({ code: "BAD_REQUEST" });
     await expect(callerWith(poisonedDb()).list({ where: Array.from({ length: 11 }, (_, i) => ({ key: `k${i}`, op: "equals" as const, value: 1 })) })).rejects.toMatchObject({ code: "BAD_REQUEST" });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await expect(callerWith(poisonedDb()).list({ where: [{ key: "status", op: "contains", value: "op" }] } as any)).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    await expect(callerWith(poisonedDb()).list({ where: [{ key: "status", op: "like", value: "op" }] } as any)).rejects.toMatchObject({ code: "BAD_REQUEST" });
   });
 
   it("maps a well-formed cursor core does not recognise to BAD_REQUEST", async () => {

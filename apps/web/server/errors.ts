@@ -186,7 +186,7 @@ export function mapCoreError(procedureName: string, err: unknown): TRPCError {
   // this is reached only for what the schema cannot see, e.g. a cursor
   // that is well-formed text but not a keyset position core issued. ---
   if (err instanceof InvalidListOptionError) {
-    return actionable("BAD_REQUEST", err, "Fix that option and retry: predicates are { key, op: \"equals\", value } or { key, op: \"oneOf\", values }, values are scalars, cursor is a nextCursor from a previous list response.");
+    return actionable("BAD_REQUEST", err, "Fix that option and retry: predicates are { key, op: \"equals\", value }, { key, op: \"oneOf\", values }, or { key, op: \"contains\", value }, values are scalars, cursor is a nextCursor from a previous list response, and a find option (text, limit, offset, nodeTypes, projects) stays within its bound.");
   }
 
   // --- Views (node-views). No web procedure writes a view today (MCP
