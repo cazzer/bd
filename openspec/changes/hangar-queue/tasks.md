@@ -7,8 +7,8 @@
 
 ## 2. Hangar queue, sessions, check-ins, messages (bd-d38.3)
 
-- [ ] 2.1 Migration 0008: `client_tokens.session_id`, `hangar` in the scope check, `hangar_check_ins`, `hangar_messages`; schema tests
-- [ ] 2.2 `packages/core/src/hangar.ts`: session metadata contract + normalizer, requestSession (node + run_by edge), claimSession (SKIP LOCKED, session token, check-in), updateSession (transition rules, token revoke), requeueSession, listSessions, recordCheckIn, getHangarStatus, appendMessage, readMessages; tests incl. racing claims
+- [x] 2.1 Migration 0008: `client_tokens.session_id`, `hangar` in the scope check, `hangar_check_ins`, `hangar_messages`; schema tests
+- [x] 2.2 `packages/core/src/hangar.ts`: session metadata contract + normalizer, requestSession (node + run_by edge), claimSession (SKIP LOCKED, session token, check-in), updateSession (transition rules, token revoke), requeueSession, listSessions, recordCheckIn, getHangarStatus, appendMessage, readMessages; tests incl. racing claims
 - [ ] 2.3 `brain_write` refuses `hangar_session` nodes; session tokens in client-tokens (verify returns sessionId; CLI list shows scope + session; `create --scope hangar`)
 - [ ] 2.4 `/hangar/v1` REST handler (route + per-endpoint scope, JSON errors, long-poll loop with socket-close abort, body caps) exporting `HANGAR_ENDPOINTS`; tests per endpoint and scope
 - [ ] 2.5 Inbox routing: `session` stamped from the session token on request; decide/release/handOff append a hangar message for session items, herdr unchanged for local ones; tests

@@ -4,7 +4,7 @@ import type { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDb, createPool, type Database } from "./client.js";
 import { resolveDatabaseUrl } from "./env.js";
-import { clientTokens, edges, ingestRuns, nodeRevisions, nodes, resolvedNodes } from "./schema.js";
+import { clientTokens, edges, hangarCheckIns, hangarMessages, ingestRuns, nodeRevisions, nodes, resolvedNodes } from "./schema.js";
 
 /**
  * Integration tests against the real Postgres instance (no mocking) —
@@ -845,6 +845,37 @@ describe("client_tokens", () => {
     }
   });
 
+  it("accepts a hangar scope and refuses any other unknown one", async () => {
+    const client = clientName();
+    try {
+      await db.insert(clientTokens).values({ client, tokenHash: randomBytes(32), scope: "hangar" });
+      const [row] = await db.select({ scope: clientTokens.scope }).from(clientTokens).where(eq(clientTokens.client, client));
+      expect(row?.scope).toBe("hangar");
+      const admin = await pgErrorOf(() => db.execute(sql`INSERT INTO client_tokens (client, token_hash, scope) VALUES (${clientName()}, ${randomBytes(32)}, 'admin')`));
+      expect(admin.code).toBe("23514");
+      expect(admin.constraint).toBe("client_tokens_scope_check");
+    } finally {
+      await db.delete(clientTokens).where(eq(clientTokens.client, client));
+    }
+  });
+
+  it("binds a session only to an agent token", async () => {
+    const agent = clientName();
+    const sessionId = randomUUID();
+    try {
+      await db.insert(clientTokens).values({ client: agent, tokenHash: randomBytes(32), scope: "agent", sessionId });
+      const [row] = await db.select({ sessionId: clientTokens.sessionId }).from(clientTokens).where(eq(clientTokens.client, agent));
+      expect(row?.sessionId).toBe(sessionId);
+      for (const scope of ["human", "hangar"] as const) {
+        const refused = await pgErrorOf(() => db.insert(clientTokens).values({ client: clientName(), tokenHash: randomBytes(32), scope, sessionId }));
+        expect(refused.code, scope).toBe("23514");
+        expect(refused.constraint, scope).toBe("client_tokens_session_scope_check");
+      }
+    } finally {
+      await db.delete(clientTokens).where(eq(clientTokens.client, agent));
+    }
+  });
+
   it("requires a scope of human or agent, with no default", async () => {
     const client = clientName();
     try {
@@ -889,6 +920,53 @@ describe("client_tokens", () => {
       expect(Buffer.compare(row.tokenHash, hash)).toBe(0);
     } finally {
       await db.delete(clientTokens).where(eq(clientTokens.client, client));
+    }
+  });
+});
+
+describe("hangar_check_ins", () => {
+  it("keeps one row per hangar: a second check-in upserts on the primary key", async () => {
+    const hangar = `schema-test-hangar-${randomUUID()}`;
+    try {
+      const [first] = await db.insert(hangarCheckIns).values({ hangar, version: "1.0.0" }).returning();
+      expect(first).toMatchObject({ hangar, version: "1.0.0", capacity: null, intervalS: 30 });
+      expect(first?.lastSeenAt).toBeInstanceOf(Date);
+
+      const duplicate = await db.insert(hangarCheckIns).values({ hangar }).catch((err: unknown) => ((err as { cause?: unknown }).cause ?? err) as { code?: string });
+      expect((duplicate as { code?: string }).code).toBe("23505");
+
+      await db
+        .insert(hangarCheckIns)
+        .values({ hangar, version: "1.1.0", capacity: { slots: 2 } })
+        .onConflictDoUpdate({ target: hangarCheckIns.hangar, set: { version: "1.1.0", capacity: { slots: 2 }, lastSeenAt: sql`now()` } });
+      const rows = await db.select().from(hangarCheckIns).where(eq(hangarCheckIns.hangar, hangar));
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ version: "1.1.0", capacity: { slots: 2 } });
+    } finally {
+      await db.delete(hangarCheckIns).where(eq(hangarCheckIns.hangar, hangar));
+    }
+  });
+});
+
+describe("hangar_messages", () => {
+  it("assigns increasing ids and serves a session's cursor read through (session_id, id)", async () => {
+    const sessionId = randomUUID();
+    try {
+      const inserted = await db
+        .insert(hangarMessages)
+        .values([
+          { sessionId, kind: "test", body: { n: 1 } },
+          { sessionId, kind: "test", body: { n: 2 } },
+        ])
+        .returning({ id: hangarMessages.id, createdAt: hangarMessages.createdAt });
+      expect(inserted).toHaveLength(2);
+      expect(inserted[1]!.id).toBeGreaterThan(inserted[0]!.id);
+      expect(inserted[0]!.createdAt).toBeInstanceOf(Date);
+
+      const index = await db.execute<{ indexdef: string }>(sql`SELECT indexdef FROM pg_indexes WHERE tablename = 'hangar_messages' AND indexname = 'hangar_messages_session_id_id_idx'`);
+      expect(index.rows[0]?.indexdef).toMatch(/\(session_id, id\)/);
+    } finally {
+      await db.delete(hangarMessages).where(eq(hangarMessages.sessionId, sessionId));
     }
   });
 });

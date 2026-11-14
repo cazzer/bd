@@ -207,7 +207,7 @@ function rawSocketRequest(port: number, head: string): Promise<string> {
 }
 
 /** A live token for a client name unique to this test file (deleted in afterAll). */
-async function newToken(label: string, scope: "human" | "agent" = "human"): Promise<{ client: string; token: string }> {
+async function newToken(label: string, scope: "human" | "agent" | "hangar" = "human"): Promise<{ client: string; token: string }> {
   const client = `mcpt-${label}-${suffix.slice(0, 16)}`;
   tokenClients.push(client);
   const { token } = await createClientToken(db!, client, scope);
@@ -524,6 +524,42 @@ describe("client tokens behind a tailnet Host", () => {
     const { token: reissued } = await createClientToken(db!, client, "human");
     const after = await rawRequest(running.url, { method: "POST", headers: { ...session, authorization: `Bearer ${reissued}` }, body: BRAIN_MAP_CALL });
     expect(after.status).toBe(404);
+  }, 30_000);
+
+  it("leaves a token session open when an unknown token or another client's refused token names it", async () => {
+    const { running, host } = await startTailnet();
+    const { token } = await newToken("victim");
+    const session = await rawInitialize(running.url, { host, authorization: `Bearer ${token}` });
+
+    const garbage = await rawRequest(running.url, { method: "POST", headers: { ...session, authorization: "Bearer garbage" }, body: BRAIN_MAP_CALL });
+    expect(garbage.status).toBe(401);
+    const unknown = `bdt_${Buffer.alloc(32, 9).toString("base64url")}`;
+    expect((await rawRequest(running.url, { method: "POST", headers: { ...session, authorization: `Bearer ${unknown}` }, body: BRAIN_MAP_CALL })).status).toBe(401);
+    const hangar = await newToken("hangar-other", "hangar");
+    expect((await rawRequest(running.url, { method: "POST", headers: { ...session, authorization: `Bearer ${hangar.token}` }, body: BRAIN_MAP_CALL })).status).toBe(403);
+
+    const still = await rawRequest(running.url, { method: "POST", headers: session, body: BRAIN_MAP_CALL });
+    expect(still.status).toBe(200);
+  }, 30_000);
+
+  it("closes a token session on any credential refusal naming it once its client's token is revoked", async () => {
+    const { running, host } = await startTailnet();
+    const { client, token } = await newToken("garbage-after");
+    const session = await rawInitialize(running.url, { host, authorization: `Bearer ${token}` });
+    await revokeClientToken(db!, client);
+    expect((await rawRequest(running.url, { method: "POST", headers: { ...session, authorization: "Bearer garbage" }, body: BRAIN_MAP_CALL })).status).toBe(401);
+
+    tokenClients.push(client);
+    const { token: reissued } = await createClientToken(db!, client, "human");
+    const after = await rawRequest(running.url, { method: "POST", headers: { ...session, authorization: `Bearer ${reissued}` }, body: BRAIN_MAP_CALL });
+    expect(after.status).toBe(404);
+  }, 30_000);
+
+  it("refuses a hangar token on /mcp with 403", async () => {
+    const { running, host } = await startTailnet();
+    const { token } = await newToken("hangar", "hangar");
+    const res = await rawRequest(running.url, { method: "POST", headers: { ...MCP_POST_HEADERS, host, authorization: `Bearer ${token}` }, body: initializeBody() });
+    expect(res.status).toBe(403);
   }, 30_000);
 
   it("leaves a tokenless loopback session open when a refused request names it", async () => {

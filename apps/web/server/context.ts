@@ -58,12 +58,18 @@ export interface Context {
    * tokenless request is the local person (hangar-queue decision 5).
    */
   scope?: ClientTokenScope | null;
+  /**
+   * The hangar session the admitting token is bound to (hangar-queue
+   * decision 4), or null for any other token or none. Absent means null.
+   */
+  sessionId?: string | null;
 }
 
 /** What admission established about a tokened request (dispatch.ts). */
 export interface AdmittedClient {
   client: string;
   scope: ClientTokenScope;
+  sessionId: string | null;
 }
 
 /**
@@ -79,6 +85,6 @@ export const admittedClients = new WeakMap<IncomingMessage, AdmittedClient>();
 export function createContextFactory(db: Database, live: Pick<Context, "watcher" | "shutdownSignal" | "readOnly" | "reviewWriter" | "runHerdr" | "herdrJson" | "herdrSocket" | "sessionCwd" | "missingBinaries" | "reviewImageRoot"> = {}) {
   return async ({ req }: { req: IncomingMessage }): Promise<Context> => {
     const admitted = admittedClients.get(req);
-    return { db, ...live, client: admitted?.client ?? null, scope: admitted?.scope ?? null };
+    return { db, ...live, client: admitted?.client ?? null, scope: admitted?.scope ?? null, sessionId: admitted?.sessionId ?? null };
   };
 }

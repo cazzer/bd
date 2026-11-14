@@ -3,14 +3,18 @@
 // uses its own client names and deletes its own rows; none asserts on the
 // table as a whole.
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { eq, inArray, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { clientTokens, type Database } from "@breakdown/db";
 import {
   createClientToken,
+  createSessionToken,
+  hasLiveToken,
   listClientTokens,
   revokeClientToken,
+  revokeSessionTokens,
+  sessionTokenClient,
   verifyClientToken,
 } from "./client-tokens.js";
 import { ClientTokenExistsError, ClientTokenNotFoundError, InvalidClientNameError } from "./errors.js";
@@ -111,7 +115,7 @@ describe("listClientTokens", () => {
     const rows = (await listClientTokens(db)).filter((r) => r.client === live || r.client === gone);
     expect(rows).toHaveLength(2);
     for (const row of rows) {
-      expect(Object.keys(row).sort()).toEqual(["client", "createdAt", "lastUsedAt", "revokedAt", "scope"]);
+      expect(Object.keys(row).sort()).toEqual(["client", "createdAt", "lastUsedAt", "revokedAt", "scope", "sessionId"]);
     }
     expect(rows.find((r) => r.client === live)?.revokedAt).toBeNull();
     expect(rows.find((r) => r.client === gone)?.revokedAt).toBeInstanceOf(Date);
@@ -135,7 +139,7 @@ describe("verifyClientToken", () => {
   it("names the client of a live token, and null once it is revoked", async () => {
     const client = clientName();
     const { token } = await createClientToken(db, client, "human");
-    expect(await verifyClientToken(db, token)).toEqual({ client, scope: "human" });
+    expect(await verifyClientToken(db, token)).toEqual({ client, scope: "human", sessionId: null });
     await revokeClientToken(db, client);
     expect(await verifyClientToken(db, token)).toBeNull();
   });
@@ -200,7 +204,7 @@ describe("verifyClientToken", () => {
     const client = clientName("agent");
     const created = await createClientToken(db, client, "agent");
     expect(created.scope).toBe("agent");
-    expect(await verifyClientToken(db, created.token)).toEqual({ client, scope: "agent" });
+    expect(await verifyClientToken(db, created.token)).toEqual({ client, scope: "agent", sessionId: null });
     const [listed] = (await listClientTokens(db)).filter((r) => r.client === client);
     expect(listed?.scope).toBe("agent");
   });
@@ -212,6 +216,68 @@ describe("verifyClientToken", () => {
     const second = await createClientToken(db, client, "human");
     expect(second.token).not.toBe(first.token);
     expect(await verifyClientToken(db, first.token)).toBeNull();
-    expect(await verifyClientToken(db, second.token)).toEqual({ client, scope: "human" });
+    expect(await verifyClientToken(db, second.token)).toEqual({ client, scope: "human", sessionId: null });
+  });
+});
+
+describe("session tokens", () => {
+  function sessionId(): string {
+    const id = randomUUID();
+    created.push(sessionTokenClient(id));
+    return id;
+  }
+
+  it("mints an agent token for client session-<uuid>, bound to the session, verifying with its sessionId", async () => {
+    const id = sessionId();
+    const minted = await db.transaction((tx) => createSessionToken(tx, id));
+    expect(minted).toMatchObject({ client: `session-${id}`, scope: "agent", sessionId: id });
+    expect(minted.token).toMatch(/^bdt_[A-Za-z0-9_-]{43}$/);
+    expect(await verifyClientToken(db, minted.token)).toEqual({ client: `session-${id}`, scope: "agent", sessionId: id });
+    const [listed] = (await listClientTokens(db)).filter((r) => r.client === minted.client);
+    expect(listed).toMatchObject({ scope: "agent", sessionId: id, revokedAt: null });
+  });
+
+  it("is not minted when the transaction that minted it rolls back", async () => {
+    const id = sessionId();
+    let token = "";
+    await expect(
+      db.transaction(async (tx) => {
+        token = (await createSessionToken(tx, id)).token;
+        throw new Error("claim failed");
+      }),
+    ).rejects.toThrow("claim failed");
+    expect(await verifyClientToken(db, token)).toBeNull();
+    expect(await hasLiveToken(db, sessionTokenClient(id))).toBe(false);
+  });
+
+  it("revokeSessionTokens revokes the session's live token, after which it verifies null", async () => {
+    const id = sessionId();
+    const other = sessionId();
+    const minted = await db.transaction((tx) => createSessionToken(tx, id));
+    const kept = await db.transaction((tx) => createSessionToken(tx, other));
+    expect(await db.transaction((tx) => revokeSessionTokens(tx, id))).toBe(1);
+    expect(await verifyClientToken(db, minted.token)).toBeNull();
+    expect(await verifyClientToken(db, kept.token)).not.toBeNull();
+    expect(await db.transaction((tx) => revokeSessionTokens(tx, id))).toBe(0);
+  });
+
+  it("re-mints for a session whose earlier token was revoked", async () => {
+    const id = sessionId();
+    const first = await db.transaction((tx) => createSessionToken(tx, id));
+    await db.transaction((tx) => revokeSessionTokens(tx, id));
+    const second = await db.transaction((tx) => createSessionToken(tx, id));
+    expect(await verifyClientToken(db, first.token)).toBeNull();
+    expect(await verifyClientToken(db, second.token)).toEqual({ client: `session-${id}`, scope: "agent", sessionId: id });
+  });
+});
+
+describe("hasLiveToken", () => {
+  it("is true while the client holds a live token and false once it is revoked or never existed", async () => {
+    const client = clientName("live");
+    expect(await hasLiveToken(db, client)).toBe(false);
+    await createClientToken(db, client, "hangar");
+    expect(await hasLiveToken(db, client)).toBe(true);
+    await revokeClientToken(db, client);
+    expect(await hasLiveToken(db, client)).toBe(false);
   });
 });

@@ -646,3 +646,56 @@ export class ClientTokenNotFoundError extends KnowledgeStoreError {
     super(`client ${JSON.stringify(client)} has no live token`);
   }
 }
+
+// --- Hangar sessions (hangar-queue change) -----------------------------
+
+/** A `hangar_session`'s metadata, or an argument to a hangar call, breaks the contract (hangar.ts). */
+export class InvalidHangarSessionError extends KnowledgeStoreError {
+  constructor(
+    readonly field: string,
+    readonly value: unknown,
+    reason: string,
+    readonly itemLabel?: string,
+  ) {
+    super(`invalid hangar session${itemLabel === undefined ? "" : ` ${itemLabel}`}: ${field} (got ${JSON.stringify(value)}) ${reason}`);
+  }
+}
+
+/** A hangar call named a node that is not a hangar session, or none at all. */
+export class HangarSessionNotFoundError extends KnowledgeStoreError {
+  constructor(readonly sessionId: string) {
+    super(`hangar session ${sessionId} does not exist`);
+  }
+}
+
+/** A session state change outside the state machine (hangar.ts `checkHangarTransition`); nothing was written. */
+export class HangarTransitionError extends KnowledgeStoreError {
+  constructor(
+    readonly from: string,
+    readonly to: string,
+  ) {
+    super(`hangar session cannot move from ${JSON.stringify(from)} to ${JSON.stringify(to)}`);
+  }
+}
+
+/** A hangar tried to change a session another hangar claimed, or none did. */
+export class HangarSessionNotClaimedByError extends KnowledgeStoreError {
+  constructor(
+    readonly sessionId: string,
+    readonly hangar: string,
+    readonly claimedBy: string | null,
+  ) {
+    super(
+      claimedBy === null
+        ? `hangar session ${sessionId} is not claimed, so ${JSON.stringify(hangar)} cannot change it`
+        : `hangar session ${sessionId} is claimed by ${JSON.stringify(claimedBy)}, not ${JSON.stringify(hangar)}`,
+    );
+  }
+}
+
+/** A generic writer (brain_write) was given a node of a type only the hangar paths write. */
+export class ReservedHangarNodeError extends KnowledgeStoreError {
+  constructor(readonly itemLabel: string) {
+    super(`node ${itemLabel} has node_type "hangar_session", which only the hangar queue writes; request a session instead`);
+  }
+}

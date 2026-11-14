@@ -29,7 +29,7 @@
 // narrows that further (trpc.ts `scopeGate`, decision 5) — an agent files
 // and completes inbox requests, a person decides.
 //
-// The admitted token client and scope are handed to tRPC through
+// The admitted token client, scope, and bound session are handed to tRPC through
 // `admittedClients` (context.ts), keyed on the request object, so a write's
 // run names the client that made it (tailnet-hosting decision 4) and a
 // procedure can check the scope. Nothing here logs a token.
@@ -43,6 +43,7 @@ import {
   UNAUTHORIZED_HEADERS,
   type AdmissionPolicy,
   type ClientTokenScope,
+  type VerifiedClientToken,
 } from "@breakdown/core";
 import { AUTH_CONNECT_PATH } from "./auth-connect.js";
 import { admittedClients } from "./context.js";
@@ -58,8 +59,8 @@ export interface RequestDispatcherOptions {
   port: number;
   /** `--allow-host` values, each already through `normalizeAllowedHost`. */
   allowedHosts: readonly string[];
-  /** The client and scope of a live token, or null (verifyClientToken in production). */
-  verifyToken: (token: string) => Promise<{ client: string; scope: ClientTokenScope } | null>;
+  /** The client, scope, and bound session of a live token, or null (verifyClientToken in production). */
+  verifyToken: (token: string) => Promise<VerifiedClientToken | null>;
   connect: Handler;
   health: Handler;
   reviewImages: Handler;
@@ -104,7 +105,7 @@ export function createRequestDispatcher({ port, allowedHosts, verifyToken, conne
   // The token scopes each route admits (module header).
   const policies: Readonly<Record<WebRoute, AdmissionPolicy>> = {
     connect: policyFor(["human"]),
-    health: policyFor(["human", "agent"]),
+    health: policyFor(["human", "agent", "hangar"]),
     reviewImages: policyFor(["human"]),
     trpc: policyFor(["human", "agent"]),
     static: policyFor(["human"]),
@@ -138,7 +139,9 @@ export function createRequestDispatcher({ port, allowedHosts, verifyToken, conne
       res.end("Unauthorized\n");
       return;
     }
-    if (admission.client !== null && admission.scope !== null) admittedClients.set(req, { client: admission.client, scope: admission.scope });
+    if (admission.client !== null && admission.scope !== null) {
+      admittedClients.set(req, { client: admission.client, scope: admission.scope, sessionId: admission.sessionId });
+    }
 
     switch (route) {
       case "connect":

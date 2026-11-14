@@ -38,8 +38,8 @@ async function startDispatcher(withStatic: boolean): Promise<{ server: Server; p
     verifyToken: async (token) => {
       verified += 1;
       if (token === THROWING_TOKEN) throw new Error("token store unavailable");
-      if (token === WORKER_TOKEN) return { client: "worker-1", scope: "agent" };
-      return token === PHONE_TOKEN ? { client: "phone", scope: "human" } : null;
+      if (token === WORKER_TOKEN) return { client: "worker-1", scope: "agent", sessionId: null };
+      return token === PHONE_TOKEN ? { client: "phone", scope: "human", sessionId: null } : null;
     },
     connect: async (req, res) => {
       calls.push(`connect ${req.method} ${req.url}`);

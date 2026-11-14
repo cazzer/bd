@@ -4,12 +4,13 @@
 // names and deletes its own rows.
 
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { eq, inArray } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { clientTokens, type Database } from "@breakdown/db";
+import { createSessionToken } from "../client-tokens.js";
 import { connectTestDb, uniqueSuffix, type TestPool } from "../test-helpers.js";
 import { runTokenCli } from "./token-command.js";
 
@@ -87,7 +88,7 @@ describe("runTokenCli", () => {
     const lines = out.split("\n");
     const liveLine = lines.find((l) => l.startsWith(`${live}\t`));
     const goneLine = lines.find((l) => l.startsWith(`${gone}\t`));
-    expect(liveLine).toMatch(/^[^\t]+\thuman\tcreated .*\tlast used never\tlive$/);
+    expect(liveLine).toMatch(/^[^\t]+\thuman\t-\tcreated .*\tlast used never\tlive$/);
     expect(goneLine).toMatch(/\trevoked \d{4}-\d{2}-\d{2}T[\d:.]+Z$/);
   });
 
@@ -117,6 +118,30 @@ describe("runTokenCli", () => {
     expect(Object.fromEntries(rows.map((r) => [r.client, r.scope]))).toEqual({ [before]: "agent", [after]: "human" });
     const { out } = await run(["list"]);
     expect(out.split("\n").find((l) => l.startsWith(`${before}\t`))).toMatch(/^[^\t]+\tagent\t/);
+  });
+
+  it("create --scope hangar records a hangar token", async () => {
+    const client = clientName();
+    const { code, out } = await run(["create", client, "--scope", "hangar"]);
+    expect(code).toBe(0);
+    expect(out).toMatch(TOKEN_LINE);
+    const listed = (await run(["list"])).out.split("\n").find((l) => l.startsWith(`${client}\t`));
+    expect(listed).toMatch(/^[^\t]+\thangar\t-\tcreated /);
+  });
+
+  it("list shows a session token's scope and bound session, never its token", async () => {
+    const sessionId = randomUUID();
+    const minted = await db.transaction((tx) => createSessionToken(tx, sessionId));
+    created.push(minted.client);
+    const { out } = await run(["list"]);
+    expect(out).not.toContain(minted.token.slice(4));
+    const line = out.split("\n").find((l) => l.startsWith(`${minted.client}\t`));
+    expect(line).toMatch(new RegExp(`^session-${sessionId}\\tagent\\tsession ${sessionId}\\tcreated .*\\tlive$`));
+  });
+
+  it("usage names the hangar scope", async () => {
+    const { err } = await run([]);
+    expect(err).toContain("--scope hangar: the hangar service; admitted by /hangar/v1 only");
   });
 
   it.each([
