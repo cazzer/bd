@@ -17,7 +17,7 @@ import {
   sessionTokenClient,
   verifyClientToken,
 } from "./client-tokens.js";
-import { ClientTokenExistsError, ClientTokenNotFoundError, InvalidClientNameError } from "./errors.js";
+import { ClientTokenExistsError, ClientTokenNotFoundError, InvalidClientNameError, ReservedClientNameError } from "./errors.js";
 import { connectTestDb, uniqueSuffix, type TestPool } from "./test-helpers.js";
 
 let pool: TestPool;
@@ -95,6 +95,12 @@ describe("createClientToken", () => {
       await expect(createClientToken(db, name, "human")).rejects.toBeInstanceOf(InvalidClientNameError);
     },
   );
+
+  it.each(["session-", `session-${randomUUID()}`, "Session-laptop"])("refuses the reserved session name %j without writing", async (name) => {
+    created.push(name);
+    await expect(createClientToken(db, name, "agent")).rejects.toBeInstanceOf(ReservedClientNameError);
+    expect(await hasLiveToken(db, name)).toBe(false);
+  });
 
   it("accepts a 64-character name of letters, digits, dot, underscore, and dash", async () => {
     const base = clientName("n");

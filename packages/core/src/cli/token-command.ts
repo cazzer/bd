@@ -14,7 +14,7 @@
 
 import type { ClientTokenScope, Database } from "@breakdown/db";
 import { createClientToken, isClientTokenScope, listClientTokens, revokeClientToken } from "../client-tokens.js";
-import { ClientTokenExistsError, ClientTokenNotFoundError, InvalidClientNameError } from "../errors.js";
+import { ClientTokenExistsError, ClientTokenNotFoundError, InvalidClientNameError, ReservedClientNameError } from "../errors.js";
 
 export interface TokenCliIo {
   db: Database;
@@ -68,7 +68,7 @@ export async function runTokenCli(argv: readonly string[], { db, out, err }: Tok
       return 0;
     }
   } catch (e) {
-    if (e instanceof ClientTokenExistsError || e instanceof ClientTokenNotFoundError || e instanceof InvalidClientNameError) {
+    if (e instanceof ClientTokenExistsError || e instanceof ClientTokenNotFoundError || e instanceof InvalidClientNameError || e instanceof ReservedClientNameError) {
       err(`${e.message}\n`);
       return 1;
     }

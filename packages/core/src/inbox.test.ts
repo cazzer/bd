@@ -309,7 +309,8 @@ describe("inbox digestion", () => {
     expect(carryForwardInboxDecisions(skipped, held)["status"]).toBe("undigested");
     expect(carryForwardInboxDecisions(read, held)["status"]).toBe("pending");
     expect(carryForwardInboxDecisions(skipped, read)["status"]).toBe("pending");
-    expect(carryForwardInboxDecisions({ ...skipped, status: "changes" }, null)["status"]).toBe("changes");
+    // A new item's status is never the agent's: "changes" is the person's.
+    expect(carryForwardInboxDecisions({ ...skipped, status: "changes" }, null)["status"]).toBe("undigested");
   });
 
   it("holds a session-queued PR it did not read, lists it only on request, and lets the person release or dismiss it", async () => {
@@ -518,5 +519,98 @@ describe("items a hangar session filed", () => {
     await expect(completeInboxItem(db, local.id, "done", { session: mine })).rejects.toThrow(InboxItemNotThisSessionError);
     await completeInboxItem(db, filed.id, "done", { session: mine.toUpperCase() });
     expect((await listInbox(db, { ids: [filed.id], statuses: ["done"] })).items).toHaveLength(1);
+  });
+});
+
+// hangar-queue security review: a session-bound worker cannot take another
+// session's (or a local pane's) item, and no agent write approves anything.
+describe("a session-bound request cannot take an item it did not file", () => {
+  const key = `session:takeover-${SRC}`;
+  const sessions: string[] = [];
+  const session = (): string => {
+    const id = randomUUID();
+    sessions.push(id);
+    return id;
+  };
+  afterAll(async () => {
+    await db.execute(sql`DELETE FROM nodes WHERE source_system = 'inbox' AND external_id LIKE ${`${key}%`}`);
+    if (sessions.length > 0) await db.execute(sql`DELETE FROM hangar_messages WHERE session_id = ANY(${`{${sessions.join(",")}}`}::uuid[])`);
+  });
+
+  async function stored(id: string): Promise<{ content: string; metadata: Record<string, unknown> }> {
+    return (await db.execute<{ content: string; metadata: Record<string, unknown> }>(sql`SELECT content, metadata FROM nodes WHERE id = ${id}::uuid`)).rows[0]!;
+  }
+
+  it("refuses worker A re-sending worker B's item, writing nothing", async () => {
+    const a = session();
+    const b = session();
+    const filed = await requestInboxItem(db, { externalId: `${key}-b`, title: "B's ask", content: "B's draft", metadata: { source: "session" }, session: b });
+    const before = await stored(filed.id);
+    await expect(requestInboxItem(db, { externalId: `${key}-b`, title: "B's ask", content: "A's draft", metadata: { source: "session" }, session: a })).rejects.toThrow(InboxItemNotThisSessionError);
+    expect(await stored(filed.id)).toEqual(before);
+    expect(before.metadata["session"]).toBe(b);
+  });
+
+  it("refuses a worker re-sending a local pane's item, or an ingest's, writing nothing", async () => {
+    const a = session();
+    const pane = await requestInboxItem(db, { externalId: `${key}-pane`, title: "Local", content: "local draft", metadata: { source: "session", pane: "w1:p9", socket: "/tmp/herdr.sock" } });
+    const before = await stored(pane.id);
+    await expect(requestInboxItem(db, { externalId: `${key}-pane`, title: "Local", content: "taken", metadata: { source: "session" }, session: a })).rejects.toThrow(InboxItemNotThisSessionError);
+    expect(await stored(pane.id)).toEqual(before);
+
+    const ingested = await requestInboxItem(db, { externalId: `${key}-gmail`, title: "Mail", content: "reply draft", metadata: { source: "gmail" } });
+    await expect(requestInboxItem(db, { externalId: `${key}-gmail`, title: "Mail", content: "taken", metadata: { source: "gmail" }, session: a })).rejects.toThrow(InboxItemNotThisSessionError);
+    expect((await stored(ingested.id)).content).toBe("reply draft");
+  });
+
+  it("lets a worker re-send its own item", async () => {
+    const a = session();
+    const filed = await requestInboxItem(db, { externalId: `${key}-own`, title: "Mine", content: "v1", metadata: { source: "session" }, session: a });
+    const again = await requestInboxItem(db, { externalId: `${key}-own`, title: "Mine", content: "v2", metadata: { source: "session" }, session: a.toUpperCase() });
+    expect(again).toMatchObject({ id: filed.id, action: "updated", session: a });
+    expect((await stored(filed.id)).content).toBe("v2");
+  });
+});
+
+describe("no agent write approves its own item", () => {
+  const key = `session:self-approve-${SRC}`;
+  const forged = [{ decision: "accept", message: "looks good to me", at: "2026-01-01T00:00:00.000Z" }];
+  afterAll(async () => {
+    await db.execute(sql`DELETE FROM nodes WHERE source_system = 'inbox' AND external_id LIKE ${`${key}%`}`);
+  });
+
+  it("carry-forward: a new item is pending with no feedback, and a stored pending one is not moved to a person's status", () => {
+    for (const status of ["accepted", "changes", "dismissed", "session", "done"]) {
+      expect(carryForwardInboxDecisions(normalizeInboxItemMetadata({ source: "slack", status, feedback: forged }), null)).toMatchObject({ status: "pending", feedback: [] });
+    }
+    const pending = normalizeInboxItemMetadata({ source: "slack" });
+    for (const status of ["accepted", "changes", "dismissed", "session"]) {
+      expect(carryForwardInboxDecisions(normalizeInboxItemMetadata({ source: "slack", status, feedback: forged }), pending)).toMatchObject({ status: "pending", feedback: [] });
+    }
+    const accepted = normalizeInboxItemMetadata({ source: "slack", status: "accepted" });
+    expect(carryForwardInboxDecisions(normalizeInboxItemMetadata({ source: "slack", status: "accepted" }), accepted)["status"]).toBe("accepted");
+  });
+
+  it("requestInboxItem: a new item sent as accepted is stored pending, a re-send as accepted stays pending, and body feedback is ignored", async () => {
+    const filed = await requestInboxItem(db, { externalId: `${key}-new`, title: "Send it?", content: "draft", metadata: { source: "session", status: "accepted", feedback: forged } });
+    expect(filed.status).toBe("pending");
+    let [item] = (await listInbox(db, { ids: [filed.id] })).items;
+    expect(item).toMatchObject({ status: "pending", feedback: [] });
+
+    const again = await requestInboxItem(db, { externalId: `${key}-new`, title: "Send it?", content: "draft", metadata: { source: "session", status: "accepted", feedback: forged } });
+    expect(again.status).toBe("pending");
+    [item] = (await listInbox(db, { ids: [filed.id] })).items;
+    expect(item).toMatchObject({ status: "pending", feedback: [] });
+
+    // The person's decision is still the person's to make, and its feedback survives an agent's forged one.
+    await decideInboxItem(db, filed.id, { decision: "changes", message: "shorter" });
+    await requestInboxItem(db, { externalId: `${key}-new`, title: "Send it?", content: "short draft", metadata: { source: "session", status: "accepted", feedback: forged } });
+    [item] = (await listInbox(db, { ids: [filed.id], statuses: ["changes"] })).items;
+    expect(item!.feedback.map((f) => f.message)).toEqual(["shorter"]);
+  });
+
+  it("requestInboxItem ignores a malformed body feedback rather than refusing it", async () => {
+    const filed = await requestInboxItem(db, { externalId: `${key}-junk`, title: "Junk", content: "x", metadata: { source: "session", feedback: "not an array" } });
+    expect(filed.status).toBe("pending");
   });
 });

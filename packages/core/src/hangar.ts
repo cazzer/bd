@@ -38,7 +38,7 @@
 import { randomUUID } from "node:crypto";
 import { sql, type SQL } from "drizzle-orm";
 import type { Database } from "@breakdown/db";
-import { createSessionToken, revokeSessionTokens } from "./client-tokens.js";
+import { createSessionToken, revokeSessionTokens, sessionTokenClient } from "./client-tokens.js";
 import {
   unsafeBuildUpsertEdgesQuery,
   unsafePrepareEdges,
@@ -46,6 +46,7 @@ import {
   type UpsertEdgeRow,
 } from "./edges.js";
 import {
+  ClientTokenExistsError,
   EdgeUpsertFailedError,
   HangarSessionNotClaimedByError,
   HangarSessionNotFoundError,
@@ -56,6 +57,7 @@ import {
   NodeNotFoundError,
   NodeUpsertFailedError,
   NotAWorkItemError,
+  ReservedHangarEdgeError,
 } from "./errors.js";
 import { normalizeOccurredAt, OCCURRED_AT_KEY } from "./event-time.js";
 import { fitText } from "./fit-text.js";
@@ -94,6 +96,9 @@ export const MAX_HANGAR_REPO_LENGTH = 200;
 export const MAX_HANGAR_FIELD_LENGTH = 200;
 export const MAX_HANGAR_DISK_PATH_LENGTH = 1024;
 export const MAX_HANGAR_REQUEUE_REASON_LENGTH = 500;
+export const MAX_HANGAR_FAILURE_REASON_LENGTH = 500;
+/** How many unclaimable queued sessions one claim attempt marks failed and passes over before it gives up until the next attempt. */
+export const MAX_CLAIM_CANDIDATES = 3;
 export const MAX_HANGAR_MESSAGE_KIND_LENGTH = 64;
 /** Serialized size caps for the opaque JSON hangar and the inbox send. */
 export const MAX_HANGAR_CAPACITY_CHARS = 10_000;
@@ -112,6 +117,7 @@ const KEY = {
   host: "host",
   diskPath: "disk_path",
   requeueReason: "requeue_reason",
+  failureReason: "failure_reason",
 } as const;
 
 /** Optional text fields and their caps; empty or null deletes the key. */
@@ -122,6 +128,7 @@ const OPTIONAL_TEXT: readonly [string, number][] = [
   [KEY.host, MAX_HANGAR_FIELD_LENGTH],
   [KEY.diskPath, MAX_HANGAR_DISK_PATH_LENGTH],
   [KEY.requeueReason, MAX_HANGAR_REQUEUE_REASON_LENGTH],
+  [KEY.failureReason, MAX_HANGAR_FAILURE_REASON_LENGTH],
 ];
 
 // --- The metadata contract (pure) --------------------------------------------
@@ -241,6 +248,8 @@ export interface HangarSession {
   host: string | null;
   diskPath: string | null;
   requeueReason: string | null;
+  /** Why a claim could not take it and marked it failed (its stored metadata broke the contract, or its token name was held). */
+  failureReason: string | null;
   /** When it was requested; claims take the oldest first. */
   occurredAt: string | null;
   createdAt: Date;
@@ -262,10 +271,13 @@ interface SessionRow extends Record<string, unknown> {
 const IS_SESSION = sql`s.node_type = ${HANGAR_SESSION_NODE_TYPE} AND s.source_system = ${HANGAR_SOURCE_SYSTEM} AND s.merged_into IS NULL`;
 
 /**
- * Sessions matching `where`, each with its `run_by` work item. Edges are
- * found from the session and from anything merged into it, and the work
- * item endpoint folds through `merged_into`; the heaviest, then oldest, edge
- * wins if there are several.
+ * Sessions matching `where`, each with its `run_by` work item. Only `run_by`
+ * edges under source system `hangar` count — the one `requestSession`
+ * writes; brain_link refuses that source system and any edge out of a
+ * session (`assertNoReservedHangarEdges`), so no agent can repoint a session
+ * at other work. Edges are found from the session and from anything merged
+ * into it, and the work item endpoint folds through `merged_into`; the
+ * heaviest, then oldest, edge wins if there are several.
  */
 function selectSessions(where: SQL, tail: SQL = sql``): SQL {
   return sql`
@@ -275,6 +287,7 @@ function selectSessions(where: SQL, tail: SQL = sql``): SQL {
       SELECT COALESCE(w.merged_into, w.id) AS work_item_id
       FROM edges e JOIN nodes w ON w.id = e.dst_id
       WHERE e.edge_type = ${RUN_BY_EDGE_TYPE}
+        AND e.source_system = ${HANGAR_SOURCE_SYSTEM}
         AND e.src_id IN (SELECT s.id UNION ALL SELECT m.id FROM nodes m WHERE m.merged_into = s.id)
       ORDER BY e.weight DESC, e.created_at, e.id
       LIMIT 1
@@ -307,6 +320,7 @@ function toSession(row: SessionRow): HangarSession {
     host: text(m, KEY.host),
     diskPath: text(m, KEY.diskPath),
     requeueReason: text(m, KEY.requeueReason),
+    failureReason: text(m, KEY.failureReason),
     occurredAt: text(m, OCCURRED_AT_KEY),
     createdAt: new Date(row.created_at),
     updatedAt: new Date(row.updated_at),
@@ -360,12 +374,46 @@ function hangarName(value: unknown): string {
   return requiredText("hangar", value, MAX_HANGAR_NAME_LENGTH);
 }
 
-/** An actor recorded as `requested_by`: control characters dropped, cut to the cap, trimmed. */
+/** Free text made to fit a contract field: control characters dropped, cut to `max`, trimmed. */
+function fitField(value: string, max: number): string {
+  let kept = "";
+  for (const char of value) if (!CONTROL_CHAR_CODE_POINTS.has(char.codePointAt(0) as number)) kept += char;
+  return (fitText(kept, max) as string).trim();
+}
+
+/** An actor recorded as `requested_by`. */
 function requesterOf(actor: string | undefined): string | undefined {
   if (actor === undefined) return undefined;
-  let kept = "";
-  for (const char of actor) if (!CONTROL_CHAR_CODE_POINTS.has(char.codePointAt(0) as number)) kept += char;
-  return (fitText(kept, MAX_HANGAR_FIELD_LENGTH) as string).trim() || undefined;
+  return fitField(actor, MAX_HANGAR_FIELD_LENGTH) || undefined;
+}
+
+// --- Reserved edges ---------------------------------------------------------------
+
+/**
+ * Refuses, for a generic edge writer (brain_link), every edge only this
+ * module writes: any under source system `hangar`, and any whose source is
+ * a hangar session (node_type `hangar_session` or source system `hangar`),
+ * since a session's out-edges are its `run_by` link to the work it runs for.
+ * One statement for the batch's sources; throws `ReservedHangarEdgeError`
+ * naming the first offending edge. An edge *into* a session is allowed.
+ */
+export async function assertNoReservedHangarEdges(db: Database, edges: readonly { srcId: string; sourceSystem: string }[]): Promise<void> {
+  edges.forEach((edge, index) => {
+    if (edge.sourceSystem.trim() === HANGAR_SOURCE_SYSTEM) {
+      throw new ReservedHangarEdgeError(`at batch index ${index}`, `source system "${HANGAR_SOURCE_SYSTEM}" is written only by the hangar queue`);
+    }
+  });
+  const srcIds = [...new Set(edges.map((e) => e.srcId.trim().toLowerCase()).filter((id) => UUID_RE.test(id)))];
+  if (srcIds.length === 0) return;
+  const sessions = await db.execute<{ id: string }>(sql`
+    SELECT id FROM nodes
+    WHERE id = ANY(${sqlArray(srcIds, "uuid")})
+      AND (node_type = ${HANGAR_SESSION_NODE_TYPE} OR source_system = ${HANGAR_SOURCE_SYSTEM})
+  `);
+  if (sessions.rows.length === 0) return;
+  const reserved = new Set(sessions.rows.map((r) => r.id));
+  const index = edges.findIndex((e) => reserved.has(e.srcId.trim().toLowerCase()));
+  throw new ReservedHangarEdgeError(`at batch index ${index} (from ${edges[index]!.srcId})`, "its source is a hangar session, whose edges only the hangar queue writes");
 }
 
 // --- Requesting -----------------------------------------------------------------
@@ -458,6 +506,13 @@ export interface ClaimedSession {
  * header), or returns null when there is none or a racing claim took it.
  * Counts as the hangar's check-in either way. The claimed session's
  * `requeue_reason` is dropped; its `occurred_at` is kept.
+ *
+ * A locked session that cannot be claimed — its stored metadata breaks the
+ * contract, or a live token already holds its `session-<id>` client name —
+ * is marked `failed` with a `failure_reason` (its tokens revoked), and the
+ * claim moves on to the next candidate in the same transaction, up to
+ * `MAX_CLAIM_CANDIDATES` rows, rather than failing every claim on the row at
+ * the head of the queue.
  */
 export async function claimSession(db: Database, input: ClaimSessionInput): Promise<ClaimedSession | null> {
   const hangar = hangarName(input.hangar);
@@ -479,26 +534,57 @@ export async function claimSession(db: Database, input: ClaimSessionInput): Prom
   const run = await openIngestRun(db, HANGAR_SOURCE_SYSTEM, { actor: hangar });
   try {
     return await db.transaction(async (tx) => {
-      const locked = await tx.execute<LockedSessionRow>(sql`
-        SELECT s.id, s.node_type, s.source_system, s.external_id, s.title, s.content, s.metadata, now() AS now
-        FROM nodes s
-        WHERE ${predicate}
-        ORDER BY s.metadata->>${OCCURRED_AT_KEY}, s.id
-        LIMIT 1
-        FOR UPDATE SKIP LOCKED
-      `);
-      const row = locked.rows[0];
-      if (!row) return null;
+      for (let candidate = 0; candidate < MAX_CLAIM_CANDIDATES; candidate += 1) {
+        // A row this transaction marked failed no longer matches `queued`.
+        const locked = await tx.execute<LockedSessionRow>(sql`
+          SELECT s.id, s.node_type, s.source_system, s.external_id, s.title, s.content, s.metadata, now() AS now
+          FROM nodes s
+          WHERE ${predicate}
+          ORDER BY s.metadata->>${OCCURRED_AT_KEY}, s.id
+          LIMIT 1
+          FOR UPDATE SKIP LOCKED
+        `);
+        const row = locked.rows[0];
+        if (!row) return null;
 
-      const { [KEY.requeueReason]: _reason, ...rest } = row.metadata;
-      const metadata = normalizeHangarSessionMetadata({ ...rest, [KEY.state]: "claimed", [KEY.claimedBy]: hangar, [KEY.claimedAt]: new Date(row.now) });
-      await writeSessionNode(tx, run, { externalId: row.external_id, title: row.title, content: row.content, metadata }, "claimSession");
-      const minted = await createSessionToken(tx, row.id);
-      return { session: await loadSession(tx, row.id), token: minted.token };
+        let metadata: Record<string, unknown>;
+        try {
+          const { [KEY.requeueReason]: _reason, ...rest } = row.metadata;
+          metadata = normalizeHangarSessionMetadata({ ...rest, [KEY.state]: "claimed", [KEY.claimedBy]: hangar, [KEY.claimedAt]: new Date(row.now) });
+        } catch (err) {
+          if (!(err instanceof InvalidHangarSessionError || err instanceof InvalidEventTimeError)) throw err;
+          await failUnclaimable(tx, run, row, `could not be claimed: its stored metadata breaks the session contract (${err.message})`);
+          continue;
+        }
+        try {
+          // A savepoint: a refused token insert must not abort the claim's transaction.
+          return await tx.transaction(async (sp) => {
+            await writeSessionNode(sp, run, { externalId: row.external_id, title: row.title, content: row.content, metadata }, "claimSession");
+            const minted = await createSessionToken(sp, row.id);
+            return { session: await loadSession(sp, row.id), token: minted.token };
+          });
+        } catch (err) {
+          if (!(err instanceof ClientTokenExistsError)) throw err;
+          await failUnclaimable(tx, run, row, `could not be claimed: a live token already holds client ${sessionTokenClient(row.id)}; revoke it with \`pnpm -s client-token revoke ${sessionTokenClient(row.id)}\` and request a new session`);
+        }
+      }
+      return null;
     });
   } finally {
     await closeIngestRun(db, run);
   }
+}
+
+/**
+ * Marks a locked queued session `failed` with `reason`, its other metadata
+ * kept as stored (it may break the contract, which is why it is failing),
+ * and revokes its tokens. Failed is final, so no claim takes it again.
+ */
+async function failUnclaimable(tx: Tx, run: IngestRunHandle, row: LockedSessionRow, reason: string): Promise<void> {
+  const stored = row.metadata !== null && typeof row.metadata === "object" && !Array.isArray(row.metadata) ? row.metadata : {};
+  const metadata = { ...stored, [KEY.state]: "failed", [KEY.failureReason]: fitField(reason, MAX_HANGAR_FAILURE_REASON_LENGTH) };
+  await writeSessionNode(tx, run, { externalId: row.external_id, title: row.title, content: row.content, metadata }, "claimSession");
+  await revokeSessionTokens(tx, row.id);
 }
 
 // --- Reporting state ----------------------------------------------------------------

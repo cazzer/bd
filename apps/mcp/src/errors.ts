@@ -30,6 +30,7 @@ import {
   HangarSessionNotClaimedByError,
   HangarSessionNotFoundError,
   HangarTransitionError,
+  HangarSessionMergeError,
   KnowledgeStoreError,
   LookupFailedError,
   MergeFailedError,
@@ -37,6 +38,7 @@ import {
   NodeNotFoundError,
   NodeUpsertFailedError,
   NotAWorkItemError,
+  ReservedHangarEdgeError,
   ReservedHangarNodeError,
   RetrievalFailedError,
   SelfMergeError,
@@ -149,6 +151,9 @@ export function mapError(toolName: string, err: unknown): CallToolResult {
   if (err instanceof SelfMergeError) {
     return actionable(err, "Choose a different survivorId — these ids already refer to the same node.");
   }
+  if (err instanceof HangarSessionMergeError) {
+    return actionable(err, "Nothing was merged. A hangar session is not a duplicate of anything: it is bound to its token and its inbox items. Merge other nodes; leave sessions as they are.");
+  }
   if (err instanceof MergeFailedError) {
     return actionable(err, RETRY_HINT);
   }
@@ -206,6 +211,9 @@ export function mapError(toolName: string, err: unknown): CallToolResult {
   // --- Hangar (brain_write of a reserved node, the brain_hangar_* tools) ---
   if (err instanceof ReservedHangarNodeError) {
     return actionable(err, "Nothing from this call was persisted. Queue a hangar session with brain_hangar_request and read sessions with brain_hangar_sessions; give any other node a different nodeType and sourceSystem, then retry.");
+  }
+  if (err instanceof ReservedHangarEdgeError) {
+    return actionable(err, "Nothing from this call was persisted. A session's run_by link is written when it is queued (brain_hangar_request); give other edges a sourceSystem other than \"hangar\" and a source that is not a hangar session, then retry.");
   }
   if (err instanceof InvalidHangarSessionError) {
     return actionable(err, "Fix that argument and retry; nothing was queued. flavor is one of headless, display-godot, display-browser; repo is 1-200 characters with no control characters; states are queued, claimed, running, stopped, failed.");

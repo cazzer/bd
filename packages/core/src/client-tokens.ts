@@ -13,7 +13,8 @@
 // host CLI: a hangar claim calls `createSessionToken` inside its own
 // transaction, for client `session-<session uuid>` with scope `agent`, and
 // the session ending calls `revokeSessionTokens` in the transaction that
-// ends it. Every statement against `client_tokens` lives in this file.
+// ends it. The `session-` namespace is the claim's alone: `createClientToken`
+// refuses it. Every statement against `client_tokens` lives in this file.
 //
 // There is no in-process cache, so a revocation takes effect on the next
 // request. `last_used_at` is touched at most once a minute per token, so
@@ -22,7 +23,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { and, asc, eq, isNull, sql } from "drizzle-orm";
 import { CLIENT_TOKEN_SCOPES, clientTokens, type ClientTokenScope, type Database } from "@breakdown/db";
-import { ClientTokenExistsError, ClientTokenNotFoundError, InvalidClientNameError } from "./errors.js";
+import { ClientTokenExistsError, ClientTokenNotFoundError, InvalidClientNameError, ReservedClientNameError } from "./errors.js";
 import { asPgError, type Tx } from "./sql-helpers.js";
 
 export const CLIENT_TOKEN_PREFIX = "bdt_";
@@ -57,9 +58,12 @@ export interface ClientTokenListing {
   revokedAt: Date | null;
 }
 
+/** The client-name prefix only a hangar claim mints under; `createClientToken` refuses it. */
+export const SESSION_CLIENT_PREFIX = "session-";
+
 /** The client name a session token is minted under: unique per session by construction. */
 export function sessionTokenClient(sessionId: string): string {
-  return `session-${sessionId}`;
+  return `${SESSION_CLIENT_PREFIX}${sessionId}`;
 }
 
 function mintToken(): string {
@@ -78,9 +82,15 @@ export function isClientTokenScope(value: string): value is ClientTokenScope {
   return (CLIENT_TOKEN_SCOPES as readonly string[]).includes(value);
 }
 
-/** Mints a `scope` token for `client`, refusing a client that already holds a live one. */
+/**
+ * Mints a `scope` token for `client`, refusing a client that already holds a
+ * live one, and any name in the `session-` namespace: a host-minted
+ * `session-<id>` would block that session's claim (its token could not be
+ * minted) and read, in every listing and actor, as the session's own worker.
+ */
 export async function createClientToken(db: Database, client: string, scope: ClientTokenScope): Promise<CreatedClientToken> {
   assertClientName(client);
+  if (client.toLowerCase().startsWith(SESSION_CLIENT_PREFIX)) throw new ReservedClientNameError(client);
   const token = mintToken();
   try {
     const [row] = await db

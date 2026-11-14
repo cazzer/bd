@@ -723,24 +723,40 @@ async function writeInboxFeedback(
 const SETTLED_BY_PERSON: readonly InboxStatus[] = ["accepted", "dismissed", "done"];
 
 /**
- * The person's decisions survive an agent's re-write of the same item.
- * `feedback` is the person's: the stored history is kept whenever the
- * incoming one is shorter (an agent that did not carry it forward cannot
- * drop it). A stored accepted/dismissed/done status is not reset by an
+ * Statuses only the person's own paths move an item into — a decision
+ * (`decideInboxItem`: accepted, changes, dismissed) or a hand-off
+ * (`handOffInboxItem`: session). No agent write sets one: an agent that
+ * could would approve its own proposed action (hangar-queue, security
+ * review). Leaving one is the agent's (changes → pending or done,
+ * accepted → done, or back to pending with `needs_you`).
+ */
+export const PERSON_DECIDED_INBOX_STATUSES: readonly InboxStatus[] = ["accepted", "changes", "dismissed", "session"];
+
+/**
+ * The person's decisions survive an agent's re-write of the same item, and
+ * no agent write can make one. `feedback` is the person's: an agent's
+ * incoming feedback is ignored and the stored history kept (a new item
+ * starts with none). A new item is `pending` (or `undigested`, below)
+ * whatever status it was sent with. On a stored item, an incoming status
+ * among `PERSON_DECIDED_INBOX_STATUSES` that differs from the stored one is
+ * ignored, and a stored accepted/dismissed/done status is not reset by an
  * incoming `pending` — re-ingesting a signal the person already decided
  * must not put it back in front of them. Any other incoming status (the
  * agent moving changes → pending after a revision, accepted → done after
- * executing) is the agent's to set. `session` is never the writer's to
- * set (module header): an incoming one is dropped and the stored one kept;
+ * executing) is the agent's to set. `session` is never the writer's to set
+ * (module header): an incoming one is dropped and the stored one kept;
  * `requestInboxItem` stamps a session-bound caller's afterwards. Pure; both
  * inputs normalized.
  */
 export function carryForwardInboxDecisions(incoming: Record<string, unknown>, stored: Record<string, unknown> | null): Record<string, unknown> {
-  const { session: _notTheWriters, ...written } = incoming;
-  if (stored === null) return withDigestion(written);
-  const merged: Record<string, unknown> = { ...written, ...(typeof stored["session"] === "string" ? { session: stored["session"] } : {}) };
-  const storedFeedback = (stored["feedback"] as InboxFeedback[] | undefined) ?? [];
-  if (((incoming["feedback"] as InboxFeedback[] | undefined) ?? []).length < storedFeedback.length) merged["feedback"] = storedFeedback;
+  const { session: _notTheWriters, feedback: _notTheAgents, ...written } = incoming;
+  if (stored === null) return withDigestion({ ...written, status: "pending", feedback: [] });
+  const merged: Record<string, unknown> = {
+    ...written,
+    feedback: (stored["feedback"] as InboxFeedback[] | undefined) ?? [],
+    ...(typeof stored["session"] === "string" ? { session: stored["session"] } : {}),
+  };
+  if (PERSON_DECIDED_INBOX_STATUSES.includes(incoming["status"] as InboxStatus) && incoming["status"] !== stored["status"]) merged["status"] = stored["status"];
   // An executor that cannot carry out an accepted item hands it back by
   // setting `needs_you` (why); that is the one way pending overrides accepted.
   const handBack = stored["status"] === "accepted" && typeof incoming["needs_you"] === "string" && incoming["needs_you"].trim() !== "";
@@ -823,37 +839,86 @@ export interface RequestInboxItemResult {
   session: string | null;
 }
 
+type StoredInboxRow = { id: string; node_type: string; metadata: Record<string, unknown> };
+
+/** The node the request's key names (any type, merged or not), with its metadata under the contract or null when it is not an inbox item or breaks the contract. */
+async function readRequestTarget(db: Database | Tx, externalId: string, lock: boolean): Promise<{ row: StoredInboxRow | null; stored: Record<string, unknown> | null }> {
+  let result: { rows: StoredInboxRow[] };
+  try {
+    result = await db.execute<StoredInboxRow>(sql`
+      SELECT id, node_type, metadata FROM nodes WHERE source_system = ${INBOX_SOURCE_SYSTEM} AND external_id = ${externalId}
+      ${lock ? sql`FOR UPDATE` : sql``}
+    `);
+  } catch (err) {
+    throw new LookupFailedError(`requestInboxItem lookup failed${formatPgInfo(asPgError(err))}`, "requestInboxItem", { cause: err });
+  }
+  const row = result.rows[0] ?? null;
+  if (row === null || row.node_type !== INBOX_ITEM_NODE_TYPE) return { row, stored: null };
+  try {
+    return { row, stored: normalizeInboxItemMetadata(normalizeOccurredAt(row.metadata)) };
+  } catch {
+    return { row, stored: null };
+  }
+}
+
+/**
+ * A session-bound caller writes only a new key or an item its own session
+ * filed: a stored item with another session, or with none (a local pane's,
+ * a person's, an ingest's), or a node that is not a readable inbox item, is
+ * refused.
+ */
+function assertSessionMayResend(target: { row: StoredInboxRow | null; stored: Record<string, unknown> | null }, session: string | undefined): void {
+  if (session === undefined || target.row === null) return;
+  if (target.stored === null || target.stored["session"] !== session) throw new InboxItemNotThisSessionError(target.row.id, session, "re-send");
+}
+
 /**
  * Queues (or refreshes) one inbox item for a caller without MCP — a live
  * Claude session in another directory, through `bin/inbox request`. Same
- * contract and same re-ingest protection as brain_write; attributed to an
- * `agent` ingest run so the write is identifiable and revertible.
+ * contract and same re-ingest protection as brain_write (the body's
+ * `feedback` and `session` are ignored, and its status never makes a
+ * decision: `carryForwardInboxDecisions`); attributed to an `agent` ingest
+ * run so the write is identifiable and revertible. A session-bound caller
+ * (`session`) may re-send only its own session's items
+ * (`InboxItemNotThisSessionError` otherwise, before any run opens and again
+ * under the row lock, so a racing writer cannot slip one in); the stored
+ * row is locked for the read-modify-write.
  */
 export async function requestInboxItem(db: Database, input: RequestInboxItemInput): Promise<RequestInboxItemResult> {
   const itemLabel = `(${INBOX_SOURCE_SYSTEM}/${input.externalId})`;
   // A body's `session` is ignored, valid or not: only the server names one.
-  const { session: _fromBody, ...bodyMetadata } = input.metadata;
+  // Its `feedback` likewise: only the person's decisions write it.
+  const { session: _fromBody, feedback: _notTheAgents, ...bodyMetadata } = input.metadata;
   const incoming = normalizeInboxItemMetadata(normalizeOccurredAt(bodyMetadata, { itemLabel }), { itemLabel });
-  const stored = await loadStoredInboxMetadata(db, [{ sourceSystem: INBOX_SOURCE_SYSTEM, externalId: input.externalId }]);
-  let metadata = carryForwardInboxDecisions(incoming, stored.get(`${INBOX_SOURCE_SYSTEM}\u0000${input.externalId}`) ?? null);
-  if (input.session !== undefined) {
-    const { pane: _pane, socket: _socket, ...rest } = metadata;
-    metadata = normalizeInboxItemMetadata({ ...rest, session: input.session }, { itemLabel });
-  }
-  const node = { nodeType: INBOX_ITEM_NODE_TYPE, sourceSystem: INBOX_SOURCE_SYSTEM, externalId: input.externalId, title: input.title, content: input.content, metadata };
-  const prepared = unsafePrepareNodes([node], DEFAULT_MAX_CONTENT_LENGTH, DEFAULT_MAX_METADATA_LENGTH, DEFAULT_MAX_TITLE_LENGTH);
+  const session = input.session?.toLowerCase();
+  assertSessionMayResend(await readRequestTarget(db, input.externalId, false), session);
 
   const run = await openIngestRun(db, "agent", { actor: input.actor ?? "inbox-cli" });
   try {
-    let written: { rows: UpsertNodeRow[] };
-    try {
-      written = await db.execute<UpsertNodeRow>(unsafeBuildUpsertNodesQuery(prepared, run.id));
-    } catch (err) {
-      throw unsafeWrapNodeWriteError(err, prepared);
-    }
-    const row = written.rows[0];
-    if (!row) throw new NodeUpsertFailedError(`requestInboxItem: upsert returned no row for ${input.externalId}`, 0, 0);
-    return { id: row.id, action: row.action, ingestRunId: run.id, status: metadata["status"] as InboxStatus, session: typeof metadata["session"] === "string" ? metadata["session"] : null };
+    return await db.transaction(async (tx) => {
+      const target = await readRequestTarget(tx, input.externalId, true);
+      assertSessionMayResend(target, session);
+      let metadata = carryForwardInboxDecisions(incoming, target.stored);
+      if (session !== undefined) {
+        const { pane: _pane, socket: _socket, ...rest } = metadata;
+        metadata = normalizeInboxItemMetadata({ ...rest, session }, { itemLabel });
+      }
+      const node = { nodeType: INBOX_ITEM_NODE_TYPE, sourceSystem: INBOX_SOURCE_SYSTEM, externalId: input.externalId, title: input.title, content: input.content, metadata };
+      const prepared = unsafePrepareNodes([node], DEFAULT_MAX_CONTENT_LENGTH, DEFAULT_MAX_METADATA_LENGTH, DEFAULT_MAX_TITLE_LENGTH);
+      let written: { rows: UpsertNodeRow[] };
+      try {
+        written = await tx.execute<UpsertNodeRow>(unsafeBuildUpsertNodesQuery(prepared, run.id));
+      } catch (err) {
+        throw unsafeWrapNodeWriteError(err, prepared);
+      }
+      const row = written.rows[0];
+      if (!row) throw new NodeUpsertFailedError(`requestInboxItem: upsert returned no row for ${input.externalId}`, 0, 0);
+      // No row was there to lock, but one is now: another writer inserted the
+      // key between the read and this upsert, which just overwrote it. Roll
+      // back rather than take that item.
+      if (session !== undefined && target.row === null && row.action !== "created") throw new InboxItemNotThisSessionError(row.id, session, "re-send");
+      return { id: row.id, action: row.action, ingestRunId: run.id, status: metadata["status"] as InboxStatus, session: typeof metadata["session"] === "string" ? metadata["session"] : null };
+    });
   } finally {
     await closeIngestRun(db, run);
   }

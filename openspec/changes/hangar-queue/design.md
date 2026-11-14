@@ -145,11 +145,21 @@ Endpoints:
 - **Claim probes before opening an ingest run,** so a long-poll doesn't write an empty run every second. Message appends take a per-session advisory lock, so a cursor can't skip a message committed out of id order.
 - **`bin/inbox` and `bin/inbox-watch` send `Authorization: Bearer $BREAKDOWN_TOKEN` when it is set.** That variable belongs to the scripts, not the servers.
 - **A refused MCP request closes its session only when a credential caused the refusal:** unknown or revoked token, or wrong scope.
+- **Security review.** These close what a remote, possibly prompt-injected worker holding a session token could otherwise do:
+  - `mergeNodes` refuses any hangar session (node_type `hangar_session` or source `hangar`) as loser, survivor, resolved survivor, or chain member, so a session is always canonical. Its single `UPDATE` is the only statement that sets `merged_into`, so no token-revoking backstop is needed.
+  - A session-bound `inboxRequest` re-sends only its own session's items. It is refused, writing nothing, when the key names another session's item, a pane's, or an ingest's.
+  - No agent write moves an item into `accepted`, `changes`, `dismissed`, or `session`, or writes `feedback`. That covers `inboxRequest` and `brain_write`, both through `carryForwardInboxDecisions`. A new item is always `pending`.
+  - Only the `run_by` edge under source `hangar` names a session's work item, and `brain_link` refuses source `hangar` and any edge out of a session.
+  - A session token's MCP session neither lists nor runs `brain_merge` and `brain_hangar_request`.
+  - `createClientToken` refuses `session-` names. A claim marks an unclaimable queued row `failed` and moves on.
 
 ## Risks / Trade-offs
 
 - [Polling every second while long-polling] → At most one hangar and a handful of workers, each running an indexed query once a second. Revisit with NOTIFY if the board ever hosts more.
-- [A leaked hangar token can mint session tokens by claiming] → Those tokens are `agent`-scoped (no human decisions), die with the session, and every claim is a visible state change. Revoke the hangar token to stop it.
+- [A session token is a broad credential] → It is a full `agent` MCP credential minus `brain_merge` and `brain_hangar_request`. It reads the whole store and every inbox item, and writes nodes and edges anywhere but the reserved hangar ones. It is held by a remote worker that may be prompt-injected. What it cannot do is enforced, not trusted: it cannot merge (no merge touches a session in any case), queue more sessions, take another session's or a local inbox item by re-sending its key, approve anything (no agent write sets `accepted`, `changes`, or `dismissed`, or writes `feedback`), or repoint a session's `run_by` (only the queue's own edge counts).
+- [A leaked hangar token can mint session tokens by claiming] → Each claim mints a session token with the reach above. Those tokens die with the session, and every claim is a visible state change. Revoke the hangar token to stop it.
+- [A header-less forwarder on Breakdown's machine] → socat, `ssh -R`, or a bare nginx `proxy_pass` makes every remote peer look like loopback, which is the tokenless local person on tRPC and MCP. That is unsafe and must not be used. Only a proxy that sets `X-Forwarded-For` (such as `tailscale serve`) may front the servers.
+- [A queued session that cannot be claimed] → A row that breaks the session contract, or whose `session-<id>` name a live token already holds, is marked `failed` with `failure_reason` and passed over (a few per attempt), so it cannot stall the queue. Host-minted names starting with `session-` are refused, which closes the second cause.
 - [Worker messages pile up] → Bounded by sessions times decisions. Cleanup arrives with bd-d38.4.
 - [Clock skew between Jetson and desktop] → All times (check-ins, offline threshold) use Breakdown's `now()`, never hangar's clock.
 - [Archive order] → This change modifies `client-access`, which `tailnet-hosting` introduces, so archive `tailnet-hosting` first.

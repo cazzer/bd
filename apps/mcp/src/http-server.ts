@@ -345,8 +345,8 @@ export async function startHttpServer(options: StartHttpServerOptions): Promise<
     });
   }
 
-  async function openSession(req: IncomingMessage, res: ServerResponse, parsedBody: unknown, tokenClient: string | null): Promise<void> {
-    const server = createServer(db, { readOnly, ...(tokenClient === null ? {} : { tokenClient }) });
+  async function openSession(req: IncomingMessage, res: ServerResponse, parsedBody: unknown, tokenClient: string | null, hangarSessionId: string | null): Promise<void> {
+    const server = createServer(db, { readOnly, ...(tokenClient === null ? {} : { tokenClient }), ...(hangarSessionId === null ? {} : { hangarSessionId }) });
     const pending = new Set<ServerResponse>();
     const transport: StreamableHTTPServerTransport = new StreamableHTTPServerTransport({
       sessionIdGenerator: randomUUID,
@@ -493,7 +493,7 @@ export async function startHttpServer(options: StartHttpServerOptions): Promise<
       return;
     }
     if (method === "POST") {
-      await openSession(req, res, parsedBody, admission.client);
+      await openSession(req, res, parsedBody, admission.client, admission.sessionId);
       return;
     }
     sendJsonRpcError(res, 400, -32000, "Bad Request: Mcp-Session-Id header is required");

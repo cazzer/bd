@@ -18,6 +18,13 @@ export interface ToolContext {
    * the SDK has no client info and no token client is bound.
    */
   actor: () => string | undefined;
+  /**
+   * The hangar session the admitting token is bound to (a session token,
+   * hangar-queue decision 4), or null for a host-minted token or a tokenless
+   * loopback session. Taken from the admission result, never from a tool
+   * argument; server.ts refuses `SESSION_REFUSED_TOOLS` when it is set.
+   */
+  hangarSessionId: string | null;
 }
 
 /**

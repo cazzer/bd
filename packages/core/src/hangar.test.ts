@@ -11,7 +11,8 @@ import { randomUUID } from "node:crypto";
 import { inArray, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { clientTokens, hangarCheckIns, hangarMessages, nodes, type Database } from "@breakdown/db";
-import { verifyClientToken } from "./client-tokens.js";
+import { sessionTokenClient, verifyClientToken } from "./client-tokens.js";
+import { upsertEdges } from "./edges.js";
 import {
   HangarSessionNotClaimedByError,
   HangarSessionNotFoundError,
@@ -20,15 +21,18 @@ import {
   InvalidHangarSessionError,
   NodeNotFoundError,
   NotAWorkItemError,
+  ReservedHangarEdgeError,
 } from "./errors.js";
 import {
   appendHangarMessage,
+  assertNoReservedHangarEdges,
   checkHangarTransition,
   claimSession,
   classifyHangarStatus,
   getHangarStatus,
   HANGAR_SESSION_STATES,
   listSessions,
+  MAX_CLAIM_CANDIDATES,
   normalizeHangarSessionMetadata,
   readHangarMessages,
   recordCheckIn,
@@ -515,5 +519,79 @@ describe("messages", () => {
       [a.id, { n: 1 }],
       [b.id, { n: 2 }],
     ]);
+  });
+});
+
+// hangar-queue security review: a row at the head of the queue that cannot
+// be claimed must not fail every claim behind it, and a session's work item
+// is only ever the one the queue linked.
+describe("claimSession passes over a session it cannot claim", () => {
+  async function corrupt(id: string): Promise<void> {
+    await db.execute(sql`UPDATE nodes SET metadata = jsonb_set(metadata, '{repo}', '42'::jsonb) WHERE id = ${id}::uuid`);
+  }
+
+  it("marks a session whose metadata breaks the contract failed with a reason, and claims the next", async () => {
+    const broken = await request("headless");
+    const good = await request("headless");
+    await corrupt(broken.id);
+    const claimed = await claimSession(db, { hangar: hangarNamed("past-broken"), flavors: ["headless"], among: [broken.id, good.id] });
+    expect(claimed!.session.id).toBe(good.id);
+    const failed = await stateOf(broken.id);
+    expect(failed["state"]).toBe("failed");
+    expect(failed["failure_reason"]).toMatch(/breaks the session contract.*repo/);
+  });
+
+  it("marks at most MAX_CLAIM_CANDIDATES per attempt, and the next attempt goes on", async () => {
+    const broken = [];
+    for (let i = 0; i <= MAX_CLAIM_CANDIDATES; i += 1) broken.push(await request("headless"));
+    const good = await request("headless");
+    for (const b of broken) await corrupt(b.id);
+    const among = [...broken.map((b) => b.id), good.id];
+    const hangar = hangarNamed("bounded");
+    expect(await claimSession(db, { hangar, flavors: ["headless"], among })).toBeNull();
+    const states = await Promise.all(broken.map(async (b) => (await stateOf(b.id))["state"]));
+    expect(states.filter((st) => st === "failed")).toHaveLength(MAX_CLAIM_CANDIDATES);
+    const next = await claimSession(db, { hangar, flavors: ["headless"], among });
+    expect(next!.session.id).toBe(good.id);
+  });
+
+  it("marks a session whose token name a live token already holds failed, minting nothing, and claims the next", async () => {
+    const squatted = await request("headless");
+    const good = await request("headless");
+    const client = sessionTokenClient(squatted.id);
+    await db.insert(clientTokens).values({ client, scope: "agent", tokenHash: Buffer.from(randomUUID()) });
+    try {
+      const claimed = await claimSession(db, { hangar: hangarNamed("past-squat"), flavors: ["headless"], among: [squatted.id, good.id] });
+      expect(claimed!.session.id).toBe(good.id);
+      const failed = await stateOf(squatted.id);
+      expect(failed).toMatchObject({ state: "failed", failure_reason: expect.stringContaining(client) });
+      expect(failed).not.toHaveProperty("claimed_by");
+      const minted = await db.select().from(clientTokens).where(inArray(clientTokens.sessionId, [squatted.id]));
+      expect(minted).toHaveLength(0);
+    } finally {
+      await db.delete(clientTokens).where(inArray(clientTokens.client, [client]));
+    }
+  });
+});
+
+describe("run_by integrity", () => {
+  it("counts only the queue's own run_by edge: an agent's edge out of a session names no work item", async () => {
+    const session = await request("headless");
+    const other = await fixtureNode("work_item", "Other work");
+    await db.execute(sql`DELETE FROM edges WHERE src_id = ${session.id}::uuid AND edge_type = 'run_by'`);
+    await upsertEdges(db, fixtureRun, [{ srcId: session.id, dstId: other, edgeType: "run_by", sourceSystem: FIXTURE_SOURCE, weight: 1 }]);
+    const [listed] = (await listSessions(db, { states: ["queued"], workItemId: session.workItemId! })).sessions.filter((x) => x.id === session.id);
+    expect(listed).toBeUndefined();
+    expect((await listSessions(db, { workItemId: other })).sessions.map((x) => x.id)).not.toContain(session.id);
+  });
+
+  it("assertNoReservedHangarEdges refuses source system hangar and any edge out of a session, and allows one into it", async () => {
+    const session = await request("headless");
+    const work = await fixtureNode("work_item", "Some work");
+    await expect(assertNoReservedHangarEdges(db, [{ srcId: work, sourceSystem: "hangar" }])).rejects.toBeInstanceOf(ReservedHangarEdgeError);
+    const refused = await assertNoReservedHangarEdges(db, [{ srcId: work, sourceSystem: "agent" }, { srcId: session.id.toUpperCase(), sourceSystem: "agent" }]).catch((e: unknown) => e);
+    expect(refused).toBeInstanceOf(ReservedHangarEdgeError);
+    expect((refused as Error).message).toContain("batch index 1");
+    await expect(assertNoReservedHangarEdges(db, [{ srcId: work, sourceSystem: "agent" }])).resolves.toBeUndefined();
   });
 });

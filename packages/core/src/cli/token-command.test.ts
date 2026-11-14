@@ -109,6 +109,15 @@ describe("runTokenCli", () => {
     expect(out).toBe("");
   });
 
+  it("refuses a client in the reserved session- namespace with exit 1, saying why", async () => {
+    const name = `session-${randomUUID()}`;
+    created.push(name);
+    const { code, out, err } = await run(["create", name, "--scope", "agent"]);
+    expect(code).toBe(1);
+    expect(out).toBe("");
+    expect(err).toContain("reserved");
+  });
+
   it("create takes --scope before or after the client and records it", async () => {
     const before = clientName();
     const after = clientName();

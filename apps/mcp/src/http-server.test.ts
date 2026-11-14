@@ -28,7 +28,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { createClientToken, revokeClientToken } from "@breakdown/core";
+import { createClientToken, createSessionToken, revokeClientToken, sessionTokenClient } from "@breakdown/core";
 import { clientTokens, createDb, createPool, ingestRuns, nodes, resolveDatabaseUrl, type Database } from "@breakdown/db";
 import { and, eq, inArray } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -464,6 +464,35 @@ describe("client tokens behind a tailnet Host", () => {
     expect(write.status).toBe(200);
     const [run] = await db!.select({ actor: ingestRuns.actor }).from(ingestRuns).where(eq(ingestRuns.id, runIdOf(write)));
     expect(run?.actor).toBe(`${client} via ${RAW_CLIENT.name} ${RAW_CLIENT.version}`);
+  }, 30_000);
+
+  it("narrows a hangar session's token: brain_merge and brain_hangar_request are neither listed nor callable; a host agent token keeps them", async () => {
+    const { running, host } = await startTailnet();
+    const hangarSession = randomUUID();
+    tokenClients.push(sessionTokenClient(hangarSession));
+    const { token } = await db!.transaction((tx) => createSessionToken(tx, hangarSession));
+    const session = await rawInitialize(running.url, { host, authorization: `Bearer ${token}` });
+
+    const listed = await rawRequest(running.url, { method: "POST", headers: session, body: JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/list" }) });
+    const names = (JSON.parse(listed.body) as { result: { tools: { name: string }[] } }).result.tools.map((t) => t.name);
+    expect(names).toContain("brain_write");
+    expect(names).not.toContain("brain_merge");
+    expect(names).not.toContain("brain_hangar_request");
+
+    for (const [name, args] of [["brain_merge", { loserId: randomUUID(), survivorId: randomUUID() }], ["brain_hangar_request", { repo: "cazzer/bd", workItemId: randomUUID(), flavor: "headless" }]] as const) {
+      const called = await rawRequest(running.url, { method: "POST", headers: session, body: JSON.stringify({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name, arguments: args } }) });
+      const result = (JSON.parse(called.body) as { result: { isError: boolean; content: { text: string }[] } }).result;
+      expect(result.isError).toBe(true);
+      expect(result.content[0]!.text).toContain(`'${name}' is not available to a hangar session's token`);
+    }
+    const map = await rawRequest(running.url, { method: "POST", headers: session, body: BRAIN_MAP_CALL });
+    expect((JSON.parse(map.body) as { result: { isError?: boolean } }).result.isError).toBeFalsy();
+
+    const { token: hostAgent } = await newToken("host-agent", "agent");
+    const hostSession = await rawInitialize(running.url, { host, authorization: `Bearer ${hostAgent}` });
+    const hostListed = await rawRequest(running.url, { method: "POST", headers: hostSession, body: JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/list" }) });
+    const hostNames = (JSON.parse(hostListed.body) as { result: { tools: { name: string }[] } }).result.tools.map((t) => t.name);
+    expect(hostNames).toEqual(expect.arrayContaining(["brain_merge", "brain_hangar_request"]));
   }, 30_000);
 
   it("ends a revoked token's open SSE stream on the session's next request", async () => {

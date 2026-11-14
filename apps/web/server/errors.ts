@@ -157,7 +157,7 @@ export function mapCoreError(procedureName: string, err: unknown): TRPCError {
     return actionable("BAD_REQUEST", err, "Only inbox items take an inbox decision.");
   }
   if (err instanceof InboxItemNotThisSessionError) {
-    return actionable("FORBIDDEN", err, "A session token completes only the items its own session filed.");
+    return actionable("FORBIDDEN", err, "A session token completes or re-sends only the items its own session filed.");
   }
   if (err instanceof NodeNotFoundError) {
     return actionable("NOT_FOUND", err, "Use search to find a valid node id, or getNodes to verify one you already have.");

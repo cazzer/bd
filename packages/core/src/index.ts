@@ -41,6 +41,7 @@ export {
   InvalidViewError,
   InvalidEventTimeError,
   InvalidClientNameError,
+  ReservedClientNameError,
   ClientTokenExistsError,
   ClientTokenNotFoundError,
   InvalidHangarSessionError,
@@ -48,6 +49,8 @@ export {
   HangarTransitionError,
   HangarSessionNotClaimedByError,
   ReservedHangarNodeError,
+  ReservedHangarEdgeError,
+  HangarSessionMergeError,
 } from "./errors.js";
 
 // `asPgError`/`PgErrorLike` are re-exported (not just used internally) so
@@ -575,6 +578,7 @@ export {
   listInbox,
   decideInboxItem,
   carryForwardInboxDecisions,
+  PERSON_DECIDED_INBOX_STATUSES,
   requestInboxItem,
   completeInboxItem,
   handOffInboxItem,
@@ -672,6 +676,8 @@ export {
   MAX_HANGAR_FIELD_LENGTH,
   MAX_HANGAR_DISK_PATH_LENGTH,
   MAX_HANGAR_REQUEUE_REASON_LENGTH,
+  MAX_HANGAR_FAILURE_REASON_LENGTH,
+  MAX_CLAIM_CANDIDATES,
   MAX_HANGAR_MESSAGE_KIND_LENGTH,
   MAX_HANGAR_CAPACITY_CHARS,
   MAX_HANGAR_MESSAGE_BODY_CHARS,
@@ -687,6 +693,7 @@ export {
   classifyHangarStatus,
   appendHangarMessage,
   readHangarMessages,
+  assertNoReservedHangarEdges,
   type HangarFlavor,
   type HangarSessionState,
   type HangarSession,

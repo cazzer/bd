@@ -395,7 +395,7 @@ export class InvalidLookupIdError extends KnowledgeStoreError {
 export class LookupFailedError extends KnowledgeStoreError {
   constructor(
     message: string,
-    readonly operation: "getNodes" | "getNeighbors" | "getNodeHistory" | "listNodes" | "getWorkItemReadiness" | "patchWorkItem" | "resolveDefaultViews" | "getSubtree" | "getTimeline" | "getNodesByExternalId" | "getWorkBoard" | "listBeadsProjects" | "getBoardItem" | "getRegisteredBeadsProject" | "listPendingReviews" | "listInbox" | "decideInboxItem" | "findNodes",
+    readonly operation: "getNodes" | "getNeighbors" | "getNodeHistory" | "listNodes" | "getWorkItemReadiness" | "patchWorkItem" | "resolveDefaultViews" | "getSubtree" | "getTimeline" | "getNodesByExternalId" | "getWorkBoard" | "listBeadsProjects" | "getBoardItem" | "getRegisteredBeadsProject" | "listPendingReviews" | "listInbox" | "decideInboxItem" | "findNodes" | "requestInboxItem",
     options?: ErrorOptions,
   ) {
     super(message, options);
@@ -620,13 +620,18 @@ export class NotAnInboxItemError extends KnowledgeStoreError {
   }
 }
 
-/** A session-bound token tried to complete an inbox item another session (or no session) filed (hangar-queue decision 9). */
+/**
+ * A session-bound token tried to complete, or re-send, an inbox item another
+ * session (or no session: a local pane's or a person's) filed (hangar-queue
+ * decision 9). Nothing was written.
+ */
 export class InboxItemNotThisSessionError extends KnowledgeStoreError {
   constructor(
     readonly nodeId: string,
     readonly sessionId: string,
+    readonly attempted: "complete" | "re-send" = "complete",
   ) {
-    super(`inbox item ${nodeId} was not filed by hangar session ${sessionId}, so its token cannot complete it`);
+    super(`inbox item ${nodeId} was not filed by hangar session ${sessionId}, so its token cannot ${attempted} it`);
   }
 }
 
@@ -638,6 +643,13 @@ export class InvalidClientNameError extends KnowledgeStoreError {
     super(
       `invalid client name ${JSON.stringify(client)}: it must start with a letter or digit and hold at most 64 letters, digits, ".", "_", or "-"`,
     );
+  }
+}
+
+/** A host-minted token named a client in the `session-` namespace, which only a hangar claim mints (client-tokens.ts). */
+export class ReservedClientNameError extends KnowledgeStoreError {
+  constructor(readonly client: string) {
+    super(`client name ${JSON.stringify(client)} is reserved: names starting with "session-" are minted only by a hangar claim, for that session; choose another name`);
   }
 }
 
@@ -711,5 +723,34 @@ export class HangarSessionNotClaimedByError extends KnowledgeStoreError {
 export class ReservedHangarNodeError extends KnowledgeStoreError {
   constructor(readonly itemLabel: string) {
     super(`node ${itemLabel} is reserved for the hangar queue (node_type "hangar_session" and source_system "hangar" are written only by it)`);
+  }
+}
+
+/**
+ * `mergeNodes` was asked to merge a hangar session (node_type
+ * `hangar_session` or source system `hangar`) away or into something, or to
+ * merge something into one. A session's identity is its token's binding and
+ * its inbox items' `session`; a merge would silently move or orphan both.
+ * Nothing was written.
+ */
+export class HangarSessionMergeError extends KnowledgeStoreError {
+  constructor(
+    readonly loserId: string,
+    readonly survivorId: string,
+    readonly sessionNodeId: string,
+  ) {
+    super(`cannot merge node ${loserId} into ${survivorId}: node ${sessionNodeId} is a hangar session, which is never merged`);
+  }
+}
+
+/**
+ * A generic edge writer (brain_link) was given an edge only the hangar paths
+ * write: one under source system `hangar`, or one whose source is a hangar
+ * session (its `run_by` link is written when the session is requested).
+ * Nothing was written.
+ */
+export class ReservedHangarEdgeError extends KnowledgeStoreError {
+  constructor(readonly itemLabel: string, reason: string) {
+    super(`edge ${itemLabel} is reserved for the hangar queue: ${reason}`);
   }
 }

@@ -22,7 +22,7 @@ https://<breakdown-host>/hangar/v1/...            # behind a TLS proxy such as `
 
 - **Authentication.** Every request carries `Authorization: Bearer <token>`. A missing, unknown, or revoked token gets `401` with `WWW-Authenticate: Bearer`. A live token whose scope the endpoint does not accept gets `403`. Tokens never go in a query string, which is ignored.
 - **Scopes.** Each endpoint takes exactly one scope: `hangar` for the service endpoints, and `agent` with a bound session for `GET /hangar/v1/messages`. Breakdown's other scope, `human`, is refused on every endpoint here. The `hangar` token is refused everywhere else in Breakdown: the web API's other routes and MCP.
-- **Requests must arrive off loopback.** Breakdown trusts a request from its own machine (loopback peer, loopback `Host`) without reading any token, and treats it as the local person (`human`), so every endpoint here refuses it with `403`. Hangar reaches Breakdown over the tailnet, from another machine. If a proxy on Breakdown's machine fronts the server, it must set `X-Forwarded-For` (or `X-Real-IP` / `Forwarded`) to the remote address, which `tailscale serve` does. A forwarder that adds no such header (socat, `ssh -R`, a bare nginx `proxy_pass`) makes remote requests look local, and they will be refused here.
+- **Requests must arrive off loopback.** Breakdown trusts a request from its own machine (loopback peer, loopback `Host`) without reading any token, and treats it as the local person (`human`), so every endpoint here refuses it with `403`. Hangar reaches Breakdown over the tailnet, from another machine. If a proxy on Breakdown's machine fronts the server, it must set `X-Forwarded-For` (or `X-Real-IP` / `Forwarded`) to the remote address, which `tailscale serve` does. **A forwarder that adds no such header (socat, `ssh -R`, a bare nginx `proxy_pass`) is unsafe and must not be used.** It makes every remote request look local, so every peer that can reach it is the tokenless local person on the web API (tRPC) and on MCP: it can read the whole store and make every decision a person makes, with no token at all. Its requests to the endpoints here are refused, but that is the least of it.
 - **Host.** The `Host` header must be a name the operator allowed with `--allow-host`, either at the server's port or bare (a proxy on 443). Any other `Host` gets `403`, token or not. Use the tailnet hostname Breakdown is served under.
 - **Content.** Every response body is JSON (`Content-Type: application/json; charset=utf-8`, `Cache-Control: no-store`). `POST` and `PATCH` requests must send `Content-Type: application/json` and a UTF-8 JSON body of at most 64 KiB (65,536 bytes). `GET` requests send no body. Unknown request fields are ignored, and responses may carry fields this document does not list yet; ignore those (see [Versioning](#versioning)).
 - **Read-only servers.** A Breakdown started with `BRAIN_READ_ONLY` answers `GET`s and refuses every `POST` and `PATCH` with `403 read_only`. That includes check-in and claim, so to hangar a read-only Breakdown has no work.
@@ -131,6 +131,7 @@ Response `200`, nothing to claim within `wait_s`:
 { "session": null }
 ```
 
+- A queued session that cannot be claimed (its stored record breaks the session contract, or a live token already holds its `session-<id>` client name) is set to `failed` with a reason recorded on it, and the claim goes on to the next match. A claim passes over at most a few such sessions per attempt.
 - `token` is the session token, returned **only in this response**. Breakdown stores only its hash, so it cannot be shown again. Store it before anything else, and see [Session tokens](#session-tokens) for what to do if you lose it.
 - A claimed session is `claimed`. Report `running` once the worker starts, or [requeue](#post-hangarv1sessionsidrequeue--scope-hangar) it if you cannot start it.
 
@@ -312,9 +313,11 @@ stateDiagram-v2
 - **Give it to the worker.** Pass it into the container that runs the session. It is the worker's only credential. With it, the worker can:
   - read its messages here, with `GET /hangar/v1/messages`;
   - use Breakdown's MCP server (`Authorization: Bearer <token>` on `/mcp`, port 5320 by default), where its writes are attributed to `session-<id>`;
-  - file and complete inbox requests with the inbox scripts (`BREAKDOWN_API=<web base URL> BREAKDOWN_TOKEN=<token> bin/inbox request …`). An item filed this way is bound to the session, and the person's decision on it arrives as an `inbox_decision` message. The token can complete only items its own session filed.
+  - file and complete inbox requests with the inbox scripts (`BREAKDOWN_API=<web base URL> BREAKDOWN_TOKEN=<token> bin/inbox request …`). An item filed this way is bound to the session, and the person's decision on it arrives as an `inbox_decision` message. The token can re-send and complete only items its own session filed. A key that names another session's item, or a local or ingested one, is refused, and nothing is written.
 
-  It cannot decide anything a person decides, and it cannot use the hangar endpoints.
+  It cannot decide anything a person decides: no agent write, with any token, can set an inbox item to `accepted`, `changes`, or `dismissed`, or write its feedback. A new item is always `pending`. It cannot use the hangar endpoints.
+- **What it can reach.** A session token is a full `agent` credential on MCP, minus two tools. It can read the whole store, including every inbox item, not only its session's, and it can write nodes and edges anywhere outside the reserved hangar ones. It cannot call `brain_merge` or `brain_hangar_request`. Those tools are neither listed nor run for it, so it cannot merge nodes or queue more sessions. Treat it as a credential that can read and write your knowledge store, and hand it only to the worker it was minted for.
+- **A leaked hangar token mints these.** Anyone holding the `hangar` token can claim queued sessions and receive their session tokens. To stop that, revoke the hangar token (`pnpm -s client-token revoke <hangar name>`). Its sessions' tokens die as those sessions end. Revoke a session token on its own with `pnpm -s client-token revoke session-<id>`.
 - **Lifetime.** The token dies when the session reaches `stopped` or `failed`, or is requeued. After that, every request with it gets `401`.
 - **Lost a token?** Breakdown cannot show it again. On startup, and whenever you are unsure, call `GET /hangar/v1/sessions?state=claimed`. Requeue any `claimed` session you hold no token for, with a reason such as `"hangar restarted before starting it"`, and a later claim gets a fresh token. For a `running` session whose worker lost its token, report `failed`.
 
@@ -328,7 +331,7 @@ pnpm -s client-token list                                   # client, scope, bou
 pnpm -s client-token revoke hangar-desktop                  # stops this hangar at once
 ```
 
-The client name, here `hangar-desktop`, is the hangar's identity. Breakdown records it as `claimed_by` and as the hangar's name in check-ins, and it is attributed with every change the hangar makes. Each client has one live token. To rotate, revoke and create again. Tokens are managed only on that host: no API endpoint, MCP tool, or web procedure creates, lists, or revokes one, except the session tokens that claims mint.
+The client name, here `hangar-desktop`, is the hangar's identity. Names starting with `session-` are reserved for the tokens claims mint, and `create` refuses them. Breakdown records it as `claimed_by` and as the hangar's name in check-ins, and it is attributed with every change the hangar makes. Each client has one live token. To rotate, revoke and create again. Tokens are managed only on that host: no API endpoint, MCP tool, or web procedure creates, lists, or revokes one, except the session tokens that claims mint.
 
 ## Errors
 

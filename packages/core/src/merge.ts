@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import type { Database } from "@breakdown/db";
-import { MergeFailedError, NodeNotFoundError, SelfMergeError } from "./errors.js";
+import { HangarSessionMergeError, MergeFailedError, NodeNotFoundError, SelfMergeError } from "./errors.js";
+import { HANGAR_SESSION_NODE_TYPE, HANGAR_SOURCE_SYSTEM } from "./hangar.js";
 import type { IngestRunHandle } from "./ingest-runs.js";
 import { asPgError, formatPgInfo } from "./sql-helpers.js";
 
@@ -19,6 +20,7 @@ export interface MergeResult {
 type NodeMergeRow = {
   id: string;
   merged_into: string | null;
+  hangar: boolean;
 }
 
 /** Postgres SQLSTATE for a detected deadlock. */
@@ -59,6 +61,14 @@ const MAX_DEADLOCK_RETRIES = 3;
  *      node — exactly the shape the trigger would otherwise reject one
  *      row at a time.
  *
+ * A hangar session (node_type `hangar_session` or source system `hangar`)
+ * is never merged, as loser, as requested survivor, as the survivor that
+ * resolves, or as a chain member the merge would repoint: the refusal
+ * (`HangarSessionMergeError`) comes before any write. This UPDATE is the
+ * only statement in the codebase that sets `merged_into`, so the refusal
+ * alone keeps every session canonical — and with it, its session token's
+ * binding and its inbox items' `session` (hangar-queue, security review).
+ *
  * Every step above runs inside one transaction, so a failure at any point
  * leaves no partial redirect. A genuine database failure (not one of the
  * `NodeNotFoundError`/`SelfMergeError` validation errors above, which are
@@ -89,7 +99,7 @@ export async function mergeNodes(db: Database, loserId: string, survivorId: stri
     try {
       return await runMergeTransaction(db, loserId, survivorId, run);
     } catch (err) {
-      if (err instanceof NodeNotFoundError || err instanceof SelfMergeError) {
+      if (err instanceof NodeNotFoundError || err instanceof SelfMergeError || err instanceof HangarSessionMergeError) {
         throw err;
       }
       const pg = asPgError(err);
@@ -106,11 +116,16 @@ export async function mergeNodes(db: Database, loserId: string, survivorId: stri
   }
 }
 
+const IS_HANGAR = sql`(node_type = ${HANGAR_SESSION_NODE_TYPE} OR source_system = ${HANGAR_SOURCE_SYSTEM})`;
+
 async function runMergeTransaction(db: Database, loserId: string, survivorId: string, run: IngestRunHandle): Promise<MergeResult> {
   return db.transaction(async (tx) => {
     const lookup = await tx.execute<NodeMergeRow>(sql`
-      SELECT id, merged_into FROM nodes WHERE id = ${loserId} OR id = ${survivorId} FOR UPDATE
+      SELECT id, merged_into, ${IS_HANGAR} AS hangar FROM nodes WHERE id = ${loserId} OR id = ${survivorId} FOR UPDATE
     `);
+    for (const id of [loserId, survivorId]) {
+      if (lookup.rows.some((r) => r.id === id && r.hangar)) throw new HangarSessionMergeError(loserId, survivorId, id);
+    }
 
     const byId = new Map(lookup.rows.map((r) => [r.id, r.merged_into]));
     if (!byId.has(loserId)) {
@@ -146,10 +161,13 @@ async function runMergeTransaction(db: Database, loserId: string, survivorId: st
     // on the same rows; it is not an incidental side effect of the
     // foreign key on merged_into (that FK protects referential integrity,
     // not this operation's atomicity, and would silently stop providing
-    // it if the FK were ever relaxed).
-    await tx.execute(sql`
-      SELECT id FROM nodes WHERE id = ${loserId} OR merged_into = ${loserId} FOR UPDATE
+    // it if the FK were ever relaxed). The resolved survivor is locked and
+    // checked with them: none of these rows may be a hangar session.
+    const affected = await tx.execute<{ id: string; hangar: boolean }>(sql`
+      SELECT id, ${IS_HANGAR} AS hangar FROM nodes WHERE id = ${loserId} OR merged_into = ${loserId} OR id = ${canonicalId} FOR UPDATE
     `);
+    const session = affected.rows.find((r) => r.hangar);
+    if (session) throw new HangarSessionMergeError(loserId, survivorId, session.id);
 
     // ingest_run_id is stamped in the same statement as merged_into so the
     // history trigger's revision names this run — see the doc comment on

@@ -35,7 +35,21 @@ export interface CreateServerOptions {
    * client and the software it ran (tailnet-hosting decision 4).
    */
   tokenClient?: string;
+  /**
+   * The hangar session the admitting token is bound to, when it is a session
+   * token (http-server.ts, from the admission result). Such a session is
+   * neither shown nor allowed `SESSION_REFUSED_TOOLS`.
+   */
+  hangarSessionId?: string;
 }
+
+/**
+ * Tools a session-bound token may not call (hangar-queue, security review):
+ * a remote, possibly prompt-injected worker must not merge nodes — a merge
+ * is how one session could absorb another or vanish a work item — or queue
+ * more remote sessions, each of which mints another token like its own.
+ */
+export const SESSION_REFUSED_TOOLS: ReadonlySet<string> = new Set(["brain_merge", "brain_hangar_request"]);
 
 /** Strips zod's `$schema` key: `Tool.inputSchema` is a bare JSON Schema object, not a document with its own `$schema` pointer. */
 function toToolInputSchema(schema: z.ZodTypeAny): Tool["inputSchema"] {
@@ -47,13 +61,14 @@ export function createServer(db: Database, options: CreateServerOptions = {}): S
   const readOnly = options.readOnly ?? false;
   const responseCharBudget = options.responseCharBudget ?? DEFAULT_RESPONSE_CHAR_BUDGET;
   const tokenClient = options.tokenClient;
+  const hangarSessionId = options.hangarSessionId ?? null;
 
   // Every tool is dispatchable by name (so a write tool called while
   // read-only gets the explanatory refusal below, not "unknown tool") —
   // but only non-write tools (or all tools, outside read-only mode) are
   // advertised in tools/list.
   const byName = new Map<string, ToolDef>(allTools.map((t) => [t.name, t]));
-  const advertised = readOnly ? allTools.filter((t) => !t.isWrite) : allTools;
+  const advertised = allTools.filter((t) => !(readOnly && t.isWrite) && !(hangarSessionId !== null && SESSION_REFUSED_TOOLS.has(t.name)));
 
   const server = new Server(
     { name: "breakdown-brain", version: "0.1.0" },
@@ -88,6 +103,7 @@ export function createServer(db: Database, options: CreateServerOptions = {}): S
       if (tokenClient === undefined) return software;
       return software ? `${tokenClient} via ${software}` : tokenClient;
     },
+    hangarSessionId,
   };
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -112,6 +128,18 @@ export function createServer(db: Database, options: CreateServerOptions = {}): S
           {
             type: "text",
             text: `Refused: this server is running in read-only mode. '${name}' is disabled and nothing was persisted. Restart the server without read-only mode to enable writes.`,
+          },
+        ],
+      };
+    }
+
+    if (hangarSessionId !== null && SESSION_REFUSED_TOOLS.has(name)) {
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: `Refused: '${name}' is not available to a hangar session's token (session ${hangarSessionId}), and nothing was persisted. Ask the person to merge nodes or queue another session from their own Claude session.`,
           },
         ],
       };

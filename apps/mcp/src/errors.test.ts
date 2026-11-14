@@ -18,6 +18,8 @@ import {
   InvalidIngestRunError,
   HangarTransitionError,
   ReservedHangarNodeError,
+  ReservedHangarEdgeError,
+  HangarSessionMergeError,
   InvalidLookupIdError,
   InvalidLookupOptionError,
   NotAWorkItemError,
@@ -282,6 +284,21 @@ describe("mapError: hangar", () => {
     expect(text).toContain("batch index 1 (hangar/x)");
     expect(text).toMatch(/nothing from this call was persisted/i);
     expect(text).toContain("brain_hangar_request");
+    expect(text).not.toMatch(STACK_LINE);
+  });
+
+  it("maps ReservedHangarEdgeError to the edge, nothing persisted, and where run_by comes from", () => {
+    const text = textOf(mapError("brain_link", new ReservedHangarEdgeError("at batch index 2", "its source is a hangar session")));
+    expect(text).toContain("batch index 2");
+    expect(text).toMatch(/nothing from this call was persisted/i);
+    expect(text).toContain("brain_hangar_request");
+    expect(text).not.toMatch(STACK_LINE);
+  });
+
+  it("maps HangarSessionMergeError to the session and says not to merge sessions", () => {
+    const text = textOf(mapError("brain_merge", new HangarSessionMergeError("a", "b", "a")));
+    expect(text).toContain("node a is a hangar session");
+    expect(text).toMatch(/nothing was merged/i);
     expect(text).not.toMatch(STACK_LINE);
   });
 
