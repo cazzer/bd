@@ -82,7 +82,7 @@ Long-poll is a loop that re-runs the claim (or the message read) every second un
 ### 4. Session tokens
 
 - `client_tokens` gains `session_id uuid null` (indexed, no foreign key: a session node may later be merged or tombstoned, and the token's lifetime is driven by session state, not row existence).
-- The claim inserts `client = 'session-' || left(session_uuid, 8)` with scope `agent`, in the claim's transaction, and returns the token once.
+- The claim inserts `client = 'session-' || session_uuid` (the full uuid, so live session clients are unique by construction) with scope `agent`, in the claim's transaction, and returns the token once.
 - Moving the session to `stopped` or `failed`, or requeueing it, sets `revoked_at` in the same transaction.
 - `verifyClientToken` returns `{ client, scope, sessionId }`, and admission passes `sessionId` through to both servers' contexts.
 - The host CLI keeps refusing a second live token per client. Session clients are unique by construction.
@@ -134,6 +134,17 @@ Endpoints:
 | `GET` | `/hangar/v1/messages` | agent, session-bound |
 
 `GET /sessions` lists the caller hangar's claimed, running, and stopped sessions, so it can reconcile after a restart.
+
+### 9. Amendments after planning
+
+- **Routes on this branch.** The web routes are `connect`, `reviewImages`, `hangar`, and `trpc`. `/healthz` and static serving arrive with tailnet-hosting group 2 (PR #3); when it lands, `health` admits any scope.
+- **Procedure names are flat.** The agent set is exactly `inbox`, `inboxRequest`, `inboxComplete`, `beadsProjects`, and `hangarStatus`.
+- **`inboxComplete` from a session-bound token** applies only to items that carry that token's own session.
+- **Delivery points.** Decide and release both go through `writeInboxFeedback`, which appends the message in its transaction. On a session item, hand-off (`inboxOpenSession`) first tells the session it was taken over locally, then clears `session` so later decisions go to the local pane. `bin/inbox-watch` skips session items.
+- **Loopback ignores a presented token** (admission step 3). Tests and the end-to-end script therefore reach the hangar endpoints through a tailnet `Host` or a non-loopback `X-Forwarded-For`, as hangar does in production.
+- **Claim probes before opening an ingest run,** so a long-poll doesn't write an empty run every second. Message appends take a per-session advisory lock, so a cursor can't skip a message committed out of id order.
+- **`bin/inbox` and `bin/inbox-watch` send `Authorization: Bearer $BREAKDOWN_TOKEN` when it is set.** That variable belongs to the scripts, not the servers.
+- **A refused MCP request closes its session only when a credential caused the refusal:** unknown or revoked token, or wrong scope.
 
 ## Risks / Trade-offs
 
