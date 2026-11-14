@@ -4,8 +4,10 @@
 // "Workers receive their messages by long-poll"). The database is shared
 // with live data: every fixture is this file's own, every claim names its
 // fixtures through `among` so it can never take a real queued request, and
-// nothing asserts on a table as a whole. Cleanup is by id, hangar name, and
-// run actor.
+// nothing asserts on a table as a whole. Queued fixtures are requested in
+// 2999, so a real hangar claiming oldest first reaches them last, and every
+// hangar name starts with `test-`. Cleanup is by id, hangar name, and run
+// actor.
 
 import { randomUUID } from "node:crypto";
 import { inArray, sql } from "drizzle-orm";
@@ -50,7 +52,7 @@ let pool: TestPool;
 let db: Database;
 let fixtureRun: IngestRunHandle;
 const suffix = uniqueSuffix().slice(0, 12);
-const ACTOR_PREFIX = `hgt-${suffix}`;
+const ACTOR_PREFIX = `test-hgt-${suffix}`;
 const FIXTURE_SOURCE = `hangar-test-${suffix}`;
 const REQUESTER = `${ACTOR_PREFIX}-requester`;
 const fixtureNodes: string[] = [];
@@ -87,8 +89,15 @@ async function fixtureNode(nodeType: string, title: string): Promise<string> {
   return id;
 }
 
+/** Far in the future, a millisecond apart in request order: oldest-first among fixtures, last behind any real request. */
+let requested = 0;
+function futureAt(): Date {
+  requested += 1;
+  return new Date(Date.UTC(2999, 0, 1) + requested);
+}
+
 async function request(flavor: string, workItemId?: string) {
-  const result = await requestSession(db, { repo: "cazzer/bd", workItemId: workItemId ?? (await fixtureNode("work_item", "Fix the thing")), flavor, actor: REQUESTER });
+  const result = await requestSession(db, { repo: "cazzer/bd", workItemId: workItemId ?? (await fixtureNode("work_item", "Fix the thing")), flavor, actor: REQUESTER, requestedAt: futureAt() });
   sessionIds.push(result.session.id);
   return result.session;
 }
@@ -194,7 +203,8 @@ describe("checkHangarTransition", () => {
 describe("requestSession", () => {
   it("queues a session node with a run_by edge to the work item, under a hangar run naming the requester", async () => {
     const workItemId = await fixtureNode("work_item", "Ship the hangar queue");
-    const { session, status } = await requestSession(db, { repo: "cazzer/bd", workItemId, flavor: "headless", actor: REQUESTER });
+    const requestedAt = futureAt();
+    const { session, status } = await requestSession(db, { repo: "cazzer/bd", workItemId, flavor: "headless", actor: REQUESTER, requestedAt });
     sessionIds.push(session.id);
 
     expect(session).toMatchObject({
@@ -208,7 +218,7 @@ describe("requestSession", () => {
       claimedBy: null,
     });
     expect(session.externalId).toMatch(/^[0-9a-f-]{36}$/);
-    expect(session.occurredAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    expect(session.occurredAt).toBe(requestedAt.toISOString());
     expect(["online", "offline", "never"]).toContain(status.state);
     expect(status.counts.queued).toBeGreaterThanOrEqual(1);
 
@@ -218,6 +228,19 @@ describe("requestSession", () => {
       WHERE n.id = ${session.id}::uuid
     `);
     expect(stored.rows).toEqual([{ node_type: "hangar_session", edge_type: "run_by", dst_id: workItemId, actor: REQUESTER, run_source: "hangar" }]);
+  });
+
+  it("stamps requested_at from the database's clock when no test seam names one", async () => {
+    const workItemId = await fixtureNode("work_item", "Requested now");
+    const before = new Date((await db.execute<{ now: Date }>(sql`SELECT now() AS now`)).rows[0]!.now);
+    const { session } = await requestSession(db, { repo: "cazzer/bd", workItemId, flavor: "headless", actor: REQUESTER });
+    sessionIds.push(session.id);
+    // Claimed at once by this file, so a real hangar has no time to take it.
+    await claimSession(db, { hangar: hangarNamed("now-claim"), flavors: ["headless"], among: [session.id] });
+    const after = new Date((await db.execute<{ now: Date }>(sql`SELECT now() AS now`)).rows[0]!.now);
+    const at = Date.parse(session.occurredAt!);
+    expect(at).toBeGreaterThanOrEqual(before.getTime());
+    expect(at).toBeLessThanOrEqual(after.getTime());
   });
 
   it("refuses a node that is not a work item, and a missing one", async () => {
@@ -335,6 +358,23 @@ describe("updateSession and requeueSession", () => {
     expect(await stateOf(session.id)).toEqual(before);
   });
 
+  it("opens no ingest run for a refused update or requeue: the checks run before the run", async () => {
+    const { session, hangar } = await claimed("refused-runs");
+    const runsBy = async (actor: string): Promise<number> => (await db.execute(sql`SELECT 1 FROM ingest_runs WHERE actor = ${actor}`)).rows.length;
+    const intruder = hangarNamed("refused-intruder");
+    await expect(updateSession(db, { hangar: intruder, id: session.id, state: "running" })).rejects.toBeInstanceOf(HangarSessionNotClaimedByError);
+    await expect(requeueSession(db, { hangar: intruder, id: session.id, reason: "mine" })).rejects.toBeInstanceOf(HangarSessionNotClaimedByError);
+    await expect(updateSession(db, { hangar: intruder, id: randomUUID(), state: "running" })).rejects.toBeInstanceOf(HangarSessionNotFoundError);
+    expect(await runsBy(intruder)).toBe(0);
+
+    const claimerRuns = await runsBy(hangar);
+    await expect(updateSession(db, { hangar, id: session.id, state: "queued" })).rejects.toBeInstanceOf(HangarTransitionError);
+    await updateSession(db, { hangar, id: session.id, state: "running" });
+    await expect(requeueSession(db, { hangar, id: session.id, reason: "too late" })).rejects.toBeInstanceOf(HangarTransitionError);
+    // Only the accepted update opened one.
+    expect(await runsBy(hangar)).toBe(claimerRuns + 1);
+  });
+
   it("refuses a queued session, which no hangar holds, and a node that is not a session", async () => {
     const session = await request("headless");
     await expect(updateSession(db, { hangar: hangarNamed("early"), id: session.id, state: "running" })).rejects.toBeInstanceOf(HangarSessionNotClaimedByError);
@@ -412,11 +452,14 @@ describe("listSessions", () => {
 describe("check-ins and status", () => {
   it("records a check-in and reports that hangar online with its version and interval", async () => {
     const hangar = hangarNamed("checker");
-    expect(await recordCheckIn(db, { hangar, version: "0.3.0", capacity: { slots: 2 } })).toEqual({ intervalS: 30 });
-    expect(await recordCheckIn(db, { hangar, version: "0.3.1" })).toEqual({ intervalS: 30 });
+    expect(await recordCheckIn(db, { hangar, version: "0.3.0", capacity: { slots: 2 } })).toEqual({ intervalS: 30, now: expect.any(Date) });
+    const second = await recordCheckIn(db, { hangar, version: "0.3.1" });
+    expect(second.intervalS).toBe(30);
     const rows = await db.select().from(hangarCheckIns).where(inArray(hangarCheckIns.hangar, [hangar]));
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ version: "0.3.1", capacity: null });
+    // `now` is the database's own: the time it recorded the check-in at.
+    expect(second.now.getTime()).toBe(new Date(rows[0]!.lastSeenAt).getTime());
 
     const status = await getHangarStatus(db, { hangar });
     expect(status).toMatchObject({ state: "online", hangar, version: "0.3.1", intervalS: 30 });

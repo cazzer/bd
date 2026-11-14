@@ -8,13 +8,15 @@
 //
 // The database is shared with live data. Every claim goes through the
 // `claimAmong` seam, set per test to this file's own fixtures, so no claim
-// can take a real queued request. Tokens, check-ins, sessions, messages, and
-// runs are this file's own and deleted by name, id, or actor prefix; nothing
-// asserts on a table as a whole.
+// can take a real queued request. Queued fixtures are requested in 2999, so
+// a real hangar claiming oldest first reaches them last, and every hangar
+// and token name starts with `test-`. Tokens, check-ins, sessions, messages,
+// and runs are this file's own and deleted by name, id, or actor prefix;
+// nothing asserts on a table as a whole.
 
 import { randomUUID } from "node:crypto";
 import { createServer, request, type IncomingHttpHeaders, type Server } from "node:http";
-import type { AddressInfo } from "node:net";
+import type { AddressInfo, Socket } from "node:net";
 import { appendHangarMessage, closeIngestRun, createClientToken, openIngestRun, requestSession, upsertNodes, verifyClientToken, type IngestRunHandle } from "@breakdown/core";
 import { clientTokens, createDb, createPool, hangarCheckIns, hangarMessages, nodes, resolveDatabaseUrl, type Database } from "@breakdown/db";
 import { createHTTPHandler } from "@trpc/server/adapters/standalone";
@@ -22,12 +24,12 @@ import { and, eq, inArray, like, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createContextFactory } from "./context.js";
 import { createRequestDispatcher } from "./dispatch.js";
-import { createHangarHandler, HANGAR_ENDPOINTS, MAX_HANGAR_BODY_BYTES } from "./hangar-api.js";
+import { CLAIMER_GONE_REASON, createHangarHandler, HANGAR_ENDPOINTS, MAX_CONCURRENT_LONG_POLLS, MAX_HANGAR_BODY_BYTES } from "./hangar-api.js";
 import { appRouter } from "./router.js";
 
 const TAILNET = "breakdown.tail.example";
 const suffix = randomUUID().slice(0, 8);
-const PREFIX = `hgapi-${suffix}`;
+const PREFIX = `test-hgapi-${suffix}`;
 const HANGAR_A = `${PREFIX}-a`;
 const HANGAR_B = `${PREFIX}-b`;
 const WORKER = `${PREFIX}-worker`;
@@ -46,10 +48,20 @@ const sessionIds: string[] = [];
 const fixtureNodes: string[] = [];
 /** The sessions a claim may take right now (the `claimAmong` seam). */
 let among: string[] = [];
+/** Runs once at the start of the next claim attempt (read through the `claimAmong` seam). */
+let onClaimAttempt: (() => void) | null = null;
+/** The server side of the most recent request's connection. */
+let lastRequestSocket: Socket | null = null;
+/** Far in the future, a millisecond apart in request order (module header). */
+let requested = 0;
+const futureAt = (): Date => new Date(Date.UTC(2999, 0, 1) + ++requested);
 
 async function listen(hangarReadOnly: boolean): Promise<number> {
   let dispatch: ReturnType<typeof createRequestDispatcher> | null = null;
-  const server = createServer((req, res) => dispatch!(req, res));
+  const server = createServer((req, res) => {
+    lastRequestSocket = req.socket;
+    void dispatch!(req, res);
+  });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   servers.push(server);
   const p = (server.address() as AddressInfo).port;
@@ -60,7 +72,16 @@ async function listen(hangarReadOnly: boolean): Promise<number> {
     connect: async (_req, res) => void res.writeHead(500).end(),
     health: async (_req, res) => void res.writeHead(500).end(),
     reviewImages: async (_req, res) => void res.writeHead(500).end(),
-    hangar: createHangarHandler({ db, readOnly: hangarReadOnly, claimAmong: () => among }),
+    hangar: createHangarHandler({
+      db,
+      readOnly: hangarReadOnly,
+      claimAmong: () => {
+        const hook = onClaimAttempt;
+        onClaimAttempt = null;
+        hook?.();
+        return among;
+      },
+    }),
     trpc: createHTTPHandler({ router: appRouter, createContext: createContextFactory(db), basePath: "/trpc/" }),
   });
   return p;
@@ -156,7 +177,7 @@ async function workItem(title: string): Promise<{ id: string; externalId: string
 /** A queued session of `flavor` for a fresh work item. Not claimable until a test lets it be. */
 async function queued(flavor = "headless", title = "Fix the thing"): Promise<{ id: string; workItem: { id: string; externalId: string } }> {
   const item = await workItem(title);
-  const { session } = await requestSession(db, { repo: "cazzer/bd", workItemId: item.id, flavor, actor: `${PREFIX}-requester` });
+  const { session } = await requestSession(db, { repo: "cazzer/bd", workItemId: item.id, flavor, actor: `${PREFIX}-requester`, requestedAt: futureAt() });
   sessionIds.push(session.id);
   return { id: session.id, workItem: item };
 }
@@ -191,9 +212,10 @@ describe("POST /hangar/v1/check-in", () => {
     expect(sent.status, sent.body).toBe(200);
     expect(sent.headers["content-type"]).toBe("application/json; charset=utf-8");
     expect(sent.json).toEqual({ interval_s: 30, now: expect.any(String) });
-    expect(Math.abs(Date.parse(sent.json["now"] as string) - Date.now())).toBeLessThan(5000);
     const [row] = await db.select().from(hangarCheckIns).where(eq(hangarCheckIns.hangar, HANGAR_A));
     expect(row).toMatchObject({ version: "0.4.1", capacity: { slots: 2 } });
+    // `now` is the database's clock: the instant it recorded this check-in.
+    expect(sent.json["now"]).toBe(row!.lastSeenAt.toISOString());
   });
 
   it("refuses a missing or mistyped version with invalid_request naming it", async () => {
@@ -230,6 +252,7 @@ describe("POST /hangar/v1/claim", () => {
       host: null,
       disk_path: null,
       requeue_reason: null,
+      failure_reason: null,
       claimed_by: HANGAR_A,
       claimed_at: expect.any(String),
       requested_at: expect.any(String),
@@ -287,10 +310,14 @@ describe("PATCH /hangar/v1/sessions/:id and GET /hangar/v1/sessions", () => {
     const byDefault = await send("/hangar/v1/sessions", { token: tokens[HANGAR_B] });
     expect((byDefault.json["sessions"] as { id: string }[]).map((s) => s.id)).toContain(theirs.id);
 
+    const runsBy = async (actor: string): Promise<number> => (await db.execute(sql`SELECT 1 FROM ingest_runs WHERE actor = ${actor}`)).rows.length;
+    const runsBefore = await runsBy(HANGAR_A);
     const notMine = await patch(theirs.id, { state: "running" });
     expect(notMine.status).toBe(403);
     expect(errorCode(notMine)).toBe("not_claimer");
     expect((await metadataOf(theirs.id))["state"]).toBe("claimed");
+    // A refused update opens no ingest run.
+    expect(await runsBy(HANGAR_A)).toBe(runsBefore);
 
     expect((await send("/hangar/v1/messages", { token })).status).toBe(200);
     expect((await patch(mine.id, { state: "stopped" })).status).toBe(200);
@@ -303,6 +330,11 @@ describe("PATCH /hangar/v1/sessions/:id and GET /hangar/v1/sessions", () => {
     expect(revoked.status).toBe(401);
     expect(errorCode(revoked)).toBe("unauthorized");
     expect(revoked.headers["www-authenticate"]).toBe("Bearer");
+
+    // Ended sessions are listed only when asked for by state.
+    const listedIdsOf = (sent: Sent): string[] => (sent.json["sessions"] as { id: string }[]).map((s) => s.id);
+    expect(listedIdsOf(await send("/hangar/v1/sessions?limit=200", { token: tokens[HANGAR_A] }))).not.toContain(mine.id);
+    expect(listedIdsOf(await send("/hangar/v1/sessions?state=stopped&limit=200", { token: tokens[HANGAR_A] }))).toContain(mine.id);
   });
 
   it("refuses an empty update, an unknown session, and a bad state filter", async () => {
@@ -390,6 +422,9 @@ describe("scopes", () => {
         const sent = await send(concrete(path), { method, token, host: `127.0.0.1:${port}`, ...(method === "GET" ? {} : { body: {} }) });
         expect(sent.status, `${method} ${path}`).toBe(403);
         expect(errorCode(sent)).toBe("forbidden");
+        expect(sent.json.error?.message).toBe(
+          "Requests over loopback are treated as the local person; reach this API through the tailnet host or a proxy that sets X-Forwarded-For (docs/hangar-api.md).",
+        );
       }
     }
   });
@@ -493,6 +528,50 @@ describe("long-poll", () => {
     await sleep(2500);
     among = [];
     expect((await metadataOf(id))["state"]).toBe("queued");
+  });
+
+  it("requeues a claim that commits after its caller's connection closed, revoking the token nobody received", async () => {
+    const { id } = await queued("display-godot");
+    among = [id];
+    // The connection closes as the attempt starts, so the claim commits for a caller that is gone.
+    onClaimAttempt = () => lastRequestSocket?.destroy();
+    await expect(send("/hangar/v1/claim", { token: tokens[HANGAR_A], body: { flavors: ["display-godot"] } })).rejects.toThrow();
+    among = [];
+    let metadata = await metadataOf(id);
+    for (let tries = 0; tries < 30 && metadata["requeue_reason"] === undefined; tries += 1) {
+      await sleep(100);
+      metadata = await metadataOf(id);
+    }
+    expect(metadata).toMatchObject({ state: "queued", requeue_reason: CLAIMER_GONE_REASON });
+    expect(metadata).not.toHaveProperty("claimed_by");
+    const minted = await db.select({ revokedAt: clientTokens.revokedAt }).from(clientTokens).where(eq(clientTokens.sessionId, id));
+    expect(minted).toHaveLength(1);
+    expect(minted[0]!.revokedAt).not.toBeNull();
+  });
+
+  it(`refuses a client's ${MAX_CONCURRENT_LONG_POLLS + 1}th open long-poll with 429 too_many_waiters, Retry-After 1`, async () => {
+    const { id } = await queued();
+    const { token } = await claim(id);
+    among = [];
+    const waitClaim = (): Promise<Sent> => send("/hangar/v1/claim", { token: tokens[HANGAR_B], body: { flavors: ["display-godot"], wait_s: 5 }, abortAfterMs: 1500 });
+    const held = Array.from({ length: MAX_CONCURRENT_LONG_POLLS }, waitClaim);
+    await sleep(400);
+
+    const refused = await send("/hangar/v1/claim", { token: tokens[HANGAR_B], body: { flavors: ["display-godot"], wait_s: 5 } });
+    expect(refused.status).toBe(429);
+    expect(errorCode(refused)).toBe("too_many_waiters");
+    expect(refused.headers["retry-after"]).toBe("1");
+    // A request that does not wait is not a long-poll and still answers.
+    expect((await send("/hangar/v1/claim", { token: tokens[HANGAR_B], body: { flavors: ["display-godot"], wait_s: 0 } })).json).toEqual({ session: null });
+    // The cap is per client: another token's long-poll still waits.
+    const otherClient = await send("/hangar/v1/messages?wait_s=1", { token });
+    expect(otherClient.status).toBe(200);
+
+    await Promise.allSettled(held);
+    await sleep(200);
+    // Once they have gone, the client may wait again.
+    const again = await send("/hangar/v1/claim", { token: tokens[HANGAR_B], body: { flavors: ["display-godot"], wait_s: 1 } });
+    expect(again.status, again.body).toBe(200);
   });
 });
 

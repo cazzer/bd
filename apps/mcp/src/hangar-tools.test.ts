@@ -8,14 +8,16 @@
 // in and queue sessions in parallel, so nothing here asserts on a global
 // count or on which liveness state hangar is in: fixtures are this file's
 // own work items, sessions are found by those work items, and cleanup is by
-// id and by this file's actors.
+// id and by this file's actors. A session queued through the tool has no
+// test seam for its request time, so `request` moves it to 2999 straight
+// after: a real hangar claiming oldest first then reaches it last.
 
 import { randomUUID } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { closeIngestRun, listSessions, openIngestRun, upsertNodes, type HangarStatus, type IngestRunHandle } from "@breakdown/core";
 import { createDb, createPool, ingestRuns, nodes, resolveDatabaseUrl, type Database } from "@breakdown/db";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createServer, type CreateServerOptions } from "./server.js";
 import { hangarStatusText } from "./tools/hangar.js";
@@ -75,6 +77,7 @@ async function workItem(title: string, nodeType = "work_item"): Promise<string> 
 async function request(client: Client, workItemId: string, flavor = "headless"): Promise<{ sessionId: string; state: string; hangar: { status: string; lastSeenAt: string | null; text: string } }> {
   const result = await call(client, "brain_hangar_request", { repo: "cazzer/bd", workItemId, flavor });
   sessionIds.push(result.sessionId);
+  await db.execute(sql`UPDATE nodes SET metadata = metadata || '{"occurred_at": "2999-01-01T00:00:00.000Z"}'::jsonb WHERE id = ${result.sessionId}::uuid`);
   return result;
 }
 
@@ -164,7 +167,7 @@ describe("brain_hangar_sessions", () => {
     const all = await call(client, "brain_hangar_sessions", { workItemId: item });
     expect(all.sessions.map((s: { id: string }) => s.id).sort()).toEqual([...ids].sort());
     expect(all).toMatchObject({ hasMore: false, truncated: false, droppedSessionIds: [] });
-    expect(all.sessions[0]).toMatchObject({ state: "queued", repo: "cazzer/bd", workItemId: item, requestedBy: ACTOR });
+    expect(all.sessions[0]).toMatchObject({ state: "queued", repo: "cazzer/bd", workItemId: item, requestedBy: ACTOR, requeueReason: null, failureReason: null });
     expect(JSON.stringify(all)).not.toMatch(/bdt_|token/i);
 
     const limited = await call(client, "brain_hangar_sessions", { workItemId: item, limit: 2 });

@@ -424,6 +424,13 @@ export interface RequestSessionInput {
   flavor: string;
   /** Who asked (the MCP client); recorded as the run's actor and `requested_by`. */
   actor?: string;
+  /**
+   * Overrides `requested_at` (the database's `now()` otherwise). A test seam:
+   * a suite sharing a database with a live hangar queues its fixtures far in
+   * the future, so an oldest-first claim reaches them last. Never set in
+   * production.
+   */
+  requestedAt?: Date;
 }
 
 export interface RequestSessionResult {
@@ -436,26 +443,27 @@ export interface RequestSessionResult {
  * work item), whether or not hangar is online: the session node and its
  * `run_by` edge in one transaction under a `hangar` run. Returns the session
  * and hangar's current status. Validation and the work item lookup run
- * before the run opens.
+ * before the run opens; `requested_at` is the database's `now()` at that
+ * lookup.
  */
 export async function requestSession(db: Database, input: RequestSessionInput): Promise<RequestSessionResult> {
   const requestedId = assertUuid(input.workItemId, "work item id");
   const requestedBy = requesterOf(input.actor);
-  const draft = normalizeHangarSessionMetadata({
+  const validated = normalizeHangarSessionMetadata({
     [KEY.state]: "queued",
     [KEY.flavor]: input.flavor,
     [KEY.repo]: input.repo,
     ...(requestedBy === undefined ? {} : { [KEY.requestedBy]: requestedBy }),
-    [OCCURRED_AT_KEY]: new Date(),
   });
 
-  const target = await db.execute<{ id: string; node_type: string; title: string }>(sql`
-    SELECT id, node_type, title FROM nodes
+  const target = await db.execute<{ id: string; node_type: string; title: string; now: string | Date }>(sql`
+    SELECT id, node_type, title, now() AS now FROM nodes
     WHERE id = (SELECT COALESCE(merged_into, id) FROM nodes WHERE id = ${requestedId}::uuid)
   `);
   const workItem = target.rows[0];
   if (!workItem) throw new NodeNotFoundError(requestedId);
   if (workItem.node_type !== WORK_ITEM_NODE_TYPE) throw new NotAWorkItemError(workItem.id, workItem.node_type);
+  const draft = normalizeHangarSessionMetadata({ ...validated, [OCCURRED_AT_KEY]: input.requestedAt ?? new Date(workItem.now) });
 
   const externalId = randomUUID();
   const title = fitText(`Hangar ${draft[KEY.flavor] as string} session: ${workItem.title}`, DEFAULT_MAX_TITLE_LENGTH) as string;
@@ -610,7 +618,9 @@ export interface SessionWriteResult {
  * transaction under a run whose actor is `hangar`. Refuses a node that is not
  * a session (`HangarSessionNotFoundError`) or one `hangar` did not claim
  * (`HangarSessionNotClaimedByError`). `change` returns the new metadata and
- * whether the session's tokens die with this write.
+ * whether the session's tokens die with this write, or throws to refuse it.
+ * The same checks run first on an unlocked read, so a refused change opens
+ * no ingest run; they run again under the row lock, which decides.
  */
 async function changeClaimedSession(
   db: Database,
@@ -619,23 +629,28 @@ async function changeClaimedSession(
   what: string,
   change: (current: Record<string, unknown>) => { metadata: Record<string, unknown>; revoke: boolean },
 ): Promise<SessionWriteResult> {
+  const read = (tx: Database | Tx, lock: boolean) =>
+    tx.execute<LockedSessionRow>(sql`
+      SELECT s.id, s.node_type, s.source_system, s.external_id, s.title, s.content, s.metadata, now() AS now
+      FROM nodes s
+      WHERE s.id = (SELECT COALESCE(merged_into, id) FROM nodes WHERE id = ${id}::uuid) AND ${IS_SESSION}
+      ${lock ? sql`FOR UPDATE` : sql``}
+    `);
+  const decide = (row: LockedSessionRow | undefined): { row: LockedSessionRow; metadata: Record<string, unknown>; revoke: boolean } => {
+    if (!row) throw new HangarSessionNotFoundError(id);
+    const current = normalizeHangarSessionMetadata(row.metadata);
+    const claimedBy = (current[KEY.claimedBy] as string | undefined) ?? null;
+    if (claimedBy !== hangar) throw new HangarSessionNotClaimedByError(row.id, hangar, claimedBy);
+    const { metadata, revoke } = change(current);
+    return { row, metadata: normalizeHangarSessionMetadata(metadata), revoke };
+  };
+
+  decide((await read(db, false)).rows[0]);
   const run = await openIngestRun(db, HANGAR_SOURCE_SYSTEM, { actor: hangar });
   try {
     return await db.transaction(async (tx) => {
-      const locked = await tx.execute<LockedSessionRow>(sql`
-        SELECT s.id, s.node_type, s.source_system, s.external_id, s.title, s.content, s.metadata, now() AS now
-        FROM nodes s
-        WHERE s.id = (SELECT COALESCE(merged_into, id) FROM nodes WHERE id = ${id}::uuid) AND ${IS_SESSION}
-        FOR UPDATE
-      `);
-      const row = locked.rows[0];
-      if (!row) throw new HangarSessionNotFoundError(id);
-      const current = normalizeHangarSessionMetadata(row.metadata);
-      const claimedBy = (current[KEY.claimedBy] as string | undefined) ?? null;
-      if (claimedBy !== hangar) throw new HangarSessionNotClaimedByError(row.id, hangar, claimedBy);
-
-      const { metadata, revoke } = change(current);
-      await writeSessionNode(tx, run, { externalId: row.external_id, title: row.title, content: row.content, metadata: normalizeHangarSessionMetadata(metadata) }, what);
+      const { row, metadata, revoke } = decide((await read(tx, true)).rows[0]);
+      await writeSessionNode(tx, run, { externalId: row.external_id, title: row.title, content: row.content, metadata }, what);
       const revokedTokens = revoke ? await revokeSessionTokens(tx, row.id) : 0;
       return { session: await loadSession(tx, row.id), revokedTokens };
     });
@@ -764,8 +779,8 @@ export interface RecordCheckInInput {
   capacity?: Record<string, unknown> | null;
 }
 
-/** Records a check-in at the database's `now()`; returns the interval hangar should check in on. */
-export async function recordCheckIn(db: Database, input: RecordCheckInInput): Promise<{ intervalS: number }> {
+/** Records a check-in at the database's `now()`; returns the interval hangar should check in on, and that `now()`. */
+export async function recordCheckIn(db: Database, input: RecordCheckInInput): Promise<{ intervalS: number; now: Date }> {
   const hangar = hangarName(input.hangar);
   const version = optionalText("version", input.version, MAX_HANGAR_FIELD_LENGTH) ?? null;
   let capacity: string | null = null;
@@ -778,13 +793,15 @@ export async function recordCheckIn(db: Database, input: RecordCheckInInput): Pr
       throw new InvalidHangarSessionError("capacity", `${capacity.slice(0, 40)}…`, `must serialize to at most ${MAX_HANGAR_CAPACITY_CHARS} characters`);
     }
   }
-  const result = await db.execute<{ interval_s: number }>(sql`
+  const result = await db.execute<{ interval_s: number; last_seen_at: string | Date }>(sql`
     INSERT INTO hangar_check_ins (hangar, last_seen_at, version, capacity)
     VALUES (${hangar}, now(), ${version}, ${capacity}::jsonb)
     ON CONFLICT (hangar) DO UPDATE SET last_seen_at = now(), version = excluded.version, capacity = excluded.capacity
-    RETURNING interval_s
+    RETURNING interval_s, last_seen_at
   `);
-  return { intervalS: Number(result.rows[0]?.interval_s ?? HANGAR_CHECK_IN_INTERVAL_S) };
+  const row = result.rows[0];
+  if (!row) throw new Error("recordCheckIn: the upsert returned no row");
+  return { intervalS: Number(row.interval_s), now: new Date(row.last_seen_at) };
 }
 
 export type HangarLiveness =

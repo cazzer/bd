@@ -51,7 +51,12 @@
 // forward. A person's decision, release, or hand-off on such an item is
 // appended to that session's messages (hangar.ts `appendHangarMessage`) in
 // the transaction that records it, instead of being typed into a herdr
-// pane (hangar-queue decisions 6 and 9).
+// pane (hangar-queue decisions 6 and 9). Only while the session is live: once
+// it has ended (stopped, failed, merged away, or gone), nobody reads its
+// messages, so the decision appends nothing and clears `session` instead,
+// and the item falls to local routing (bin/inbox-watch, inbox-execute).
+// A session-bound caller writes only its own session's items, through
+// `requestInboxItem` or brain_write (`assertSessionMayWriteInboxItems`).
 //
 // The app makes no model call: deciding is a pure Postgres write that
 // records the decision and flips the status. Carrying out an accepted action
@@ -86,7 +91,7 @@ import {
   unsafePrepareNodes,
   unsafeWrapNodeWriteError,
 } from "./nodes.js";
-import { appendHangarMessage } from "./hangar.js";
+import { appendHangarMessage, HANGAR_SESSION_NODE_TYPE, HANGAR_SOURCE_SYSTEM } from "./hangar.js";
 import { asPgError, formatPgInfo, sqlArray, type Tx } from "./sql-helpers.js";
 
 // --- Contract ---------------------------------------------------------------
@@ -571,6 +576,12 @@ export interface DecideInboxItemResult {
   socket: string | null;
   /** The hangar session the decision was sent to as a message (module header), or null for a local item. */
   session: string | null;
+  /**
+   * The hangar session that filed the item, when it had ended by the time of
+   * the decision (module header): nothing was sent, and the item's `session`
+   * was cleared. Null otherwise.
+   */
+  endedSession: string | null;
 }
 
 /** The kind of a hangar message carrying a person's decision on a session's inbox item. */
@@ -603,6 +614,30 @@ function decisionMessageBody(item: { id: string; title: string }, decision: Inbo
 
 async function sendToSession(tx: Tx, session: string, body: Record<string, unknown>): Promise<void> {
   await appendHangarMessage(tx, { sessionId: session, kind: INBOX_DECISION_MESSAGE_KIND, body });
+}
+
+/**
+ * Whether hangar session `session` still reads its messages: a canonical
+ * session the hangar queue wrote, neither stopped nor failed. A merged-away
+ * or missing node counts as ended. Takes a share lock, so a racing stop
+ * waits for the decision's transaction, and the message lands before the
+ * session's token dies.
+ */
+async function hangarSessionLive(tx: Tx, session: string): Promise<boolean> {
+  const result = await tx.execute<{ state: string | null; merged_into: string | null }>(sql`
+    SELECT metadata->>'state' AS state, merged_into FROM nodes
+    WHERE id = ${session}::uuid AND node_type = ${HANGAR_SESSION_NODE_TYPE} AND source_system = ${HANGAR_SOURCE_SYSTEM}
+    FOR SHARE
+  `);
+  const row = result.rows[0];
+  return row !== undefined && row.merged_into === null && row.state !== "stopped" && row.state !== "failed";
+}
+
+/** The item's hangar session, split by whether it is still live (`hangarSessionLive`). */
+async function itemSession(tx: Tx, metadata: Record<string, unknown>): Promise<{ live: string | null; ended: string | null }> {
+  const session = typeof metadata["session"] === "string" ? metadata["session"] : null;
+  if (session === null) return { live: null, ended: null };
+  return (await hangarSessionLive(tx, session)) ? { live: session, ended: null } : { live: null, ended: session };
 }
 
 /**
@@ -685,8 +720,11 @@ async function writeInboxFeedback(
       const after = NEXT_AFTER[kind];
       const entry: InboxFeedback = { decision: kind, message, at: (input.now ?? new Date()).toISOString(), ...(input.option === undefined ? {} : { option: input.option }) };
       const feedback = [...(current["feedback"] as InboxFeedback[]), entry];
+      const { live: session, ended: endedSession } = await itemSession(tx, current);
       // A decision answers the agent's hand-back (`needs_you`) and its re-queue note (`revision`).
       const { needs_you: _handedBack, revision: _answered, ...rest } = current;
+      // An ended session reads nothing more: the item becomes local (module header).
+      if (endedSession !== null) delete rest["session"];
       const metadata = normalizeInboxItemMetadata({ ...rest, status: after, feedback });
 
       const prepared = unsafePrepareNodes(
@@ -705,12 +743,11 @@ async function writeInboxFeedback(
       if (!row) throw new NodeUpsertFailedError(`decideInboxItem: upsert returned no row for node ${existing.id}`, 0, 0);
       const pane = typeof current["pane"] === "string" ? current["pane"] : null;
       const socket = typeof current["socket"] === "string" ? current["socket"] : null;
-      const session = typeof current["session"] === "string" ? current["session"] : null;
       if (session !== null) {
         const item = { id: row.id, title: existing.title };
         await sendToSession(tx, session, decisionMessageBody(item, kind, after, message, input.option, inboxNotifyText({ ...item, after }, message, input.option)));
       }
-      return { id: row.id, ingestRunId: run.id, before, after, title: existing.title, pane, socket, session };
+      return { id: row.id, ingestRunId: run.id, before, after, title: existing.title, pane, socket, session, endedSession };
     });
   } finally {
     await closeIngestRun(db, run);
@@ -873,6 +910,49 @@ function assertSessionMayResend(target: { row: StoredInboxRow | null; stored: Re
 }
 
 /**
+ * brain_write's counterpart of `assertSessionMayResend`, for a session-bound
+ * caller (hangar-queue decision 9): every item that is an inbox item, or
+ * whose key names a stored one, must be a new key or an item `session`
+ * filed. One statement for the batch, run before any ingest run opens;
+ * throws `InboxItemNotThisSessionError` naming the first offender, so the
+ * batch writes nothing.
+ */
+export async function assertSessionMayWriteInboxItems(
+  db: Database,
+  session: string,
+  items: readonly { nodeType: string; sourceSystem: string; externalId: string }[],
+): Promise<void> {
+  if (items.length === 0) return;
+  const own = session.toLowerCase();
+  let result: { rows: { id: string; node_type: string; source_system: string; external_id: string; metadata: Record<string, unknown> }[] };
+  try {
+    result = await db.execute(sql`
+      SELECT id, node_type, source_system, external_id, metadata FROM nodes
+      WHERE (source_system, external_id) IN (${sql.join(
+        items.map((i) => sql`(${i.sourceSystem}, ${i.externalId})`),
+        sql.raw(", "),
+      )})`);
+  } catch (err) {
+    throw new LookupFailedError(`assertSessionMayWriteInboxItems query failed${formatPgInfo(asPgError(err))}`, "requestInboxItem", { cause: err });
+  }
+  const stored = new Map(result.rows.map((r) => [`${r.source_system}\u0000${r.external_id}`, r]));
+  for (const item of items) {
+    const row = stored.get(`${item.sourceSystem}\u0000${item.externalId}`);
+    if (row === undefined) continue;
+    if (item.nodeType.trim() !== INBOX_ITEM_NODE_TYPE && row.node_type !== INBOX_ITEM_NODE_TYPE) continue;
+    let metadata: Record<string, unknown> | null = null;
+    if (row.node_type === INBOX_ITEM_NODE_TYPE) {
+      try {
+        metadata = normalizeInboxItemMetadata(normalizeOccurredAt(row.metadata));
+      } catch {
+        // A stored row past the contract is no session's to re-send.
+      }
+    }
+    if (metadata === null || metadata["session"] !== own) throw new InboxItemNotThisSessionError(row.id, own, "re-send");
+  }
+}
+
+/**
  * Queues (or refreshes) one inbox item for a caller without MCP — a live
  * Claude session in another directory, through `bin/inbox request`. Same
  * contract and same re-ingest protection as brain_write (the body's
@@ -1004,8 +1084,9 @@ export interface HandOffInboxItemInput {
  * from the same pane returns it to pending, and the person's decision is
  * prompted back to that pane like any session item. An item a hangar
  * session filed tells that session it was taken over (a message, in the
- * same transaction) and drops `session`, so later decisions go to the
- * local pane. Row-locked, under a `human` ingest run. Pure Postgres.
+ * same transaction, unless the session has ended) and drops `session`, so
+ * later decisions go to the local pane. Row-locked, under a `human` ingest
+ * run. Pure Postgres.
  */
 export async function handOffInboxItem(
   db: Database,
@@ -1040,7 +1121,8 @@ export async function handOffInboxItem(
       const before = current["status"] as InboxStatus;
       if (!INBOX_HANDOFF_STATUSES.includes(before)) throw new InboxDecisionConflictError(existing.id, before);
       const feedback = [...(current["feedback"] as InboxFeedback[]), { decision: "session", message: `opened in herdr tab ${input.tab}`, at: (input.now ?? new Date()).toISOString() }];
-      const { needs_you: _handedBack, session: remote, ...rest } = current;
+      const { live: session } = await itemSession(tx, current);
+      const { needs_you: _handedBack, session: _remote, ...rest } = current;
       const metadata = normalizeInboxItemMetadata({ ...rest, status: "session", pane: input.pane, socket: input.socket, session_tab: input.tab, feedback });
       const prepared = unsafePrepareNodes(
         [{ nodeType: existing.node_type, sourceSystem: existing.source_system, externalId: existing.external_id, title: existing.title, content: existing.content, metadata }],
@@ -1056,7 +1138,6 @@ export async function handOffInboxItem(
       }
       const row = written.rows[0];
       if (!row) throw new NodeUpsertFailedError(`handOffInboxItem: upsert returned no row for node ${existing.id}`, 0, 0);
-      const session = typeof remote === "string" ? remote : null;
       if (session !== null) {
         const text = `[inbox] "${existing.title}" was taken over in a local session; stop work on it. Don't run inbox done for it.`;
         await sendToSession(tx, session, decisionMessageBody({ id: row.id, title: existing.title }, "session", "session", "", undefined, text));

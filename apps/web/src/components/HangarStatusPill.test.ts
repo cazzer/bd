@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 //
 // The board header's hangar chip (hangar-queue tasks.md 2.7): it words the
-// status the server answers, polls every 30 s only while the tab is
-// visible, reads again when the tab comes back, and disappears while reads
-// fail.
+// status the server answers with the open counts beside it, polls every
+// 30 s only while the tab is visible, reads again when the tab comes back,
+// disappears while reads fail, and stays off while there is nothing to say.
 
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -52,6 +52,7 @@ async function advance(ms: number): Promise<void> {
 }
 
 const chip = (): HTMLElement | null => container.querySelector('[role="status"]');
+const counts = (): HTMLElement | null => container.querySelector("[data-hangar-counts]");
 
 describe("HangarStatusPill", () => {
   test("shows the status as a labelled status chip with the details in its title", async () => {
@@ -60,8 +61,11 @@ describe("HangarStatusPill", () => {
     expect(chip()).toBeNull();
     await settle();
 
-    expect(chip()?.textContent).toBe("hangar online");
+    expect(chip()?.textContent).toBe("hangar online · 2 queued, 1 claimed");
     expect(chip()?.getAttribute("data-hangar-pill")).toBe("online");
+    // The counts are not the screen-reader-only part, so phones show them beside the dot.
+    expect(counts()?.textContent?.trim()).toBe("2 queued, 1 claimed");
+    expect(counts()?.className ?? "").not.toContain("sr-only");
     expect(chip()?.title).toContain("hangar-desktop 0.4.1");
     expect(chip()?.title).toContain("2 queued · 1 claimed · 0 running");
     expect(container.querySelector("button")).toBeNull();
@@ -74,12 +78,29 @@ describe("HangarStatusPill", () => {
     trpcMock.hangarStatus.query.mockResolvedValueOnce({ ...ONLINE, status: "offline", lastSeenAt: nineToday.toISOString() });
     act(() => root.render(createElement(HangarStatusPill)));
     await settle();
-    expect(chip()?.textContent).toBe("hangar offline since 09:00");
+    expect(chip()?.textContent).toBe("hangar offline since 09:00 · 2 queued, 1 claimed");
 
     trpcMock.hangarStatus.query.mockResolvedValueOnce({ ...ONLINE, status: "never", hangar: null, version: null, lastSeenAt: null });
     await advance(HANGAR_POLL_MS);
-    expect(chip()?.textContent).toBe("hangar never checked in");
+    expect(chip()?.textContent).toBe("hangar never checked in · 2 queued, 1 claimed");
     expect(chip()?.title).toContain("No hangar has checked in");
+  });
+
+  test("leaves the counts off when nothing is open, and the whole chip off when no hangar ever checked in either", async () => {
+    const idle = { ...ONLINE, queued: 0, claimed: 0, running: 0 };
+    trpcMock.hangarStatus.query.mockResolvedValueOnce(idle);
+    act(() => root.render(createElement(HangarStatusPill)));
+    await settle();
+    expect(chip()?.textContent).toBe("hangar online");
+    expect(counts()).toBeNull();
+
+    trpcMock.hangarStatus.query.mockResolvedValueOnce({ ...idle, status: "never", hangar: null, version: null, lastSeenAt: null });
+    await advance(HANGAR_POLL_MS);
+    expect(chip()).toBeNull();
+
+    trpcMock.hangarStatus.query.mockResolvedValueOnce({ ...idle, status: "never", hangar: null, version: null, lastSeenAt: null, running: 1 });
+    await advance(HANGAR_POLL_MS);
+    expect(chip()?.textContent).toBe("hangar never checked in · 1 running");
   });
 
   test("polls every 30 seconds while visible, not while hidden, and at once on return", async () => {
@@ -115,6 +136,6 @@ describe("HangarStatusPill", () => {
 
     trpcMock.hangarStatus.query.mockResolvedValueOnce(ONLINE);
     await advance(HANGAR_POLL_MS);
-    expect(chip()?.textContent).toBe("hangar online");
+    expect(chip()?.textContent).toBe("hangar online · 2 queued, 1 claimed");
   });
 });

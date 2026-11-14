@@ -9,7 +9,9 @@
 // told through that session's messages instead, appended by core in the
 // decision's own transaction, so no herdr command runs for it
 // (hangar-queue decision 6). The session comes from the admitted token,
-// never the body.
+// never the body. Once that session has ended, core clears it from the item
+// and sends nothing; the decision reports that, and runs no herdr command
+// either, so the item is left to local routing (bin/inbox-watch).
 
 import {
   completeInboxItem,
@@ -92,7 +94,9 @@ const inboxDecisionProcedure = humanProcedure.input(inboxDecisionInputSchema).mu
   }
   // A failed notification never fails the decision: it is recorded either way.
   let notified: Notified = { ok: false, reason: "the item was not queued from a live session" };
-  if (result.session !== null) {
+  if (result.endedSession !== null) {
+    notified = { ok: false, reason: "the hangar session that filed it has ended" };
+  } else if (result.session !== null) {
     // Already queued as the session's message, in the decision's transaction.
     notified = { ok: true, session: result.session };
   } else if (result.pane !== null && REVIEW_PANE_PATTERN.test(result.pane) && result.socket !== null && isReviewSocketPath(result.socket) && ctx.runHerdr !== undefined) {

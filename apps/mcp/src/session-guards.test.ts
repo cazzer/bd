@@ -1,17 +1,19 @@
 // The hangar-queue security review's guards, through the real MCP protocol:
 // a session-bound server neither lists nor runs brain_merge and
 // brain_hangar_request; brain_merge refuses a hangar session; brain_link
-// refuses edges only the hangar queue writes; and brain_write never lets an
-// agent set an inbox item's decision or feedback.
+// refuses edges only the hangar queue writes; brain_write never lets an
+// agent set an inbox item's decision or feedback; and a session-bound
+// brain_write touches only new inbox keys and its own session's items.
 //
 // The database is shared with live data, so every fixture is this file's
 // own (its own source system, inbox keys, and requester actor) and cleanup
-// is by id and key.
+// is by id and key. Its queued sessions are requested in 2999, so a real
+// hangar claiming oldest first reaches them last.
 
 import { randomUUID } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { closeIngestRun, openIngestRun, requestSession, upsertNodes, type IngestRunHandle } from "@breakdown/core";
+import { closeIngestRun, openIngestRun, requestInboxItem, requestSession, upsertNodes, type IngestRunHandle } from "@breakdown/core";
 import { createDb, createPool, edges, ingestRuns, nodes, resolveDatabaseUrl, type Database } from "@breakdown/db";
 import { and, eq, inArray, like } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -77,7 +79,7 @@ async function fixture(title: string, nodeType = "work_item"): Promise<string> {
 }
 
 async function session(): Promise<string> {
-  const { session: s } = await requestSession(db, { repo: "cazzer/bd", workItemId: await fixture("Guarded work"), flavor: "headless", actor: ACTOR });
+  const { session: s } = await requestSession(db, { repo: "cazzer/bd", workItemId: await fixture("Guarded work"), flavor: "headless", actor: ACTOR, requestedAt: new Date("2999-01-01T00:00:00.000Z") });
   sessionIds.push(s.id);
   return s.id;
 }
@@ -155,5 +157,53 @@ describe("brain_write never sets an inbox item's decision", () => {
       await call(client, "brain_write", { items: { ...item, metadata: { ...item.metadata, status } } });
       expect((await stored(externalId))["status"]).toBe("pending");
     }
+  });
+});
+
+describe("a session-bound brain_write on inbox items", () => {
+  async function storedRow(externalId: string): Promise<{ nodeType: string; content: string; metadata: Record<string, unknown> } | undefined> {
+    const [row] = await db
+      .select({ nodeType: nodes.nodeType, content: nodes.content, metadata: nodes.metadata })
+      .from(nodes)
+      .where(and(eq(nodes.sourceSystem, "inbox"), eq(nodes.externalId, externalId)));
+    return row === undefined ? undefined : { ...row, metadata: row.metadata as Record<string, unknown> };
+  }
+  const inboxItem = (externalId: string, content: string, metadata: Record<string, unknown> = { source: "session" }) => ({ nodeType: "inbox_item", sourceSystem: "inbox", externalId, title: "Ask", content, metadata });
+
+  it("writes a new key bound to its session (no pane), and re-sends its own item", async () => {
+    const s = await session();
+    const client = await connect({ hangarSessionId: s });
+    const externalId = `${INBOX_KEY}-own`;
+    expect((await call(client, "brain_write", { items: inboxItem(externalId, "draft", { source: "session", pane: "w1:p1", socket: "/tmp/herdr.sock", session: randomUUID() }) })).created).toBe(1);
+    const written = await storedRow(externalId);
+    expect(written?.metadata).toMatchObject({ session: s, status: "pending" });
+    expect(written?.metadata).not.toHaveProperty("pane");
+
+    expect((await call(client, "brain_write", { items: inboxItem(externalId, "draft v2") })).updated).toBe(1);
+    expect((await storedRow(externalId))?.metadata).toMatchObject({ session: s, status: "pending" });
+  });
+
+  it("refuses another session's item, a local one, and a non-inbox node over an inbox key, writing nothing from the batch", async () => {
+    const mine = await session();
+    const other = await session();
+    const client = await connect({ hangarSessionId: mine });
+    const theirs = `${INBOX_KEY}-theirs`;
+    const local = `${INBOX_KEY}-local`;
+    const fresh = `${INBOX_KEY}-fresh`;
+    await requestInboxItem(db, { externalId: theirs, title: "Ask", content: "their draft", metadata: { source: "session" }, session: other });
+    await requestInboxItem(db, { externalId: local, title: "Ask", content: "local draft", metadata: { source: "session", pane: "w1:p9", socket: "/tmp/herdr.sock" } });
+    const before = { theirs: await storedRow(theirs), local: await storedRow(local) };
+
+    for (const offender of [inboxItem(theirs, "taken"), inboxItem(local, "taken"), { nodeType: "doc", sourceSystem: "inbox", externalId: local, title: "not an inbox item" }]) {
+      const text = await refusal(client, "brain_write", { items: [inboxItem(fresh, "would be fine alone"), offender] });
+      expect(text).toContain(`was not filed by hangar session ${mine}`);
+      expect(text).toMatch(/nothing from this call was persisted/i);
+    }
+    expect(await storedRow(theirs)).toEqual(before.theirs);
+    expect(await storedRow(local)).toEqual(before.local);
+    expect(await storedRow(fresh)).toBeUndefined();
+
+    // A server not bound to a session is unaffected.
+    expect((await call(await connect(), "brain_write", { items: inboxItem(local, "local draft v2", { source: "session" }) })).updated).toBe(1);
   });
 });

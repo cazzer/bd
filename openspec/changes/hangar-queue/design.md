@@ -133,7 +133,7 @@ Endpoints:
 | `GET` | `/hangar/v1/sessions` | hangar |
 | `GET` | `/hangar/v1/messages` | agent, session-bound |
 
-`GET /sessions` lists the caller hangar's claimed, running, and stopped sessions, so it can reconcile after a restart.
+`GET /sessions` lists the caller hangar's claimed and running sessions by default, so it can reconcile after a restart; stopped and failed ones only when asked by state.
 
 ### 9. Amendments after planning
 
@@ -152,6 +152,14 @@ Endpoints:
   - Only the `run_by` edge under source `hangar` names a session's work item, and `brain_link` refuses source `hangar` and any edge out of a session.
   - A session token's MCP session neither lists nor runs `brain_merge` and `brain_hangar_request`.
   - `createClientToken` refuses `session-` names. A claim marks an unclaimable queued row `failed` and moves on.
+  - A session-bound `brain_write` writes only new inbox keys and its own session's items, binding new ones to the session, like `inboxRequest`.
+- **Second review round.**
+  - A decision, release, or hand-off on an item whose session has ended (stopped, failed, merged away, or missing) appends no message. It clears `session` instead, so the item falls to local routing (`bin/inbox-watch`, inbox-execute), and the decision reports `notified: { ok: false }` without trying herdr.
+  - A claim that commits as its caller's socket closes, or whose answer cannot be built, is requeued at once (`claimer disconnected before receiving the claim`), so it is not stranded claimed with a token nobody holds.
+  - `PATCH` and requeue run their lookup and checks before opening an ingest run, then again under the row lock, so a refused update leaves no empty run.
+  - One client holds at most 4 long-polls open at once (claim and messages together); a fifth gets `429 too_many_waiters` with `Retry-After: 1`. The recommended `wait_s` is 25; a client polling with 0 sleeps at least a second between polls.
+  - `requested_at` and the check-in response's `now` come from the database's `now()`, like every other time here. Sessions carry `failure_reason` on the REST API and in `brain_hangar_sessions`.
+  - Test suites queue their fixture sessions with `requested_at` in 2999 and name their check-ins `test-…`, but a live hangar on the same database can still claim a fixture when its queue is otherwise empty: stop it before running `pnpm check` there.
 
 ## Risks / Trade-offs
 

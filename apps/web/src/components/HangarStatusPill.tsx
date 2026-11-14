@@ -1,8 +1,11 @@
 // The board header's hangar chip (hangar-queue design decision 7): "hangar
-// online", "hangar offline since …", or "hangar never checked in", with the
-// hangar's name, version, last check-in, and open session counts in its
-// tooltip. A status chip, not a control: it takes no focus and has no
-// action, so it needs no phone-sized hit target.
+// online", "hangar offline since …", or "hangar never checked in", then the
+// open session counts when there are any ("· 1 queued, 1 running"), with
+// the hangar's name, version, last check-in, and every count in its
+// tooltip. On phones the words give way to the dot, but the counts stay:
+// they are what changes. With no hangar ever checked in and nothing open
+// the chip is left off. A status chip, not a control: it takes no focus and
+// has no action, so it needs no phone-sized hit target.
 //
 // It reads `hangarStatus` on mount, every POLL_MS while the tab is visible,
 // and at once when the tab becomes visible again; a hidden tab makes no
@@ -12,7 +15,7 @@
 // board, and the board's own reads already surface a lost connection.
 
 import { useEffect, useState } from "react";
-import { hangarPillLabel, hangarPillTitle, type HangarStatusView } from "../lib/hangarStatus.js";
+import { hangarPillCounts, hangarPillHidden, hangarPillLabel, hangarPillTitle, type HangarStatusView } from "../lib/hangarStatus.js";
 import { trpc } from "../trpc.js";
 
 export const HANGAR_POLL_MS = 30_000;
@@ -71,8 +74,9 @@ function HangarLight({ status }: { status: HangarStatusView["status"] }) {
 
 export function HangarStatusPill() {
   const polled = useHangarStatus();
-  if (polled === null) return null;
+  if (polled === null || hangarPillHidden(polled.status)) return null;
   const { status, at } = polled;
+  const counts = hangarPillCounts(status);
 
   return (
     <span
@@ -82,8 +86,12 @@ export function HangarStatusPill() {
       className="inline-flex h-7 shrink-0 items-center gap-2 rounded-full border border-hairline px-3 text-xs whitespace-nowrap text-fg-muted"
     >
       <HangarLight status={status.status} />
-      {/* The dot alone on phones, where the header is tight; the words stay readable to a screen reader there. */}
-      <span className="sr-only sm:not-sr-only">{hangarPillLabel(status, at)}</span>
+      {/* The dot and the counts on phones, where the header is tight; the words stay readable to a screen reader there. */}
+      <span className="sr-only sm:not-sr-only">
+        {hangarPillLabel(status, at)}
+        {counts === null ? "" : " ·"}
+      </span>
+      {counts === null ? null : <span data-hangar-counts="">{` ${counts}`}</span>}
     </span>
   );
 }

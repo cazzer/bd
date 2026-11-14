@@ -406,18 +406,37 @@ describe("the actor the person's inbox writes record (tailnet-hosting decision 4
 
 // hangar-queue decisions 6 and 9: an item a remote session filed is bound to
 // that session (from its token, never the body), and the person's decision,
-// release, or hand-off on it becomes that session's message.
+// release, or hand-off on it becomes that session's message while the
+// session is live; once it has ended, nothing is sent and the item turns
+// local.
 describe("items a hangar session filed", () => {
   const key = `session:hangar-${SRC}`;
   const sessions: string[] = [];
+  const sessionNodes: string[] = [];
+  /** A session id with no session node behind it: what an ended-and-gone session looks like. */
   const session = (): string => {
     const id = randomUUID();
     sessions.push(id);
     return id;
   };
+  /**
+   * A hangar session node in `state`, written straight to the store (not
+   * through the queue). Never queued, so no real hangar can claim it, and
+   * claimed by a `test-` name no real hangar lists.
+   */
+  async function sessionNode(state: string): Promise<string> {
+    const result = await upsertNodes(db, run, [
+      { nodeType: "hangar_session", sourceSystem: "hangar", externalId: randomUUID(), title: "test session", metadata: { state, flavor: "headless", repo: "test/repo", claimed_by: `test-${SRC}` } },
+    ]);
+    const id = result.rows[0]!.id;
+    sessions.push(id);
+    sessionNodes.push(id);
+    return id;
+  }
   afterAll(async () => {
     await db.execute(sql`DELETE FROM nodes WHERE source_system = 'inbox' AND external_id LIKE ${`${key}%`}`);
     if (sessions.length > 0) await db.execute(sql`DELETE FROM hangar_messages WHERE session_id = ANY(${`{${sessions.join(",")}}`}::uuid[])`);
+    if (sessionNodes.length > 0) await db.execute(sql`DELETE FROM nodes WHERE id = ANY(${`{${sessionNodes.join(",")}}`}::uuid[])`);
   });
 
   async function messagesFor(sessionId: string): Promise<{ kind: string; body: Record<string, unknown> }[]> {
@@ -467,17 +486,17 @@ describe("items a hangar session filed", () => {
   });
 
   it("appends exactly one message per decision and per release, with the decision's body", async () => {
-    const s = session();
+    const s = await sessionNode("running");
     const card = { question: "Which?", options: [{ id: "a", label: "A" }, { id: "b", label: "B" }] };
     const filed = await requestInboxItem(db, { externalId: `${key}-decide`, title: "Pick one", content: "x", metadata: { source: "session", ...card }, session: s });
     const decided = await decideInboxItem(db, filed.id, { decision: "accept", option: "b", message: " go " });
-    expect(decided).toMatchObject({ session: s, pane: null, after: "accepted" });
+    expect(decided).toMatchObject({ session: s, endedSession: null, pane: null, after: "accepted" });
     const expectedText = inboxNotifyText({ id: filed.id, title: "Pick one", after: "accepted" }, "go", "b");
     expect(await messagesFor(s)).toEqual([
       { kind: "inbox_decision", body: { item_id: filed.id, title: "Pick one", decision: "accept", outcome: "accepted", option: "b", message: "go", text: expectedText } },
     ]);
 
-    const s2 = session();
+    const s2 = await sessionNode("claimed");
     const held = await requestInboxItem(db, { externalId: `${key}-release`, title: "Read it", content: "x", metadata: { source: "github", url: "https://github.com/a/b/pull/9" }, session: s2 });
     expect(held.status).toBe("undigested");
     expect(await releaseInboxItem(db, held.id)).toMatchObject({ session: s2, after: "pending" });
@@ -488,7 +507,7 @@ describe("items a hangar session filed", () => {
   });
 
   it("tells the session on hand-off and clears it, so later decisions go to the local pane", async () => {
-    const s = session();
+    const s = await sessionNode("running");
     const filed = await requestInboxItem(db, { externalId: `${key}-handoff`, title: "Deep one", content: "x", metadata: { source: "session" }, session: s });
     const handed = await handOffInboxItem(db, filed.id, { pane: "w9:p7", socket: "/tmp/herdr.sock", tab: "w9:t7" });
     expect(handed.session).toBe(s);
@@ -503,14 +522,46 @@ describe("items a hangar session filed", () => {
     expect(await messagesFor(s)).toHaveLength(1);
   });
 
+  it("sends nothing once the session has ended (stopped, failed, merged away, or gone), and clears it so local routing takes the item", async () => {
+    const survivor = await sessionNode("running");
+    const merged = await sessionNode("running");
+    await db.execute(sql`UPDATE nodes SET merged_into = ${survivor}::uuid WHERE id = ${merged}::uuid`);
+    const ended: [string, string][] = [
+      ["stopped", await sessionNode("stopped")],
+      ["failed", await sessionNode("failed")],
+      ["merged", merged],
+      ["gone", session()],
+    ];
+    for (const [label, s] of ended) {
+      const filed = await requestInboxItem(db, { externalId: `${key}-ended-${label}`, title: `Ended ${label}`, content: "x", metadata: { source: "session" }, session: s });
+      expect(filed.session).toBe(s);
+      const decided = await decideInboxItem(db, filed.id, { decision: "accept", message: "go" });
+      expect(decided, label).toMatchObject({ session: null, endedSession: s, after: "accepted" });
+      expect(await messagesFor(s), label).toEqual([]);
+      const [item] = (await listInbox(db, { ids: [filed.id], statuses: ["accepted"] })).items;
+      // bin/inbox-watch runs the executor on an accepted item with neither a pane nor a session.
+      expect(item, label).toMatchObject({ status: "accepted", pane: null, hangarSession: null });
+      expect(item!.feedback.at(-1), label).toMatchObject({ decision: "accept", message: "go" });
+    }
+    expect(await messagesFor(survivor)).toEqual([]);
+
+    const stopped = await sessionNode("stopped");
+    const held = await requestInboxItem(db, { externalId: `${key}-ended-release`, title: "Held", content: "x", metadata: { source: "github", url: "https://github.com/a/b/pull/7" }, session: stopped });
+    expect(await releaseInboxItem(db, held.id)).toMatchObject({ session: null, endedSession: stopped, after: "pending" });
+    const handedOver = await requestInboxItem(db, { externalId: `${key}-ended-handoff`, title: "Deep", content: "x", metadata: { source: "session" }, session: stopped });
+    expect(await handOffInboxItem(db, handedOver.id, { pane: "w9:p8", socket: "/tmp/herdr.sock", tab: "w9:t8" })).toMatchObject({ session: null });
+    expect(await messagesFor(stopped)).toEqual([]);
+    expect((await listInbox(db, { ids: [handedOver.id], statuses: ["session"] })).items[0]).toMatchObject({ hangarSession: null, pane: "w9:p8" });
+  });
+
   it("appends nothing for a local item", async () => {
     const filed = await requestInboxItem(db, { externalId: `${key}-plain`, title: "Local ask", content: "x", metadata: { source: "session", pane: "w1:p3", socket: "/tmp/herdr.sock" } });
-    expect(await decideInboxItem(db, filed.id, { decision: "accept" })).toMatchObject({ session: null, pane: "w1:p3" });
+    expect(await decideInboxItem(db, filed.id, { decision: "accept" })).toMatchObject({ session: null, endedSession: null, pane: "w1:p3" });
     expect(await messagesAbout(filed.id)).toBe(0);
   });
 
   it("lets a session complete only its own items", async () => {
-    const mine = session();
+    const mine = await sessionNode("running");
     const filed = await requestInboxItem(db, { externalId: `${key}-complete`, title: "Do it", content: "x", metadata: { source: "session" }, session: mine });
     await decideInboxItem(db, filed.id, { decision: "accept" });
     await expect(completeInboxItem(db, filed.id, "done", { session: session() })).rejects.toThrow(InboxItemNotThisSessionError);

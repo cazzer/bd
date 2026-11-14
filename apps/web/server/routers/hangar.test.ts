@@ -13,7 +13,7 @@ import type { Context } from "../context.js";
 import { appRouter } from "../router.js";
 import { createCallerFactory } from "../trpc.js";
 
-const HANGAR = `hgstatus-${randomUUID().slice(0, 8)}`;
+const HANGAR = `test-hgstatus-${randomUUID().slice(0, 8)}`;
 const ISO = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/;
 
 let pool: ReturnType<typeof createPool>;

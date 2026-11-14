@@ -26,6 +26,7 @@ import {
   InvalidViewError,
   InvalidWorkItemError,
   InvalidInboxItemError,
+  InboxItemNotThisSessionError,
   InvalidHangarSessionError,
   HangarSessionNotClaimedByError,
   HangarSessionNotFoundError,
@@ -196,6 +197,9 @@ export function mapError(toolName: string, err: unknown): CallToolResult {
   // --- Inbox items (brain_write of an inbox_item) ---
   if (err instanceof InvalidInboxItemError) {
     return actionable(err, "Fix that field on the named item and retry; nothing from this call was persisted. status is one of pending, changes, accepted, dismissed, done; source is required; url and links[].url are http(s); priority is an integer 0-4.");
+  }
+  if (err instanceof InboxItemNotThisSessionError) {
+    return actionable(err, "Nothing from this call was persisted. A hangar session's token writes only new inbox keys and the items its own session filed; give your item its own externalId, or leave that item to the session or person who owns it.");
   }
   // --- Work items (brain_write of a work_item, brain_update_work_item) ---
   if (err instanceof InvalidWorkItemError) {

@@ -42,7 +42,7 @@ https://<breakdown-host>/hangar/v1/...            # behind a TLS proxy such as `
 
 ### The session object
 
-Every endpoint that returns a session uses this shape. Times are UTC ISO-8601 with milliseconds (`2026-11-14T09:00:00.000Z`) and come from Breakdown's clock. Optional fields are `null` when unset, never absent.
+Every endpoint that returns a session uses this shape. Times are UTC ISO-8601 with milliseconds (`2026-11-14T09:00:00.000Z`) and come from the clock of Breakdown's database. Optional fields are `null` when unset, never absent.
 
 ```json
 {
@@ -60,6 +60,7 @@ Every endpoint that returns a session uses this shape. Times are UTC ISO-8601 wi
   "host": "hangar-linux",
   "disk_path": "/var/lib/hangar/disks/3f0c2a9e.img",
   "requeue_reason": null,
+  "failure_reason": null,
   "claimed_by": "hangar-desktop",
   "claimed_at": "2026-11-14T09:00:01.250Z",
   "requested_at": "2026-11-14T08:59:40.000Z"
@@ -74,7 +75,8 @@ Every endpoint that returns a session uses this shape. Times are UTC ISO-8601 wi
 | `repo` | string | The repository to work in, as the requester named it (e.g. `owner/name`). |
 | `work_item` | object or null | The work item the session runs for. `id` is Breakdown's node id. `external_id` and `source_system` say where it came from (for a beads issue, `source_system` is `beads`). `null` only if the link was removed. |
 | `container`, `host`, `disk_path` | string or null | Where it runs, as hangar last reported it. |
-| `requeue_reason` | string or null | Why hangar last gave it back. Cleared when it is claimed again. |
+| `requeue_reason` | string or null | Why it was last given back to the queue: the reason hangar sent, or `claimer disconnected before receiving the claim` when Breakdown gave it back itself (see [Long-poll](#long-poll)). Cleared when it is claimed again. |
+| `failure_reason` | string or null | Why a claim could not take it and set it `failed` (see [the claim](#post-hangarv1claim--scope-hangar)). `null` for every other session, including one hangar reported `failed`. |
 | `claimed_by` | string or null | The name of the hangar that holds it: the client name of that hangar's token. `null` while queued. |
 | `claimed_at` | time or null | When it was last claimed. |
 | `requested_at` | time | When it was requested. Claims take the oldest first, and a requeued session keeps its place. |
@@ -99,7 +101,7 @@ Response `200`:
 ```
 
 - `interval_s`: how many seconds to wait before the next check-in. Always use this value over your own setting.
-- `now`: Breakdown's clock, for logging skew. Never use your own clock to judge liveness.
+- `now`: the time Breakdown's database recorded this check-in at, for logging skew. Never use your own clock to judge liveness.
 
 Status codes: `200`, `400 invalid_json` / `invalid_request`, `401`, `403 forbidden` / `read_only`, `413`, `415`.
 
@@ -114,13 +116,13 @@ Request:
 ```
 
 - `flavors` (array, required): 1 to 3 distinct values from `headless`, `display-godot`, `display-browser`. Name only flavors you can start now. Breakdown does not track capacity, so the choice is yours.
-- `wait_s` (integer, 0–30, default 0): how long to wait for a match. `0` answers at once.
+- `wait_s` (integer, 0–30, default 0): how long to wait for a match. `0` answers at once. Send `25`: a long-poll answers within about a second of a request arriving and costs one connection while it waits. If you send `0`, sleep at least 1 s between claims (see [Long-poll](#long-poll)).
 
 Response `200`, claimed:
 
 ```json
 {
-  "session": { "id": "3f0c2a9e-6f7d-4a54-9a0b-1c2d3e4f5a6b", "state": "claimed", "flavor": "headless", "repo": "cazzer/bd", "work_item": { "id": "8b1e4c1d-2f3a-4b5c-8d9e-0a1b2c3d4e5f", "external_id": "bd-d38.3", "source_system": "beads", "title": "Hangar queue, sessions, check-ins, messages" }, "container": null, "host": null, "disk_path": null, "requeue_reason": null, "claimed_by": "hangar-desktop", "claimed_at": "2026-11-14T09:00:01.250Z", "requested_at": "2026-11-14T08:59:40.000Z" },
+  "session": { "id": "3f0c2a9e-6f7d-4a54-9a0b-1c2d3e4f5a6b", "state": "claimed", "flavor": "headless", "repo": "cazzer/bd", "work_item": { "id": "8b1e4c1d-2f3a-4b5c-8d9e-0a1b2c3d4e5f", "external_id": "bd-d38.3", "source_system": "beads", "title": "Hangar queue, sessions, check-ins, messages" }, "container": null, "host": null, "disk_path": null, "requeue_reason": null, "failure_reason": null, "claimed_by": "hangar-desktop", "claimed_at": "2026-11-14T09:00:01.250Z", "requested_at": "2026-11-14T08:59:40.000Z" },
   "token": "bdt_Zk3…"
 }
 ```
@@ -131,11 +133,11 @@ Response `200`, nothing to claim within `wait_s`:
 { "session": null }
 ```
 
-- A queued session that cannot be claimed (its stored record breaks the session contract, or a live token already holds its `session-<id>` client name) is set to `failed` with a reason recorded on it, and the claim goes on to the next match. A claim passes over at most a few such sessions per attempt.
+- A queued session that cannot be claimed (its stored record breaks the session contract, or a live token already holds its `session-<id>` client name) is set to `failed` with its `failure_reason` recorded, and the claim goes on to the next match. A claim passes over at most a few such sessions per attempt.
 - `token` is the session token, returned **only in this response**. Breakdown stores only its hash, so it cannot be shown again. Store it before anything else, and see [Session tokens](#session-tokens) for what to do if you lose it.
 - A claimed session is `claimed`. Report `running` once the worker starts, or [requeue](#post-hangarv1sessionsidrequeue--scope-hangar) it if you cannot start it.
 
-Status codes: `200`, `400 invalid_json` / `invalid_request`, `401`, `403 forbidden` / `read_only`, `413`, `415`.
+Status codes: `200`, `400 invalid_json` / `invalid_request`, `401`, `403 forbidden` / `read_only`, `413`, `415`, `429 too_many_waiters` (see [Long-poll](#long-poll)).
 
 ### `PATCH /hangar/v1/sessions/:id` — scope `hangar`
 
@@ -188,7 +190,7 @@ Status codes: `200`, `400 invalid_json` / `invalid_request`, `401`, `403 forbidd
 Lists the sessions your hangar holds, newest-changed first. Use it at startup to reconcile with what you are actually running.
 
 Query parameters:
-- `state` (repeatable, e.g. `?state=claimed&state=running`): which states to list. Defaults to `claimed`, `running`, and `stopped`. Queued sessions belong to no hangar, so `?state=queued` lists nothing.
+- `state` (repeatable, e.g. `?state=claimed&state=running`): which states to list. Defaults to `claimed` and `running`, the sessions you still hold open. Ask for `stopped` or `failed` by name to see ended ones. Queued sessions belong to no hangar, so `?state=queued` lists nothing.
 - `limit` (integer, 1–200, default 50).
 
 Other parameters are ignored. Giving `limit` twice is a `400`.
@@ -209,7 +211,7 @@ A worker reads its own session's messages, waiting up to `wait_s` seconds for on
 
 Query parameters:
 - `after` (integer ≥ 0, default 0): the `cursor` from your previous read, or `0` to read from the start.
-- `wait_s` (integer, 0–30, default 0): how long to wait when there is nothing after `after`.
+- `wait_s` (integer, 0–30, default 0): how long to wait when there is nothing after `after`. Send `25`. If you send `0`, sleep at least 1 s between reads.
 
 Example: `GET /hangar/v1/messages?after=118&wait_s=25`
 
@@ -239,7 +241,7 @@ Response `200`:
 
 Nothing arrived within `wait_s`: `{ "messages": [], "cursor": 118 }`. The cursor is unchanged.
 
-Status codes: `200`, `400 invalid_request` (a bad `after` or `wait_s`), `401` (the token is revoked, for example because the session stopped), `403 forbidden` (not a session token).
+Status codes: `200`, `400 invalid_request` (a bad `after` or `wait_s`), `401` (the token is revoked, for example because the session stopped), `403 forbidden` (not a session token), `429 too_many_waiters`.
 
 #### Message kinds
 
@@ -259,15 +261,19 @@ Status codes: `200`, `400 invalid_request` (a bad `after` or `wait_s`), `401` (t
 
 After a `session` message the item belongs to a local session. Later decisions on it do not come here, and the worker must not complete it.
 
+Decisions reach a session only while it is open. Once it is `stopped` or `failed`, a decision on an item it filed sends no message: the item stops being bound to the session and is handled on Breakdown's host like any local item.
+
 ## Long-poll
 
 `POST /claim` (`wait_s` in the body) and `GET /messages` (`wait_s` in the query) long-poll:
 
 - **Bound.** `wait_s` is an integer from 0 to 30. Larger values get `400`.
 - **Early answer.** Breakdown checks once a second, and answers as soon as a claim succeeds or a message arrives, typically within about a second of it arriving. Otherwise it answers empty when `wait_s` passes.
-- **Re-poll at once.** After any answer, empty or not, send the next request straight away. There is no rate to respect beyond one outstanding long-poll per caller.
+- **Use `wait_s: 25`.** That is the recommended value for both endpoints. The default is `0`, which answers at once.
+- **Re-poll.** After a long-poll (`wait_s` above 0) answers, empty or not, send the next one straight away. With `wait_s: 0`, an empty answer comes back at once, so sleep at least 1 second before the next request.
+- **At most 4 at once.** One client (one token) may hold at most 4 long-polls open at a time, claims and message reads together. A fifth gets `429 too_many_waiters` with `Retry-After: 1`. A request with `wait_s: 0` does not count. One outstanding long-poll per loop is all a client needs.
 - **Timeouts.** Set your HTTP client's timeout above `wait_s`, for example `wait_s + 10` seconds.
-- **No claim after disconnect.** If you close the connection, Breakdown stops before its next attempt, so it never claims for a request whose caller is gone. One narrow window remains: if a claim completes in the same instant the connection closes, you never receive its token. That session shows up as `claimed` by you in [`GET /sessions`](#get-hangarv1sessions--scope-hangar); requeue it.
+- **No claim after disconnect.** If you close the connection, Breakdown stops before its next attempt, so it never claims for a request whose caller is gone. If a claim completes just as the connection closes, Breakdown sees that it cannot answer and requeues the session at once, with `requeue_reason` `claimer disconnected before receiving the claim`, and the token it minted is revoked. One narrow window remains: if the answer is written but lost in transit, you never receive the token. That session shows up as `claimed` by you in [`GET /sessions`](#get-hangarv1sessions--scope-hangar); requeue it.
 - **Shutdown.** When Breakdown shuts down, an open long-poll answers empty early, and the next request fails to connect. Retry with backoff.
 
 ## Cursor semantics
@@ -304,7 +310,7 @@ stateDiagram-v2
 
 - **Interval.** Check in every `interval_s` seconds, taken from the latest check-in response. It is 30 today. The server's value always wins over your own setting.
 - **Claims count.** Every claim attempt, including each one-second retry inside a long-poll, counts as a check-in. It updates the time only, not version or capacity.
-- **Offline rule.** Breakdown reports hangar `online` while its last check-in is less than three intervals old (90 s today), `offline since <last check-in>` after that, and `never` before the first one. Every time is Breakdown's own clock. Hangar's clock is never used, so skew between the machines does not matter.
+- **Offline rule.** Breakdown reports hangar `online` while its last check-in is less than three intervals old (90 s today), `offline since <last check-in>` after that, and `never` before the first one. Every time is the clock of Breakdown's database. Hangar's clock is never used, so skew between the machines does not matter.
 - Breakdown shows this status to agents (MCP) and on its web board. A request made while hangar is offline still queues. It waits for the next claim.
 
 ## Session tokens
@@ -348,7 +354,7 @@ Branch on `code`, which is stable within v1. `message` is for people, and its wo
 | 400 | `invalid_json` | The body is not valid UTF-8 JSON. |
 | 400 | `invalid_request` | The JSON or query string breaks the endpoint's schema: a required field is missing, or a documented field has the wrong type or is out of range. The message lists each problem as `field: reason`. An unknown field is not an error (see [Versioning](#versioning)). |
 | 401 | `unauthorized` | No token, or an unknown or revoked one. Sent with `WWW-Authenticate: Bearer`. |
-| 403 | `forbidden` | The token's scope cannot call this endpoint, the request arrived over loopback with no token honored, or the `Host` / `Origin` is not allowed. |
+| 403 | `forbidden` | The token's scope cannot call this endpoint, the request arrived over loopback (where no token is read; reach Breakdown through the tailnet host or a proxy that sets `X-Forwarded-For`), or the `Host` / `Origin` is not allowed. |
 | 403 | `read_only` | The server is read-only and this is a `POST` or `PATCH`. |
 | 403 | `not_claimer` | The session is held by another hangar, or by none. |
 | 404 | `not_found` | No such endpoint, or no session with that id (a malformed id included). |
@@ -356,6 +362,7 @@ Branch on `code`, which is stable within v1. `message` is for people, and its wo
 | 409 | `invalid_transition` | The state change breaks the [state machine](#session-state-machine). |
 | 413 | `too_large` | The body is over 64 KiB, declared or sent. The connection is closed. |
 | 415 | `unsupported_media_type` | A `POST` or `PATCH` without `Content-Type: application/json`. |
+| 429 | `too_many_waiters` | This client already holds 4 long-polls open (see [Long-poll](#long-poll)). Sent with `Retry-After: 1`. |
 | 500 | `internal` | A server fault. It is logged on Breakdown's side, and you can retry with backoff. |
 
 ## Versioning

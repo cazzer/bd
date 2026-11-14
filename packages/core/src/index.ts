@@ -580,6 +580,7 @@ export {
   carryForwardInboxDecisions,
   PERSON_DECIDED_INBOX_STATUSES,
   requestInboxItem,
+  assertSessionMayWriteInboxItems,
   completeInboxItem,
   handOffInboxItem,
   INBOX_FEEDBACK_KINDS,

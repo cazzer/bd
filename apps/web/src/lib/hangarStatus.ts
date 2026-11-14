@@ -1,5 +1,6 @@
 // Pure helpers behind the board header's hangar pill (hangar-queue design
-// decision 7): what the chip says and what its tooltip adds. Liveness is
+// decision 7): what the chip says, the open counts it shows beside that,
+// whether it shows at all, and what its tooltip adds. Liveness is
 // decided by the server against its own clock (`hangarStatus`); these only
 // word it. Times read in the browser's local zone: the time alone when the
 // last check-in was today, the date too when it was not. Structural types
@@ -54,4 +55,23 @@ export function hangarPillTitle(status: HangarStatusView, now: Date): string {
   if (at !== null) lines.push(`Last check-in ${formatInstant(at, now, true)}`);
   lines.push(`${status.queued} queued · ${status.claimed} claimed · ${status.running} running`);
   return lines.join("\n");
+}
+
+/** The open session counts the chip shows inline, zeros left out ("1 queued, 1 running"); null when there are none. */
+export function hangarPillCounts(status: HangarStatusView): string | null {
+  const parts = (
+    [
+      [status.queued, "queued"],
+      [status.claimed, "claimed"],
+      [status.running, "running"],
+    ] as const
+  )
+    .filter(([n]) => n > 0)
+    .map(([n, word]) => `${n} ${word}`);
+  return parts.length === 0 ? null : parts.join(", ");
+}
+
+/** Nothing to say: no hangar has ever checked in and no session is open, so the chip is left off the header. */
+export function hangarPillHidden(status: HangarStatusView): boolean {
+  return status.status === "never" && status.queued + status.claimed + status.running === 0;
 }

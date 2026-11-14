@@ -926,7 +926,7 @@ describe("client_tokens", () => {
 
 describe("hangar_check_ins", () => {
   it("keeps one row per hangar: a second check-in upserts on the primary key", async () => {
-    const hangar = `schema-test-hangar-${randomUUID()}`;
+    const hangar = `test-schema-hangar-${randomUUID()}`;
     try {
       const [first] = await db.insert(hangarCheckIns).values({ hangar, version: "1.0.0" }).returning();
       expect(first).toMatchObject({ hangar, version: "1.0.0", capacity: null, intervalS: 30 });

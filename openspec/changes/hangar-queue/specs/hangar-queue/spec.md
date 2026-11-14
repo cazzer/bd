@@ -109,7 +109,7 @@ Hangar SHALL check in on an interval, and every claim SHALL count as a check-in.
 
 ### Requirement: Workers receive their messages by long-poll
 
-A worker SHALL fetch its session's messages with its session token, waiting up to a bound (at most 30 seconds) for one to arrive, and SHALL pass back a cursor so that each message is delivered after the last one it acknowledged. A worker SHALL NOT be able to read another session's messages. When a person decides an inbox item or review that a remote session filed, the decision SHALL be queued as a message to that session instead of being typed into a herdr pane. Items filed by a local session SHALL keep herdr delivery. The session an item belongs to SHALL be taken from the token that filed it, never from the request body.
+A worker SHALL fetch its session's messages with its session token, waiting up to a bound (at most 30 seconds) for one to arrive, and SHALL pass back a cursor so that each message is delivered after the last one it acknowledged. A worker SHALL NOT be able to read another session's messages. When a person decides an inbox item or review that a remote session filed, the decision SHALL be queued as a message to that session instead of being typed into a herdr pane. Items filed by a local session SHALL keep herdr delivery. The session an item belongs to SHALL be taken from the token that filed it, never from the request body. When the session that filed an item has ended (stopped or failed) by the time a person decides it, no message SHALL be queued; the item SHALL stop being bound to the session, so it is handled like a local item.
 
 #### Scenario: Reply reaches a remote session
 
@@ -120,6 +120,11 @@ A worker SHALL fetch its session's messages with its session token, waiting up t
 
 - **WHEN** a local session's item, recorded with a herdr pane, is decided
 - **THEN** the decision is typed into that pane as before
+
+#### Scenario: Decision after the session ended
+
+- **WHEN** a worker's session is stopped and a person then accepts an item that session filed
+- **THEN** no message is queued, the item is no longer bound to the session, and the decision reports that the session has ended
 
 #### Scenario: Another session's messages
 

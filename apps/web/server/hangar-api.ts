@@ -24,7 +24,11 @@
 // something, its bound passes, the client's socket closes, or the server
 // shuts down. Nothing is held across a pause: each attempt is its own
 // statement or transaction. Once the socket is gone no further attempt runs,
-// so a disconnected claimer never takes a session it cannot receive.
+// so a disconnected claimer never takes a session it cannot receive; a
+// claim that commits as the socket goes, or whose answer cannot be built,
+// is requeued at once rather than left claimed with a token nobody holds.
+// One client holds at most MAX_CONCURRENT_LONG_POLLS long-polls open at a
+// time; past that it is told to retry (429).
 //
 // Nothing here logs a token, a header, or a query string.
 
@@ -63,8 +67,12 @@ export const HANGAR_API_PREFIX = "/hangar/v1/";
 export const MAX_HANGAR_BODY_BYTES = 64 * 1024;
 /** How often a long-poll re-runs its query. */
 const POLL_INTERVAL_MS = 1000;
-/** What `GET /sessions` lists when no `state` is given: what hangar reconciles after a restart. */
-const DEFAULT_LISTED_STATES: readonly HangarSessionState[] = ["claimed", "running", "stopped"];
+/** What `GET /sessions` lists when no `state` is given: the open sessions hangar reconciles after a restart. */
+const DEFAULT_LISTED_STATES: readonly HangarSessionState[] = ["claimed", "running"];
+/** The most long-polls (claim and messages with `wait_s` > 0, together) one client may hold open at once. */
+export const MAX_CONCURRENT_LONG_POLLS = 4;
+/** The requeue reason for a claim whose caller left before it could be delivered. */
+export const CLAIMER_GONE_REASON = "claimer disconnected before receiving the claim";
 
 /** The endpoint table: the router below and docs/hangar-api.md are both checked against it. */
 export const HANGAR_ENDPOINTS = [
@@ -262,6 +270,7 @@ async function sessionsJson(db: Database, sessions: readonly HangarSession[]): P
     host: s.host,
     disk_path: s.diskPath,
     requeue_reason: s.requeueReason,
+    failure_reason: s.failureReason,
     claimed_by: s.claimedBy,
     claimed_at: s.claimedAt,
     requested_at: s.occurredAt,
@@ -346,23 +355,60 @@ function mapCoreError(err: unknown): HangarApiError | null {
 }
 
 export function createHangarHandler({ db, readOnly = false, shutdownSignal, claimAmong }: HangarHandlerOptions): (req: IncomingMessage, res: ServerResponse, admitted: AdmittedClient | null) => Promise<void> {
+  /** Open long-polls per client (`MAX_CONCURRENT_LONG_POLLS`). */
+  const waiting = new Map<string, number>();
+
+  /** Runs a long-poll of `waitS` seconds for `client`, or refuses it with 429 when the client already holds the most allowed; `waitS` 0 is not a long-poll. */
+  async function asWaiter<T>(client: string, waitS: number, run: () => Promise<T>): Promise<T> {
+    if (waitS === 0) return run();
+    const held = waiting.get(client) ?? 0;
+    if (held >= MAX_CONCURRENT_LONG_POLLS) {
+      throw new HangarApiError(429, "too_many_waiters", `This client already holds ${MAX_CONCURRENT_LONG_POLLS} long-polls open (claim and messages together); retry once one answers.`, { "Retry-After": "1" });
+    }
+    waiting.set(client, held + 1);
+    try {
+      return await run();
+    } finally {
+      const left = (waiting.get(client) ?? 1) - 1;
+      if (left <= 0) waiting.delete(client);
+      else waiting.set(client, left);
+    }
+  }
+
   const handlers: Record<EndpointKey, EndpointHandler> = {
     "POST /hangar/v1/check-in": async ({ req, res, admitted }) => {
       const body = await readJsonBody(req, checkInSchema);
-      const { intervalS } = await recordCheckIn(db, { hangar: admitted.client, version: body.version, capacity: body.capacity ?? null });
-      sendJson(res, 200, { interval_s: intervalS, now: new Date().toISOString() });
+      const { intervalS, now } = await recordCheckIn(db, { hangar: admitted.client, version: body.version, capacity: body.capacity ?? null });
+      sendJson(res, 200, { interval_s: intervalS, now: now.toISOString() });
     },
 
     "POST /hangar/v1/claim": async ({ req, res, admitted, signal }) => {
       const body = await readJsonBody(req, claimSchema);
-      const claimed = await longPoll(body.wait_s, signal, () =>
-        claimSession(db, { hangar: admitted.client, flavors: body.flavors, ...(claimAmong === undefined ? {} : { among: claimAmong() }) }),
+      const claimed = await asWaiter(admitted.client, body.wait_s, () =>
+        longPoll(body.wait_s, signal, () => claimSession(db, { hangar: admitted.client, flavors: body.flavors, ...(claimAmong === undefined ? {} : { among: claimAmong() }) })),
       );
       if (claimed === null) {
         sendJson(res, 200, { session: null });
         return;
       }
-      sendJson(res, 200, { session: await sessionJson(db, claimed.session), token: claimed.token });
+      // Nobody will hold this token: give the session back rather than strand it claimed (module header).
+      const giveBack = () => requeueSession(db, { hangar: admitted.client, id: claimed.session.id, reason: CLAIMER_GONE_REASON });
+      if (res.destroyed || res.writableEnded) {
+        await giveBack();
+        return;
+      }
+      let session: Record<string, unknown>;
+      try {
+        session = await sessionJson(db, claimed.session);
+      } catch (err) {
+        await giveBack().catch((requeueErr: unknown) => console.error(`[breakdown-web] hangar claim: could not requeue session ${claimed.session.id} after a failed answer:`, requeueErr));
+        throw err;
+      }
+      if (res.destroyed) {
+        await giveBack();
+        return;
+      }
+      sendJson(res, 200, { session, token: claimed.token });
     },
 
     "PATCH /hangar/v1/sessions/:id": async ({ req, res, admitted, id }) => {
@@ -399,10 +445,12 @@ export function createHangarHandler({ db, readOnly = false, shutdownSignal, clai
       const sessionId = admitted.sessionId!;
       const after = intParam(query, "after", 0, Number.MAX_SAFE_INTEGER, 0);
       const waitS = intParam(query, "wait_s", 0, MAX_HANGAR_WAIT_S, 0);
-      const read = await longPoll<ReadHangarMessagesResult>(waitS, signal, async () => {
-        const page = await readHangarMessages(db, { sessionId, after });
-        return page.messages.length === 0 ? null : page;
-      });
+      const read = await asWaiter(admitted.client, waitS, () =>
+        longPoll<ReadHangarMessagesResult>(waitS, signal, async () => {
+          const page = await readHangarMessages(db, { sessionId, after });
+          return page.messages.length === 0 ? null : page;
+        }),
+      );
       const page = read ?? { messages: [], cursor: after };
       sendJson(res, 200, {
         messages: page.messages.map((m) => ({ id: m.id, kind: m.kind, body: m.body, created_at: m.createdAt.toISOString() })),
@@ -437,8 +485,15 @@ export function createHangarHandler({ db, readOnly = false, shutdownSignal, clai
       }
 
       const { endpoint } = hit;
-      const scope = admitted?.scope ?? "human";
-      if (admitted === null || scope !== endpoint.scope) {
+      if (admitted === null) {
+        throw new HangarApiError(
+          403,
+          "forbidden",
+          "Requests over loopback are treated as the local person; reach this API through the tailnet host or a proxy that sets X-Forwarded-For (docs/hangar-api.md).",
+        );
+      }
+      if (admitted.scope !== endpoint.scope) {
+        const scope = admitted.scope;
         throw new HangarApiError(403, "forbidden", `${/^[aeiou]/.test(scope) ? "An" : "A"} ${scope} token cannot call ${endpoint.method} ${endpoint.path}; it takes a ${endpoint.scope} token.`);
       }
       if (endpoint.scope === "agent" && admitted.sessionId === null) {

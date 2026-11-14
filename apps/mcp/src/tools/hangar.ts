@@ -53,6 +53,7 @@ function sessionJson(s: HangarSession): Record<string, unknown> {
     host: s.host,
     diskPath: s.diskPath,
     requeueReason: s.requeueReason,
+    failureReason: s.failureReason,
     updatedAt: s.updatedAt.toISOString(),
   };
 }
@@ -113,7 +114,7 @@ export const hangarSessionsTool: ToolDef<typeof sessionsSchema> = {
   description:
     `List hangar sessions, most recently changed first: filter by states (${HANGAR_SESSION_STATES.join(", ")}) and by workItemId (the work item a session runs for). ` +
     `limit is 1-${MAX_SESSIONS_LIMIT}, default ${DEFAULT_SESSIONS_LIMIT}; hasMore says more sessions matched. Each session carries its state, flavor, repo, work item, ` +
-    "who requested it, which hangar claimed it and when, where it runs (container, host, diskPath), and why it was last requeued. Read-only.",
+    "who requested it, which hangar claimed it and when, where it runs (container, host, diskPath), why it was last requeued, and why a claim marked it failed (failureReason). Read-only.",
   schema: sessionsSchema,
   isWrite: false,
   async handler(ctx: ToolContext, args) {
