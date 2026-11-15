@@ -11,8 +11,13 @@
 // token can only ask (brain_hangar_outcome_request), and no procedure takes
 // a hangar token. Attributed to the admitted client, or "human" for the
 // tokenless local person.
+//
+// `hangarSessions` (hangar-release): one work item's sessions, newest-changed
+// first, for the board drawer's "Hangar sessions" section. `human` only, a
+// read, so a read-only server serves it. The disk path itself stays off the
+// wire: the drawer needs only whether one is still held.
 
-import { getHangarStatus, HANGAR_OUTCOMES, setHangarSessionOutcome, type HangarOutcome, type HangarSessionState } from "@breakdown/core";
+import { getHangarStatus, HANGAR_OUTCOMES, listSessions, setHangarSessionOutcome, type HangarFlavor, type HangarOutcome, type HangarSessionState } from "@breakdown/core";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { mapCoreError } from "../errors.js";
@@ -73,4 +78,60 @@ const hangarSessionOutcomeProcedure = humanProcedure.input(hangarSessionOutcomeI
   }
 });
 
-export const hangarRouter = router({ hangarStatus: hangarStatusProcedure, hangarSessionOutcome: hangarSessionOutcomeProcedure });
+export interface HangarSessionDto {
+  id: string;
+  state: HangarSessionState;
+  flavor: HangarFlavor;
+  repo: string;
+  outcome: HangarOutcome | null;
+  outcomeAt: string | null;
+  outcomeBy: string | null;
+  released: boolean;
+  /** Hangar still reports a disk path for it. */
+  diskHeld: boolean;
+  container: string | null;
+  host: string | null;
+  failureReason: string | null;
+  requeueReason: string | null;
+  /** When it was requested. */
+  requestedAt: string | null;
+  updatedAt: string;
+}
+
+export interface HangarSessionsDto {
+  sessions: HangarSessionDto[];
+  /** More sessions than were listed. */
+  truncated: boolean;
+}
+
+export const hangarSessionsInputSchema = z.object({ workItemId: z.string().uuid() });
+
+const hangarSessionsProcedure = humanProcedure.input(hangarSessionsInputSchema).query(async ({ ctx, input }): Promise<HangarSessionsDto> => {
+  try {
+    const listed = await listSessions(ctx.db, { workItemId: input.workItemId });
+    return {
+      sessions: listed.sessions.map((s) => ({
+        id: s.id,
+        state: s.state,
+        flavor: s.flavor,
+        repo: s.repo,
+        outcome: s.outcome,
+        outcomeAt: s.outcomeAt,
+        outcomeBy: s.outcomeBy,
+        released: s.released,
+        diskHeld: s.diskPath !== null,
+        container: s.container,
+        host: s.host,
+        failureReason: s.failureReason,
+        requeueReason: s.requeueReason,
+        requestedAt: s.occurredAt,
+        updatedAt: s.updatedAt.toISOString(),
+      })),
+      truncated: listed.truncated,
+    };
+  } catch (err) {
+    throw mapCoreError("hangarSessions", err);
+  }
+});
+
+export const hangarRouter = router({ hangarStatus: hangarStatusProcedure, hangarSessionOutcome: hangarSessionOutcomeProcedure, hangarSessions: hangarSessionsProcedure });

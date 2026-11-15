@@ -126,15 +126,23 @@ const claimSchema = z.object({
 
 // `outcome` is not a field here: only a person sets it, so a sent one is
 // dropped like any unknown field (hangar-release; docs/hangar-api.md).
-const updateSchema = z
-  .object({
+// `reason` is used only with state "failed"; with any other state, or none,
+// it is an unused field and dropped before it is checked, so a hangar that
+// sends it more widely keeps working.
+const updateSchema = z.preprocess(
+  (body) => {
+    if (typeof body !== "object" || body === null || Array.isArray(body) || (body as Record<string, unknown>)["state"] === "failed") return body;
+    const { reason: _unused, ...rest } = body as Record<string, unknown>;
+    return rest;
+  },
+  z.object({
     state: z.enum(HANGAR_SESSION_STATES).optional(),
     container: z.string().max(MAX_HANGAR_FIELD_LENGTH).nullable().optional(),
     host: z.string().max(MAX_HANGAR_FIELD_LENGTH).nullable().optional(),
     disk_path: z.string().max(MAX_HANGAR_DISK_PATH_LENGTH).nullable().optional(),
     reason: z.string().trim().min(1).max(MAX_HANGAR_FAILURE_REASON_LENGTH).optional(),
-  })
-  .refine((body) => body.reason === undefined || body.state === "failed", { path: ["reason"], message: 'is taken only with state "failed"' });
+  }),
+);
 
 const requeueSchema = z.object({
   reason: z.string().trim().min(1).max(MAX_HANGAR_REQUEUE_REASON_LENGTH),

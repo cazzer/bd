@@ -163,7 +163,7 @@ Request (every field optional, at least one of `state`, `container`, `host`, `di
 
 - `state`: the state to move to. The [state machine](#session-state-machine) decides which moves are allowed. Sending the current state is allowed, and leaves the state as it is while you update the other fields. Omitting it updates only the other fields, and that is allowed on an ended (`stopped` or `failed`) session too.
 - `container`, `host` (string, at most 200 characters), `disk_path` (string, at most 1,024 characters): a string sets the field, `null` or `""` clears it, and an omitted field is left as it is. Values are trimmed and must not contain control characters. Clearing `container` and `disk_path` on an ended session is how you acknowledge a release (see [Releasing sessions](#releasing-sessions)).
-- `reason` (string, 1–500 characters): why you failed the session, for example `git clone exited 128` or `repo "x/y" is not on this hangar's allowlist`. Taken only with `state: "failed"`, and stored as the session's `failure_reason`. Sent with any other `state`, or without one, it is a `400 invalid_request`.
+- `reason` (string, 1–500 characters): why you failed the session, for example `git clone exited 128` or `repo "x/y" is not on this hangar's allowlist`. Used only with `state: "failed"`, and stored as the session's `failure_reason`; there it must be 1–500 characters, or the request is a `400 invalid_request`. Sent with any other `state`, or without one, it is ignored like any unused field (see [Versioning](#versioning)).
 - `outcome` is not a field of this request. Only a person sets it, so a sent `outcome` is ignored like any unknown field.
 
 Response `200`:
@@ -176,7 +176,7 @@ Moving to `stopped` or `failed` revokes the session token in the same transactio
 
 Status codes:
 - `200`
-- `400 invalid_json` / `invalid_request`: for example, an empty body `{}`, or a `reason` without `state: "failed"`
+- `400 invalid_json` / `invalid_request`: for example, an empty body `{}` (or one with only an ignored `reason`), or an empty `reason` with `state: "failed"`
 - `401`
 - `403 forbidden` / `read_only` / `not_claimer`: another hangar holds the session, or nobody does, as with a queued one
 - `404 not_found`: no session has that id

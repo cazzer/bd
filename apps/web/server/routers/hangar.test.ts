@@ -5,9 +5,11 @@
 // `hangarSessionOutcome` and an outcome request's inbox decision
 // (hangar-release) run on this file's own session nodes, written straight to
 // the store and never queued, so no real hangar can claim them.
+// `hangarSessions` lists sessions requested for this file's own work item,
+// queued far in the future so an oldest-first claim reaches them last.
 
 import { randomUUID } from "node:crypto";
-import { closeIngestRun, openIngestRun, recordCheckIn, requestHangarOutcome, upsertNodes, type IngestRunHandle } from "@breakdown/core";
+import { closeIngestRun, openIngestRun, recordCheckIn, requestHangarOutcome, requestSession, upsertNodes, type IngestRunHandle } from "@breakdown/core";
 import { createDb, createPool, hangarCheckIns, ingestRuns, nodes, resolveDatabaseUrl, type Database } from "@breakdown/db";
 import { TRPCError } from "@trpc/server";
 import { and, eq, inArray, like, sql } from "drizzle-orm";
@@ -21,6 +23,7 @@ const ISO = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/;
 
 const PERSON = `${HANGAR}-person`;
 const SESSION_NODES: string[] = [];
+const WORK_ITEMS: string[] = [];
 
 let pool: ReturnType<typeof createPool>;
 let db: Database;
@@ -35,10 +38,15 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await db.delete(hangarCheckIns).where(eq(hangarCheckIns.hangar, HANGAR));
+  if (WORK_ITEMS.length > 0) {
+    const sessions = await db.execute<{ id: string }>(sql`SELECT src_id AS id FROM edges WHERE edge_type = 'run_by' AND dst_id = ANY(${`{${WORK_ITEMS.join(",")}}`}::uuid[])`);
+    SESSION_NODES.push(...sessions.rows.map((r) => r.id));
+  }
   if (SESSION_NODES.length > 0) {
     await db.delete(nodes).where(and(eq(nodes.sourceSystem, "inbox"), inArray(nodes.externalId, SESSION_NODES.map((id) => `hangar-outcome:${id}`))));
     await db.delete(nodes).where(inArray(nodes.id, SESSION_NODES));
   }
+  if (WORK_ITEMS.length > 0) await db.delete(nodes).where(inArray(nodes.id, WORK_ITEMS));
   await closeIngestRun(db, run);
   await db.delete(ingestRuns).where(like(ingestRuns.actor, `${HANGAR}%`));
   await pool.end();
@@ -101,6 +109,37 @@ describe("hangarSessionOutcome", () => {
     const id = await sessionNode("running");
     const refused = await caller("human").hangarSessionOutcome({ id, outcome: "accepted" }).catch((e: unknown) => e);
     expect(refused).toMatchObject({ code: "CONFLICT", message: expect.stringContaining("is running") });
+  });
+});
+
+describe("hangarSessions", () => {
+  it("lists a work item's sessions newest-changed first, with the outcome and whether a disk is held", async () => {
+    const item = await upsertNodes(db, run, [{ nodeType: "work_item", sourceSystem: `${HANGAR}-fixtures`, externalId: randomUUID(), title: "Sessions fixture", metadata: { status: "open", priority: 2 } }]);
+    const workItemId = item.rows[0]!.id;
+    WORK_ITEMS.push(workItemId);
+    expect(await caller("human").hangarSessions({ workItemId })).toEqual({ sessions: [], truncated: false });
+
+    const later = new Date("2999-01-01T00:00:00.000Z");
+    const first = (await requestSession(db, { repo: "test/repo", workItemId, flavor: "headless", actor: PERSON, requestedAt: later })).session;
+    const second = (await requestSession(db, { repo: "test/repo", workItemId, flavor: "display-browser", actor: PERSON, requestedAt: later })).session;
+    // Ended and holding a disk, as hangar would leave it, written straight to the store.
+    await upsertNodes(db, run, [
+      { nodeType: "hangar_session", sourceSystem: "hangar", externalId: first.externalId, title: first.title, metadata: { state: "failed", flavor: "headless", repo: "test/repo", claimed_by: HANGAR, container: "c-1", host: "h-1", disk_path: "/disks/t.img", failure_reason: "worker exited 3" } },
+    ]);
+    await caller("human", { client: PERSON }).hangarSessionOutcome({ id: first.id, outcome: "tabled" });
+
+    const listed = await caller(null, { readOnly: true }).hangarSessions({ workItemId });
+    expect(listed.truncated).toBe(false);
+    expect(listed.sessions.map((s) => s.id)).toEqual([first.id, second.id]);
+    expect(listed.sessions[0]).toMatchObject({ state: "failed", flavor: "headless", outcome: "tabled", outcomeBy: PERSON, released: false, diskHeld: true, container: "c-1", host: "h-1", failureReason: "worker exited 3" });
+    expect(listed.sessions[0]!.updatedAt).toMatch(ISO);
+    expect(listed.sessions[1]).toMatchObject({ state: "queued", flavor: "display-browser", outcome: null, outcomeAt: null, released: false, diskHeld: false, container: null, requestedAt: later.toISOString() });
+    expect(Object.keys(listed.sessions[0]!)).not.toContain("diskPath");
+  });
+
+  it("refuses an agent token and a malformed id", async () => {
+    expect(await caller("agent").hangarSessions({ workItemId: randomUUID() }).catch((e: unknown) => e)).toMatchObject({ code: "FORBIDDEN" });
+    expect(await caller("human").hangarSessions({ workItemId: "nope" }).catch((e: unknown) => e)).toMatchObject({ code: "BAD_REQUEST" });
   });
 });
 

@@ -70,6 +70,8 @@
 // new line (lib/reviewAttachments.ts `appendNote`; video-review-attachments,
 // design.md decision 8) and puts the caret at the message's end; a note is
 // plain text, sent as typed.
+// Below either body, the item's hangar sessions (HangarSessions.tsx), left
+// off while it has none.
 // For any other item: its fields, its description, and a link to the
 // graph. The description and a legacy review's summary render as markdown
 // through EvidenceView (bead bodies are markdown; plain text reads the same
@@ -118,6 +120,7 @@ import { ReviewAttachments, SectionTitle, type AttachmentLayout, type Attachment
 import { ReviewSessionLinks } from "./ReviewSessionLinks.js";
 import { cardShortcut, DecisionCardBody, DecisionFooter, type CardOutcome, type FooterLabels, type Refusal } from "./DecisionCard.js";
 import { EvidenceView } from "./EvidenceView.js";
+import { HangarSessions } from "./HangarSessions.js";
 
 type BoardItem = NonNullable<Awaited<ReturnType<typeof trpc.boardItem.query>>["item"]>;
 
@@ -536,6 +539,7 @@ export function ReviewItemPanel({
         ) : (
           <PlainBody item={loaded} />
         ))}
+      {loaded && <HangarSessions workItemId={loaded.id} version={boardVersion} />}
     </div>
   );
 

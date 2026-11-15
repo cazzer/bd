@@ -406,15 +406,23 @@ describe("releasing sessions", () => {
     expect((await metadataOf(id))["outcome"]).toBeUndefined();
   });
 
-  it("stores reason with failed as failure_reason, and refuses it with any other state", async () => {
+  it("stores reason with failed as failure_reason, checks its length there, and ignores it with any other state", async () => {
     const { id } = await queued();
     await claim(id);
-    for (const body of [{ state: "running", reason: "worker exited 3" }, { reason: "worker exited 3" }, { state: "failed", reason: "" }, { state: "failed", reason: "x".repeat(501) }]) {
+    for (const body of [{ state: "failed", reason: "" }, { state: "failed", reason: "x".repeat(501) }, { state: "failed", reason: 42 }]) {
       const refused = await patch(id, body);
       expect(refused.status, JSON.stringify(body)).toBe(400);
       expect(refused.json.error).toMatchObject({ code: "invalid_request", message: expect.stringContaining("reason") });
     }
     expect((await metadataOf(id))["state"]).toBe("claimed");
+    // Alone, an ignored reason leaves nothing to change.
+    const nothing = await patch(id, { reason: "worker exited 3" });
+    expect(nothing.status, nothing.body).toBe(400);
+    expect(nothing.json.error).toMatchObject({ code: "invalid_request" });
+    const running = await patch(id, { state: "running", reason: "x".repeat(501) });
+    expect(running.status, running.body).toBe(200);
+    expect(running.json["session"]).toMatchObject({ state: "running", failure_reason: null });
+    expect((await metadataOf(id))["failure_reason"]).toBeUndefined();
     const failed = await patch(id, { state: "failed", reason: "git clone exited 128" });
     expect(failed.status, failed.body).toBe(200);
     expect(failed.json["session"]).toMatchObject({ state: "failed", failure_reason: "git clone exited 128" });
