@@ -129,7 +129,7 @@ const NEW_REVIEW_ID_SUFFIX = `.${"9".repeat(15)}`;
  *   | { args: { itemId: string, summary: string, boardUrl: string, images: string[] } }
  *   | { args: { itemId: string, cardPaths: string[], boardUrl: string } }}
  */
-export function parseArgs(argv) {
+export function parseArgs(argv, env = {}) {
   let parsed;
   try {
     parsed = parseNodeArgs({
@@ -147,13 +147,14 @@ export function parseArgs(argv) {
   }
   const { values, positionals } = parsed;
   if (values.help) return { help: true };
+  if (env.BREAKDOWN_API && !isHttpUrl(env.BREAKDOWN_API)) return { error: `BREAKDOWN_API must be an http(s) URL: ${env.BREAKDOWN_API}` };
   const [itemId, ...images] = positionals;
   if (itemId === undefined) return { error: "missing <item-id>" };
   if (!ITEM_ID.test(itemId)) return { error: `not an issue id: ${itemId}` };
   if (values.summary === undefined && images.length > 0 && images.every((p) => p.endsWith(".md"))) {
     if (images.length > MAX_CARDS) return { error: `at most ${MAX_CARDS} cards in one call, got ${images.length}` };
-    const boardUrl = values["board-url"] ?? DEFAULT_BOARD_URL;
-    if (!isHttpUrl(boardUrl)) return { error: `--board-url must be an http(s) URL: ${boardUrl}` };
+    const boardUrl = values["board-url"] ?? (env.BREAKDOWN_UI || DEFAULT_BOARD_URL);
+    if (!isHttpUrl(boardUrl)) return { error: `${boardSource(values)} must be an http(s) URL: ${boardUrl}` };
     return { args: { itemId, cardPaths: images, boardUrl } };
   }
   if (values.summary === undefined && images.some((p) => p.endsWith(".md"))) {
@@ -164,10 +165,12 @@ export function parseArgs(argv) {
   if (summary.length > MAX_SUMMARY) return { error: `--summary is longer than ${MAX_SUMMARY} characters` };
   if (images.length === 0) return { error: "at least one image is required" };
   if (images.length > MAX_IMAGES) return { error: `at most ${MAX_IMAGES} images, got ${images.length}` };
-  const boardUrl = values["board-url"] ?? DEFAULT_BOARD_URL;
-  if (!isHttpUrl(boardUrl)) return { error: `--board-url must be an http(s) URL: ${boardUrl}` };
+  const boardUrl = values["board-url"] ?? (env.BREAKDOWN_UI || DEFAULT_BOARD_URL);
+  if (!isHttpUrl(boardUrl)) return { error: `${boardSource(values)} must be an http(s) URL: ${boardUrl}` };
   return { args: { itemId, summary, boardUrl, images } };
 }
+
+const boardSource = (values) => (values["board-url"] === undefined ? "BREAKDOWN_UI" : "--board-url");
 
 function isHttpUrl(value) {
   try {
@@ -178,7 +181,9 @@ function isHttpUrl(value) {
   }
 }
 
+/** $BREAKDOWN_API (validated by parseArgs), else the local server: the same names as bin/inbox. */
 export function apiBase(env) {
+  if (env.BREAKDOWN_API) return env.BREAKDOWN_API.replace(/\/+$/, "");
   const port = PORT.test(env.WEB_SERVER_PORT ?? "") ? env.WEB_SERVER_PORT : DEFAULT_SERVER_PORT;
   return `http://127.0.0.1:${port}`;
 }
@@ -753,10 +758,15 @@ function blocksOn(item, id) {
 
 class Refusal extends Error {}
 
-async function fetchProjects(fetchFn, url) {
+/** `authorization: Bearer $BREAKDOWN_TOKEN` when set: needed off loopback (a tailnet host). */
+export function authHeaders(env) {
+  return env.BREAKDOWN_TOKEN ? { authorization: `Bearer ${env.BREAKDOWN_TOKEN}` } : {};
+}
+
+async function fetchProjects(fetchFn, url, headers = {}) {
   let response;
   try {
-    response = await fetchFn(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+    response = await fetchFn(url, { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
   } catch (err) {
     if (err?.name === "TimeoutError") throw new Error(`no answer within ${FETCH_TIMEOUT_MS / 1000} s`);
     throw new Error(err?.cause?.code ?? err?.cause?.message ?? err?.message ?? String(err));
@@ -836,7 +846,7 @@ async function showInChrome(deps, boardUrl, link) {
  * @returns {Promise<{ exitCode: number }>}
  */
 export async function requestReview(deps) {
-  const parsed = parseArgs(deps.argv);
+  const parsed = parseArgs(deps.argv, deps.env);
   if ("help" in parsed) {
     deps.out(USAGE);
     return { exitCode: 0 };
@@ -1036,11 +1046,12 @@ async function check(deps, args) {
   const api = apiBase(deps.env);
   let projects;
   try {
-    projects = await fetchProjects(deps.fetch, `${api}/trpc/beadsProjects`);
+    projects = await fetchProjects(deps.fetch, `${api}/trpc/beadsProjects`, authHeaders(deps.env));
   } catch (err) {
-    throw new Refusal(
-      `cannot reach the breakdown server at ${api}/trpc/beadsProjects (${err.message}). Start it with \`pnpm dev\` in ${deps.breakdownRoot}, then retry. Nothing was filed.`,
-    );
+    const fix = deps.env.BREAKDOWN_API
+      ? "Check BREAKDOWN_API and BREAKDOWN_TOKEN and that the server is up"
+      : `Start it with \`pnpm dev\` in ${deps.breakdownRoot}`;
+    throw new Refusal(`cannot reach the breakdown server at ${api}/trpc/beadsProjects (${err.message}). ${fix}, then retry. Nothing was filed.`);
   }
   const project = findProject(projects, realMain);
   if (!project) {
@@ -1096,6 +1107,7 @@ async function stageFiles(deps, key, files) {
     const names = [];
     for (const [index, given] of files.entries()) {
       const name = copiedName(index, given);
+      // Copied on this machine only: a remote Breakdown (BREAKDOWN_API) can't serve them until bd-d38.6 uploads them.
       await fs.copyFile(path.resolve(deps.cwd, given), path.join(dir, name));
       names.push(name);
     }
