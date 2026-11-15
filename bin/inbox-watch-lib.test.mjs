@@ -9,10 +9,15 @@ import {
   MAX_IDS_PER_RUN,
   parseInboxResponse,
   parseWatchArgs,
+  planTick,
+  readBodyCapped,
   remoteWarning,
   resolveApi,
+  RUN_TOOLS,
   sanitizeForLog,
   selectDue,
+  stripTerminalControls,
+  takeRun,
 } from "./inbox-watch-lib.mjs";
 
 const ID_A = "0b6c3a1e-2f4d-4c8a-9e1b-7d5f3a2c1b0e";
@@ -43,6 +48,11 @@ describe("resolveApi", () => {
   it("drops trailing slashes and keeps a path prefix", () => {
     assert.deepEqual(resolveApi({ BREAKDOWN_API: "https://x.tail1.ts.net/" }), { api: "https://x.tail1.ts.net" });
     assert.deepEqual(resolveApi({ BREAKDOWN_API: "http://127.0.0.1:4310/api//" }), { api: "http://127.0.0.1:4310/api" });
+  });
+  it("refuses a query or a fragment", () => {
+    assert.match(resolveApi({ BREAKDOWN_API: "https://x.tail1.ts.net/?a=1" }).error, /query or fragment/);
+    assert.match(resolveApi({ BREAKDOWN_API: "https://x.tail1.ts.net/?" }).error, /query or fragment/);
+    assert.match(resolveApi({ BREAKDOWN_API: "https://x.tail1.ts.net#frag" }).error, /query or fragment/);
   });
   it("refuses a URL that is not http(s)", () => {
     assert.match(resolveApi({ BREAKDOWN_API: "ftp://host" }).error, /http\(s\)/);
@@ -85,6 +95,8 @@ describe("remoteWarning", () => {
     assert.match(warned, /x\.tail1\.ts\.net/);
     assert.match(warned, /24h/);
     assert.match(warned, /what-the-relay-trusts/);
+    assert.match(warned, /no built-in tools except Skill and ToolSearch/);
+    assert.doesNotMatch(warned, /no shell or file edits/);
     assert.doesNotMatch(warned, /BREAKDOWN_TOKEN/);
     assert.match(remoteWarning("https://x.tail1.ts.net", "/repo", "24h", { hasToken: false }), /BREAKDOWN_TOKEN/);
   });
@@ -92,14 +104,17 @@ describe("remoteWarning", () => {
 
 describe("parseWatchArgs", () => {
   it("has defaults", () => {
-    assert.deepEqual(parseWatchArgs([]), { intervalMs: 30_000, once: false, dryRun: false, allowRemote: false, maxAgeMs: DAY, maxAge: "24h" });
+    assert.deepEqual(parseWatchArgs([]), { intervalMs: 30_000, once: false, dryRun: false, allowRemote: false, maxAgeMs: DAY, maxAge: "24h", maxRunsPerHour: 12 });
   });
   it("reads the flags", () => {
-    const parsed = parseWatchArgs(["--interval", "60", "--once", "--dry-run", "--allow-remote", "--max-age", "2h"]);
-    assert.deepEqual(parsed, { intervalMs: 60_000, once: true, dryRun: true, allowRemote: true, maxAgeMs: 7_200_000, maxAge: "2h" });
+    const parsed = parseWatchArgs(["--interval", "60", "--once", "--dry-run", "--allow-remote", "--max-age", "2h", "--max-runs-per-hour", "3"]);
+    assert.deepEqual(parsed, { intervalMs: 60_000, once: true, dryRun: true, allowRemote: true, maxAgeMs: 7_200_000, maxAge: "2h", maxRunsPerHour: 3 });
   });
   it("refuses a bad --interval", () => {
     for (const value of ["5", "abc", "1.5", "", "-30"]) assert.match(parseWatchArgs([`--interval=${value}`]).error, /--interval/, value);
+  });
+  it("refuses a bad --max-runs-per-hour", () => {
+    for (const value of ["0", "abc", "1.5", "", "-1", "10000"]) assert.match(parseWatchArgs([`--max-runs-per-hour=${value}`]).error, /--max-runs-per-hour/, value);
   });
   it("refuses a bad --max-age", () => {
     assert.match(parseWatchArgs(["--max-age", "2x"]).error, /--max-age/);
@@ -185,7 +200,7 @@ describe("decisionTime", () => {
 describe("selectDue", () => {
   const now = Date.parse("2026-11-14T12:00:00.000Z");
   const at = (ms) => new Date(now - ms).toISOString();
-  const opts = (tried = new Set()) => ({ status: "accepted", now, maxAgeMs: DAY, tried });
+  const opts = (tried = new Set()) => ({ status: "accepted", now, maxAgeMs: DAY, maxAge: "24h", tried });
 
   it("runs an item decided within the window, up to exactly the limit", () => {
     const fresh = item({ updatedAt: at(DAY - 60_000) });
@@ -198,16 +213,26 @@ describe("selectDue", () => {
     assert.deepEqual(due, []);
     assert.equal(stale.length, 1);
     assert.equal(stale[0].item, old);
-    assert.match(stale[0].reason, /decided 2026-11-13T11:59:00\.000Z, older than --max-age 1d/);
-    assert.match(selectDue([old], { ...opts(), maxAge: "24h" }).stale[0].reason, /older than --max-age 24h$/);
+    assert.equal(stale[0].reason, "decided 2026-11-13T11:59:00.000Z, older than --max-age 24h");
   });
   it("judges age by the decision, not updatedAt", () => {
     const old = item({ updatedAt: at(0), feedback: [{ decision: "accept", at: at(2 * DAY) }] });
     assert.equal(selectDue([old], opts()).stale.length, 1);
   });
-  it("counts a future decision as fresh", () => {
-    const future = item({ updatedAt: new Date(now + HOUR).toISOString() });
-    assert.deepEqual(selectDue([future], opts()).due, [future]);
+  it("counts a decision up to five minutes ahead as fresh", () => {
+    const skewed = item({ updatedAt: new Date(now + 5 * 60_000).toISOString() });
+    assert.deepEqual(selectDue([skewed], opts()).due, [skewed]);
+  });
+  it("skips a decision more than five minutes ahead as unreadable", () => {
+    const future = item({ updatedAt: new Date(now + 5 * 60_000 + 1000).toISOString() });
+    const far = item({ id: ID_B, feedback: [{ decision: "accept", at: new Date(now + HOUR).toISOString() }] });
+    const { due, stale } = selectDue([future, far], opts());
+    assert.deepEqual(due, []);
+    assert.deepEqual(stale.map((s) => s.item), [future, far]);
+    assert.match(stale[0].reason, /is in the future/);
+  });
+  it("requires the --max-age label", () => {
+    assert.throws(() => selectDue([], { status: "accepted", now, maxAgeMs: DAY, tried: new Set() }), /maxAge/);
   });
   it("skips an unreadable time as stale", () => {
     const { due, stale } = selectDue([item({ updatedAt: "garbage" })], opts());
@@ -221,6 +246,89 @@ describe("selectDue", () => {
     const tried = new Set([`${ID_B}@${triedItem.updatedAt}`]);
     assert.deepEqual(selectDue([owned, triedItem, changes], opts(tried)), { due: [], stale: [] });
     assert.equal(tried.size, 1);
+  });
+});
+
+describe("planTick", () => {
+  const now = Date.parse("2026-11-14T12:00:00.000Z");
+  const uuid = (n) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  const fresh = (n, status = "accepted") => item({ id: uuid(n), status, updatedAt: new Date(now - 60_000).toISOString() });
+  const opts = (tried) => ({ tried, now, maxAgeMs: DAY, maxAge: "24h" });
+
+  it("caps a batch at MAX_IDS_PER_RUN, runs the leftovers next tick, and logs a stale item once", () => {
+    const items = [...Array.from({ length: 30 }, (_, i) => fresh(i)), item({ id: uuid(99), updatedAt: new Date(now - 2 * DAY).toISOString() })];
+    const start = new Set();
+    const first = planTick(items, opts(start));
+    assert.equal(start.size, 0, "the argument is not changed");
+    assert.deepEqual(first.batches.map((b) => [b.status, b.ids.length]), [["accepted", MAX_IDS_PER_RUN]]);
+    assert.deepEqual(first.batches[0].ids, items.slice(0, 25).map((i) => i.id));
+    assert.deepEqual(first.leftover, { accepted: 5, changes: 0 });
+    assert.deepEqual(first.stale.map((s) => [s.item.id, s.status]), [[uuid(99), "accepted"]]);
+
+    const second = planTick(items, opts(first.tried));
+    assert.deepEqual(second.batches.map((b) => b.ids), [items.slice(25, 30).map((i) => i.id)]);
+    assert.deepEqual(second.leftover, { accepted: 0, changes: 0 });
+    assert.deepEqual(second.stale, []);
+
+    const third = planTick(items, opts(second.tried));
+    assert.deepEqual(third.batches, []);
+    assert.deepEqual(third.stale, []);
+  });
+  it("plans one batch per status", () => {
+    const plan = planTick([fresh(1), fresh(2, "changes")], opts(new Set()));
+    assert.deepEqual(plan.batches, [
+      { status: "accepted", ids: [uuid(1)] },
+      { status: "changes", ids: [uuid(2)] },
+    ]);
+  });
+  it("prunes tried keys whose id the poll no longer reports", () => {
+    const plan = planTick([fresh(1)], opts(new Set([`${uuid(1)}@old`, `${uuid(2)}@gone`])));
+    assert.deepEqual([...plan.tried].sort(), [`${uuid(1)}@${fresh(1).updatedAt}`, `${uuid(1)}@old`]);
+  });
+  it("runs an item again once its version changes", () => {
+    const first = planTick([fresh(1)], opts(new Set()));
+    const bumped = item({ id: uuid(1), updatedAt: new Date(now - 30_000).toISOString() });
+    assert.deepEqual(planTick([bumped], opts(first.tried)).batches, [{ status: "accepted", ids: [uuid(1)] }]);
+  });
+});
+
+describe("takeRun", () => {
+  it("allows up to the budget in an hour, then refuses", () => {
+    let starts = [];
+    for (let i = 0; i < 12; i += 1) {
+      const taken = takeRun(starts, 1_000_000 + i * 1000, 12);
+      assert.equal(taken.allowed, true);
+      starts = taken.starts;
+    }
+    const refused = takeRun(starts, 1_000_000 + 60_000, 12);
+    assert.equal(refused.allowed, false);
+    assert.equal(refused.starts.length, 12);
+  });
+  it("forgets runs older than an hour", () => {
+    const taken = takeRun([0, 1000], HOUR + 500, 2);
+    assert.deepEqual(taken, { allowed: true, starts: [1000, HOUR + 500] });
+  });
+  it("does not change its argument", () => {
+    const starts = [5];
+    takeRun(starts, 10, 3);
+    assert.deepEqual(starts, [5]);
+  });
+});
+
+describe("readBodyCapped", () => {
+  it("reads a body within the cap", async () => {
+    assert.equal(await readBodyCapped(new Response("héllo"), 100), "héllo");
+  });
+  it("refuses a declared length past the cap", async () => {
+    await assert.rejects(readBodyCapped(new Response("x".repeat(50), { headers: { "content-length": "50" } }), 10), /more than 10/);
+  });
+  it("refuses a streamed body past the cap", async () => {
+    const stream = new ReadableStream({
+      pull(controller) {
+        controller.enqueue(new Uint8Array(8));
+      },
+    });
+    await assert.rejects(readBodyCapped(new Response(stream), 20), /more than 20/);
   });
 });
 
@@ -251,14 +359,13 @@ describe("buildPrompt", () => {
 });
 
 describe("claudeArgs", () => {
-  it("is today's argv on loopback", () => {
-    assert.deepEqual(claudeArgs("P", { remote: false }), ["-p", "P", "--mcp-config", ".mcp.json", "--permission-mode", "bypassPermissions"]);
-  });
-  it("denies shell and file tools in remote mode, after the prompt", () => {
-    const args = claudeArgs("P", { remote: true });
-    assert.deepEqual(args, ["-p", "P", "--mcp-config", ".mcp.json", "--disallowedTools", "Bash,Edit,Write,NotebookEdit", "--permission-mode", "bypassPermissions"]);
+  it("allows only Skill and ToolSearch of the built-in tools, after the prompt and before another flag", () => {
+    const args = claudeArgs("P");
+    assert.equal(RUN_TOOLS, "Skill,ToolSearch");
+    assert.deepEqual(args, ["-p", "P", "--mcp-config", ".mcp.json", "--tools", "Skill,ToolSearch", "--permission-mode", "bypassPermissions"]);
     assert.equal(args[1], "P");
-    assert.equal(args.indexOf("--disallowedTools") + 2, args.indexOf("--permission-mode"));
+    assert.equal(args.indexOf("--tools") + 2, args.indexOf("--permission-mode"));
+    assert.ok(!args.includes("--disallowedTools"));
   });
 });
 
@@ -268,8 +375,21 @@ describe("sanitizeForLog", () => {
     assert.doesNotMatch(clean, /[\u0000-\u001f\u007f-\u009f]/);
     assert.match(clean, /bad line/);
   });
+  it("strips bidi overrides and line separators", () => {
+    const clean = sanitizeForLog("a\u202eb\u2066c\u2069d\u2028e\u2029f\u202ag");
+    assert.doesNotMatch(clean, /[\u2028\u2029\u202a-\u202e\u2066-\u2069]/);
+    assert.equal(clean, "a b c d e f g");
+  });
   it("truncates", () => {
     assert.equal(sanitizeForLog("x".repeat(500)).length, 301);
     assert.equal(sanitizeForLog("abcdef", 3), "abc…");
+  });
+});
+
+describe("stripTerminalControls", () => {
+  it("removes escape, OSC, and C1 controls, keeping newlines and tabs", () => {
+    const out = stripTerminalControls("\u001b[31mred\u001b[0m\tok\n\u001b]0;title\u0007done\r\u009b2J\n");
+    assert.doesNotMatch(out, /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/);
+    assert.equal(out, "[31mred[0m\tok\n]0;titledone2J\n");
   });
 });

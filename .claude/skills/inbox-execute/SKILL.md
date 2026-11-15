@@ -26,7 +26,7 @@ The person accepted these items in breakdown's inbox. Your job is to do exactly 
 
 Never execute an item whose status isn't `accepted` when you read it.
 
-`bin/inbox-watch` runs this skill headless whenever you accept an item no session owns, so Accept acts within about 30 seconds. It names the item ids it selected, and it runs only on a loopback Breakdown unless given `--allow-remote`.
+`bin/inbox-watch` runs this skill headless whenever you accept an item no session owns, so Accept acts within about 30 seconds. It names the item ids it selected, and it runs only on a loopback Breakdown unless given `--allow-remote`. Its runs have no built-in tools but Skill and ToolSearch, so everything here goes through MCP tools.
 
 ## Triage: items sent back with a note
 

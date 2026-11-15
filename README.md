@@ -310,7 +310,7 @@ Items are `inbox_item` nodes (`packages/core/src/inbox.ts`). The app makes no mo
 | Queue a draft from any session | `inbox request --key session:<slug> --title ... --url <u> --read 'full|<u>' < body.md` (decision is prompted back into that herdr pane) |
 | Close an item after acting | `inbox done <id> "<what you did>"` |
 | Go deep on one item | **Talk it through ↗** (`o`): a new tab in herdr's `inbox` workspace with Claude primed on the item. It sends its draft back here with `inbox request`, and your Accept is prompted back into that tab. `pnpm dev` has to run inside herdr (or herdr's default socket must exist). |
-| Make Accept act on its own | `inbox-watch` in a spare terminal: runs `claude -p` with `inbox-execute` (accepted) or the revise step (changes) for items no session owns; loopback Breakdown only unless `--allow-remote` (trust caveats in docs/relay.md), and skips items decided more than `--max-age` (24h) ago |
+| Make Accept act on its own | `inbox-watch` in a spare terminal: runs `claude -p` with `inbox-execute` (accepted) or the revise step (changes) for items no session owns; loopback Breakdown only unless `--allow-remote` (trust caveats in docs/relay.md), skips items decided more than `--max-age` (24h) ago, and gives each run no built-in tools but Skill and ToolSearch (MCP tools only) |
 
 Headless, e.g. from launchd/cron: `claude -p --mcp-config .mcp.json "/inbox-ingest"`. Put the CLIs on `PATH` once: `ln -sf "$PWD/bin/inbox" "$PWD/bin/inbox-watch" ~/.local/bin/`.
 

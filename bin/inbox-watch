@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// inbox-watch — makes a decision in the inbox act right away. Polls the
-// local breakdown server and, when you've accepted (or sent back) an item
+// inbox-watch — makes a decision in the inbox act right away. Polls a
+// breakdown server's inbox and, when you've accepted (or sent back) an item
 // that no live session owns, runs your own Claude Code headless in this
 // checkout to carry it out:
 //
@@ -14,46 +14,54 @@
 //
 // This runs outside the app on purpose. breakdown never calls a model; this
 // is a convenience loop on your machine that starts the Claude Code you
-// already use, with your connectors, the same as typing the skill yourself.
-// Each run uses --permission-mode bypassPermissions, so it acts without
-// asking — the approval was your Accept. Stop it with Ctrl-C.
+// already use. Each run uses --permission-mode bypassPermissions, so it
+// acts without asking — the approval was your Accept. Stop it with Ctrl-C.
 //
-//   inbox-watch [--interval 30] [--once] [--dry-run] [--max-age 24h] [--allow-remote]
+//   inbox-watch [--interval 30] [--once] [--dry-run] [--max-age 24h]
+//               [--max-runs-per-hour 12] [--allow-remote]
 //
-// It polls only a loopback Breakdown (127.0.0.0/8, ::1, localhost) unless
-// given --allow-remote, and then only over https, or http to a tailnet
-// address or *.ts.net name (the relay's --url rule); redirects are never
-// followed. Each run is named exactly the item ids this script selected,
-// never the server's text, and acts on no other item. An item whose
-// decision (its latest matching feedback entry's `at`, else `updatedAt`)
-// is older than --max-age is skipped. Against a remote Breakdown the run
-// is denied shell and file-edit tools, but it still acts through your
-// connectors on content that server wrote: read
-// docs/relay.md#what-the-relay-trusts before using --allow-remote. The
-// checks live in bin/inbox-watch-lib.mjs.
+// Two modes. By default it polls only a loopback BREAKDOWN_API (127.0.0.0/8,
+// ::1, localhost: a hostname check, so an ssh tunnel or local proxy passes
+// too). With --allow-remote it polls another host, but only over https, or
+// http to a tailnet address or *.ts.net name (the relay's --url rule), and
+// warns when it starts. Either way, redirects are never followed; each run
+// is named exactly the item ids this script selected, never the server's
+// text, and told to act on no other item; an item whose decision (its
+// latest matching feedback entry's `at`, else `updatedAt`) is older than
+// --max-age is skipped; past --max-runs-per-hour runs the watcher stops;
+// and each run gets no built-in tools except Skill and ToolSearch, so MCP
+// tools only (every MCP server, connector, and plugin tool your Claude
+// config loads). The item content a run acts on comes from the `brain` MCP
+// entry in your Claude config, not from BREAKDOWN_API, so either mode is
+// only as trustworthy as that entry: read docs/relay.md#what-the-relay-trusts
+// before using --allow-remote. The checks live in bin/inbox-watch-lib.mjs.
 //
 // $BREAKDOWN_API points it at another server (default the local one). When
 // $BREAKDOWN_TOKEN is set, each poll sends it as `Authorization: Bearer`
 // (needed off loopback; an `agent` token may read the inbox). They resolve
 // as bin/inbox and bin/review-request resolve them: an empty value is
 // unset, a trailing slash is dropped, and a URL that is not http(s) is
-// refused. Both are this script's variables, not the server's.
+// refused (so is one with a query or fragment). Both are this script's
+// variables, not the server's.
 
 import { spawn } from "node:child_process";
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import {
   buildPrompt,
   checkApiTrust,
   claudeArgs,
-  itemKey,
-  MAX_IDS_PER_RUN,
+  FETCH_TIMEOUT_MS,
   parseInboxResponse,
   parseWatchArgs,
+  planTick,
+  readBodyCapped,
   remoteWarning,
   resolveApi,
   sanitizeForLog,
-  selectDue,
+  stripTerminalControls,
+  takeRun,
   WATCH_USAGE,
   WATCHED_STATUSES,
 } from "./inbox-watch-lib.mjs";
@@ -92,8 +100,8 @@ function log(message) {
 
 async function query(statuses) {
   const url = `${API}/trpc/inbox?input=${encodeURIComponent(JSON.stringify({ statuses }))}`;
-  const res = await fetch(url, { headers: AUTH, redirect: "error" });
-  const text = await res.text();
+  const res = await fetch(url, { headers: AUTH, redirect: "error", signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+  const text = await readBodyCapped(res);
   let body;
   try {
     body = JSON.parse(text);
@@ -107,21 +115,32 @@ async function query(statuses) {
   return parsed.items;
 }
 
+/** Copies a child's output stream to ours with terminal controls removed (stripTerminalControls). */
+function relay(from, to) {
+  const decoder = new StringDecoder("utf8");
+  from.on("data", (chunk) => to.write(stripTerminalControls(decoder.write(chunk))));
+  from.on("end", () => to.write(stripTerminalControls(decoder.end())));
+}
+
 function runClaude(args) {
   return new Promise((resolve) => {
-    const child = spawn("claude", args, { cwd: REPO, stdio: ["ignore", "inherit", "inherit"] });
+    const child = spawn("claude", args, { cwd: REPO, stdio: ["ignore", "pipe", "pipe"] });
+    relay(child.stdout, process.stdout);
+    relay(child.stderr, process.stderr);
     child.on("error", (err) => {
       log(`could not start claude: ${err.message}`);
       resolve(1);
     });
-    child.on("exit", (code) => resolve(code ?? 1));
+    child.on("close", (code) => resolve(code ?? 1));
   });
 }
 
-// An item is tried once per version: if the run leaves it untouched (a
-// connector failed, say), it isn't retried until something changes it. A
-// skipped stale item is logged once per version the same way.
-const tried = new Set();
+// Tried keys, replaced each tick by planTick's (see there): an item is tried
+// once per version, so one the run left untouched (a connector failed, say)
+// isn't retried until something changes it, and a stale one is logged once.
+let tried = new Set();
+// When each claude run started, for --max-runs-per-hour.
+let runStarts = [];
 
 async function tick() {
   let items;
@@ -132,22 +151,25 @@ async function tick() {
     log(`can't read the inbox (${reason})${REMOTE ? "" : "; is `pnpm dev` running?"}`);
     return;
   }
-  for (const status of WATCHED_STATUSES) {
-    const { due, stale } = selectDue(items, { status, now: Date.now(), maxAgeMs: options.maxAgeMs, maxAge: options.maxAge, tried });
-    for (const { item, reason } of stale) {
-      log(`skipped ${item.id} (${status}): ${reason}`);
-      tried.add(itemKey(item));
-    }
-    if (due.length === 0) continue;
-    const batch = due.slice(0, MAX_IDS_PER_RUN);
-    for (const item of batch) tried.add(itemKey(item));
-    const ids = batch.map((item) => item.id);
-    log(`${batch.length} ${status}: ${ids.join(", ")}`);
+  const plan = planTick(items, { tried, now: Date.now(), maxAgeMs: options.maxAgeMs, maxAge: options.maxAge });
+  tried = plan.tried;
+  for (const { item, status, reason } of plan.stale) log(`skipped ${item.id} (${status}): ${reason}`);
+  for (const { status, ids } of plan.batches) {
+    const more = plan.leftover[status] > 0 ? ` (+${plan.leftover[status]} next tick)` : "";
+    log(`${ids.length} ${status}: ${ids.join(", ")}${more}`);
     if (options.dryRun) {
-      log(`dry run: would run claude on ${status} ${ids.join(", ")}`);
+      log("dry run: not starting claude");
       continue;
     }
-    const code = await runClaude(claudeArgs(buildPrompt(status, ids), { remote: REMOTE }));
+    const budget = takeRun(runStarts, Date.now(), options.maxRunsPerHour);
+    runStarts = budget.starts;
+    if (!budget.allowed) {
+      console.error(
+        `inbox-watch: RUN BUDGET HIT: ${options.maxRunsPerHour} claude runs started in the last hour (--max-runs-per-hour). Stopping the watcher; nothing more runs. Check the inbox for an item that keeps coming back, then restart.`,
+      );
+      process.exit(3);
+    }
+    const code = await runClaude(claudeArgs(buildPrompt(status, ids)));
     log(code === 0 ? `${status} run finished` : `${status} run exited ${code}`);
   }
 }
