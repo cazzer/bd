@@ -3,7 +3,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { MAX_RELAY_HERDR_PAYLOAD_TEXT_LENGTH, MAX_RELAY_HERDR_TEXT_LENGTH, RELAY_PROVENANCE_LINE } from "@breakdown/core";
+import { MAX_RELAY_HERDR_PAYLOAD_TEXT_LENGTH, MAX_RELAY_HERDR_TEXT_LENGTH, RELAY_PROVENANCE_LINE, RELAY_PROVENANCE_SEPARATOR } from "@breakdown/core";
 import { createRelayRunners, RelayRefusedError, type SocketInspection } from "./runners.js";
 
 const DIR = "/Users/me/dev/bd";
@@ -77,7 +77,7 @@ describe("relay runners", () => {
   it("run herdr only as agent prompt, with the provenance line first, on an allowlisted socket of this user", async () => {
     const { herdr, r } = runners();
     await r.runHerdr(["agent", "prompt", "w1:p1", "Review bd-x1 accepted."], SOCKET);
-    expect(herdr).toHaveBeenCalledWith(["agent", "prompt", "w1:p1", `${RELAY_PROVENANCE_LINE}\nReview bd-x1 accepted.`], SOCKET);
+    expect(herdr).toHaveBeenCalledWith(["agent", "prompt", "w1:p1", `${RELAY_PROVENANCE_LINE}${RELAY_PROVENANCE_SEPARATOR}Review bd-x1 accepted.`], SOCKET);
     await expect(r.runHerdr(["agent", "send", "w1:p1", "x"], SOCKET)).rejects.toThrow(/not on the relay's allowlist/);
     await expect(r.runHerdr(["agent", "prompt", "w1:p1", "-x"], SOCKET)).rejects.toThrow(/not on the relay's allowlist/);
     await expect(r.runHerdr(["agent", "prompt", "w1:p1", "x"], "relative.sock")).rejects.toThrow(/not an absolute path/);

@@ -1,4 +1,4 @@
-// `relayStatus` and `relayAction` over the real router and database
+// `relayStatus`, `relayAction`, and `relayActionsFor` over the real router and database
 // (laptop-relay design.md decisions 8 and 9). The database is shared with
 // live data and with suites that check a relay in or queue actions in
 // parallel, so status is asserted by shape and rule, never by a particular
@@ -84,5 +84,50 @@ describe("relayAction", () => {
 
   it("refuses an agent or relay token", async () => {
     for (const scope of ["agent", "relay"] as const) await expect(caller({ scope }).relayAction({ id: 1 })).rejects.toMatchObject({ code: "FORBIDDEN" });
+  });
+});
+
+describe("relayActionsFor", () => {
+  it("serves each item's open action, else its recent finished one, with a review decision's decision and option but no payload", async () => {
+    const review = randomUUID();
+    const inbox = randomUUID();
+    const none = randomUUID();
+    const decided = await enqueueRelayAction(db, {
+      kind: "review_decision",
+      payload: { project_key: PROJECT, cwd: "/Users/test/checkout", issue_id: "rls-1", decision: "accept", message: "ship it", option: "B", seen: { question: "Which?", label: "Option B" } },
+      requestedBy: "relay-router-suite",
+      originNodeId: review,
+    });
+    const prompt = await enqueueRelayAction(db, { kind: "herdr_prompt", payload: { pane: "w1:p1", socket: "/tmp/rls.sock", text: "told" }, requestedBy: "relay-router-suite", originNodeId: inbox });
+    ACTION_IDS.push(decided.action.id, prompt.action.id);
+    // Claimed only among this file's own action, so no live action is touched.
+    expect((await claimRelayAction(db, { relay: RELAY, among: [prompt.action.id] }))?.id).toBe(prompt.action.id);
+    await reportRelayAction(db, { relay: RELAY, id: prompt.action.id, state: "failed", error: "herdr: no such pane" });
+
+    const { actions } = await caller().relayActionsFor({ originNodeIds: [review, inbox, none] });
+    const byOrigin = new Map(actions.map((a) => [a.originNodeId, a]));
+    expect(byOrigin.size).toBe(2);
+    expect(byOrigin.get(review)).toEqual({
+      id: decided.action.id,
+      kind: "review_decision",
+      state: "queued",
+      result: null,
+      error: null,
+      createdAt: expect.stringMatching(ISO),
+      finishedAt: null,
+      originNodeId: review,
+      decision: "accept",
+      option: "B",
+    });
+    expect(byOrigin.get(inbox)).toMatchObject({ id: prompt.action.id, kind: "herdr_prompt", state: "failed", error: "herdr: no such pane", decision: null, option: null, finishedAt: expect.stringMatching(ISO) });
+    expect(JSON.stringify(actions)).not.toContain("ship it");
+    expect(JSON.stringify(actions)).not.toContain("/tmp/rls.sock");
+  });
+
+  it("refuses more than 200 items or a malformed id with BAD_REQUEST, and an agent or relay token", async () => {
+    await expect(caller().relayActionsFor({ originNodeIds: Array.from({ length: 201 }, () => randomUUID()) })).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    await expect(caller().relayActionsFor({ originNodeIds: ["nope"] })).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    expect(await caller().relayActionsFor({ originNodeIds: [] })).toEqual({ actions: [] });
+    for (const scope of ["agent", "relay"] as const) await expect(caller({ scope }).relayActionsFor({ originNodeIds: [] })).rejects.toMatchObject({ code: "FORBIDDEN" });
   });
 });

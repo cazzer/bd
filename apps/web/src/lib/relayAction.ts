@@ -28,6 +28,20 @@ export interface RelayActionView {
 export const RELAY_PENDING_TEXT = "Pending: waiting for the laptop relay";
 export const RELAY_CLAIMED_TEXT = "Pending: the laptop relay is writing it";
 
+/** One item's action as `relayActionsFor` answers it (server routers/relay.ts `RelayOriginActionDto`). */
+export interface RelayOriginActionView extends RelayActionView {
+  kind: "review_decision" | "herdr_prompt" | "beads_reingest";
+  originNodeId: string;
+  /** A review decision's `accept` or `changes`; null for any other kind. */
+  decision: "accept" | "changes" | null;
+  option: string | null;
+}
+
+/** Whether two answers for the same action say the same thing: the pollers keep the older object then. */
+export function sameRelayAction(a: RelayActionView, b: RelayActionView): boolean {
+  return a.id === b.id && a.state === b.state && a.error === b.error && JSON.stringify(a.result ?? null) === JSON.stringify(b.result ?? null);
+}
+
 /** Still waiting on the relay: queued, or claimed and not yet reported. */
 export function isRelayActionOpen(state: RelayActionState): boolean {
   return state === "queued" || state === "claimed";

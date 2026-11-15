@@ -189,10 +189,19 @@ export function DecisionFooter({
 
   // Focus follows the outcome, so a keyboard or screen-reader user lands on
   // what happened — and sits on that line while the write is in flight, so
-  // the pressed button disabling never drops focus out of the panel.
+  // the pressed button disabling never drops focus out of the panel. Only
+  // on a transition: a write starting, the form coming back (busy ending),
+  // an outcome settling (from none or pending to a final tone), or a new
+  // refusal. A host re-sending the same pending outcome (a relay poll), or a
+  // card reopened on a decision already waiting, moves nothing.
+  const seen = useRef({ writing, busy, tone: outcome?.tone ?? null, refusal });
   useEffect(() => {
-    if (busy || outcome !== null || refusal !== null) reportRef.current?.focus();
-  }, [busy, outcome, refusal]);
+    const was = seen.current;
+    const tone = outcome?.tone ?? null;
+    seen.current = { writing, busy, tone, refusal };
+    const settled = tone !== null && tone !== "pending" && (was.tone === null || was.tone === "pending");
+    if ((writing && !was.writing) || (!busy && was.busy) || settled || (refusal !== null && refusal !== was.refusal)) reportRef.current?.focus();
+  }, [writing, busy, outcome, refusal]);
 
   const failure: Refusal | null = refusal ?? (outcome !== null && outcome.tone !== "ok" && outcome.tone !== "pending" ? { text: outcome.text, detail: null } : null);
   // One row until it is focused or holds a draft, at every width, so the footer leaves the card its height.

@@ -305,6 +305,49 @@ export async function getRelayAction(db: Database, id: number | string): Promise
   return row === undefined ? null : toAction(row);
 }
 
+/** At most this many origins per `listRelayActionsForOrigins` call: a screenful of items. */
+export const MAX_RELAY_ORIGIN_IDS = 200;
+/** How long a finished action still answers for its origin: a failure the person has not seen yet, after a reload. */
+export const RELAY_ORIGIN_RECENT_S = 24 * 60 * 60;
+
+export interface ListRelayActionsForOriginsInput {
+  /** Node ids of reviews and inbox items (`origin_node_id`); duplicates are read once. */
+  originNodeIds: readonly string[];
+  /** At most this many actions back (default and cap `MAX_RELAY_ORIGIN_IDS`). */
+  limit?: number;
+}
+
+/**
+ * Per origin node, the action the UI shows for it: the open (queued or
+ * claimed) one when there is one, else the most recently finished one, if
+ * it finished within `RELAY_ORIGIN_RECENT_S`. An origin with neither is
+ * absent. One statement, served by the origin index (`DISTINCT ON` over the
+ * origin's few rows), so a reloaded card or inbox reads its pending state
+ * and any failure it missed at once. Ordered by origin, so the answer is
+ * stable; the caller keys it by `originNodeId`.
+ */
+export async function listRelayActionsForOrigins(db: Database, input: ListRelayActionsForOriginsInput): Promise<RelayAction[]> {
+  if (!Array.isArray(input.originNodeIds)) throw new InvalidRelayActionError("originNodeIds", input.originNodeIds, "must be an array of node uuids");
+  const ids = [...new Set(input.originNodeIds)];
+  if (ids.length > MAX_RELAY_ORIGIN_IDS) throw new InvalidRelayActionError("originNodeIds", ids.length, `must name at most ${MAX_RELAY_ORIGIN_IDS} nodes`);
+  for (const id of ids) {
+    if (typeof id !== "string" || !UUID_RE.test(id)) throw new InvalidRelayActionError("originNodeIds", id, "must be node uuids");
+  }
+  const limit = input.limit ?? MAX_RELAY_ORIGIN_IDS;
+  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_RELAY_ORIGIN_IDS) {
+    throw new InvalidRelayActionError("limit", limit, `must be an integer from 1 to ${MAX_RELAY_ORIGIN_IDS}`);
+  }
+  if (ids.length === 0) return [];
+  const result = await db.execute<RelayActionRow>(sql`
+    SELECT DISTINCT ON (origin_node_id) ${COLUMNS} FROM relay_actions
+    WHERE origin_node_id = ANY(${sqlArray(ids, "uuid")})
+      AND (state IN ('queued', 'claimed') OR finished_at >= now() - make_interval(secs => ${RELAY_ORIGIN_RECENT_S}))
+    ORDER BY origin_node_id, (state IN ('queued', 'claimed')) DESC, coalesce(finished_at, created_at) DESC, id DESC
+    LIMIT ${limit}
+  `);
+  return result.rows.map(toAction);
+}
+
 // --- Enqueue ---------------------------------------------------------------------------
 
 /** The target an open action holds: the open-target index's key. Herdr prompts hold none. */

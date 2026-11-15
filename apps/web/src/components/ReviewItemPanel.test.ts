@@ -31,6 +31,7 @@ const trpcMock = vi.hoisted(() => ({
   boardItem: { query: vi.fn() },
   reviewDecision: { mutate: vi.fn() },
   relayAction: { query: vi.fn() },
+  relayActionsFor: { query: vi.fn() },
 }));
 vi.mock("../trpc.js", () => ({ trpc: trpcMock, HttpStatusError: class HttpStatusError extends Error {} }));
 vi.mock("./EvidenceView.js", async () => {
@@ -105,6 +106,8 @@ beforeEach(() => {
   trpcMock.boardItem.query.mockReset();
   trpcMock.reviewDecision.mutate.mockReset();
   trpcMock.relayAction.query.mockReset();
+  trpcMock.relayActionsFor.query.mockReset();
+  trpcMock.relayActionsFor.query.mockResolvedValue({ actions: [] });
   trpcMock.reviewDecision.mutate.mockResolvedValue({ ok: true, decision: "accept", item: "shlo-k54.4.1.1", written: ["comment", "close"], notified: { ok: true, pane: "w1:p1" } });
 });
 
@@ -788,5 +791,149 @@ describe("a decision queued for the laptop relay", () => {
     expect(container.querySelector("[role=alert]")!.textContent).toContain("The laptop relay could not write the decision: bd: issue not found.");
     expect(container.querySelector("textarea")!.value).toBe("keep me");
     expect(button("Accept Track").disabled).toBe(false);
+  });
+});
+
+// laptop-relay review fixes (bd-d38.11): the pending state is the server's,
+// read whenever the panel shows an item, and a poll that says nothing new
+// moves neither focus nor the outcome line.
+describe("relay state across polls, reloads, and item swaps", () => {
+  const ITEM_ID = "00000000-0000-0000-0000-000000000001";
+  const relay = (state: string, over: Record<string, unknown> = {}) => ({ id: 41, kind: "review_decision", state, result: null, error: null, createdAt: "2026-11-14T10:00:00.000Z", finishedAt: null, ...over });
+  const forOrigin = (state: string, over: Record<string, unknown> = {}) => ({ ...relay(state, over), originNodeId: ITEM_ID, decision: "accept", option: "A" });
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function tick(ms: number) {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+  }
+
+  const status = () => container.querySelector<HTMLElement>("[role=status][data-outcome-tone]");
+  const decisionButtons = () => buttons().filter((b) => /^(Accept|Request|B|C)/.test(b.textContent ?? ""));
+
+  test("repeated pending polls leave focus where the person put it and never re-render the status line", async () => {
+    trpcMock.reviewDecision.mutate.mockResolvedValue({ queued: true, actionId: 41, decision: "accept", item: "shlo-k54.4.1.1" });
+    // A new object every poll, saying the same thing; then claimed (still pending).
+    trpcMock.relayAction.query.mockImplementation(async () => relay("queued"));
+    await render(boardItem(fixtureReview("shlo-k54.4.1.1")));
+    await click(button("Accept Track"));
+    await tick(0);
+    expect(status()?.textContent).toBe("Pending: waiting for the laptop relay");
+
+    const title = container.querySelector<HTMLElement>("[data-panel-title]")!;
+    act(() => title.focus());
+    let mutations = 0;
+    const observer = new MutationObserver((records) => {
+      mutations += records.length;
+    });
+    observer.observe(status()!, { subtree: true, childList: true, characterData: true, attributes: true });
+    await tick(2_000);
+    await tick(2_000);
+    await tick(2_000);
+    observer.disconnect();
+    expect(trpcMock.relayAction.query.mock.calls.length).toBeGreaterThanOrEqual(4);
+    expect(mutations).toBe(0);
+    expect(document.activeElement).toBe(title);
+
+    // Claimed is still pending: the line says so, and focus stays put.
+    trpcMock.relayAction.query.mockImplementation(async () => relay("claimed"));
+    await tick(2_000);
+    expect(status()?.textContent).toBe("Pending: the laptop relay is writing it");
+    expect(document.activeElement).toBe(title);
+
+    // The relay's answer is a transition: focus goes to it.
+    trpcMock.relayAction.query.mockImplementation(async () => relay("failed", { error: "bd: issue not found" }));
+    await tick(2_000);
+    const alert = container.querySelector<HTMLElement>("[role=alert]")!;
+    expect(alert.textContent).toContain("bd: issue not found");
+    expect(alert.parentElement!.contains(document.activeElement)).toBe(true);
+  });
+
+  test("a card reopened on a decision still waiting shows it pending with the decisions held, keeps focus on the title, and follows it to done", async () => {
+    trpcMock.relayActionsFor.query.mockResolvedValue({ actions: [forOrigin("queued")] });
+    trpcMock.relayAction.query.mockResolvedValueOnce(relay("queued")).mockResolvedValue(relay("done", { result: { ok: true, written: ["comment", "close"], notified: { ok: true, pane: "w1:p1" } } }));
+    const onWritten = vi.fn();
+    const onDecided = vi.fn();
+    await render(boardItem(fixtureReview("shlo-k54.4.1.1")), { acceptLabel: "Accept", changesLabel: "Request changes", onWritten }, { onDecided });
+    await tick(0);
+
+    expect(trpcMock.relayActionsFor.query).toHaveBeenCalledWith({ originNodeIds: [ITEM_ID] });
+    expect(status()?.getAttribute("data-outcome-tone")).toBe("pending");
+    expect(status()?.textContent).toBe("Pending: waiting for the laptop relay");
+    expect(decisionButtons().length).toBeGreaterThan(0);
+    expect(decisionButtons().every((b) => b.disabled)).toBe(true);
+    expect(document.activeElement?.hasAttribute("data-panel-title")).toBe(true);
+    expect(trpcMock.relayAction.query).toHaveBeenCalledWith({ id: 41 });
+    await click(button("Request changes"));
+    expect(trpcMock.reviewDecision.mutate).not.toHaveBeenCalled();
+
+    await tick(2_000);
+    expect(status()?.getAttribute("data-outcome-tone")).toBe("ok");
+    expect(status()?.textContent).toContain("Accepted A");
+    expect(onDecided).toHaveBeenCalledTimes(1);
+    expect(onWritten).toHaveBeenCalledTimes(1);
+    expect(onWritten.mock.calls[0]![1].option).toEqual({ id: "A", recommended: true });
+  });
+
+  test("a failure that happened while the card was closed is shown on reopen, with the decisions back", async () => {
+    trpcMock.relayActionsFor.query.mockResolvedValue({ actions: [forOrigin("failed", { error: "bd: issue not found", finishedAt: "2026-11-14T10:01:00.000Z" })] });
+    const onDecided = vi.fn();
+    await render(boardItem(fixtureReview("shlo-k54.4.1.1")), undefined, { onDecided });
+    await tick(0);
+    expect(container.querySelector("[role=alert]")!.textContent).toContain("The laptop relay could not write the decision: bd: issue not found.");
+    expect(button("Accept Track").disabled).toBe(false);
+    expect(trpcMock.relayAction.query).not.toHaveBeenCalled();
+    expect(onDecided).not.toHaveBeenCalled();
+  });
+
+  test("shows nothing on reopen for a decision the relay wrote, or a failure on a review since closed", async () => {
+    trpcMock.relayActionsFor.query.mockResolvedValue({ actions: [forOrigin("done", { result: { note: "already applied" }, finishedAt: "2026-11-14T10:01:00.000Z" })] });
+    await render(boardItem(fixtureReview("shlo-k54.4.1.1")));
+    await tick(0);
+    expect(status()?.textContent ?? "").toBe("");
+    expect(container.querySelector("[role=alert]")).toBeNull();
+
+    act(() => root.unmount());
+    root = createRoot(container);
+    trpcMock.relayActionsFor.query.mockResolvedValue({ actions: [forOrigin("failed", { error: "bd: boom", finishedAt: "2026-11-14T10:01:00.000Z" })] });
+    await render(boardItem(fixtureReview("shlo-k54.4.1.1"), "", { status: "closed", closedReason: "Accepted" }));
+    await tick(0);
+    expect(container.querySelector("[role=alert]")).toBeNull();
+  });
+
+  test("a different item without a remount drops the last one's held form and pending state, and reads its own", async () => {
+    trpcMock.relayActionsFor.query.mockResolvedValueOnce({ actions: [forOrigin("queued")] }).mockResolvedValue({ actions: [] });
+    trpcMock.relayAction.query.mockImplementation(async () => relay("queued"));
+    const props = { project: "shlo", boardLoaded: true, boardVersion: 0, onDraftChange: () => {}, onDecided: () => {}, onProjectConfirmed: () => {}, onEscape: () => {}, titleId: "t" };
+    trpcMock.boardItem.query.mockResolvedValue({ item: boardItem(fixtureReview("shlo-k54.4.1.1")) });
+    await act(async () => {
+      root.render(createElement(ReviewItemPanel, { ...props, item: "shlo-k54.4.1.1", initialDraft: "first draft" }));
+    });
+    await tick(0);
+    expect(status()?.textContent).toBe("Pending: waiting for the laptop relay");
+    expect(container.querySelector("textarea")!.disabled).toBe(true);
+
+    const other = "00000000-0000-0000-0000-000000000002";
+    trpcMock.boardItem.query.mockResolvedValue({ item: boardItem(fixtureReview("shlo-k54.4.1.1"), "", { id: other, externalId: "shlo-k54.4.1.2" }) });
+    await act(async () => {
+      root.render(createElement(ReviewItemPanel, { ...props, item: "shlo-k54.4.1.2", initialDraft: "second draft" }));
+    });
+    await tick(0);
+    expect(trpcMock.relayActionsFor.query).toHaveBeenLastCalledWith({ originNodeIds: [other] });
+    expect(status()?.textContent ?? "").toBe("");
+    expect(container.querySelector("textarea")!.disabled).toBe(false);
+    expect(container.querySelector("textarea")!.value).toBe("second draft");
+    expect(button("Accept Track").disabled).toBe(false);
+    const polls = trpcMock.relayAction.query.mock.calls.length;
+    await tick(6_000);
+    expect(trpcMock.relayAction.query.mock.calls.length).toBe(polls);
   });
 });

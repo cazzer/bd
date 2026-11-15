@@ -3,7 +3,7 @@ import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { RELAY_PROVENANCE_LINE, type RelayActionKind } from "@breakdown/core";
+import { RELAY_PROVENANCE_LINE, RELAY_PROVENANCE_SEPARATOR, type RelayActionKind } from "@breakdown/core";
 import { createReviewWriter } from "../review-writer.js";
 import { executeAction, reportSummary, type ClaimedAction, type ExecuteDeps } from "./execute.js";
 import { createRelayRunners } from "./runners.js";
@@ -61,7 +61,7 @@ function act(kind: unknown, payload: unknown, createdAt: unknown = new Date().to
   return { id: "1", kind, payload, createdAt };
 }
 
-const sent = (text: string) => `${RELAY_PROVENANCE_LINE}\n${text}`;
+const sent = (text: string) => `${RELAY_PROVENANCE_LINE}${RELAY_PROVENANCE_SEPARATOR}${text}`;
 
 const accept = { project_key: "bd", cwd: DIR, issue_id: "bd-x1", decision: "accept", message: "Ship it", option: "b", seen: { question: "Which layout?", label: "Two columns", what: "Split the board", risk: "Narrow screens" } };
 const changes = { project_key: "bd", cwd: DIR, issue_id: "bd-x1", decision: "changes", message: "Wider gutters" };

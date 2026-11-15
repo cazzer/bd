@@ -6,11 +6,20 @@
 // queued action, and nothing asserts on a table as a whole. Cleanup is by
 // action id and relay name.
 
+import { randomUUID } from "node:crypto";
 import { inArray, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { relayActions, relayCheckIns, type Database } from "@breakdown/db";
 import { InvalidRelayActionError, RelayActionNotClaimedByError, RelayActionNotFoundError, RelayActionPendingError } from "./errors.js";
-import { MAX_RELAY_HERDR_PAYLOAD_TEXT_LENGTH, MAX_RELAY_HERDR_TEXT_LENGTH, RELAY_PROVENANCE_LINE } from "./relay-allowlist.js";
+import {
+  fitRelayHerdrText,
+  MAX_RELAY_HERDR_PAYLOAD_TEXT_LENGTH,
+  MAX_RELAY_HERDR_TEXT_LENGTH,
+  RELAY_HERDR_TRUNCATED_SUFFIX,
+  RELAY_PROVENANCE_LINE,
+  RELAY_PROVENANCE_SEPARATOR,
+  withRelayProvenance,
+} from "./relay-allowlist.js";
 import {
   claimRelayAction,
   classifyRelayStatus,
@@ -18,10 +27,13 @@ import {
   findOpenRelayAction,
   getRelayAction,
   getRelayStatus,
+  listRelayActionsForOrigins,
   MAX_RELAY_ATTEMPTS,
+  MAX_RELAY_ORIGIN_IDS,
   MAX_RELAY_CLAIM_PROJECTS,
   parseRelayPayload,
   RELAY_MAX_AGE_S,
+  RELAY_ORIGIN_RECENT_S,
   recordRelayCheckIn,
   RELAY_RECLAIM_AFTER_S,
   reportRelayAction,
@@ -332,6 +344,75 @@ describe("reportRelayAction and requeueRelayAction", () => {
   });
 });
 
+describe("listRelayActionsForOrigins", () => {
+  // Origins are random per run, so no other row can answer for them; a
+  // finished state is set on the fixture rows directly (no claim runs).
+  const origin = () => randomUUID();
+
+  async function queuedFor(originNodeId: string, kind: RelayActionKind = "review_decision"): Promise<number> {
+    const payload = kind === "review_decision" ? reviewPayload(projectKey()) : { pane: `${PREFIX}-pane`, socket: "/tmp/herdr.sock", text: "told" };
+    const { action } = await enqueueRelayAction(db, { kind, payload, requestedBy: REQUESTER, originNodeId });
+    actionIds.push(action.id);
+    return action.id;
+  }
+
+  async function finish(id: number, state: "done" | "failed", agoS = 0): Promise<void> {
+    await db.execute(sql`
+      UPDATE relay_actions SET state = ${state}, finished_at = now() - make_interval(secs => ${agoS}),
+        error = ${state === "failed" ? "bd: issue not found" : null}
+      WHERE id = ${id}
+    `);
+  }
+
+  it("answers the open action of an origin over a later finished one", async () => {
+    const o = origin();
+    const failed = await queuedFor(o, "herdr_prompt");
+    await finish(failed, "failed");
+    const open = await queuedFor(o, "herdr_prompt");
+    const [only, ...rest] = await listRelayActionsForOrigins(db, { originNodeIds: [o] });
+    expect(rest).toEqual([]);
+    expect(only).toMatchObject({ id: open, state: "queued", originNodeId: o });
+  });
+
+  it(`answers the most recently finished action, within ${RELAY_ORIGIN_RECENT_S / 3600} h, and nothing for an origin with none`, async () => {
+    const recent = origin();
+    const older = await queuedFor(recent, "herdr_prompt");
+    const newer = await queuedFor(recent, "herdr_prompt");
+    await finish(older, "done", 60);
+    await finish(newer, "failed", 10);
+    const stale = origin();
+    await finish(await queuedFor(stale), "failed", RELAY_ORIGIN_RECENT_S + 60);
+    const none = origin();
+
+    const answer = await listRelayActionsForOrigins(db, { originNodeIds: [recent, stale, none, recent] });
+    expect(answer.map((a) => [a.originNodeId, a.id, a.state, a.error])).toEqual([[recent, newer, "failed", "bd: issue not found"]]);
+  });
+
+  it("answers one action per origin, in origin order, up to the limit", async () => {
+    const origins = [origin(), origin(), origin()];
+    const ids = [];
+    for (const o of origins) ids.push(await queuedFor(o));
+    const answer = await listRelayActionsForOrigins(db, { originNodeIds: origins });
+    expect(answer.map((a) => a.originNodeId)).toEqual([...origins].sort());
+    expect(answer.map((a) => a.id).sort()).toEqual([...ids].sort());
+    expect(await listRelayActionsForOrigins(db, { originNodeIds: origins, limit: 2 })).toHaveLength(2);
+  });
+
+  it(`refuses more than ${MAX_RELAY_ORIGIN_IDS} origins, a malformed one, and a bad limit; reads nothing for none`, async () => {
+    const many = Array.from({ length: MAX_RELAY_ORIGIN_IDS + 1 }, origin);
+    await expect(listRelayActionsForOrigins(db, { originNodeIds: many })).rejects.toThrow(InvalidRelayActionError);
+    await expect(listRelayActionsForOrigins(db, { originNodeIds: many.slice(0, MAX_RELAY_ORIGIN_IDS) })).resolves.toEqual([]);
+    await expect(listRelayActionsForOrigins(db, { originNodeIds: ["not-a-uuid"] })).rejects.toThrow(/originNodeIds/);
+    await expect(listRelayActionsForOrigins(db, { originNodeIds: [origin()], limit: 0 })).rejects.toThrow(/limit/);
+    expect(await listRelayActionsForOrigins(db, { originNodeIds: [] })).toEqual([]);
+  });
+
+  it("has its origin index (migration 0010)", async () => {
+    const index = await db.execute<{ indexdef: string }>(sql`SELECT indexdef FROM pg_indexes WHERE indexname = 'relay_actions_origin_idx'`);
+    expect(index.rows[0]?.indexdef).toMatch(/\(origin_node_id\) WHERE \(origin_node_id IS NOT NULL\)/);
+  });
+});
+
 describe("relay status", () => {
   it("reports never for a relay that has not checked in", async () => {
     expect(await getRelayStatus(db, { relay: `${PREFIX}-ghost` })).toMatchObject({ state: "never", lastSeenAt: null, relay: null });
@@ -370,7 +451,27 @@ describe("parseRelayPayload", () => {
 
 describe("the provenance line's room", () => {
   it("leaves the prompt as the relay sends it within the herdr cap", () => {
-    expect(RELAY_PROVENANCE_LINE.length + 1 + MAX_RELAY_HERDR_PAYLOAD_TEXT_LENGTH).toBe(MAX_RELAY_HERDR_TEXT_LENGTH);
+    expect(RELAY_PROVENANCE_LINE.length + RELAY_PROVENANCE_SEPARATOR.length + MAX_RELAY_HERDR_PAYLOAD_TEXT_LENGTH).toBe(MAX_RELAY_HERDR_TEXT_LENGTH);
+    expect(withRelayProvenance("x".repeat(MAX_RELAY_HERDR_PAYLOAD_TEXT_LENGTH))).toHaveLength(MAX_RELAY_HERDR_TEXT_LENGTH);
     expect(() => parseRelayPayload("herdr_prompt", { pane: "w1:p1", socket: "/tmp/h.sock", text: "x".repeat(MAX_RELAY_HERDR_PAYLOAD_TEXT_LENGTH) })).not.toThrow();
+  });
+
+  it("fits a prompt over the payload cap to it, ending with the truncation note and never splitting a surrogate pair", () => {
+    const fits = "x".repeat(MAX_RELAY_HERDR_PAYLOAD_TEXT_LENGTH);
+    expect(fitRelayHerdrText(fits)).toBe(fits);
+    const cut = fitRelayHerdrText(`${fits}y`);
+    expect(cut).toHaveLength(MAX_RELAY_HERDR_PAYLOAD_TEXT_LENGTH);
+    expect(cut.endsWith(RELAY_HERDR_TRUNCATED_SUFFIX)).toBe(true);
+    expect(() => parseRelayPayload("herdr_prompt", { pane: "w1:p1", socket: "/tmp/h.sock", text: cut })).not.toThrow();
+    const keep = MAX_RELAY_HERDR_PAYLOAD_TEXT_LENGTH - RELAY_HERDR_TRUNCATED_SUFFIX.length;
+    const astral = fitRelayHerdrText(`${"x".repeat(keep - 1)}😀${"x".repeat(100)}`);
+    expect(astral).toBe(`${"x".repeat(keep - 1)}${RELAY_HERDR_TRUNCATED_SUFFIX}`);
+  });
+
+  it("keeps the provenance on the prompt's own line, so herdr cannot submit the prefix alone", () => {
+    expect(RELAY_PROVENANCE_SEPARATOR).not.toMatch(/[\r\n]/);
+    const sent = withRelayProvenance("[inbox] Accepted: \"x\".");
+    expect(sent.split("\n")).toHaveLength(1);
+    expect(sent).toBe(`${RELAY_PROVENANCE_LINE} — [inbox] Accepted: "x".`);
   });
 });

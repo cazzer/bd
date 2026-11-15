@@ -3,8 +3,8 @@
 // useRelayAction (laptop-relay tasks.md 1.7): it reads the action at once,
 // every 2 s while it is queued or claimed, never while the tab is hidden
 // (reading again the moment it is visible), stops once the action is done
-// or failed, keeps its last answer through a failed read, and follows
-// nothing for a null id.
+// or failed, keeps its last answer through a failed read, keeps the same
+// object while polls say the same thing, and follows nothing for a null id.
 
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -101,6 +101,30 @@ describe("useRelayAction", () => {
     expect(shown()).toBe("queued");
     await advance(RELAY_ACTION_POLL_MS);
     expect(shown()).toBe("done");
+  });
+
+  test("keeps the same object while polls say the same thing", async () => {
+    const seen: Array<RelayActionView | null> = [];
+    function Recorder() {
+      seen.push(useRelayAction(7));
+      return null;
+    }
+    // A fresh object every poll, as the network gives.
+    trpcMock.relayAction.query.mockImplementation(async () => answer("queued"));
+    await act(async () => {
+      root.render(createElement(Recorder));
+      await Promise.resolve();
+    });
+    const first = seen.at(-1)!;
+    expect(first.state).toBe("queued");
+    await advance(RELAY_ACTION_POLL_MS * 3);
+    expect(trpcMock.relayAction.query).toHaveBeenCalledTimes(4);
+    expect(seen.every((v) => v === null || v === first)).toBe(true);
+
+    trpcMock.relayAction.query.mockImplementation(async () => ({ ...answer("queued"), error: "slow" }));
+    await advance(RELAY_ACTION_POLL_MS);
+    expect(seen.at(-1)).not.toBe(first);
+    expect(seen.at(-1)?.error).toBe("slow");
   });
 
   test("follows nothing for a null id, and drops an earlier id's answer when the id changes", async () => {

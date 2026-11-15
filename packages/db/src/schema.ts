@@ -463,7 +463,8 @@ export const hangarMessages = pgTable(
  * without a report fails. The open index serves both the queued and the
  * reclaim predicate. The open-target index makes a second pending action on
  * the same project and issue a conflict (herdr prompts are excluded: two
- * replies to one pane are two actions).
+ * replies to one pane are two actions). The origin index serves the UI's
+ * per-item read: a card or inbox row's open or recent action.
  */
 export const RELAY_ACTION_KINDS = ["review_decision", "herdr_prompt", "beads_reingest"] as const;
 export type RelayActionKind = (typeof RELAY_ACTION_KINDS)[number];
@@ -493,6 +494,10 @@ export const relayActions = pgTable(
     index("relay_actions_open_idx")
       .on(table.createdAt, table.id)
       .where(sql`${table.state} IN ('queued', 'claimed')`),
+    // A card or inbox reading its items' actions (core relay.ts `listRelayActionsForOrigins`).
+    index("relay_actions_origin_idx")
+      .on(table.originNodeId)
+      .where(sql`${table.originNodeId} IS NOT NULL`),
     uniqueIndex("relay_actions_open_target_idx")
       .on(table.kind, sql`(${table.payload}->>'project_key')`, sql`coalesce(${table.payload}->>'issue_id', '')`)
       .where(sql`${table.state} IN ('queued', 'claimed') AND ${table.kind} <> 'herdr_prompt'`),

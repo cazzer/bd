@@ -19,7 +19,8 @@
 // 6), a pane item's notification is queued as a `herdr_prompt` relay action
 // instead of run, and `notified` is `{ ok: true, relay: <action id> }`; a
 // prompt that cannot be queued is `{ ok: false }` and never fails the
-// decision. Opening or focusing a session still needs herdr here and is
+// decision. A prompt longer than the relay payload's cap is cut to it and
+// says so (core `fitRelayHerdrText`), rather than left unqueued. Opening or focusing a session still needs herdr here and is
 // refused with PRECONDITION_FAILED naming it.
 
 import {
@@ -43,6 +44,7 @@ import {
   REVIEW_OPTION_ID_PATTERN,
   requestInboxItem,
   enqueueRelayAction,
+  fitRelayHerdrText,
   type DecideInboxItemResult,
   type InboxItem,
 } from "@breakdown/core";
@@ -113,7 +115,7 @@ const inboxDecisionProcedure = humanProcedure.input(inboxDecisionInputSchema).mu
     try {
       const { action } = await enqueueRelayAction(ctx.db, {
         kind: "herdr_prompt",
-        payload: { pane: result.pane, socket: result.socket, text: inboxNotifyText(result, input.message, input.option) },
+        payload: { pane: result.pane, socket: result.socket, text: fitRelayHerdrText(inboxNotifyText(result, input.message, input.option)) },
         requestedBy: ctx.client ?? "human",
         originNodeId: result.id,
       });

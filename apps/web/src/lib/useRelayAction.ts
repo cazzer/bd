@@ -4,10 +4,14 @@
 // no requests; it reads again the moment the tab is visible. A failed read
 // keeps the last answer and is retried on the next tick: the board's own
 // reads already surface a lost connection. `id` null follows nothing.
+//
+// An answer that says what the last one said (state, error, result) keeps
+// the last one's object, so a card waiting on a queued action does not
+// re-render, or re-run what it does on a new answer, every tick.
 
 import { useEffect, useState } from "react";
 import { trpc } from "../trpc.js";
-import { isRelayActionOpen, type RelayActionView } from "./relayAction.js";
+import { isRelayActionOpen, sameRelayAction, type RelayActionView } from "./relayAction.js";
 
 export const RELAY_ACTION_POLL_MS = 2_000;
 
@@ -27,7 +31,7 @@ export function useRelayAction(id: number | null): RelayActionView | null {
       try {
         const action = await trpc.relayAction.query({ id: id! });
         if (cancelled) return;
-        setLatest(action);
+        setLatest((prev) => (prev !== null && sameRelayAction(prev, action) ? prev : action));
         if (!isRelayActionOpen(action.state)) {
           finished = true;
           stop();

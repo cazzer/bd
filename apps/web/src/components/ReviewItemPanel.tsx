@@ -55,6 +55,16 @@
 // such as "already applied", or the relay's error; then the item is
 // re-read, the host told, and a written decision reported to `onWritten`.
 // The run's own controls stay usable meanwhile, so the person can move on.
+// The pending state is the server's, not the panel's: whenever the panel
+// shows an item (on mount, and when the host swaps the item without a
+// remount, which also resets the outcome, the held form, and the message to
+// the new item's draft) it reads the item's relay action
+// (`relayActionsFor`). One still open is followed as if just queued, so a
+// reloaded or reopened card shows "Pending: waiting for the laptop relay"
+// with the decisions held; one that failed within the last day while the
+// card was closed is shown, if the review is still open, so the person
+// sees it before deciding again. A poll that says nothing new moves neither
+// the outcome line nor focus.
 // While the decision is open and nothing is being written, each video's
 // Note button (ReviewAttachments.tsx) appends its time to the message on a
 // new line (lib/reviewAttachments.ts `appendNote`; video-review-attachments,
@@ -99,7 +109,7 @@ import { useEffect, useId, useRef, useState, type KeyboardEvent, type MouseEvent
 import { navigate } from "../lib/navigate.js";
 import { appendNote, reviewAttachments } from "../lib/reviewAttachments.js";
 import { CARD_MOVED_TEXT, cardActions, chosenOption, describeChosen, isCardMovedRefusal, seenFor, type CardOption, type ChosenOption } from "../lib/reviewCard.js";
-import { describeRelayDecision, RELAY_PENDING_TEXT } from "../lib/relayAction.js";
+import { describeRelayDecision, isRelayActionOpen, RELAY_PENDING_TEXT } from "../lib/relayAction.js";
 import { canDecide, decisionBlocked, decisionEffects, describeNotified, describeRecipient, describeThrownDecision, type ReviewDecisionKind } from "../lib/reviewDrawer.js";
 import { useRelayAction } from "../lib/useRelayAction.js";
 import { formatRoute, type GraphRoute } from "../lib/route.js";
@@ -175,6 +185,11 @@ interface QueuedDecision {
   option: ChosenOption | null;
   /** The review promised a notice to a recorded pane. */
   promised: boolean;
+}
+
+/** The review promised a notice to a recorded pane (a pane and a herdr session): only then does a failed notice matter. */
+function promisesNotice(item: BoardItem): boolean {
+  return item.review !== null && !("invalid" in item.review) && item.review.pane !== null && item.review.socket !== undefined;
 }
 
 function messageOf(err: unknown, fallback: string): string {
@@ -288,6 +303,26 @@ export function ReviewItemPanel({
     titleRef.current?.focus();
   }, []);
 
+  // A read of the item's relay action still in flight is dropped once a
+  // decision starts or the item changes (bumped there).
+  const relayRead = useRef(0);
+
+  // The host swapped the item without remounting: nothing decided on the
+  // last one carries over (module header).
+  const itemKey = `${project ?? ""}/${item}`;
+  const shownKey = useRef(itemKey);
+  useEffect(() => {
+    if (shownKey.current === itemKey) return;
+    shownKey.current = itemKey;
+    relayRead.current += 1;
+    setQueued(null);
+    setOutcome(null);
+    setRefusal(null);
+    setNeedsMessage(false);
+    setFocusedOption(null);
+    setMessageState(initialDraft);
+  }, [itemKey]);
+
   useEffect(() => {
     if (project === null) return;
     let cancelled = false;
@@ -346,6 +381,37 @@ export function ReviewItemPanel({
     if (reading.written) decisions.onWritten?.(queued.decision, { notified: reading.notified, notifyFailed: queued.promised && reading.notifyFailed, option: queued.option });
   }, [relayAction]);
 
+  // The item's relay action, read whenever another item is shown (module
+  // header): an open one is followed as if just queued; a failure the card
+  // missed is shown while the review is still open.
+  const loadedId = loaded !== null && loaded.isReview ? loaded.id : null;
+  useEffect(() => {
+    if (loadedId === null || loaded === null) return;
+    const mine = ++relayRead.current;
+    const shown = loaded;
+    trpc.relayActionsFor
+      .query({ originNodeIds: [loadedId] })
+      .then(({ actions: found }) => {
+        if (mine !== relayRead.current) return;
+        const action = found.find((a) => a.originNodeId === loadedId && a.kind === "review_decision" && a.decision !== null);
+        if (action === undefined || action.decision === null) return;
+        const shownCard = shown.isReview ? shown.card : null;
+        const chosen = action.option === null || shownCard === null ? undefined : shownCard.options.find((o) => o.id === action.option);
+        const named = chosen === undefined || shownCard === null ? null : chosenOption(shownCard, chosen);
+        const acceptedAs = named === null ? undefined : describeChosen(named);
+        const reading = describeRelayDecision(action, action.decision, acceptedAs);
+        if (isRelayActionOpen(action.state)) {
+          setQueued({ actionId: action.id, decision: action.decision, acceptedAs, option: named, promised: promisesNotice(shown) });
+          setOutcome({ ...reading.outcome, notified: reading.notified });
+        } else if (!reading.written && canDecide(shown)) {
+          setOutcome({ ...reading.outcome, notified: reading.notified });
+        }
+      })
+      .catch(() => {
+        // Not knowing is the state before this read: the card decides as usual, and a decision already waiting is refused by the server (CONFLICT).
+      });
+  }, [loadedId]);
+
   const decidable = loaded !== null && canDecide(loaded) && decisions.notice === undefined;
   const card = loaded?.isReview ? loaded.card : null;
   const actions = card !== null ? cardActions(card) : null;
@@ -383,6 +449,7 @@ export function ReviewItemPanel({
     if (!timeArmed || project === null || loaded === null || decisionBlocked(decision, message, pending !== null || queued !== null)) return;
     const chosen = option !== undefined && card !== null ? { option: option.id, seen: seenFor(card, option) } : {};
     const named = option !== undefined && card !== null ? chosenOption(card, option) : null;
+    relayRead.current += 1;
     setPending(decision);
     setPendingOption(option?.id ?? null);
     onBusyChange?.(true);
@@ -392,7 +459,7 @@ export function ReviewItemPanel({
     try {
       const result = await trpc.reviewDecision.mutate({ project, item: loaded.externalId, decision, message, ...chosen });
       // A failed notice matters only where one was promised (a pane and a herdr session recorded); otherwise the recipient line already said the comment is the record.
-      const promised = loaded.review !== null && !("invalid" in loaded.review) && loaded.review.pane !== null && loaded.review.socket !== undefined;
+      const promised = promisesNotice(loaded);
       if ("queued" in result) {
         // No `bd` on the server: the message stays in the (held) box until the relay reports.
         setQueued({ actionId: result.actionId, decision, acceptedAs: named === null ? undefined : describeChosen(named), option: named, promised });

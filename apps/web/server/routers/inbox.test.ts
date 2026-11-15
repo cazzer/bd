@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
-import { closeIngestRun, getRelayAction, HostBinaryUnavailableError, inboxNotifyText, listInbox, openIngestRun, requestInboxItem, upsertNodes, type IngestRunHandle } from "@breakdown/core";
+import { closeIngestRun, getRelayAction, HostBinaryUnavailableError, inboxNotifyText, listInbox, MAX_INBOX_FEEDBACK_LENGTH, MAX_RELAY_HERDR_PAYLOAD_TEXT_LENGTH, openIngestRun, requestInboxItem, upsertNodes, type IngestRunHandle } from "@breakdown/core";
 import { createDb, createPool, hangarMessages, ingestRuns, nodes, relayActions, resolveDatabaseUrl, type Database } from "@breakdown/db";
 import { TRPCError } from "@trpc/server";
 import { and, eq, inArray, like, sql } from "drizzle-orm";
@@ -289,6 +289,18 @@ describe("inbox delivery without herdr (queued for the laptop relay)", () => {
       originNodeId: filed.id,
       payload: { pane: "w1:p6", socket: "/Users/someone/.config/herdr/herdr.sock", text: inboxNotifyText({ id: filed.id, title: "Relay ask", after: "accepted" }, "go ahead") },
     });
+  });
+
+  it("queues the prompt for a near-limit note and title whole, within the relay payload's cap (core fitRelayHerdrText cuts anything longer)", async () => {
+    const herdrless = createCallerFactory(appRouter)({ db, runHerdr: noHerdr, missingBinaries: ["herdr"] });
+    const note = `${"n".repeat(MAX_INBOX_FEEDBACK_LENGTH - 4)} end`;
+    const near = await caller().inboxRequest({ key: `${KEY}-relay-near`, title: "t".repeat(500), content: "x", metadata: { source: "session", pane: "w1:p6", socket: "/tmp/herdr.sock" } });
+    const fits = await herdrless.inboxDecision({ id: near.id, decision: "changes", message: note });
+    const fitsId = (fits.notified as { relay: number }).relay;
+    ACTION_IDS.push(fitsId);
+    const whole = inboxNotifyText({ id: near.id, title: "t".repeat(500), after: "changes" }, note);
+    expect(whole.length).toBeLessThanOrEqual(MAX_RELAY_HERDR_PAYLOAD_TEXT_LENGTH);
+    expect((await getRelayAction(db, fitsId))?.payload).toMatchObject({ text: whole });
   });
 
   it("reports an action it could not queue as not notified, and still records the decision", async () => {
