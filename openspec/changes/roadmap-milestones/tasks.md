@@ -10,11 +10,11 @@
 
 ## 2. Roadmap read
 
-- [ ] 2.1 `packages/core/src/roadmap.ts`: option validation shared with the board (`projects`), one-statement read per design decision 2, `MAX_ROADMAP_ROWS` cap with `truncated`; export from `index.ts`
-- [ ] 2.2 Tests on a fixture: two milestones + nested epics + direct-under-milestone task + deferred task + a `child_of` cycle → spec's rollup numbers (75/25/50, deferred excluded, cycle counted once, empty epic has no share), epic start = earliest item `started_at`, milestone ordering inputs, project isolation, cap/truncated, malformed stored date read as absent
-- [ ] 2.3 Consistency test: board and roadmap agree on each epic's ancestry for the same fixture
-- [ ] 2.4 tRPC `roadmap` procedure with the board's scopes; `procedure-scopes.test.ts` and a router test (refuses a bad project key naming `projects`)
-- [ ] 2.5 `pnpm check` passes
+- [x] 2.1 `packages/core/src/roadmap.ts`: option validation shared with the board (`projects`), one-statement read per design decision 2, `MAX_ROADMAP_ROWS` cap with `truncated`; export from `index.ts`
+- [x] 2.2 Tests on a fixture: two milestones + nested epics + direct-under-milestone task + deferred task + a `child_of` cycle → spec's rollup numbers (75/25/50, deferred excluded, cycle counted once, empty epic has no share), epic start = earliest item `started_at`, milestone ordering inputs, project isolation, cap/truncated, malformed stored date read as absent
+- [x] 2.3 Consistency test: board and roadmap agree on each epic's ancestry for the same fixture
+- [x] 2.4 tRPC `roadmap` procedure with the board's scopes; `procedure-scopes.test.ts` and a router test (refuses a bad project key naming `projects`)
+- [x] 2.5 `pnpm check` passes
 
 ## 3. Board switcher and Board/Roadmap toggle
 

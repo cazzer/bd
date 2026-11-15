@@ -222,7 +222,13 @@ export interface BeadsProject {
   updatedAt: Date;
 }
 
-function resolveBoardProjects(options: WorkBoardOptions): string[] | null {
+/**
+ * Validates a board-style project selection: null for absent (every
+ * registered project), else the de-duplicated keys. Throws
+ * `InvalidLookupOptionError` naming `projects`. Shared with the roadmap
+ * read (roadmap.ts) so the two refuse the same selections.
+ */
+export function resolveBoardProjects(options: { projects?: readonly string[] }): string[] | null {
   const projects = options.projects;
   if (projects === undefined || projects === null) return null;
   if (!Array.isArray(projects)) {
@@ -326,15 +332,24 @@ export function notPastMilestoneCondition(walkName: string, rowAlias: string): S
   )`;
 }
 
+/**
+ * The jsonb array that `metadata @> ANY (...)` selects a project set with
+ * (module header, `filtered`): one `{"project": k}` per named key, or per
+ * `registered` key when `projects` is null (the caller declares
+ * `registeredProjectsCte()`). Shared with the roadmap read.
+ */
+export function projectContainmentArray(projects: readonly string[] | null): SQL {
+  return projects === null
+    ? sql`ARRAY(SELECT jsonb_build_object('project', r.key) FROM registered r)`
+    : sqlArray(
+        projects.map((k) => JSON.stringify({ project: k })),
+        "jsonb",
+      );
+}
+
 /** Pure: builds the board statement from already-validated project keys (null = every registered project; non-empty otherwise) and a validated item cap. */
 export function buildWorkBoardQuery(projects: readonly string[] | null, maxItems: number = MAX_BOARD_ITEMS): SQL {
-  const projectKeys =
-    projects === null
-      ? sql`ARRAY(SELECT jsonb_build_object('project', r.key) FROM registered r)`
-      : sqlArray(
-          projects.map((k) => JSON.stringify({ project: k })),
-          "jsonb",
-        );
+  const projectKeys = projectContainmentArray(projects);
   return sql`
 WITH RECURSIVE
 ${registeredProjectsCte()},

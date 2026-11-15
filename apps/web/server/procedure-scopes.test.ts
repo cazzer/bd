@@ -55,6 +55,13 @@ describe("procedure scopes", () => {
     expect(procedures.filter(([path]) => scopesOf(path).includes("relay")).map(([path]) => path)).toEqual([]);
   });
 
+  it("gives the roadmap read exactly the board read's scopes (roadmap-milestones decision 8)", async () => {
+    expect(scopesOf("roadmap")).toEqual(["human"]);
+    expect(scopesOf("roadmap")).toEqual(scopesOf("board"));
+    expect(await refusal(() => caller("agent").roadmap({}))).toMatchObject({ code: "FORBIDDEN" });
+    expect(await refusal(() => caller("hangar").roadmap({}))).toMatchObject({ code: "FORBIDDEN" });
+  });
+
   it("keeps the relay's status and actions to a person (laptop-relay decision 9)", async () => {
     for (const name of ["relayStatus", "relayAction", "relayActionsFor"]) expect(scopesOf(name), name).toEqual(["human"]);
     expect(await refusal(() => caller("agent").relayStatus())).toMatchObject({ code: "FORBIDDEN" });

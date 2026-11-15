@@ -10,10 +10,11 @@ import { readRouter } from "./routers/read.js";
 import { relayRouter } from "./routers/relay.js";
 import { inboxRouter } from "./routers/inbox.js";
 import { reviewRouter } from "./routers/review.js";
+import { roadmapRouter } from "./routers/roadmap.js";
 import { reviewSessionRouter } from "./routers/review-session.js";
 import { writeRouter } from "./routers/write.js";
 import { mergeRouters } from "./trpc.js";
 
-export const appRouter = mergeRouters(readRouter, writeRouter, boardRouter, boardLiveRouter, reviewRouter, reviewSessionRouter, inboxRouter, hangarRouter, relayRouter);
+export const appRouter = mergeRouters(readRouter, writeRouter, boardRouter, boardLiveRouter, roadmapRouter, reviewRouter, reviewSessionRouter, inboxRouter, hangarRouter, relayRouter);
 
 export type AppRouter = typeof appRouter;

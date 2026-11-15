@@ -408,6 +408,20 @@ export {
   type BeadsProject,
 } from "./board.js";
 
+// Roadmap read (roadmap-milestones change): milestones and epics of the
+// chosen projects with progress rolled up from their items, in one
+// statement sharing the board's ancestor walk. See roadmap.ts.
+export {
+  getRoadmap,
+  buildRoadmapQuery,
+  MAX_ROADMAP_ROWS,
+  type Roadmap,
+  type RoadmapEpic,
+  type RoadmapMilestone,
+  type RoadmapOptions,
+  type RoadmapProgress,
+} from "./roadmap.js";
+
 // The pending review queue (review-queue change): every pending review
 // across the registered projects, oldest first, in one statement. See
 // review-queue.ts.
