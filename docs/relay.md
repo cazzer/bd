@@ -242,8 +242,6 @@ so a `herdr_prompt` payload's `text` is at most 8,000 less that line and its new
 
 ## What the relay trusts
 
-**Not covered by the relay's controls: `bin/inbox-watch`.** With `BREAKDOWN_API` pointed at a remote Breakdown, inbox-watch runs a headless `claude -p` with bypassed permissions on accepted inbox items the server reports, so a compromised Breakdown can drive it without a relay token and outside `--project`, `--herdr-socket`, `--kinds` and `--max-age`. Keep inbox-watch on a loopback `BREAKDOWN_API` until bd-d38.16 guards it; that bead blocks cutover (bd-d38.10).
-
 The relay treats Breakdown as possibly compromised. Its own command line is the trust anchor:
 
 - **Checkouts.** `bd` runs only in a `--project key=/abs/path` checkout, only at exactly that path, and only while the path is its own realpath (no symlink anywhere along it) holding a real `.beads/` directory, checked again immediately before every `bd` spawn. A payload's `cwd` must equal it. Breakdown's project list can narrow these, never add one or move one ([`GET /projects`](#get-relayv1projects--scope-relay)).
@@ -253,6 +251,15 @@ The relay treats Breakdown as possibly compromised. Its own command line is the 
 - **Transport.** `--url` must be `https`, or `http` only to loopback, a tailnet address (100.64.0.0/10), or a `*.ts.net` name. Redirects are never followed, so the token goes only to that origin.
 
 **What a compromised Breakdown can still do.** Within the configured projects and sockets it can choose the wording of the decisions and prompts the relay relays (a comment, a close reason, a prompt typed into an agent's pane), queue a well-formed decision the person never made, and delay or drop actions. The provenance line (`[Breakdown relay] … — ` before every relayed prompt, on the same line as the prompt, so herdr never submits it alone) tells the agent the prompt is untrusted, and every decision is a `bd` comment that stays visible on the board. This is accepted for now: the relay exists to carry the board's decisions, and a cryptographic tie from a decision to the person (a signature checked on the Mac) is a separate change. Narrow what it can reach with `--project`, `--kinds`, and `--herdr-socket`.
+
+**`bin/inbox-watch` against a remote Breakdown.** inbox-watch is not the relay, but it reads a Breakdown's inbox and acts on it, so it carries its own controls (`bin/inbox-watch-lib.mjs`):
+
+- **Loopback by default.** It refuses a `BREAKDOWN_API` whose host is not loopback (127.0.0.0/8, `::1`, `localhost`) unless given `--allow-remote`, and then only under the relay's `--url` transport rule: `https`, or `http` only to a tailnet address (100.64.0.0/10) or a `*.ts.net` name, with no credentials in the URL. Redirects are never followed. In remote mode it prints a warning when it starts.
+- **Ids, not text.** Each run is handed only the item ids inbox-watch selected, each checked to be a UUID; no title, note, or other server text is put in the prompt. The run is told to `brain_get` exactly those ids and act on no other item (an instruction to the model, not a sandbox).
+- **Age.** It skips an item whose decision (the latest feedback entry matching its status, else `updatedAt`) is older than `--max-age` (default 24h); an unreadable time counts as too old. Malformed inbox entries are dropped.
+- **Tools.** In remote mode the run is denied shell and file-edit tools (`--disallowedTools Bash,Edit,Write,NotebookEdit`).
+
+What it still trusts, plainly: the relay runs only allowlisted `bd` and `herdr` argument vectors in checkouts you named, but inbox-watch hands each item to a Claude with bypassed permissions acting through your connectors. The item's draft, note, and links come from Breakdown, read over the brain MCP server your Claude config names, so a compromised Breakdown can forge a freshly accepted item and write the text the run follows, including mail or messages sent as you. The age check stops stale and replayed items, not forged ones. Use `--allow-remote` only against a Breakdown you would let act through your connectors; otherwise keep inbox-watch on loopback and Accept from a live session.
 
 ## Minting the relay token
 
