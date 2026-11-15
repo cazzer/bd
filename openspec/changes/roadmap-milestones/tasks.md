@@ -30,5 +30,5 @@
 - [x] 4.2 Pure layout module (axis span, week ticks, bar/target positions, overdue, UTC date labels) with unit tests, incl. date-only due never shifting a day and not-started epics having no bar
 - [x] 4.3 Rows: title, status, progress bar + share + in-progress/deferred counts, "no items" state; activating a row opens the board item drawer and sets `item`
 - [x] 4.4 Live update: re-read on the board change stream for the shown projects
-- [x] 4.5 Live check with a seeded scratch beads project (milestones, epics, dated and claimed tasks): screenshots of one project and all projects; review request filed
+- [ ] 4.5 Live check with a seeded scratch beads project (milestones, epics, dated and claimed tasks): screenshots of one project and all projects; review request filed
 - [x] 4.6 README "Working on it"/board section documents milestones (`bd create -t milestone --due …`, `bd update <epic> --parent <milestone>`) and `/roadmap`

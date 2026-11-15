@@ -30,8 +30,8 @@ afterEach(() => {
 
 const OFFERED = ["skyos", "tides", "strides"];
 
-function render(address: string[], onChoose = vi.fn(), offered: string[] | null = OFFERED) {
-  act(() => root.render(createElement(ProjectSwitcher, { offered, address, onChoose })));
+function render(address: string[], onChoose = vi.fn(), offered: string[] | null = OFFERED, fallback = false) {
+  act(() => root.render(createElement(ProjectSwitcher, { offered, address, onChoose, fallback })));
   const select = container.querySelector("select")!;
   return { select, onChoose };
 }
@@ -74,6 +74,32 @@ describe("ProjectSwitcher", () => {
     expect([...select.options].map((o) => o.textContent)).toEqual(["rmf"]);
     render([], vi.fn(), null);
     expect(container.querySelector("select")!.selectedOptions[0]?.textContent).toBe("All projects");
+  });
+
+  describe("with the registry unreadable (fallback: offered is the address)", () => {
+    test("with no project named, is a live menu offering All projects alone", () => {
+      const { select } = render([], vi.fn(), [], true);
+      expect(select.disabled).toBe(false);
+      expect([...select.options].map((o) => o.textContent)).toEqual(["All projects"]);
+      expect(select.value).toBe(ALL_PROJECTS_CHOICE);
+    });
+
+    test("with one project named, stays a menu (not text) reading it, and offers All projects", () => {
+      const { select, onChoose } = render(["rmf"], vi.fn(), ["rmf"], true);
+      expect(select.disabled).toBe(false);
+      expect(select.selectedOptions[0]?.textContent).toBe("rmf");
+      expect([...select.options].map((o) => o.textContent)).toEqual(["All projects", "rmf"]);
+      choose(select, ALL_PROJECTS_CHOICE);
+      expect(onChoose).toHaveBeenCalledWith(ALL_PROJECTS_CHOICE);
+    });
+
+    test("with several named, reads them (not All projects) and offers each one", () => {
+      const { select, onChoose } = render(["rmf", "rmb"], vi.fn(), ["rmf", "rmb"], true);
+      expect(select.selectedOptions[0]?.textContent).toBe("rmf + rmb");
+      expect([...select.options].filter((o) => !o.hidden).map((o) => o.textContent)).toEqual(["All projects", "rmf", "rmb"]);
+      choose(select, "rmb");
+      expect(onChoose).toHaveBeenCalledWith("rmb");
+    });
   });
 
   test("shows the only offered project as text, with nothing to choose", () => {

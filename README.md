@@ -306,7 +306,7 @@ bd update <epic-id> --parent <milestone-id>             # or move an existing on
 bd update <epic-id> --due 2026-12-01                    # an epic's own target (else its milestone's)
 ```
 
-The roadmap lists each project's milestones by due date, each above its epics, then the epics with no milestone, on one week-scaled timeline with a line at today. An epic's bar runs from when it or its first item was claimed to when it closed (or to today), and an open epic or milestone past its target is marked overdue. Progress rolls up from items: an epic counts every item under it, nested epics' too, a milestone counts every item under it through an epic or directly, and the share is closed ÷ (all − deferred), with in-progress and deferred counts shown beside it. A row opens the same drawer as a board card. On the board, a lane names its epic's milestone, and milestones are never cards.
+The roadmap lists each project's milestones by due date, each above its epics, then the epics with no milestone, on one week-scaled timeline with a line at today. An epic's bar runs from when it or its first item was claimed to when it closed (or to today), a dashed span runs on to its target, and an open epic or milestone past its target is marked overdue (the span turns red). Projects and milestones fold, and the fold is remembered in that browser. Progress rolls up from items: an epic counts every item under it, nested epics' too, a milestone counts every item under it through an epic or directly, and the share is closed ÷ (all − deferred), with in-progress and deferred counts shown beside it. A row opens the same drawer as a board card. On the board, a lane names its epic's milestone, and milestones are never cards.
 
 ## Inbox
 

@@ -100,7 +100,7 @@ describe("roadmap", () => {
         title: `${TAG}-e`,
         status: "open",
         project: PROJECT,
-        milestone: { id: id.get(`${TAG}-m`), title: `${TAG}-m`, dueAt: "2026-12-15T00:00:00.000Z" },
+        milestone: { id: id.get(`${TAG}-m`), externalId: `${TAG}-m`, title: `${TAG}-m`, status: "open", project: PROJECT, dueAt: "2026-12-15T00:00:00.000Z" },
         dueAt: null,
         startedAt: null,
         closedAt: null,

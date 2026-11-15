@@ -8,26 +8,23 @@
 //
 // An epic's milestone may not be one of its project's own: beads keeps one
 // project per tracker, but an agent can assert a `child_of` edge across
-// projects, and the read names an epic's milestone wherever it lives. Such
-// an epic is grouped under a header for that milestone in the epic's own
-// section, labelled with the milestone's project — from the answer when
-// that project is shown too, else from `elsewhere` (the view's lookup of
-// the milestones the answer names but does not return), else unknown.
+// projects, and the read names an epic's milestone wherever it lives, with
+// its project, external id, and status. Such an epic is grouped under a
+// header for that milestone in the epic's own section, labelled with the
+// milestone's project.
+//
+// A project the last read did not cover (a switch whose answer has not
+// landed) is a loading section, never left out and never empty, so a switch
+// to "All projects" cannot flash a false "nothing planned".
 
 import type { RoadmapEpic, RoadmapMilestone } from "@breakdown/core";
 
 export type { RoadmapEpic, RoadmapMilestone };
 
-/** A milestone the answer names (an epic's) without returning, as the view looked it up. */
-export interface ElsewhereMilestone {
-  externalId: string;
-  project: string;
-}
-
-/** A group's heading: a milestone of this project, or one of another project (or of no project the view could find). */
+/** A group's heading: a milestone of this project, one of another project, or "No milestone". */
 export type RoadmapGroupHead =
   | { kind: "milestone"; milestone: RoadmapMilestone }
-  | { kind: "foreign"; id: string; title: string; dueAt: string | null; externalId: string | null; project: string | null; milestone: RoadmapMilestone | null }
+  | { kind: "foreign"; milestone: NonNullable<RoadmapEpic["milestone"]> }
   | { kind: "none" };
 
 export interface RoadmapGroup {
@@ -40,6 +37,8 @@ export interface RoadmapGroup {
 export interface RoadmapSection {
   project: string;
   groups: RoadmapGroup[];
+  /** True while the last read did not cover this project. */
+  loading: boolean;
 }
 
 export const NO_MILESTONE_TITLE = "No milestone";
@@ -56,26 +55,29 @@ function compareHeads(a: { dueAt: string | null; title: string; id: string }, b:
 }
 
 function headKey(head: RoadmapGroupHead): { dueAt: string | null; title: string; id: string } {
-  if (head.kind === "milestone") return head.milestone;
-  if (head.kind === "foreign") return head;
-  return { dueAt: null, title: "", id: "" };
+  return head.kind === "none" ? { dueAt: null, title: "", id: "" } : head.milestone;
 }
 
 /**
- * The sections to draw, in `projects` order (the chosen projects). With
- * `everyProject` (an address naming no project), a project with no
+ * The sections to draw, in `projects` order (the chosen projects). `read`
+ * is the projects the answer covers (null: every project). With
+ * `everyProject` (an address naming no project), a covered project with no
  * milestone and no epic is left out; otherwise every chosen project gets a
- * section, empty or not, so the view can say it has none yet.
+ * section, empty or not, so the view can say it has none yet. A project the
+ * answer does not cover is a loading section either way.
  */
 export function buildRoadmapSections(
   answer: { milestones: readonly RoadmapMilestone[]; epics: readonly RoadmapEpic[] },
   projects: readonly string[],
   everyProject: boolean,
-  elsewhere: ReadonlyMap<string, ElsewhereMilestone> = new Map(),
+  read: readonly string[] | null,
 ): RoadmapSection[] {
-  const milestoneById = new Map(answer.milestones.map((m) => [m.id, m]));
   const sections: RoadmapSection[] = [];
   for (const project of projects) {
+    if (read !== null && !read.includes(project)) {
+      sections.push({ project, groups: [], loading: true });
+      continue;
+    }
     const own = answer.milestones.filter((m) => m.project === project);
     const epics = answer.epics.filter((e) => e.project === project);
     if (everyProject && own.length === 0 && epics.length === 0) continue;
@@ -91,46 +93,35 @@ export function buildRoadmapSections(
       }
       let group = groups.get(m.id);
       if (!group) {
-        const known = milestoneById.get(m.id) ?? null;
-        const found = elsewhere.get(m.id);
-        group = {
-          key: m.id,
-          head: {
-            kind: "foreign",
-            id: m.id,
-            title: known?.title ?? m.title,
-            dueAt: known?.dueAt ?? m.dueAt,
-            externalId: known?.externalId ?? found?.externalId ?? null,
-            project: known?.project ?? found?.project ?? null,
-            milestone: known,
-          },
-          epics: [],
-        };
+        group = { key: m.id, head: { kind: "foreign", milestone: m }, epics: [] };
         groups.set(m.id, group);
       }
       group.epics.push(epic);
     }
     const ordered = [...groups.values()].sort((a, b) => compareHeads(headKey(a.head), headKey(b.head)));
     if (none.epics.length > 0) ordered.push(none);
-    sections.push({ project, groups: ordered });
+    sections.push({ project, groups: ordered, loading: false });
   }
   return sections;
 }
 
-/** The milestones epics name that the answer does not return: the ids the view looks up to label them. */
-export function unreturnedMilestoneIds(answer: { milestones: readonly RoadmapMilestone[]; epics: readonly RoadmapEpic[] }): string[] {
-  const returned = new Set(answer.milestones.map((m) => m.id));
-  const ids = new Set<string>();
-  for (const e of answer.epics) if (e.milestone !== null && !returned.has(e.milestone.id)) ids.add(e.milestone.id);
-  return [...ids].sort();
+/**
+ * The projects whose changes can change the shown roadmap: the projects
+ * read, plus every project owning a shown epic's milestone (its due date and
+ * status are drawn). Null when the read covered every project.
+ */
+export function watchedProjects(answer: { epics: readonly RoadmapEpic[] }, read: readonly string[] | null): string[] | null {
+  if (read === null) return null;
+  const watched = new Set(read);
+  for (const e of answer.epics) if (e.milestone?.project) watched.add(e.milestone.project);
+  return [...watched];
 }
 
 /** The project of the row whose external id is `item`, else the single chosen project, else null (the drawer waits). */
 export function roadmapItemProject(item: string, sections: readonly RoadmapSection[], chosen: readonly string[]): string | null {
   for (const section of sections) {
     for (const group of section.groups) {
-      if (group.head.kind === "milestone" && group.head.milestone.externalId === item) return group.head.milestone.project;
-      if (group.head.kind === "foreign" && group.head.externalId === item && group.head.project !== null) return group.head.project;
+      if (group.head.kind !== "none" && group.head.milestone.externalId === item && group.head.milestone.project !== null) return group.head.milestone.project;
       for (const epic of group.epics) if (epic.externalId === item) return epic.project;
     }
   }

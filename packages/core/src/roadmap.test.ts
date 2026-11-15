@@ -162,7 +162,7 @@ describe("getRoadmap rollup", () => {
     expect(milestone(roadmap, id("m")).progress).toEqual(progress(8, 4, 1));
     expect(milestone(roadmap, id("m")).unepicked).toEqual(progress(0, 0));
     expect([share(epic(roadmap, id("ea")).progress), share(epic(roadmap, id("eb")).progress), share(milestone(roadmap, id("m")).progress)]).toEqual([75, 25, 50]);
-    expect(epic(roadmap, id("ea")).milestone).toEqual({ id: id("m"), title: "Beta", dueAt: "2026-12-15T00:00:00.000Z" });
+    expect(epic(roadmap, id("ea")).milestone).toEqual({ id: id("m"), externalId: `${tag}-m`, title: "Beta", status: "open", project: a, dueAt: "2026-12-15T00:00:00.000Z" });
     expect(milestone(roadmap, id("m"))).toMatchObject({ externalId: `${tag}-m`, title: "Beta", status: "open", project: a, dueAt: "2026-12-15T00:00:00.000Z" });
     expect(roadmap.truncated).toBe(false);
     // Leaves are counted, never returned; no content either.
@@ -294,7 +294,7 @@ describe("getRoadmap rollup", () => {
 
     expect(roadmap.epics.map((e) => e.id)).toEqual([id("survivor")]);
     expect(epic(roadmap, id("survivor")).progress).toEqual(progress(2, 1));
-    expect(epic(roadmap, id("survivor")).milestone).toEqual({ id: id("m"), title: "M", dueAt: null });
+    expect(epic(roadmap, id("survivor")).milestone).toMatchObject({ id: id("m"), title: "M", dueAt: null });
     expect(milestone(roadmap, id("m")).progress).toEqual(progress(2, 1));
     expect(milestone(roadmap, id("m")).unepicked).toEqual(progress(0, 0));
   });
@@ -452,10 +452,10 @@ describe("getRoadmap projects and bounds", () => {
     expect(mine.map((e) => e.id).sort()).toEqual([id("ea"), id("eb")].sort());
   });
 
-  it("names an epic's milestone in a project not shown, with its due date, without listing or counting it", async () => {
+  it("names an epic's milestone in a project not shown, with its external id, project, status, and due date, without listing or counting it", async () => {
     const { a, b, tag } = scope();
     const ids = await items([
-      { ext: `${tag}-mb`, project: b, issueType: "milestone", title: "Launch", dueAt: "2027-02-01T00:00:00.000Z" },
+      { ext: `${tag}-mb`, project: b, issueType: "milestone", title: "Launch", status: "closed", dueAt: "2027-02-01T00:00:00.000Z" },
       { ext: `${tag}-ea`, project: a, issueType: "epic" },
       { ext: `${tag}-ta`, project: a },
     ]);
@@ -468,7 +468,7 @@ describe("getRoadmap projects and bounds", () => {
     const onlyA = await getRoadmap(db, { projects: [a] });
 
     expect(onlyA.milestones).toEqual([]);
-    expect(epic(onlyA, id("ea")).milestone).toEqual({ id: id("mb"), title: "Launch", dueAt: "2027-02-01T00:00:00.000Z" });
+    expect(epic(onlyA, id("ea")).milestone).toEqual({ id: id("mb"), externalId: `${tag}-mb`, title: "Launch", status: "closed", project: b, dueAt: "2027-02-01T00:00:00.000Z" });
     expect(epic(onlyA, id("ea")).progress.total).toBe(1);
     // Read with b too, the milestone counts a's task through a's epic.
     expect(milestone(await getRoadmap(db, { projects: [a, b] }), id("mb")).progress.total).toBe(1);

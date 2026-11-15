@@ -74,7 +74,7 @@ import { describeRefresh } from "../lib/relayAction.js";
 import { drawerProject } from "../lib/reviewDrawer.js";
 import { formatRoute, type BoardRoute, type GraphRoute } from "../lib/route.js";
 import { viewFilterOf, type ViewNode } from "../lib/viewFilter.js";
-import { boardToRoadmap, chooseProject, viewCarriedProjects } from "../lib/workViewNav.js";
+import { boardToRoadmap, chooseProject, switcherOffer, viewCarriedProjects } from "../lib/workViewNav.js";
 import { trpc } from "../trpc.js";
 import { HangarStatusPill } from "./HangarStatusPill.js";
 import { RelayStatusPill } from "./RelayStatusPill.js";
@@ -348,9 +348,8 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
   // so a reader can always switch away from a project that fails to read.
   // With the registry unreadable too, it offers the address's projects and
   // "All projects" (ProjectSwitcher's `fallback`).
-  const knownOffered = view === null ? null : view.viewProjects !== null ? offeredProjects(view.viewProjects, []) : registryKeys !== null ? offeredProjects(null, registryKeys) : null;
-  const switcherFallback = view !== null && knownOffered === null && registryFailed;
-  const switcherOffered = switcherFallback ? [...projects] : knownOffered;
+  const { offered: switcherOffered, fallback: switcherFallback } =
+    view === null ? { offered: null, fallback: false } : switcherOffer({ viewProjects: view.viewProjects, registry: registryKeys, registryFailed, address: projects });
 
   function chooseFromSwitcher(choice: string) {
     navigate(chooseProject(route, switcherOffered ?? [], choice), "push");

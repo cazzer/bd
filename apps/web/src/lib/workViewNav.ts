@@ -84,3 +84,31 @@ export function boardToRoadmap(route: BoardRoute, viewChosen: readonly string[] 
 export function roadmapToBoard(route: RoadmapRoute): BoardRoute {
   return { view: "board", viewId: null, projects: [...route.projects], item: null };
 }
+
+/** What the switcher offers (ProjectSwitcher's `offered` and `fallback`). */
+export interface SwitcherOffer {
+  /** The projects to offer; null while they are not known yet (the switcher is disabled). */
+  offered: string[] | null;
+  /** True when the registry could not be read and `offered` is the address's own projects. */
+  fallback: boolean;
+}
+
+/**
+ * What the board's or the roadmap's switcher offers, known as soon as its
+ * source is, independent of the board or roadmap read: a view's own
+ * projects (`viewProjects`, known without the registry), else the
+ * registry's keys once read, else — the registry having failed — the
+ * address's projects as a fallback, so a reader can always switch away from
+ * a project that fails to read. Null while none of these is known.
+ */
+export function switcherOffer(source: {
+  viewProjects: readonly string[] | null;
+  registry: readonly string[] | null;
+  registryFailed: boolean;
+  address: readonly string[];
+}): SwitcherOffer {
+  if (source.viewProjects !== null) return { offered: offeredProjects(source.viewProjects, []), fallback: false };
+  if (source.registry !== null) return { offered: offeredProjects(null, source.registry), fallback: false };
+  if (source.registryFailed) return { offered: [...source.address], fallback: true };
+  return { offered: null, fallback: false };
+}

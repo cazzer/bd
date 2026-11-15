@@ -75,8 +75,9 @@
 // only their milestones and epics are heads (work-roadmap spec: only items
 // in the shown projects are counted). An epic's items in a project that is
 // not selected are not counted under it. An epic's milestone is answered
-// with its id, title, and due date wherever it lives, so the view can name
-// a milestone of another project and use its due date as the target.
+// with its id, external id, title, status, project, and due date wherever
+// it lives, so the view can name, open, and mark overdue a milestone of
+// another project, and use its due date as the target.
 //
 // Two parents: beads gives an item one parent, but an agent can assert a
 // second child_of edge. Then an item's epics (every epic on any path) and
@@ -141,8 +142,14 @@ export interface RoadmapEpic {
   title: string;
   status: string;
   project: string;
-  /** The epic's nearest milestone ancestor, of any project; null when it has none. */
-  milestone: { id: string; title: string; dueAt: string | null } | null;
+  /**
+   * The epic's nearest milestone ancestor, of any project; null when it has
+   * none. It carries enough to label and open it, and to mark it overdue,
+   * when its project is not shown (so it is not in `milestones`): its
+   * `project` is null only for a milestone written with none, and its
+   * `status` reads a missing value as open, as items' statuses do.
+   */
+  milestone: { id: string; externalId: string; title: string; status: string; project: string | null; dueAt: string | null } | null;
   dueAt: string | null;
   startedAt: string | null;
   closedAt: string | null;
@@ -269,7 +276,9 @@ SELECT jsonb_build_object(
       'id', h.id, 'externalId', h.external_id, 'title', h.title, 'status', h.status,
       'project', h.project,
       'milestone', CASE WHEN mn.id IS NULL THEN NULL
-                        ELSE jsonb_build_object('id', mn.id, 'title', mn.title, 'dueAt', ${canonicalDate("due_at", "mn")}) END,
+                        ELSE jsonb_build_object('id', mn.id, 'externalId', mn.external_id, 'title', mn.title,
+                                                'status', COALESCE(mn.metadata->>'status', 'open'), 'project', mn.metadata->>'project',
+                                                'dueAt', ${canonicalDate("due_at", "mn")}) END,
       'dueAt', h.due_at, 'startedAt', h.started_at, 'closedAt', h.closed_at,
       'firstStartedAt', ep.first_started_at,
       'progress', COALESCE(ep.progress, ${EMPTY_PROGRESS_JSON}::jsonb)

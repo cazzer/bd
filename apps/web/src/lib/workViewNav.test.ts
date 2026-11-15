@@ -6,7 +6,7 @@
 import { describe, expect, it } from "vitest";
 import { PROJECT_KEY_PATTERN } from "./boardRow.js";
 import { formatRoute, parseRoute, type BoardRoute, type RoadmapRoute } from "./route.js";
-import { ALL_PROJECTS_CHOICE, boardToRoadmap, chooseProject, roadmapToBoard, SEVERAL_PROJECTS_VALUE, switcherState, viewCarriedProjects } from "./workViewNav.js";
+import { ALL_PROJECTS_CHOICE, boardToRoadmap, chooseProject, roadmapToBoard, SEVERAL_PROJECTS_VALUE, switcherOffer, switcherState, viewCarriedProjects } from "./workViewNav.js";
 
 const OFFERED = ["skyos", "tides", "strides"];
 
@@ -108,5 +108,27 @@ describe("Board / Roadmap toggle", () => {
   it("carries the project and drops the item from roadmap to board", () => {
     expect(formatRoute(roadmapToBoard({ view: "roadmap", projects: ["skyos"], item: "sky-1" }))).toBe("/board?project=skyos");
     expect(formatRoute(roadmapToBoard({ view: "roadmap", projects: [], item: null }))).toBe("/board");
+  });
+});
+
+describe("switcherOffer", () => {
+  const base = { viewProjects: null, registry: null, registryFailed: false, address: ["rmf"] };
+
+  it("offers a view's own projects without waiting for the registry", () => {
+    expect(switcherOffer({ ...base, viewProjects: ["a", "b", "a"] })).toEqual({ offered: ["a", "b"], fallback: false });
+  });
+
+  it("offers the registry's projects once read, whatever the board or roadmap read does", () => {
+    expect(switcherOffer({ ...base, registry: ["rmf", "rmb"] })).toEqual({ offered: ["rmf", "rmb"], fallback: false });
+    expect(switcherOffer({ ...base, registry: ["rmf"], registryFailed: true })).toEqual({ offered: ["rmf"], fallback: false });
+  });
+
+  it("falls back to the address's projects when the registry fails", () => {
+    expect(switcherOffer({ ...base, registryFailed: true })).toEqual({ offered: ["rmf"], fallback: true });
+    expect(switcherOffer({ ...base, address: [], registryFailed: true })).toEqual({ offered: [], fallback: true });
+  });
+
+  it("is unknown while nothing has been read", () => {
+    expect(switcherOffer(base)).toEqual({ offered: null, fallback: false });
   });
 });
