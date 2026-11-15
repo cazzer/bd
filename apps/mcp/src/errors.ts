@@ -32,6 +32,7 @@ import {
   HangarSessionNotFoundError,
   HangarTransitionError,
   HangarOutcomeRefusedError,
+  HangarEndedSessionChangeError,
   HangarSessionMergeError,
   KnowledgeStoreError,
   LookupFailedError,
@@ -42,6 +43,7 @@ import {
   NotAWorkItemError,
   ReservedHangarEdgeError,
   ReservedHangarNodeError,
+  ReservedInboxItemError,
   RetrievalFailedError,
   SelfMergeError,
 } from "@breakdown/core";
@@ -217,6 +219,9 @@ export function mapError(toolName: string, err: unknown): CallToolResult {
   if (err instanceof ReservedHangarNodeError) {
     return actionable(err, "Nothing from this call was persisted. Queue a hangar session with brain_hangar_request and read sessions with brain_hangar_sessions; give any other node a different nodeType and sourceSystem, then retry.");
   }
+  if (err instanceof ReservedInboxItemError) {
+    return actionable(err, "Nothing from this call was persisted. An outcome request (an inbox key starting \"hangar-outcome:\") is written only by brain_hangar_outcome_request, which writes its card itself; give any other inbox item a different externalId, then retry.");
+  }
   if (err instanceof ReservedHangarEdgeError) {
     return actionable(err, "Nothing from this call was persisted. A session's run_by link is written when it is queued (brain_hangar_request); give other edges a sourceSystem other than \"hangar\" and a source that is not a hangar session, then retry.");
   }
@@ -236,7 +241,7 @@ export function mapError(toolName: string, err: unknown): CallToolResult {
   }
   // Only hangar's REST API claims and reports sessions; no MCP tool reaches
   // these today, but a session-state refusal is never something to retry.
-  if (err instanceof HangarSessionNotFoundError || err instanceof HangarTransitionError || err instanceof HangarSessionNotClaimedByError) {
+  if (err instanceof HangarSessionNotFoundError || err instanceof HangarTransitionError || err instanceof HangarSessionNotClaimedByError || err instanceof HangarEndedSessionChangeError) {
     return actionable(err, "Session state is reported by hangar itself, not through MCP; read the session with brain_hangar_sessions instead of retrying.");
   }
 

@@ -391,11 +391,54 @@ describe("releasing sessions", () => {
     expect(acked.json["session"]).toMatchObject({ state: "stopped", container: null, disk_path: null, outcome: "tabled", released: true });
   });
 
-  it("clears container and disk_path with null on a final session with no outcome", async () => {
+  it("refuses the ack (clearing a held disk_path) before a person has set an outcome, 409 session_ended, changing nothing", async () => {
     const id = await ended("failed");
-    const cleared = await patch(id, { container: null, disk_path: null });
-    expect(cleared.status, cleared.body).toBe(200);
-    expect(cleared.json["session"]).toMatchObject({ state: "failed", container: null, disk_path: null, outcome: null, released: false });
+    const refused = await patch(id, { container: null, disk_path: null });
+    expect(refused.status, refused.body).toBe(409);
+    expect(refused.json.error).toMatchObject({ code: "session_ended", message: expect.stringContaining("no outcome") });
+    expect(await metadataOf(id)).toMatchObject({ container: `hangar-${id}`, disk_path: `/disks/${id}.img` });
+    // Clearing the container alone is still allowed.
+    const container = await patch(id, { container: null });
+    expect(container.status, container.body).toBe(200);
+    expect(container.json["session"]).toMatchObject({ state: "failed", container: null, disk_path: `/disks/${id}.img`, released: false });
+  });
+
+  it("an ended session's container and disk_path only clear: a value is refused, 409 session_ended", async () => {
+    const id = await ended("stopped");
+    for (const body of [{ disk_path: "/disks/other.img" }, { container: "c-new" }, { state: "stopped", disk_path: "/disks/other.img" }]) {
+      const refused = await patch(id, body);
+      expect(refused.status, JSON.stringify(body)).toBe(409);
+      expect(refused.json.error).toMatchObject({ code: "session_ended" });
+    }
+    expect(await metadataOf(id)).toMatchObject({ container: `hangar-${id}`, disk_path: `/disks/${id}.img` });
+    // Re-sending the value it already holds is no change, so a retried report still answers 200.
+    expect((await patch(id, { state: "stopped", container: `hangar-${id}` })).status).toBe(200);
+  });
+
+  it("a released session is never un-released: only clears are taken, and a repeated ack is a no-op", async () => {
+    const id = await ended("stopped");
+    await setHangarSessionOutcome(db, { id, outcome: "tabled", actor: PERSON });
+    expect((await patch(id, { disk_path: null })).status).toBe(200);
+    for (const body of [{ disk_path: `/disks/${id}.img` }, { container: "c-new" }, { host: "elsewhere" }]) {
+      const refused = await patch(id, body);
+      expect(refused.status, JSON.stringify(body)).toBe(409);
+      expect(refused.json.error).toMatchObject({ code: "session_ended" });
+    }
+    // Hangar's ack clears the container it still reported, then repeats after a lost answer.
+    for (let i = 0; i < 2; i += 1) {
+      const acked = await patch(id, { container: null, disk_path: null });
+      expect(acked.status, acked.body).toBe(200);
+      expect(acked.json["session"]).toMatchObject({ container: null, disk_path: null, outcome: "tabled", released: true });
+    }
+  });
+
+  it("a repeated failed report keeps the first reason", async () => {
+    const { id } = await queued();
+    await claim(id);
+    expect((await patch(id, { state: "failed", reason: "worker exited 3" })).status).toBe(200);
+    const again = await patch(id, { state: "failed", reason: "hangar lost the worker while it was down" });
+    expect(again.status, again.body).toBe(200);
+    expect(again.json["session"]).toMatchObject({ state: "failed", failure_reason: "worker exited 3" });
   });
 
   it("ignores an outcome hangar sends", async () => {

@@ -23,7 +23,7 @@
 // own stderr via `console.error` below, for whoever is running this
 // locally to read — never sent to the client.
 
-import { HangarOutcomeRefusedError, HangarSessionNotFoundError, HostBinaryUnavailableError, InboxCardChangedError, InboxDecisionConflictError, InboxItemNotThisSessionError, InboxItemSessionEndedError, InvalidHangarSessionError, InvalidInboxItemError, NotAnInboxItemError, type HostBinary } from "@breakdown/core";
+import { HangarOutcomeRefusedError, HangarSessionNotFoundError, ReservedInboxItemError, HostBinaryUnavailableError, InboxCardChangedError, InboxDecisionConflictError, InboxItemNotThisSessionError, InboxItemSessionEndedError, InvalidHangarSessionError, InvalidInboxItemError, NotAnInboxItemError, type HostBinary } from "@breakdown/core";
 import {
   asPgError,
   ContentTooLargeError,
@@ -85,6 +85,14 @@ function isForeignKeyViolation(err: EdgeUpsertFailedError): boolean {
  */
 /** What the person sees when an accept or send-back is refused on an item whose hangar session has ended. */
 export const INBOX_SESSION_ENDED_MESSAGE = "The hangar session that filed this has ended. Hand it off to a local session or dismiss it.";
+
+/** What the person sees when hangar has already released a session whose outcome they tried to set or change. */
+export const HANGAR_SESSION_RELEASED_MESSAGE = "This session is already released: hangar has removed its disk, so the outcome can't change.";
+
+/** What the person sees when a session that has not ended is accepted or tabled; `state` is its current state. */
+export function hangarSessionNotEndedMessage(state: string): string {
+  return `Only a stopped or failed session can be accepted or tabled (this one is ${state}).`;
+}
 
 function actionable(code: TRPCErrorCode, err: KnowledgeStoreError, hint: string): TRPCError {
   return new TRPCError({ code, message: `${err.message} ${hint}` });
@@ -164,7 +172,11 @@ export function mapCoreError(procedureName: string, err: unknown): TRPCError {
     return new TRPCError({ code: "CONFLICT", message: INBOX_SESSION_ENDED_MESSAGE });
   }
   if (err instanceof HangarOutcomeRefusedError) {
-    return actionable("CONFLICT", err, err.kind === "state" ? "Wait until the session has stopped or failed." : "Hangar has already acted on the decision.");
+    // Worded for the person on the board row or the card; the core message (ids) is for logs.
+    return new TRPCError({ code: "CONFLICT", message: err.kind === "state" ? hangarSessionNotEndedMessage(err.detail) : HANGAR_SESSION_RELEASED_MESSAGE });
+  }
+  if (err instanceof ReservedInboxItemError) {
+    return actionable("FORBIDDEN", err, "Outcome requests are filed only through brain_hangar_outcome_request; use a different key.");
   }
   if (err instanceof HangarSessionNotFoundError) {
     return actionable("NOT_FOUND", err, "Reload the board; the session is gone.");

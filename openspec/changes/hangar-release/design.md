@@ -40,5 +40,6 @@ The board item's drawer lists the item's hangar sessions, from `listSessions` by
 
 ## Risks / Trade-offs
 
-- [A person tables by mistake] → They can change it until hangar acknowledges. After that the disk is gone, and the Table confirmation says so.
+- [A person tables by mistake] → They can change it until hangar acknowledges. After that the disk is gone, and the confirmation says so. Accept deletes the disk too, so both outcomes ask first.
+- [An agent shapes the card the person clicks] → An outcome request's card is the server's: its key is reserved to `requestHangarOutcome`, the agent's note is quoted below the server's facts, a stored binding pins the card, an accept is refused off any other option set, and the card's banner is built from the session itself.
 - [Hangar is offline when the decision is made] → The decision waits in the listing until hangar's next check-in. The board shows "not yet released".

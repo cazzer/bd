@@ -17,6 +17,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Context } from "../context.js";
 import { appRouter } from "../router.js";
 import { createCallerFactory } from "../trpc.js";
+import { HANGAR_SESSION_RELEASED_MESSAGE, hangarSessionNotEndedMessage } from "../errors.js";
 
 const HANGAR = `test-hgstatus-${randomUUID().slice(0, 8)}`;
 const ISO = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/;
@@ -108,7 +109,18 @@ describe("hangarSessionOutcome", () => {
   it("refuses a running session with CONFLICT naming its state", async () => {
     const id = await sessionNode("running");
     const refused = await caller("human").hangarSessionOutcome({ id, outcome: "accepted" }).catch((e: unknown) => e);
-    expect(refused).toMatchObject({ code: "CONFLICT", message: expect.stringContaining("is running") });
+    // Worded for the person on the board row, not the core message's ids.
+    expect(refused).toMatchObject({ code: "CONFLICT", message: hangarSessionNotEndedMessage("running") });
+    expect((refused as Error).message).toBe("Only a stopped or failed session can be accepted or tabled (this one is running).");
+  });
+
+  it("refuses a released session with CONFLICT in the person's words", async () => {
+    const id = await sessionNode("stopped");
+    await caller("human", { client: PERSON }).hangarSessionOutcome({ id, outcome: "tabled" });
+    await db.execute(sql`UPDATE nodes SET metadata = metadata - 'disk_path' WHERE id = ${id}::uuid`);
+    const refused = await caller("human").hangarSessionOutcome({ id, outcome: "accepted" }).catch((e: unknown) => e);
+    expect(refused).toMatchObject({ code: "CONFLICT", message: HANGAR_SESSION_RELEASED_MESSAGE });
+    expect(HANGAR_SESSION_RELEASED_MESSAGE).toBe("This session is already released: hangar has removed its disk, so the outcome can't change.");
   });
 });
 
@@ -162,7 +174,27 @@ describe("an outcome request's inbox decision", () => {
     const filed = await requestHangarOutcome(db, { sessionId: id, outcome: "tabled", note: "Merged.", actor: `${HANGAR}-agent` });
     await db.execute(sql`UPDATE nodes SET metadata = metadata - 'disk_path' || '{"outcome":"accepted"}'::jsonb WHERE id = ${id}::uuid`);
     const refused = await caller("human", { client: PERSON }).inboxDecision({ id: filed.id, decision: "accept", option: "table" }).catch((e: unknown) => e);
-    expect(refused).toMatchObject({ code: "CONFLICT", message: expect.stringContaining("already released") });
+    expect(refused).toMatchObject({ code: "CONFLICT", message: HANGAR_SESSION_RELEASED_MESSAGE });
     expect(await caller("human").inbox({ statuses: ["pending"] }).then((r) => r.items.find((i) => i.id === filed.id))).toMatchObject({ status: "pending", feedback: [] });
+  });
+
+  it("serves the bound session's facts on the inbox item for the card's banner; other items carry none", async () => {
+    const id = await sessionNode("failed");
+    const filed = await requestHangarOutcome(db, { sessionId: id, outcome: "tabled", note: "Merged.", actor: `${HANGAR}-agent` });
+    const items = (await caller("human").inbox({ statuses: ["pending"] })).items;
+    const bound = items.find((i) => i.id === filed.id);
+    expect(bound).toMatchObject({ hangarOutcome: { sessionId: id, requested: "tabled" }, hangarOutcomeSession: { id, state: "failed", repo: "test/repo", diskHeld: true, released: false } });
+    expect(Object.keys(bound!.hangarOutcomeSession!)).not.toContain("diskPath");
+    expect(items.filter((i) => i.hangarOutcome === null).every((i) => i.hangarOutcomeSession === null)).toBe(true);
+  });
+
+  it("inboxRequest refuses a hangar-outcome: key with FORBIDDEN, writing nothing", async () => {
+    const id = await sessionNode("stopped");
+    const key = `hangar-outcome:${id}`;
+    const refused = await caller("agent", { client: `${HANGAR}-agent` })
+      .inboxRequest({ key, title: "Accept", content: "Safe to click.", metadata: { source: "hangar", question: "Accept?", options: [{ id: "accept", label: "Accept" }, { id: "table", label: "Table" }] } })
+      .catch((e: unknown) => e);
+    expect(refused).toMatchObject({ code: "FORBIDDEN" });
+    expect(await db.select({ id: nodes.id }).from(nodes).where(and(eq(nodes.sourceSystem, "inbox"), eq(nodes.externalId, key)))).toEqual([]);
   });
 });

@@ -11,7 +11,7 @@ Hangar keeps every stopped or failed session's disk, and its stopped container, 
   - It's returned wherever the session object is: REST, MCP, and the board.
 - **Agents can only ask.** A new MCP tool, `brain_hangar_outcome_request`, files an inbox item bound to a session, with Accept and Table options. Your decision on it sets the outcome. Session tokens and the hangar token can't call it.
 - **`reason` on `PATCH /hangar/v1/sessions/:id` with `state: "failed"`** (1–500 characters). It's stored as the session's `failure_reason`, the same field claim-time failures already use.
-- **Release acknowledgement.** `PATCH {container: null, disk_path: null}` on a final session is how hangar says it released the session. `outcome` set with `disk_path` null means released.
+- **Release acknowledgement.** `PATCH {container: null, disk_path: null}` on a final session is how hangar says it released the session, taken once a person has set an outcome. `outcome` set with `disk_path` null means released. An ended session's placement only clears, so a released session is never un-released (`409 session_ended`).
 - **Releasable sessions.** `brain_hangar_sessions` gains a `releasable` filter: outcome set, disk still held. The board shows each session's outcome with Accept and Table on ended sessions.
 - **The contract doc.** `docs/hangar-api.md` documents all of the above. No new endpoint.
 

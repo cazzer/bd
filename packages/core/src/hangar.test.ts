@@ -16,6 +16,7 @@ import { clientTokens, hangarCheckIns, hangarMessages, nodes, type Database } fr
 import { sessionTokenClient, verifyClientToken } from "./client-tokens.js";
 import { upsertEdges } from "./edges.js";
 import {
+  HangarEndedSessionChangeError,
   HangarOutcomeRefusedError,
   HangarSessionNotClaimedByError,
   HangarSessionNotFoundError,
@@ -777,6 +778,52 @@ describe("a person's outcome and hangar's release", () => {
     expect((await stateOf(id))["state"]).toBe("running");
     const failed = await updateSession(db, { hangar, id, state: "failed", reason: "  git clone exited 128 " });
     expect(failed.session).toMatchObject({ state: "failed", failureReason: "git clone exited 128" });
+  });
+
+  it("an ended session's container and disk_path only clear; a set value is refused, changing nothing", async () => {
+    const { id, hangar } = await ended("only-clear", "stopped");
+    const before = await stateOf(id);
+    for (const change of [{ diskPath: "/disks/other.img" }, { container: "c-new" }, { state: "stopped", diskPath: "/disks/other.img" }]) {
+      const refused = await updateSession(db, { hangar, id, ...change }).catch((e: unknown) => e);
+      expect(refused, JSON.stringify(change)).toBeInstanceOf(HangarEndedSessionChangeError);
+      expect((refused as HangarEndedSessionChangeError).kind).toBe("value");
+    }
+    expect(await stateOf(id)).toEqual(before);
+    // Its own value again is no change: a retried report is not refused.
+    expect((await updateSession(db, { hangar, id, state: "stopped", container: `hangar-${id}` })).session.container).toBe(`hangar-${id}`);
+    // A host is still hangar's to report.
+    expect((await updateSession(db, { hangar, id, host: "hangar-linux" })).session.host).toBe("hangar-linux");
+  });
+
+  it("refuses the ack (clearing a held disk_path) unless an outcome is set", async () => {
+    const { id, hangar } = await ended("ack-first", "failed");
+    const refused = await updateSession(db, { hangar, id, container: null, diskPath: "" }).catch((e: unknown) => e);
+    expect(refused).toBeInstanceOf(HangarEndedSessionChangeError);
+    expect((refused as HangarEndedSessionChangeError).kind).toBe("no_outcome");
+    expect(await stateOf(id)).toMatchObject({ container: `hangar-${id}`, disk_path: `/disks/${id}.img` });
+    await setHangarSessionOutcome(db, { id, outcome: "tabled", actor: PERSON });
+    expect((await updateSession(db, { hangar, id, container: null, diskPath: null })).session.released).toBe(true);
+  });
+
+  it("refuses any change but a clear on a released session: it is never un-released", async () => {
+    const { id, hangar } = await ended("unrelease", "stopped");
+    await setHangarSessionOutcome(db, { id, outcome: "accepted", actor: PERSON });
+    await updateSession(db, { hangar, id, diskPath: null });
+    for (const change of [{ diskPath: `/disks/${id}.img` }, { container: "c-new" }, { host: "elsewhere" }]) {
+      const refused = await updateSession(db, { hangar, id, ...change }).catch((e: unknown) => e);
+      expect(refused, JSON.stringify(change)).toBeInstanceOf(HangarEndedSessionChangeError);
+      expect((refused as HangarEndedSessionChangeError).kind).toBe("released");
+    }
+    expect((await setHangarSessionOutcome(db, { id, outcome: "tabled", actor: PERSON }).catch((e: unknown) => e))).toBeInstanceOf(HangarOutcomeRefusedError);
+    // The ack, and its repeat after a lost answer, still answer.
+    for (let i = 0; i < 2; i += 1) expect((await updateSession(db, { hangar, id, container: null, diskPath: null })).session).toMatchObject({ released: true, container: null, outcome: "accepted" });
+  });
+
+  it("does not overwrite failure_reason on a repeated failed report", async () => {
+    const { id, hangar } = await ended("refail", "running");
+    await updateSession(db, { hangar, id, state: "failed", reason: "worker exited 3" });
+    const again = await updateSession(db, { hangar, id, state: "failed", reason: "hangar lost the worker while it was down" });
+    expect(again.session).toMatchObject({ state: "failed", failureReason: "worker exited 3" });
   });
 
   it("lists releasable sessions: an outcome set and the disk still held", async () => {

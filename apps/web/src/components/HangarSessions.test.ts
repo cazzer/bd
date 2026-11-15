@@ -2,14 +2,16 @@
 //
 // The drawer's hangar sessions section (hangar-release, tasks.md 1.4): left
 // off with no sessions; Accept and Table only on an ended session without an
-// outcome; Table asks first and sends only from its confirm button; the
+// outcome; both ask first, each with its own warning, and send only from the
+// confirm button, which takes focus (Cancel gives it back to the opener); the
 // mutation's arguments; a refusal shown on the row; and "Change to …" until
-// hangar has released the session. The tRPC client is mocked.
+// hangar has released the session, which asks the same way. The tRPC client
+// is mocked.
 
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { HangarSessions, TABLE_WARNING } from "./HangarSessions.js";
+import { ACCEPT_WARNING, HangarSessions, TABLE_WARNING } from "./HangarSessions.js";
 
 const trpcMock = vi.hoisted(() => ({ hangarSessions: { query: vi.fn() }, hangarSessionOutcome: { mutate: vi.fn() } }));
 vi.mock("../trpc.js", () => ({ trpc: trpcMock }));
@@ -124,11 +126,20 @@ describe("HangarSessions", () => {
     for (const b of row("s-stopped").querySelectorAll("button")) expect(b.className).toContain("min-h-11");
   });
 
-  test("accepts at once with the session's id", async () => {
+  test("Accept asks first too, says the disk is deleted, and sends with the session's id from its confirm button", async () => {
     await render([session("s-1", "stopped")]);
+    await click(button(row("s-1"), "Accept"));
+    expect(trpcMock.hangarSessionOutcome.mutate).not.toHaveBeenCalled();
+    expect(row("s-1").textContent).toContain(ACCEPT_WARNING);
+    expect(ACCEPT_WARNING).toContain("deletes its disk");
+    expect(row("s-1").querySelector('[role="group"]')?.getAttribute("aria-label")).toBe("Confirm accepting");
+    expect(buttons(row("s-1"))).toEqual(["Accept session", "Cancel"]);
+    expect(document.activeElement).toBe(button(row("s-1"), "Accept session"));
+
     trpcMock.hangarSessionOutcome.mutate.mockResolvedValue({ id: "s-1", state: "stopped", outcome: "accepted", outcomeAt: NOW, outcomeBy: "human", released: false, changed: true });
     trpcMock.hangarSessions.query.mockResolvedValue({ sessions: [session("s-1", "stopped", { outcome: "accepted", outcomeAt: NOW, outcomeBy: "human" })], truncated: false });
-    await click(button(row("s-1"), "Accept"));
+    await click(button(row("s-1"), "Accept session"));
+    expect(trpcMock.hangarSessionOutcome.mutate).toHaveBeenCalledTimes(1);
     expect(trpcMock.hangarSessionOutcome.mutate).toHaveBeenCalledWith({ id: "s-1", outcome: "accepted" });
     expect(row("s-1").querySelector("[data-session-outcome]")?.getAttribute("data-session-outcome")).toBe("accepted");
     expect(buttons(row("s-1"))).toEqual(["Change to tabled"]);
@@ -142,10 +153,13 @@ describe("HangarSessions", () => {
     expect(trpcMock.hangarSessionOutcome.mutate).not.toHaveBeenCalled();
     expect(row("s-1").textContent).toContain(TABLE_WARNING);
     expect(buttons(row("s-1"))).toEqual(["Table session", "Cancel"]);
+    expect(document.activeElement).toBe(button(row("s-1"), "Table session"));
 
     await click(button(row("s-1"), "Cancel"));
     expect(trpcMock.hangarSessionOutcome.mutate).not.toHaveBeenCalled();
     expect(row("s-1").textContent).not.toContain(TABLE_WARNING);
+    // Focus goes back to the button that opened the confirmation.
+    expect(document.activeElement).toBe(button(row("s-1"), "Table"));
 
     trpcMock.hangarSessionOutcome.mutate.mockResolvedValue({ id: "s-1", state: "stopped", outcome: "tabled", outcomeAt: NOW, outcomeBy: "human", released: false, changed: true });
     trpcMock.hangarSessions.query.mockResolvedValue({ sessions: [session("s-1", "stopped", { outcome: "tabled", outcomeAt: NOW, outcomeBy: "human" })], truncated: false });
@@ -167,11 +181,27 @@ describe("HangarSessions", () => {
     expect(trpcMock.hangarSessionOutcome.mutate).toHaveBeenCalledWith({ id: "s-1", outcome: "tabled" });
   });
 
+  test("changing a tabled session to accepted asks with the accept warning, and Cancel restores focus", async () => {
+    await render([session("s-1", "stopped", { outcome: "tabled", outcomeAt: NOW, outcomeBy: "human" })]);
+    await click(button(row("s-1"), "Change to accepted"));
+    expect(trpcMock.hangarSessionOutcome.mutate).not.toHaveBeenCalled();
+    expect(row("s-1").textContent).toContain(ACCEPT_WARNING);
+    expect(document.activeElement).toBe(button(row("s-1"), "Accept session"));
+    await click(button(row("s-1"), "Cancel"));
+    expect(document.activeElement).toBe(button(row("s-1"), "Change to accepted"));
+
+    trpcMock.hangarSessionOutcome.mutate.mockResolvedValue({ id: "s-1", state: "stopped", outcome: "accepted", outcomeAt: NOW, outcomeBy: "human", released: false, changed: true });
+    await click(button(row("s-1"), "Change to accepted"));
+    await click(button(row("s-1"), "Accept session"));
+    expect(trpcMock.hangarSessionOutcome.mutate).toHaveBeenCalledWith({ id: "s-1", outcome: "accepted" });
+  });
+
   test("shows a refusal on the row in the server's words", async () => {
     await render([session("s-1", "stopped")]);
-    const refused = Object.assign(new Error("Hangar session s-1 is already released (tabled); its outcome can no longer change."), { data: { code: "CONFLICT", httpStatus: 409 } });
+    const refused = Object.assign(new Error("This session is already released: hangar has removed its disk, so the outcome can't change."), { data: { code: "CONFLICT", httpStatus: 409 } });
     trpcMock.hangarSessionOutcome.mutate.mockRejectedValue(refused);
     await click(button(row("s-1"), "Accept"));
+    await click(button(row("s-1"), "Accept session"));
     expect(row("s-1").querySelector('[role="alert"]')?.textContent).toBe(refused.message);
     expect(row("s-1").querySelector("[data-session-outcome]")).toBeNull();
   });

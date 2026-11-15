@@ -22,6 +22,12 @@
 // decision. A prompt longer than the relay payload's cap is cut to it and
 // says so (core `fitRelayHerdrText`), rather than left unqueued. Opening or focusing a session still needs herdr here and is
 // refused with PRECONDITION_FAILED naming it.
+//
+// An outcome request (core inbox.ts `requestHangarOutcome`) carries, beside
+// its binding, `hangarOutcomeSession`: the bound session as it stands now
+// (state, repo, whether hangar still holds its disk, released), read in one
+// statement for the page. The card's banner is built from these facts, never
+// from the item's text, since accepting it deletes that session's disk.
 
 import {
   completeInboxItem,
@@ -45,6 +51,8 @@ import {
   requestInboxItem,
   enqueueRelayAction,
   fitRelayHerdrText,
+  getSessionsByIds,
+  type HangarSessionState,
   type DecideInboxItemResult,
   type InboxItem,
 } from "@breakdown/core";
@@ -54,13 +62,33 @@ import { mapCoreError, refuseMissingBinary } from "../errors.js";
 import { openInboxSession } from "../inbox-session.js";
 import { agentProcedure, humanProcedure, router } from "../trpc.js";
 
+/** The session an outcome request is bound to, as it stands now (module header). */
+export interface InboxOutcomeSessionDto {
+  id: string;
+  state: HangarSessionState;
+  repo: string;
+  /** Hangar still reports a disk path for it. */
+  diskHeld: boolean;
+  released: boolean;
+}
+
 export interface InboxItemDto extends Omit<InboxItem, "receivedAt" | "updatedAt"> {
   receivedAt: string;
   updatedAt: string;
+  /** Set on an outcome request whose session exists; null otherwise. */
+  hangarOutcomeSession: InboxOutcomeSessionDto | null;
 }
 
-function toDto(item: InboxItem): InboxItemDto {
-  return { ...item, receivedAt: item.receivedAt.toISOString(), updatedAt: item.updatedAt.toISOString() };
+function toDto(item: InboxItem, sessions: ReadonlyMap<string, InboxOutcomeSessionDto>): InboxItemDto {
+  const bound = item.hangarOutcome === null ? null : (sessions.get(item.hangarOutcome.sessionId) ?? null);
+  return { ...item, receivedAt: item.receivedAt.toISOString(), updatedAt: item.updatedAt.toISOString(), hangarOutcomeSession: bound };
+}
+
+/** The sessions the page's outcome requests are bound to, by id; one statement, none when there are no requests. */
+async function outcomeSessions(db: Parameters<typeof getSessionsByIds>[0], items: readonly InboxItem[]): Promise<Map<string, InboxOutcomeSessionDto>> {
+  const ids = items.flatMap((i) => (i.hangarOutcome === null ? [] : [i.hangarOutcome.sessionId]));
+  const sessions = await getSessionsByIds(db, ids);
+  return new Map(sessions.map((s) => [s.id, { id: s.id, state: s.state, repo: s.repo, diskHeld: s.diskPath !== null, released: s.released }]));
 }
 
 export const inboxInputSchema = z
@@ -72,7 +100,8 @@ export const inboxInputSchema = z
 const inboxProcedure = agentProcedure.input(inboxInputSchema).query(async ({ ctx, input }) => {
   try {
     const list = await listInbox(ctx.db, input?.statuses === undefined ? {} : { statuses: input.statuses });
-    return { items: list.items.map(toDto), total: list.total, truncated: list.truncated };
+    const sessions = await outcomeSessions(ctx.db, list.items);
+    return { items: list.items.map((item) => toDto(item, sessions)), total: list.total, truncated: list.truncated };
   } catch (err) {
     throw mapCoreError("inbox", err);
   }

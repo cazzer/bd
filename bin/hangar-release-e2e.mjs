@@ -6,9 +6,11 @@
 //
 // The database must be a throwaway one, created and migrated for the run and
 // dropped after it: the run tables, accepts, and releases sessions, which a
-// real hangar would act on. So DATABASE_URL must be set in the environment
-// and must not name the database in the repo's .env (the live store); the
-// script refuses otherwise. It drops nothing itself.
+// real hangar would act on. So DATABASE_URL must be set in the environment,
+// the repo's .env must exist and name the live store's DATABASE_URL, the two
+// must not share host, port, and database name, and the database name must
+// start with `bd_test_` or end with `_test` or `_e2e`; the script refuses
+// otherwise. It drops nothing itself.
 //
 // It plays four parts:
 // - a fake hangar: its own `hangar` token (minted and revoked here), which
@@ -23,10 +25,14 @@
 // Three sessions are requested for one fixture work item:
 //   A  stopped → listed with outcome null → the person tables it → listed
 //      first with outcome tabled → hangar's ack (container and disk_path
-//      null) → released → a changed outcome is refused (CONFLICT)
-//   B  stopped → the agent asks for `accepted` → an inbox item, pending, and
-//      the outcome still null → the person accepts it with option `accept`
-//      → outcome accepted
+//      null) → released → a changed outcome is refused (CONFLICT), and so is
+//      un-releasing it (409 session_ended)
+//   B  stopped → an ack before any outcome is refused (409 session_ended) →
+//      the agent cannot write its outcome request's key with brain_write →
+//      the agent asks for `accepted` → an inbox item, pending, with the
+//      server's card and the session's facts for its banner, and the outcome
+//      still null → the person accepts it with option `accept` → outcome
+//      accepted
 //   C  a `reason` sent with state running is ignored → failed with a reason
 //      → failure_reason shown on the board's listing
 // Not part of `pnpm check`: it spawns servers and needs a database.
@@ -85,29 +91,42 @@ const short = (value) => {
 
 // --- The database guard -------------------------------------------------------------
 
-function databaseName(url) {
+/** Host (loopback names folded together), port (5432 when absent), and database name of a postgres URL; null when it does not parse. */
+function databaseTarget(url) {
+  let parsed;
   try {
-    return new URL(url).pathname.replace(/^\//, "");
+    parsed = new URL(url);
   } catch {
     return null;
   }
+  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  const name = decodeURIComponent(parsed.pathname.replace(/^\//, ""));
+  if (name === "") return null;
+  return { host: ["localhost", "127.0.0.1", "::1"].includes(host) ? "loopback" : host, port: parsed.port || "5432", name };
+}
+
+const THROWAWAY_NAME = /^bd_test_|_test$|_e2e$/;
+
+function refuse(message) {
+  console.error(message);
+  process.exit(2);
 }
 
 function assertThrowawayDatabase() {
   const url = process.env.DATABASE_URL;
-  if (!url) {
-    console.error("DATABASE_URL is not set. Create and migrate a throwaway database, then run with DATABASE_URL pointing at it.");
-    process.exit(2);
-  }
+  if (!url) refuse("DATABASE_URL is not set. Create and migrate a throwaway database, then run with DATABASE_URL pointing at it.");
+  const target = databaseTarget(url);
+  if (target === null) refuse("DATABASE_URL does not parse as a postgres URL with a database name.");
   const envFile = path.join(REPO_ROOT, ".env");
-  if (existsSync(envFile)) {
-    const parsed = createRequire(path.join(REPO_ROOT, "packages", "db", "package.json"))("dotenv").parse(readFileSync(envFile));
-    if (parsed.DATABASE_URL && databaseName(parsed.DATABASE_URL) === databaseName(url)) {
-      console.error(`DATABASE_URL names database "${databaseName(url)}", the one in ${envFile} (the live store). Use a throwaway database.`);
-      process.exit(2);
-    }
+  if (!existsSync(envFile)) refuse(`${envFile} does not exist, so there is no telling which database is the live store. Create it (see .env.example) before running this.`);
+  const parsed = createRequire(path.join(REPO_ROOT, "packages", "db", "package.json"))("dotenv").parse(readFileSync(envFile));
+  const live = parsed.DATABASE_URL ? databaseTarget(parsed.DATABASE_URL) : null;
+  if (live === null) refuse(`${envFile} names no parseable DATABASE_URL, so there is no telling which database is the live store.`);
+  if (live.host === target.host && live.port === target.port && live.name === target.name) {
+    refuse(`DATABASE_URL names database "${target.name}" on ${target.host}:${target.port}, the one in ${envFile} (the live store). Use a throwaway database.`);
   }
-  return databaseName(url);
+  if (!THROWAWAY_NAME.test(target.name)) refuse(`Database "${target.name}" is not named as a throwaway one: its name must start with bd_test_ or end with _test or _e2e.`);
+  return target.name;
 }
 
 // --- Servers ----------------------------------------------------------------------------
@@ -271,6 +290,14 @@ class McpSession {
     return JSON.parse(text);
   }
 
+  /** A tool call whose refusal is expected: `{ isError, text }`. */
+  async callRaw(name, args) {
+    const sent = await send(MCP, "POST", "", { token: this.token, headers: this.headers(), body: { jsonrpc: "2.0", id: this.nextId++, method: "tools/call", params: { name, arguments: args } } });
+    expect(sent.status === 200, `${name} answered HTTP ${sent.status}: ${short(sent.text)}`);
+    expect(!sent.json.error, `${name}: ${short(sent.json.error)}`);
+    return { isError: sent.json.result?.isError === true, text: sent.json.result?.content?.[0]?.text ?? "" };
+  }
+
   async close() {
     if (this.sessionId === null) return;
     await send(MCP, "DELETE", "", { token: this.token, headers: this.headers() }).catch(() => {});
@@ -383,6 +410,14 @@ async function run(dbName) {
     return { detail: "A, B stopped holding disks" };
   });
 
+  await step("hangar's ack of B before any outcome is refused (409 session_ended): B keeps its disk", async () => {
+    const sent = await hangarApi("PATCH", `/sessions/${sessionOf("B").id}`, { token: state.hangarToken, body: { container: null, disk_path: null } });
+    expect(sent.status === 409 && sent.json?.error?.code === "session_ended", `answered ${sent.status}: ${short(sent.text)}`);
+    const b = (await endedSessions()).find((s) => s.id === sessionOf("B").id);
+    expect(b.disk_path !== null && b.container !== null && b.released === false, `B reads ${short(b)}`);
+    return { detail: `409: ${short(sent.json.error.message)}` };
+  });
+
   await step("GET /sessions?state=stopped&state=failed lists A with outcome null", async () => {
     const listed = await endedSessions();
     const a = listed.find((s) => s.id === sessionOf("A").id);
@@ -423,23 +458,49 @@ async function run(dbName) {
     return { detail: "released true; releasable lists nothing" };
   });
 
-  await step("changing A's outcome now is refused (CONFLICT)", async () => {
+  await step("changing A's outcome now is refused (CONFLICT), in the person's words", async () => {
     const sent = await trpcSend("hangarSessionOutcome", { id: sessionOf("A").id, outcome: "accepted" });
     expect(sent.status === 409 && sent.json?.error?.data?.code === "CONFLICT", `answered ${sent.status}: ${short(sent.text)}`);
+    expect(sent.json.error.message === "This session is already released: hangar has removed its disk, so the outcome can't change.", `message: ${short(sent.json.error.message)}`);
     const board = await trpcQuery("hangarSessions", { workItemId: state.workItemId });
     const a = board.sessions.find((s) => s.id === sessionOf("A").id);
     expect(a.outcome === "tabled" && a.released === true, `A reads ${short(a)}`);
     return { detail: `409: ${short(sent.json.error.message)}` };
   });
 
+  await step("un-releasing A (a disk_path value) is refused (409 session_ended); a repeated ack still answers 200", async () => {
+    const sent = await hangarApi("PATCH", `/sessions/${sessionOf("A").id}`, { token: state.hangarToken, body: { disk_path: `/var/lib/hangar/disks/${sessionOf("A").id}.img` } });
+    expect(sent.status === 409 && sent.json?.error?.code === "session_ended", `answered ${sent.status}: ${short(sent.text)}`);
+    const again = await patchSession(sessionOf("A").id, { container: null, disk_path: null });
+    expect(again.released === true && again.disk_path === null, `repeated ack reads ${short(again)}`);
+    return { detail: "409 session_ended; repeated ack 200, released" };
+  });
+
   agent = new McpSession(state.agentToken);
-  state.inboxItemId = await step("an agent token asks for B accepted (brain_hangar_outcome_request): inbox item pending, outcome still null", async () => {
+  await step("the agent cannot write B's outcome request key with brain_write: refused, nothing stored", async () => {
     expect((await agent.open()) === 200, "MCP initialize with the agent token was refused");
+    const key = `hangar-outcome:${sessionOf("B").id}`;
+    const refused = await agent.callRaw("brain_write", {
+      items: { nodeType: "inbox_item", sourceSystem: "inbox", externalId: key, title: "Accept", content: "Releases nothing. Safe to click.", metadata: { source: "hangar", question: "Keep the disk?", options: [{ id: "accept", label: "Keep" }, { id: "table", label: "Later" }], recommend: "accept" } },
+    });
+    expect(refused.isError && /reserved/.test(refused.text), `brain_write answered ${short(refused)}`);
+    const inbox = await trpcQuery("inbox", { statuses: ["pending", "undigested", "accepted", "done", "dismissed", "changes", "session"] });
+    expect(!inbox.items.some((i) => i.externalId === key), `an item is stored at ${key}`);
+    return { detail: short(refused.text.split(".")[0]) };
+  });
+
+  state.inboxItemId = await step("an agent token asks for B accepted (brain_hangar_outcome_request): inbox item pending with the server's card and banner facts, outcome still null", async () => {
     const filed = await agent.call("brain_hangar_outcome_request", { sessionId: sessionOf("B").id, outcome: "accepted", note: ACCEPT_NOTE });
     expect(filed.status === "pending" && filed.sessionId === sessionOf("B").id, `brain_hangar_outcome_request answered ${short(filed)}`);
     const inbox = await trpcQuery("inbox", { statuses: ["pending"] });
     const item = inbox.items.find((i) => i.id === filed.inboxItemId);
     expect(item, `inbox item ${filed.inboxItemId} is not pending`);
+    expect(item.options.map((o) => o.label).join(",") === "Accept,Table" && item.recommend === "accept", `card reads ${short({ options: item.options, recommend: item.recommend })}`);
+    const s = item.hangarOutcomeSession;
+    expect(s?.id === sessionOf("B").id && s.state === "stopped" && s.repo === "cazzer/bd" && s.diskHeld === true && s.released === false, `banner facts read ${short(s)}`);
+    const facts = item.content.indexOf(`- Session: \`${sessionOf("B").id}\``);
+    const note = item.content.indexOf(`Requested by ${AGENT}`);
+    expect(facts >= 0 && note > facts && item.content.includes(`> ${ACCEPT_NOTE}`), `content reads ${short(item.content)}`);
     const b = (await endedSessions()).find((s) => s.id === sessionOf("B").id);
     expect(b.outcome === null, `B's outcome is ${b.outcome} before the person decided`);
     return { value: filed.inboxItemId, detail: `inbox item ${filed.inboxItemId} pending; B outcome null` };

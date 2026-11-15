@@ -10,18 +10,21 @@
 // Either outcome releases the session: at its next check-in hangar removes
 // the container, deletes the disk, and acknowledges (docs/hangar-api.md
 // "Releasing sessions"). Accept says the work is done or kept; Table sets it
-// aside, so it asks first, inline (no browser confirm): the warning and an
-// explicit "Table session" button. Until hangar has released the session, the
-// outcome can be changed ("Change to …", which asks the same way when it
-// would table). A refusal (the session moved on — hangar released it, or it
-// is no longer ended) is shown on the row in the server's words, and the
-// list is read again. Every control is at least 44 px tall below `sm`.
+// aside. Both delete the disk, so both ask first, inline (no browser
+// confirm): the outcome's warning and an explicit "Accept session" or
+// "Table session" button, which takes focus when the confirmation opens;
+// Cancel puts focus back on the button that opened it. Until hangar has
+// released the session, the outcome can be changed ("Change to …", which
+// asks the same way). A refusal (the session moved on: hangar released it,
+// or it is no longer ended) is shown on the row in the server's words,
+// written for the person (server/errors.ts), and the list is read again.
+// Every control is at least 44 px tall below `sm`.
 //
 // It reads on mount and whenever the host's source re-reads (`version`),
 // keeping the previous answer on screen meanwhile; a failed read is said on
 // the section when there is one to say it on, and leaves it off otherwise.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { trpc } from "../trpc.js";
 import { SectionTitle } from "./ReviewAttachments.js";
 
@@ -30,7 +33,13 @@ type Session = SessionsAnswer["sessions"][number];
 type Outcome = "accepted" | "tabled";
 type OutcomeSet = Awaited<ReturnType<typeof trpc.hangarSessionOutcome.mutate>>;
 
-export const TABLE_WARNING = "Tabling deletes this session's disk when hangar next checks in.";
+export const ACCEPT_WARNING = "Accepting releases this session: hangar removes its container and deletes its disk at its next check-in.";
+export const TABLE_WARNING = "Tabling releases this session: hangar removes its container and deletes its disk at its next check-in.";
+
+const CONFIRM: Record<Outcome, { warning: string; label: string; group: string; tone: string }> = {
+  accepted: { warning: ACCEPT_WARNING, label: "Accept session", group: "Confirm accepting", tone: "bg-accent text-ground hover:bg-accent/90" },
+  tabled: { warning: TABLE_WARNING, label: "Table session", group: "Confirm tabling", tone: "bg-red-500/80 text-white hover:bg-red-500" },
+};
 
 const ENDED: readonly Session["state"][] = ["stopped", "failed"];
 
@@ -131,24 +140,52 @@ interface SessionRowProps {
   onSettled: () => void;
 }
 
+type Opener = "accept" | "table" | "change";
+
 function SessionRow({ session: shown, onWritten, onSettled }: SessionRowProps) {
-  const [confirming, setConfirming] = useState(false);
+  const [confirming, setConfirming] = useState<Outcome | null>(null);
   const [pending, setPending] = useState(false);
   const [refusal, setRefusal] = useState<string | null>(null);
+  const confirmRef = useRef<HTMLButtonElement>(null);
+  const openers: Record<Opener, React.RefObject<HTMLButtonElement | null>> = { accept: useRef(null), table: useRef(null), change: useRef(null) };
+  /** The button that opened the confirmation, focused again on Cancel. */
+  const opener = useRef<Opener | null>(null);
+  const restoreFocus = useRef(false);
 
   const ended = ENDED.includes(shown.state);
   const outcome = shown.outcome;
   const decidable = ended && !shown.released;
+
+  useEffect(() => {
+    if (confirming !== null) {
+      confirmRef.current?.focus();
+    } else if (restoreFocus.current) {
+      restoreFocus.current = false;
+      if (opener.current !== null) openers[opener.current].current?.focus();
+    }
+    // `openers` holds stable refs; only the confirmation opening or closing moves focus.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [confirming]);
+
+  function ask(next: Outcome, from: Opener) {
+    opener.current = from;
+    setConfirming(next);
+  }
+
+  function cancel() {
+    restoreFocus.current = true;
+    setConfirming(null);
+  }
 
   async function setOutcome(next: Outcome) {
     setPending(true);
     setRefusal(null);
     try {
       onWritten(await trpc.hangarSessionOutcome.mutate({ id: shown.id, outcome: next }));
-      setConfirming(false);
+      setConfirming(null);
     } catch (err) {
       setRefusal(messageOf(err, "Could not set the session's outcome."));
-      setConfirming(false);
+      setConfirming(null);
     } finally {
       setPending(false);
     }
@@ -191,34 +228,35 @@ function SessionRow({ session: shown, onWritten, onSettled }: SessionRowProps) {
         ended && <p className="mt-1 text-fg-muted">{shown.diskHeld ? "Ended · disk held, waiting for your decision" : "Ended · waiting for your decision"}</p>
       )}
 
-      {decidable && !confirming && outcome === null && (
+      {decidable && confirming === null && outcome === null && (
         <div className="mt-2 flex flex-wrap gap-2">
-          <button type="button" disabled={pending} onClick={() => void setOutcome("accepted")} className={`${BUTTON} bg-accent text-ground hover:bg-accent/90`}>
+          <button ref={openers.accept} type="button" disabled={pending} onClick={() => ask("accepted", "accept")} className={`${BUTTON} bg-accent text-ground hover:bg-accent/90`}>
             Accept
           </button>
-          <button type="button" disabled={pending} onClick={() => setConfirming(true)} className={`${BUTTON} border border-hairline text-fg hover:bg-surface`}>
+          <button ref={openers.table} type="button" disabled={pending} onClick={() => ask("tabled", "table")} className={`${BUTTON} border border-hairline text-fg hover:bg-surface`}>
             Table
           </button>
         </div>
       )}
-      {decidable && !confirming && outcome !== null && (
+      {decidable && confirming === null && outcome !== null && (
         <button
+          ref={openers.change}
           type="button"
           disabled={pending}
-          onClick={() => (outcome === "accepted" ? setConfirming(true) : void setOutcome("accepted"))}
+          onClick={() => ask(outcome === "accepted" ? "tabled" : "accepted", "change")}
           className="mt-1 inline-flex min-h-11 items-center rounded text-sm text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-accent disabled:opacity-60 sm:min-h-0"
         >
           Change to {outcome === "accepted" ? "tabled" : "accepted"}
         </button>
       )}
-      {decidable && confirming && (
-        <div role="group" aria-label="Confirm tabling" className="mt-2 rounded-lg border border-amber-400/40 bg-amber-400/10 px-3 py-2">
-          <p className="text-amber-200">{TABLE_WARNING}</p>
+      {decidable && confirming !== null && (
+        <div role="group" aria-label={CONFIRM[confirming].group} className="mt-2 rounded-lg border border-amber-400/40 bg-amber-400/10 px-3 py-2">
+          <p className="text-amber-200">{CONFIRM[confirming].warning}</p>
           <div className="mt-2 flex flex-wrap gap-2">
-            <button type="button" disabled={pending} onClick={() => void setOutcome("tabled")} className={`${BUTTON} bg-red-500/80 text-white hover:bg-red-500`}>
-              Table session
+            <button ref={confirmRef} type="button" disabled={pending} onClick={() => void setOutcome(confirming)} className={`${BUTTON} ${CONFIRM[confirming].tone}`}>
+              {CONFIRM[confirming].label}
             </button>
-            <button type="button" disabled={pending} onClick={() => setConfirming(false)} className={`${BUTTON} text-fg-muted hover:text-fg`}>
+            <button type="button" disabled={pending} onClick={cancel} className={`${BUTTON} text-fg-muted hover:text-fg`}>
               Cancel
             </button>
           </div>

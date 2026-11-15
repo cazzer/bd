@@ -37,6 +37,11 @@
 // happened while the inbox was closed shows when it opens. The detail says
 // the selected item's relay state, and its recipient line says the agent
 // will be told when the relay runs.
+//
+// An outcome request (an item bound to a hangar session, `hangarOutcome`)
+// shows a banner above its card, built from the binding and the server's
+// read of that session (`hangarOutcomeSession`), never from the item's text:
+// what a click releases, and that it deletes the disk.
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { filterBySource, groupByWork, hangarOriginLabel, needsMeRows, REVIEW_SOURCE, sourcesOf, type NeedsMeRow, type WorkGroupSlot } from "../lib/inboxRows.js";
@@ -730,6 +735,8 @@ function InboxDetail({ item, parent, candidates, now, messageRef, keyed, onDecid
         </section>
       )}
 
+      {item.hangarOutcome !== null && <HangarOutcomeBanner sessionId={item.hangarOutcome.sessionId} session={item.hangarOutcomeSession} />}
+
       <div className="space-y-5">
         {card !== null ? (
           <DecisionCardBody key={item.updatedAt} card={card} evidence={item.content} focusedOption={focusedOption} optionDescId={optionDescId} />
@@ -907,6 +914,24 @@ function InboxDetail({ item, parent, candidates, now, messageRef, keyed, onDecid
         )}
       </div>
     </article>
+  );
+}
+
+/** The banner text for an outcome request, from the binding's session id and the server's read of that session (null when it is gone). */
+export function hangarOutcomeBannerText(sessionId: string, session: Item["hangarOutcomeSession"]): string {
+  const short = sessionId.slice(0, 8);
+  if (session === null) return `Releases hangar session ${short}. Its current state couldn't be read; Accept or Table deletes its disk when hangar next checks in.`;
+  const which = `hangar session ${short} (${session.repo}, ${session.state})`;
+  if (session.released) return `Hangar has already released ${which}: its disk is gone, so the outcome can't change.`;
+  if (!session.diskHeld) return `Releases ${which}. Hangar holds no disk for it, so Accept or Table releases it at once.`;
+  return `Releases ${which}. Accept or Table deletes its disk when hangar next checks in.`;
+}
+
+function HangarOutcomeBanner({ sessionId, session }: { sessionId: string; session: Item["hangarOutcomeSession"] }) {
+  return (
+    <p role="note" aria-label="What this decides" data-hangar-outcome-banner={sessionId} className="rounded-xl border border-amber-400/50 bg-amber-400/10 px-3 py-2 text-sm text-amber-100">
+      {hangarOutcomeBannerText(sessionId, session)}
+    </p>
   );
 }
 

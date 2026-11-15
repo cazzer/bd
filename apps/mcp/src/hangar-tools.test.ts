@@ -280,3 +280,41 @@ describe("brain_write refuses hangar sessions", () => {
     expect(stored).toEqual([]);
   });
 });
+
+describe("brain_write refuses outcome requests", () => {
+  const outcomeCard = { source: "hangar", question: "Accept or table this hangar session?", options: [{ id: "accept", label: "Accept" }, { id: "table", label: "Table" }], recommend: "accept" };
+  const storedAt = async (externalId: string) => db.select({ id: nodes.id }).from(nodes).where(and(eq(nodes.sourceSystem, "inbox"), eq(nodes.externalId, externalId)));
+
+  it("refuses any item at an inbox hangar-outcome: key, whatever its type, and persists nothing from the batch", async () => {
+    const client = await connect();
+    const sessionId = await endedSession("stopped");
+    const key = `hangar-outcome:${sessionId}`;
+    for (const nodeType of ["inbox_item", "doc"]) {
+      const raw = await client.callTool({
+        name: "brain_write",
+        arguments: { items: [{ nodeType: "doc", sourceSystem: FIXTURE_SOURCE, externalId: `fine-outcome-${nodeType}-${SUFFIX}`, title: "fine alone" }, { nodeType, sourceSystem: "inbox", externalId: key, title: "Accept", content: "Safe to click.", metadata: outcomeCard }] },
+      });
+      expect(raw.isError).toBe(true);
+      expect(textOf(raw)).toContain(`batch index 1 (inbox/${key})`);
+      expect(textOf(raw)).toMatch(/brain_hangar_outcome_request/);
+      expect(await storedAt(key)).toEqual([]);
+      expect(await db.select({ id: nodes.id }).from(nodes).where(eq(nodes.externalId, `fine-outcome-${nodeType}-${SUFFIX}`))).toEqual([]);
+    }
+  });
+
+  it("a session token cannot pre-create its own outcome request's key, so the agent's request files a clean card", async () => {
+    const sessionId = await endedSession("stopped");
+    const key = `hangar-outcome:${sessionId}`;
+    const sessionClient = await connect({ hangarSessionId: sessionId });
+    const raw = await sessionClient.callTool({ name: "brain_write", arguments: { items: { nodeType: "inbox_item", sourceSystem: "inbox", externalId: key, title: "Accept", content: "Safe to click.", metadata: outcomeCard } } });
+    expect(raw.isError).toBe(true);
+    expect(textOf(raw)).toMatch(/reserved/);
+    expect(await storedAt(key)).toEqual([]);
+
+    const filed = await call(await connect(), "brain_hangar_outcome_request", { sessionId, outcome: "accepted", note: "Merged." });
+    expect(filed).toMatchObject({ action: "created" });
+    const [item] = (await listInbox(db, { ids: [filed.inboxItemId] })).items;
+    expect(item).toMatchObject({ hangarSession: null, pane: null, hangarOutcome: { sessionId, requested: "accepted" } });
+    expect(item!.content).not.toContain("Safe to click");
+  });
+});

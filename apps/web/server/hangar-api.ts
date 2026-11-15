@@ -38,6 +38,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import {
   claimSession,
   getNodes,
+  HangarEndedSessionChangeError,
   HANGAR_FLAVORS,
   HANGAR_SESSION_STATES,
   HangarSessionNotClaimedByError,
@@ -223,6 +224,7 @@ type EndpointHandler = (call: Call) => Promise<void>;
 function mapCoreError(err: unknown): ApiError | null {
   if (err instanceof ApiError) return err;
   if (err instanceof HangarTransitionError) return new ApiError(409, "invalid_transition", err.message);
+  if (err instanceof HangarEndedSessionChangeError) return new ApiError(409, "session_ended", err.message);
   if (err instanceof HangarSessionNotClaimedByError) return new ApiError(403, "not_claimer", err.message);
   if (err instanceof HangarSessionNotFoundError) return new ApiError(404, "not_found", err.message);
   if (err instanceof InvalidHangarSessionError || err instanceof InvalidLookupIdError) return invalidRequest(err.message);

@@ -70,8 +70,15 @@
 // requested }. Like `session`, only that path sets the binding: every other
 // writer's is dropped and the stored one kept (carryForwardInboxDecisions),
 // so no agent can turn an ordinary item into one, or repoint one at another
-// session. The person's accept with an option sets the session's outcome in
-// the decision's own transaction, attributed to them (hangar.ts
+// session. A click on one deletes a session's disk, so its card is the
+// server's: the key prefix `hangar-outcome:` under `inbox` is reserved
+// (`ReservedInboxItemError` from brain_write and `requestInboxItem`, and for
+// any stored item carrying a binding), `requestHangarOutcome` always writes
+// the canonical card with the agent's note quoted below the server-written
+// facts, a stored binding pins the card through any re-write, and an accept
+// is refused unless the stored options are still the canonical pair
+// (`InboxCardChangedError`). The person's accept with an option sets the
+// session's outcome in the decision's own transaction, attributed to them (hangar.ts
 // `unsafeSetHangarSessionOutcomeInTx`), and closes the item `done`: there is
 // nothing left for an executor. A refusal (the session cannot take an
 // outcome now) fails the decision and writes nothing. A dismiss leaves the
@@ -87,6 +94,7 @@ import { ABOUT_EDGE_TYPE } from "./work-context.js";
 import { WORK_ITEM_NODE_TYPE } from "./work-items.js";
 import type { Database } from "@breakdown/db";
 import {
+  ReservedInboxItemError,
   InboxCardChangedError,
   InboxDecisionConflictError,
   InboxItemNotThisSessionError,
@@ -225,6 +233,53 @@ const CONTROL_CHAR = /[\u0000-\u0008\u000b-\u001f\u007f]/;
 
 /** The metadata key binding an outcome request to its session (module header). */
 export const HANGAR_OUTCOME_KEY = "hangar_outcome";
+
+/** The external-id prefix, under source system `inbox`, that only `requestHangarOutcome` writes (module header). */
+export const HANGAR_OUTCOME_KEY_PREFIX = "hangar-outcome:";
+
+/** An outcome request's question; part of the canonical card. */
+export const HANGAR_OUTCOME_QUESTION = "Accept or table this hangar session?";
+
+const DISK_DELETED = "Its disk is deleted: anything on it that was not pushed is lost.";
+
+/** An outcome request's options, in order, exactly as stored (module header); an accept is refused on any other set. */
+export const HANGAR_OUTCOME_OPTIONS: readonly ReviewOption[] = [
+  { id: "accept", label: "Accept", what: "The work is done or kept. Hangar releases the session: it removes the container and deletes the disk at its next check-in.", risk: DISK_DELETED },
+  { id: "table", label: "Table", what: "Set the work aside. Hangar releases the session: it removes the container and deletes the disk at its next check-in.", risk: DISK_DELETED },
+];
+
+const OUTCOME_OF_OPTION: Readonly<Record<string, HangarOutcome>> = { accept: "accepted", table: "tabled" };
+
+/** Whether a key is reserved for outcome requests: source system `inbox`, external id under `HANGAR_OUTCOME_KEY_PREFIX`, matched as the upsert stores them (trimmed). */
+export function isHangarOutcomeKey(sourceSystem: string, externalId: string): boolean {
+  return sourceSystem.trim() === INBOX_SOURCE_SYSTEM && externalId.trim().startsWith(HANGAR_OUTCOME_KEY_PREFIX);
+}
+
+/**
+ * For a generic writer (brain_write, `requestInboxItem`): refuses, before
+ * anything is written, any item (whatever its node type) at a key reserved
+ * for outcome requests. Throws `ReservedInboxItemError` naming the first.
+ */
+export function assertNoHangarOutcomeKeys(items: readonly { sourceSystem: string; externalId: string; label?: string }[]): void {
+  for (const item of items) {
+    if (isHangarOutcomeKey(item.sourceSystem, item.externalId)) {
+      throw new ReservedInboxItemError(item.label ?? `(${item.sourceSystem.trim()}/${item.externalId.trim()})`, `keys starting "${HANGAR_OUTCOME_KEY_PREFIX}" are written only by brain_hangar_outcome_request`);
+    }
+  }
+}
+
+/** For a generic writer: refuses a stored item (normalized metadata) that carries an outcome request binding, whatever its key. */
+export function assertNotHangarOutcomeItem(label: string, stored: Record<string, unknown> | null | undefined): void {
+  if (stored != null && stored[HANGAR_OUTCOME_KEY] !== undefined) {
+    throw new ReservedInboxItemError(label, "it is an outcome request, written only by brain_hangar_outcome_request");
+  }
+}
+
+/** Whether stored options are exactly `HANGAR_OUTCOME_OPTIONS` (ids, labels, and text, in order). */
+function isCanonicalOutcomeCard(options: readonly ReviewOption[]): boolean {
+  const fields = (o: ReviewOption) => [o.id, o.label, o.what ?? null, o.risk ?? null];
+  return JSON.stringify(options.map(fields)) === JSON.stringify(HANGAR_OUTCOME_OPTIONS.map(fields));
+}
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -794,8 +849,12 @@ async function writeInboxFeedback(
       const binding = readHangarOutcome(current);
       let sessionOutcome: DecideInboxItemResult["sessionOutcome"] = null;
       if (binding !== null && kind === "accept") {
-        const outcome = input.option === "accept" ? "accepted" : input.option === "table" ? "tabled" : null;
-        if (outcome === null) throw new InvalidInboxItemError("option", input.option, "must be accept or table on a hangar outcome request");
+        // The outcome comes from the option id alone, and only off the
+        // canonical card: relabelled options are a card the person was not
+        // shown by the server (module header).
+        if (!isCanonicalOutcomeCard((current["options"] as ReviewOption[] | undefined) ?? [])) throw new InboxCardChangedError(existing.id, input.option ?? null);
+        const outcome = input.option === undefined ? undefined : OUTCOME_OF_OPTION[input.option];
+        if (outcome === undefined) throw new InvalidInboxItemError("option", input.option, "must be accept or table on a hangar outcome request");
         if (outcomeRun === null) throw new InboxCardChangedError(existing.id, input.option ?? null);
         const set = await unsafeSetHangarSessionOutcomeInTx(tx, outcomeRun, { id: binding.sessionId, outcome, actor });
         sessionOutcome = { sessionId: set.session.id, outcome, changed: set.changed };
@@ -836,8 +895,11 @@ async function writeInboxFeedback(
       return { id: row.id, ingestRunId: run.id, before, after, title: existing.title, pane, socket, session, endedSession, sessionOutcome };
     });
   } finally {
-    if (outcomeRun !== null) await closeIngestRun(db, outcomeRun);
-    await closeIngestRun(db, run);
+    try {
+      if (outcomeRun !== null) await closeIngestRun(db, outcomeRun);
+    } finally {
+      await closeIngestRun(db, run);
+    }
   }
 }
 
@@ -879,8 +941,11 @@ export const PERSON_DECIDED_INBOX_STATUSES: readonly InboxStatus[] = ["accepted"
  * executing) is the agent's to set. `session` and `hangar_outcome` are
  * never the writer's to set (module header): an incoming one is dropped and
  * the stored one kept; `requestInboxItem` stamps a session-bound caller's
- * session, and `requestHangarOutcome` its binding, afterwards. Pure; both
- * inputs normalized.
+ * session, and `requestHangarOutcome` its binding, afterwards. A stored
+ * binding also pins the card (question, options, recommend, on_accept) to
+ * the stored one, as defense in depth behind the reserved key: only
+ * `requestHangarOutcome` rewrites it, after this. Pure; both inputs
+ * normalized.
  */
 export function carryForwardInboxDecisions(incoming: Record<string, unknown>, stored: Record<string, unknown> | null): Record<string, unknown> {
   const { session: _notTheWriters, [HANGAR_OUTCOME_KEY]: _notTheirsEither, feedback: _notTheAgents, ...written } = incoming;
@@ -891,6 +956,12 @@ export function carryForwardInboxDecisions(incoming: Record<string, unknown>, st
     ...(typeof stored["session"] === "string" ? { session: stored["session"] } : {}),
     ...(stored[HANGAR_OUTCOME_KEY] !== undefined ? { [HANGAR_OUTCOME_KEY]: stored[HANGAR_OUTCOME_KEY] } : {}),
   };
+  if (stored[HANGAR_OUTCOME_KEY] !== undefined) {
+    for (const key of CARD_KEYS) {
+      if (stored[key] === undefined) delete merged[key];
+      else merged[key] = stored[key];
+    }
+  }
   if (PERSON_DECIDED_INBOX_STATUSES.includes(incoming["status"] as InboxStatus) && incoming["status"] !== stored["status"]) merged["status"] = stored["status"];
   // An executor that cannot carry out an accepted item hands it back by
   // setting `needs_you` (why); that is the one way pending overrides accepted.
@@ -1007,6 +1078,24 @@ function assertSessionMayResend(target: { row: StoredInboxRow | null; stored: Re
   if (target.stored === null || target.stored["session"] !== session) throw new InboxItemNotThisSessionError(target.row.id, session, "re-send");
 }
 
+/**
+ * Without a binding (a generic request), a stored item carrying one is
+ * refused. With one (`requestHangarOutcome`), the key must be new or hold
+ * an item already bound to the same session: anything else at it was not
+ * written by this path, and taking it over would carry its fields forward.
+ */
+function assertBindingMayWrite(target: { row: StoredInboxRow | null; stored: Record<string, unknown> | null }, binding: { session_id: string } | undefined, itemLabel: string): void {
+  if (binding === undefined) {
+    assertNotHangarOutcomeItem(itemLabel, target.stored);
+    return;
+  }
+  if (target.row === null) return;
+  const stored = target.stored === null ? null : readHangarOutcome(target.stored);
+  if (stored === null || stored.sessionId !== binding.session_id) {
+    throw new ReservedInboxItemError(itemLabel, "the key is held by an item that is not this session's outcome request; nothing was filed");
+  }
+}
+
 /** A node's natural key as the upsert stores it (trimmed), for matching a pre-read against what the upsert returns. */
 function nodeKey(sourceSystem: string, externalId: string): string {
   return `${sourceSystem.trim()}\u0000${externalId.trim()}`;
@@ -1093,7 +1182,9 @@ export function assertSessionCreatedAbsentKeys(
  * (`session`) may re-send only its own session's items
  * (`InboxItemNotThisSessionError` otherwise, before any run opens and again
  * under the row lock, so a racing writer cannot slip one in); the stored
- * row is locked for the read-modify-write.
+ * row is locked for the read-modify-write. A key reserved for outcome
+ * requests, or a stored item carrying a binding, is refused
+ * (`ReservedInboxItemError`, module header) before anything is written.
  */
 export async function requestInboxItem(db: Database, input: RequestInboxItemInput): Promise<RequestInboxItemResult> {
   return fileInboxItem(db, input, undefined);
@@ -1106,21 +1197,32 @@ async function fileInboxItem(db: Database, input: RequestInboxItemInput, binding
   // Its `feedback` likewise: only the person's decisions write it; and its
   // `hangar_outcome`: only requestHangarOutcome binds one.
   const { session: _fromBody, feedback: _notTheAgents, [HANGAR_OUTCOME_KEY]: _notABinding, ...bodyMetadata } = input.metadata;
+  if (binding === undefined) assertNoHangarOutcomeKeys([{ sourceSystem: INBOX_SOURCE_SYSTEM, externalId: input.externalId, label: itemLabel }]);
   const incoming = normalizeInboxItemMetadata(normalizeOccurredAt(bodyMetadata, { itemLabel }), { itemLabel });
   const session = input.session?.toLowerCase();
-  assertSessionMayResend(await readRequestTarget(db, input.externalId, false), session);
+  const pre = await readRequestTarget(db, input.externalId, false);
+  assertSessionMayResend(pre, session);
+  assertBindingMayWrite(pre, binding, itemLabel);
 
   const run = await openIngestRun(db, "agent", { actor: input.actor ?? "inbox-cli" });
   try {
     return await db.transaction(async (tx) => {
       const target = await readRequestTarget(tx, input.externalId, true);
       assertSessionMayResend(target, session);
+      assertBindingMayWrite(target, binding, itemLabel);
       let metadata = carryForwardInboxDecisions(incoming, target.stored);
       if (session !== undefined) {
         const { pane: _pane, socket: _socket, ...rest } = metadata;
         metadata = normalizeInboxItemMetadata({ ...rest, session }, { itemLabel });
       }
-      if (binding !== undefined) metadata = normalizeInboxItemMetadata({ ...metadata, [HANGAR_OUTCOME_KEY]: binding }, { itemLabel });
+      if (binding !== undefined) {
+        // A bound item never reaches a session or a pane, and always carries
+        // the canonical card `requestHangarOutcome` built (module header).
+        const { session: _session, pane: _pane, socket: _socket, ...rest } = metadata;
+        const card = Object.fromEntries(CARD_KEYS.flatMap((key) => (incoming[key] === undefined ? [] : [[key, incoming[key]]])));
+        for (const key of CARD_KEYS) delete rest[key];
+        metadata = normalizeInboxItemMetadata({ ...rest, ...card, [HANGAR_OUTCOME_KEY]: binding }, { itemLabel });
+      }
       const node = { nodeType: INBOX_ITEM_NODE_TYPE, sourceSystem: INBOX_SOURCE_SYSTEM, externalId: input.externalId, title: input.title, content: input.content, metadata };
       const prepared = unsafePrepareNodes([node], DEFAULT_MAX_CONTENT_LENGTH, DEFAULT_MAX_METADATA_LENGTH, DEFAULT_MAX_TITLE_LENGTH);
       let written: { rows: UpsertNodeRow[] };
@@ -1135,6 +1237,7 @@ async function fileInboxItem(db: Database, input: RequestInboxItemInput, binding
       // key between the read and this upsert, which just overwrote it. Roll
       // back rather than take that item.
       if (session !== undefined && target.row === null && row.action !== "created") throw new InboxItemNotThisSessionError(row.id, session, "re-send");
+      if (binding !== undefined && target.row === null && row.action !== "created") throw new ReservedInboxItemError(itemLabel, "another writer took the key while this request was filed; nothing was filed");
       return { id: row.id, action: row.action, ingestRunId: run.id, status: metadata["status"] as InboxStatus, session: typeof metadata["session"] === "string" ? metadata["session"] : null };
     });
   } finally {
@@ -1162,8 +1265,12 @@ export interface RequestHangarOutcomeResult extends RequestInboxItemResult {
 /**
  * An agent asks the person to accept or table an ended hangar session
  * (module header): files, or refreshes, the inbox item keyed
- * `hangar-outcome:<session id>`, with a card offering `accept` and `table`
- * (the requested one recommended) and the `hangar_outcome` binding. Sets no
+ * `hangar-outcome:<session id>`, with the canonical card
+ * (`HANGAR_OUTCOME_OPTIONS`, the requested one recommended), a server-written
+ * title and content with the agent's note quoted last ("Requested by
+ * <actor>:"), and the `hangar_outcome` binding. The key must be new or hold
+ * this session's own request (`ReservedInboxItemError` otherwise); a bound
+ * item never carries `session`, `pane`, or `socket`. Sets no
  * outcome. Refuses a session that cannot take one now (not ended, or already
  * released: `HangarOutcomeRefusedError`) before anything is written. One
  * item per session: a repeat request while it is pending updates it; once
@@ -1182,35 +1289,39 @@ export async function requestHangarOutcome(db: Database, input: RequestHangarOut
   }
   const session = await getSessionTakingOutcome(db, input.sessionId);
   const option = requested === "accepted" ? "accept" : "table";
+  const actor = input.actor ?? "agent";
+  const shortId = session.id.slice(0, 8);
+  // The server's facts come first and the agent's note last, quoted line by
+  // line, so nothing the agent wrote can read as the server's (module header).
   const lines = [
-    `**An agent asks to ${option} this hangar session.**`,
-    "",
-    note,
+    `**Accept or Table releases this hangar session: hangar removes its container and deletes its disk at its next check-in.** You can change your choice until then.`,
     "",
     `- Session: \`${session.id}\` (${session.state}, ${session.flavor})`,
     `- Repo: ${session.repo}`,
     ...(session.failureReason === null ? [] : [`- Failure reason: ${session.failureReason}`]),
     ...(session.outcome === null ? [] : [`- Current outcome: ${session.outcome}`]),
+    `- Asked for: ${option}`,
     "",
-    "Either choice releases the session: hangar deletes its disk and its stopped container at its next check-in. You can change your choice until then.",
+    "---",
+    "",
+    `Requested by ${actor}:`,
+    "",
+    ...note.split("\n").map((line) => (line.trim() === "" ? ">" : `> ${line}`)),
   ];
   const result = await fileInboxItem(
     db,
     {
-      externalId: `hangar-outcome:${session.id}`,
-      title: fitText(`${option === "accept" ? "Accept" : "Table"} ${session.title}`, DEFAULT_MAX_TITLE_LENGTH) as string,
+      externalId: `${HANGAR_OUTCOME_KEY_PREFIX}${session.id}`,
+      title: fitText(`${option === "accept" ? "Accept" : "Table"} hangar session ${shortId} (${session.repo})`, DEFAULT_MAX_TITLE_LENGTH) as string,
       content: fitText(lines.join("\n"), DEFAULT_MAX_CONTENT_LENGTH) as string,
       metadata: {
         source: HANGAR_SOURCE_SYSTEM,
         action: "hangar_outcome",
-        question: "Accept or table this hangar session?",
-        options: [
-          { id: "accept", label: "Accept", what: "The work is done or kept; hangar releases the session." },
-          { id: "table", label: "Table", what: "Set the work aside; hangar releases the session.", risk: "The session's disk is deleted when hangar next checks in." },
-        ],
+        question: HANGAR_OUTCOME_QUESTION,
+        options: HANGAR_OUTCOME_OPTIONS.map((o) => ({ ...o })),
         recommend: option,
       },
-      actor: input.actor ?? "agent",
+      actor,
     },
     { session_id: session.id, requested },
   );

@@ -28,6 +28,9 @@
 // PATCH that clears `container` and `disk_path`. An outcome with no disk path
 // is released: hangar holds nothing more, and the outcome is final. No
 // hangar or agent path writes `outcome`; `updateSession` carries it forward.
+// On an ended session a PATCH only clears placement fields, never sets them
+// (so nothing un-releases a session), and clears a held disk path only once
+// an outcome is set (`HangarEndedSessionChangeError`).
 //
 // Claiming is one transaction: `FOR UPDATE SKIP LOCKED` on the oldest queued
 // session of an admitted flavor, the state change, and the session token
@@ -58,6 +61,7 @@ import {
   ClientTokenExistsError,
   ContentTooLargeError,
   EdgeUpsertFailedError,
+  HangarEndedSessionChangeError,
   HangarOutcomeRefusedError,
   HangarSessionNotClaimedByError,
   HangarSessionNotFoundError,
@@ -801,9 +805,11 @@ async function changeClaimedSession(
  * transition must pass `checkHangarTransition`; `stopped` and `failed`
  * revoke the session token in the same transaction. Each change is a
  * revision of the session node. `reason` comes only with `failed` and is
- * stored as `failure_reason`. A field update on an ended session (no state,
- * or the same one) is allowed: clearing `container` and `disk_path` is how
- * hangar acknowledges a release (module header). The outcome is carried
+ * stored as `failure_reason` on the move into failed; a repeated failed
+ * report keeps the reason already stored. A field update on an ended session
+ * (no state, or the same one) is allowed within `assertEndedSessionChange`:
+ * clearing `container` and `disk_path` once a person has set an outcome is
+ * how hangar acknowledges a release (module header). The outcome is carried
  * forward untouched; hangar never sets it.
  */
 export async function updateSession(db: Database, input: UpdateSessionInput): Promise<SessionWriteResult> {
@@ -822,21 +828,43 @@ export async function updateSession(db: Database, input: UpdateSessionInput): Pr
   if (state === undefined && fields.every(([, value]) => value === undefined)) {
     throw new InvalidHangarSessionError("update", {}, "names nothing to change: give a state, container, host, or disk_path");
   }
-  for (const [key, value, max] of fields) optionalText(key, value, max);
+  // Each given field as the contract stores it: a string, or null to clear (null, "", or blank).
+  const given: [string, string | null][] = fields.flatMap(([key, value, max]): [string, string | null][] => (value === undefined ? [] : [[key, optionalText(key, value, max) ?? null]]));
 
   return changeClaimedSession(db, hangar, id, "updateSession", (current) => {
     const from = current[KEY.state] as HangarSessionState;
     const to = state ?? from;
     checkHangarTransition(from, to);
+    if (HANGAR_FINAL_STATES.includes(from)) assertEndedSessionChange(id, current, given);
     const metadata: Record<string, unknown> = { ...current, [KEY.state]: to };
-    for (const [key, value] of fields) {
-      if (value === undefined) continue;
+    for (const [key, value] of given) {
       if (value === null) delete metadata[key];
       else metadata[key] = value;
     }
-    if (reason !== undefined) metadata[KEY.failureReason] = reason;
+    // Only the move into failed records why: a repeated failed report keeps the first reason.
+    if (reason !== undefined && from !== "failed") metadata[KEY.failureReason] = reason;
     return { metadata, revoke: to === "stopped" || to === "failed" };
   });
+}
+
+/**
+ * The rules for a `PATCH` on an ended session (`HangarEndedSessionChangeError`
+ * otherwise): its placement fields only clear, never set, so a released
+ * session is never un-released; on a released one, nothing but a clear (an
+ * acknowledgement hangar repeats after a lost answer stays a no-op); and
+ * clearing a held `disk_path`, the release acknowledgement, only once a
+ * person has set an outcome. `fields` are already normalized (null clears).
+ */
+function assertEndedSessionChange(id: string, current: Record<string, unknown>, given: readonly [string, string | null][]): void {
+  const hasOutcome = current[KEY.outcome] !== undefined;
+  const released = hasOutcome && current[KEY.diskPath] === undefined;
+  for (const [key, value] of given) {
+    if (value === null || value === current[key]) continue;
+    if (released) throw new HangarEndedSessionChangeError(id, "released", key);
+    if (key === KEY.container || key === KEY.diskPath) throw new HangarEndedSessionChangeError(id, "value", key);
+  }
+  const clearsDisk = given.some(([key, value]) => key === KEY.diskPath && value === null);
+  if (clearsDisk && current[KEY.diskPath] !== undefined && !hasOutcome) throw new HangarEndedSessionChangeError(id, "no_outcome", KEY.diskPath);
 }
 
 export interface RequeueSessionInput {
@@ -982,6 +1010,14 @@ export interface ListSessionsResult {
   sessions: HangarSession[];
   /** More sessions matched than `limit`. */
   truncated: boolean;
+}
+
+/** The sessions these ids name, in one statement; an id that names no session is left out. The caller bounds the ids (an inbox page's outcome requests). */
+export async function getSessionsByIds(db: Database, ids: readonly string[]): Promise<HangarSession[]> {
+  const wanted = [...new Set(ids.map((id) => assertUuid(id, "session id")))];
+  if (wanted.length === 0) return [];
+  const result = await db.execute<SessionRow>(selectSessions(sql`s.id = ANY(${sqlArray(wanted, "uuid")})`));
+  return result.rows.map(toSession);
 }
 
 /** Sessions newest-changed first, filtered and bounded. One statement. */
