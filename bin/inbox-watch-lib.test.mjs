@@ -10,12 +10,14 @@ import {
   parseInboxResponse,
   parseWatchArgs,
   planTick,
+  MAX_STALE_LOG_LINES,
   readBodyCapped,
   remoteWarning,
   resolveApi,
   RUN_TOOLS,
   sanitizeForLog,
   selectDue,
+  staleLogLines,
   stripTerminalControls,
   takeRun,
 } from "./inbox-watch-lib.mjs";
@@ -96,6 +98,8 @@ describe("remoteWarning", () => {
     assert.match(warned, /24h/);
     assert.match(warned, /what-the-relay-trusts/);
     assert.match(warned, /no built-in tools except Skill and ToolSearch/);
+    assert.match(warned, /every MCP server/);
+    assert.match(warned, /bd-d38\.18/);
     assert.doesNotMatch(warned, /no shell or file edits/);
     assert.doesNotMatch(warned, /BREAKDOWN_TOKEN/);
     assert.match(remoteWarning("https://x.tail1.ts.net", "/repo", "24h", { hasToken: false }), /BREAKDOWN_TOKEN/);
@@ -281,14 +285,31 @@ describe("planTick", () => {
       { status: "changes", ids: [uuid(2)] },
     ]);
   });
-  it("prunes tried keys whose id the poll no longer reports", () => {
-    const plan = planTick([fresh(1)], opts(new Set([`${uuid(1)}@old`, `${uuid(2)}@gone`])));
-    assert.deepEqual([...plan.tried].sort(), [`${uuid(1)}@${fresh(1).updatedAt}`, `${uuid(1)}@old`]);
+  it("keeps only tried keys of versions the poll still reports", () => {
+    const current = `${uuid(1)}@${fresh(1).updatedAt}`;
+    const start = new Set([current, `${uuid(1)}@old`, `${uuid(2)}@gone`]);
+    const plan = planTick([fresh(1)], opts(start));
+    assert.deepEqual([...plan.tried], [current]);
+    assert.deepEqual(plan.batches, [], "the current version was already tried");
+    assert.equal(start.size, 3);
   });
   it("runs an item again once its version changes", () => {
     const first = planTick([fresh(1)], opts(new Set()));
     const bumped = item({ id: uuid(1), updatedAt: new Date(now - 30_000).toISOString() });
     assert.deepEqual(planTick([bumped], opts(first.tried)).batches, [{ status: "accepted", ids: [uuid(1)] }]);
+  });
+});
+
+describe("staleLogLines", () => {
+  const stale = (n) => Array.from({ length: n }, (_, i) => ({ item: { id: `id${i}` }, status: "accepted", reason: "old" }));
+  it("logs each stale item up to the cap", () => {
+    assert.deepEqual(staleLogLines(stale(2)), ["skipped id0 (accepted): old", "skipped id1 (accepted): old"]);
+    assert.equal(staleLogLines(stale(MAX_STALE_LOG_LINES)).length, MAX_STALE_LOG_LINES);
+  });
+  it("counts the rest past the cap", () => {
+    const lines = staleLogLines(stale(MAX_STALE_LOG_LINES + 7));
+    assert.equal(lines.length, MAX_STALE_LOG_LINES + 1);
+    assert.equal(lines.at(-1), "…and 7 more skipped");
   });
 });
 
@@ -362,9 +383,9 @@ describe("claudeArgs", () => {
   it("allows only Skill and ToolSearch of the built-in tools, after the prompt and before another flag", () => {
     const args = claudeArgs("P");
     assert.equal(RUN_TOOLS, "Skill,ToolSearch");
-    assert.deepEqual(args, ["-p", "P", "--mcp-config", ".mcp.json", "--tools", "Skill,ToolSearch", "--permission-mode", "bypassPermissions"]);
+    assert.deepEqual(args, ["-p", "P", "--mcp-config", ".mcp.json", "--tools", "Skill,ToolSearch", "--no-session-persistence", "--permission-mode", "bypassPermissions"]);
     assert.equal(args[1], "P");
-    assert.equal(args.indexOf("--tools") + 2, args.indexOf("--permission-mode"));
+    assert.ok(args[args.indexOf("--tools") + 2].startsWith("--"), "--tools is followed by another flag");
     assert.ok(!args.includes("--disallowedTools"));
   });
 });
@@ -391,5 +412,8 @@ describe("stripTerminalControls", () => {
     const out = stripTerminalControls("\u001b[31mred\u001b[0m\tok\n\u001b]0;title\u0007done\r\u009b2J\n");
     assert.doesNotMatch(out, /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/);
     assert.equal(out, "[31mred[0m\tok\n]0;titledone2J\n");
+  });
+  it("removes bidi overrides and line separators", () => {
+    assert.equal(stripTerminalControls("a\u202eb\u2066c\u2069d\u2028e\u2029f\u202ag\n"), "abcdefg\n");
   });
 });

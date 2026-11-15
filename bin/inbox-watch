@@ -29,12 +29,18 @@
 // text, and told to act on no other item; an item whose decision (its
 // latest matching feedback entry's `at`, else `updatedAt`) is older than
 // --max-age is skipped; past --max-runs-per-hour runs the watcher stops;
-// and each run gets no built-in tools except Skill and ToolSearch, so MCP
-// tools only (every MCP server, connector, and plugin tool your Claude
-// config loads). The item content a run acts on comes from the `brain` MCP
-// entry in your Claude config, not from BREAKDOWN_API, so either mode is
-// only as trustworthy as that entry: read docs/relay.md#what-the-relay-trusts
-// before using --allow-remote. The checks live in bin/inbox-watch-lib.mjs.
+// and each run gets no built-in tools except Skill and ToolSearch, so no
+// built-in tool runs commands, reads or writes files, fetches the web, or
+// starts subagents. But every MCP server your Claude config loads stays
+// available, and a local one (a plugin's stdio server, say) can do whatever
+// it does, including install software or write files; hooks from your
+// settings and plugins still run. Until bd-d38.18 binds the run to a strict
+// MCP config, don't use --allow-remote against a Breakdown you wouldn't let
+// drive every MCP server your Claude config loads. The item content a run
+// acts on comes from the `brain` MCP entry in your Claude config, not from
+// BREAKDOWN_API, so either mode is only as trustworthy as that entry: read
+// docs/relay.md#what-the-relay-trusts before using --allow-remote. The
+// checks live in bin/inbox-watch-lib.mjs.
 //
 // $BREAKDOWN_API points it at another server (default the local one). When
 // $BREAKDOWN_TOKEN is set, each poll sends it as `Authorization: Bearer`
@@ -60,6 +66,7 @@ import {
   remoteWarning,
   resolveApi,
   sanitizeForLog,
+  staleLogLines,
   stripTerminalControls,
   takeRun,
   WATCH_USAGE,
@@ -116,7 +123,7 @@ async function query(statuses) {
 }
 
 /** Copies a child's output stream to ours with terminal controls removed (stripTerminalControls). */
-function relay(from, to) {
+function copyStripped(from, to) {
   const decoder = new StringDecoder("utf8");
   from.on("data", (chunk) => to.write(stripTerminalControls(decoder.write(chunk))));
   from.on("end", () => to.write(stripTerminalControls(decoder.end())));
@@ -125,8 +132,8 @@ function relay(from, to) {
 function runClaude(args) {
   return new Promise((resolve) => {
     const child = spawn("claude", args, { cwd: REPO, stdio: ["ignore", "pipe", "pipe"] });
-    relay(child.stdout, process.stdout);
-    relay(child.stderr, process.stderr);
+    copyStripped(child.stdout, process.stdout);
+    copyStripped(child.stderr, process.stderr);
     child.on("error", (err) => {
       log(`could not start claude: ${err.message}`);
       resolve(1);
@@ -153,7 +160,7 @@ async function tick() {
   }
   const plan = planTick(items, { tried, now: Date.now(), maxAgeMs: options.maxAgeMs, maxAge: options.maxAge });
   tried = plan.tried;
-  for (const { item, status, reason } of plan.stale) log(`skipped ${item.id} (${status}): ${reason}`);
+  for (const line of staleLogLines(plan.stale)) log(line);
   for (const { status, ids } of plan.batches) {
     const more = plan.leftover[status] > 0 ? ` (+${plan.leftover[status]} next tick)` : "";
     log(`${ids.length} ${status}: ${ids.join(", ")}${more}`);

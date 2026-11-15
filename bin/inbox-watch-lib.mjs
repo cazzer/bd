@@ -21,10 +21,15 @@
 // - How often it runs. At most `--max-runs-per-hour` runs; past that the
 //   watcher stops.
 // - Which tools the run has, in both modes: no built-in tool except Skill
-//   (to load inbox-execute) and ToolSearch (to load deferred MCP tools), so
-//   the run cannot run commands, read files, fetch the web, or start
-//   subagents. MCP tools (the brain server and every connector and plugin
-//   tool your Claude config loads) stay available; that is how it acts.
+//   (to load inbox-execute) and ToolSearch (to load deferred MCP tools).
+//   No built-in tool runs commands, reads or writes files, fetches the web,
+//   or starts subagents. Every MCP server your Claude config loads stays
+//   available, and an MCP server can do whatever it does: a local one (a
+//   plugin's stdio server, for instance) may install software, write files,
+//   or record the microphone, and the run has it. Hooks from your settings
+//   and plugins still run (fixed commands the model doesn't choose). The
+//   follow-up that narrows this is bd-d38.18 (a strict MCP config bound to
+//   BREAKDOWN_API). The run is also not saved as a session transcript.
 //
 // The content a run acts on comes from whatever `brain` MCP entry your
 // Claude config names, not from BREAKDOWN_API, so loopback mode is only as
@@ -41,13 +46,14 @@ export const RUN_TOOLS = "Skill,ToolSearch";
 export const FUTURE_SKEW_MS = 5 * 60_000;
 export const FETCH_TIMEOUT_MS = 15_000;
 export const MAX_BODY_BYTES = 2 * 1024 * 1024;
+export const MAX_STALE_LOG_LINES = 20;
 export const TRUST_DOC = "docs/relay.md#what-the-relay-trusts";
 
 const DEFAULT_INTERVAL_S = 30;
 const MIN_INTERVAL_S = 10;
 const HOUR_MS = 3_600_000;
 const LOG_UNSAFE_CHARS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
-const TERMINAL_CONTROLS = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g;
+const TERMINAL_CONTROLS = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
 const DECISION_FOR_STATUS = { accepted: "accept", changes: "changes" };
 
 export const WATCH_USAGE = [
@@ -161,7 +167,7 @@ export function checkApiTrust(api, { allowRemote }) {
 
 /** The one-line warning printed when the watcher starts in remote mode. */
 export function remoteWarning(api, repo, maxAge, { hasToken }) {
-  let line = `inbox-watch: REMOTE mode, ${api} is not loopback. Accepted items it reports run a headless claude with bypassed permissions in ${repo}: no built-in tools except Skill and ToolSearch, but every MCP tool your Claude config loads, your connectors among them; only items named by id and decided within ${maxAge} run, but their content is that server's. See ${TRUST_DOC}.`;
+  let line = `inbox-watch: REMOTE mode, ${api} is not loopback. Accepted items it reports run a headless claude with bypassed permissions in ${repo}: no built-in tools except Skill and ToolSearch, but every MCP server your Claude config loads (which can do whatever it does) and your hooks; only items named by id and decided within ${maxAge} run, but their content is that server's. Until bd-d38.18, use this only against a Breakdown you would let drive all of those. See ${TRUST_DOC}.`;
   if (!hasToken) line += " No $BREAKDOWN_TOKEN is set; a remote Breakdown refuses an untokened poll, so set an `agent` token.";
   return line;
 }
@@ -258,15 +264,16 @@ export function selectDue(items, { status, now, maxAgeMs, maxAge, tried }) {
  * items each cap left for the next tick, and `tried` for the next tick.
  *
  * The caller replaces its `tried` with the returned set; the argument is
- * not changed. The new set keeps only keys whose id this poll still
- * reports, plus every stale and batched item's key, so a stale item is
- * logged once per version and a left-over item stays due.
+ * not changed. The new set keeps only the tried keys of versions this poll
+ * still reports (an older version of a reported id is dropped), plus every
+ * stale and batched item's key, so a stale item is logged once per version
+ * and a left-over item stays due.
  *
  * @returns {{ stale: { item: object, status: string, reason: string }[], batches: { status: string, ids: string[] }[], leftover: Record<string, number>, tried: Set<string> }}
  */
 export function planTick(items, { tried, now, maxAgeMs, maxAge }) {
-  const reported = new Set(items.map((item) => item.id));
-  const next = new Set([...tried].filter((key) => reported.has(key.slice(0, key.indexOf("@")))));
+  const reported = new Set(items.map(itemKey));
+  const next = new Set([...tried].filter((key) => reported.has(key)));
   const stale = [];
   const batches = [];
   const leftover = {};
@@ -282,6 +289,13 @@ export function planTick(items, { tried, now, maxAgeMs, maxAge }) {
     if (batch.length > 0) batches.push({ status, ids: batch.map((item) => item.id) });
   }
   return { stale, batches, leftover, tried: next };
+}
+
+/** The log lines for a tick's stale items: at most MAX_STALE_LOG_LINES, then one line counting the rest. */
+export function staleLogLines(stale) {
+  const lines = stale.slice(0, MAX_STALE_LOG_LINES).map(({ item, status, reason }) => `skipped ${item.id} (${status}): ${reason}`);
+  if (stale.length > MAX_STALE_LOG_LINES) lines.push(`…and ${stale.length - MAX_STALE_LOG_LINES} more skipped`);
+  return lines;
 }
 
 /**
@@ -348,12 +362,13 @@ export function buildPrompt(status, ids) {
 
 /**
  * claude's argv for one run, the same in both modes: of the built-in tools
- * only RUN_TOOLS (module header). The prompt stays at index 1, and the
- * variadic --tools is followed by another flag, so it can never swallow the
- * prompt or a later argument.
+ * only RUN_TOOLS (module header), and no session saved to disk, so a forged
+ * item's text is not kept in a transcript. The prompt stays at index 1, and
+ * the variadic --tools is followed by another flag, so it can never swallow
+ * the prompt or a later argument.
  */
 export function claudeArgs(prompt) {
-  return ["-p", prompt, "--mcp-config", ".mcp.json", "--tools", RUN_TOOLS, "--permission-mode", "bypassPermissions"];
+  return ["-p", prompt, "--mcp-config", ".mcp.json", "--tools", RUN_TOOLS, "--no-session-persistence", "--permission-mode", "bypassPermissions"];
 }
 
 /** Server-supplied text made safe for one log line: control characters, line separators, and bidi overrides become spaces; at most `max` characters. */
@@ -362,7 +377,7 @@ export function sanitizeForLog(text, max = 300) {
   return clean.length > max ? `${clean.slice(0, max)}…` : clean;
 }
 
-/** The run's own output made safe for the terminal: C0 and C1 controls (escape and OSC sequences among them) removed, newlines and tabs kept. */
+/** The run's own output made safe for the terminal: C0 and C1 controls (escape and OSC sequences among them), line separators, and bidi overrides removed; newlines and tabs kept. */
 export function stripTerminalControls(text) {
   return text.replace(TERMINAL_CONTROLS, "");
 }
