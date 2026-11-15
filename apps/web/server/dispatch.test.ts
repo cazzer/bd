@@ -57,6 +57,10 @@ async function startDispatcher(withStatic: boolean): Promise<{ server: Server; p
       calls.push(`images ${req.url} ${admitted(req)}`);
       res.end("image");
     },
+    reviewUploads: async (req, res) => {
+      calls.push(`uploads ${req.method} ${req.url} ${admitted(req)}`);
+      res.end("upload");
+    },
     hangar: async (req, res, client) => {
       calls.push(`hangar ${req.method} ${req.url} ${client === null ? "client=null" : `client=${client.client}/${client.scope}`}`);
       res.end("hangar");
@@ -292,6 +296,30 @@ describe("createRequestDispatcher: client tokens", () => {
   });
 });
 
+describe("createRequestDispatcher: review media uploads", () => {
+  const upload = "/review-uploads/bd/bd-1/0a1b2c3d4e5f/01-a.png";
+
+  it("admits an agent token to uploads while the same token stays refused on /review-images/", async () => {
+    expect(await send(upload, { Host: tailnetHost(), ...bearer(WORKER_TOKEN) }, "PUT")).toMatchObject({ status: 200, body: "upload" });
+    expect(await send("/review-uploads/bd/bd-1/0a1b2c3d4e5f", { Host: tailnetHost(), ...bearer(WORKER_TOKEN) }, "DELETE")).toMatchObject({ status: 200, body: "upload" });
+    expect(await send("/review-images/bd/bd-1/0a1b2c3d4e5f/01-a.png", { Host: tailnetHost(), ...bearer(WORKER_TOKEN) })).toMatchObject({ status: 403 });
+    expect(calls).toEqual([`uploads PUT ${upload} client=worker-1/agent`, "uploads DELETE /review-uploads/bd/bd-1/0a1b2c3d4e5f client=worker-1/agent"]);
+  });
+
+  it("refuses a hangar or relay token with 403", async () => {
+    expect(await send(upload, { Host: tailnetHost(), ...bearer(HANGAR_TOKEN) }, "PUT")).toMatchObject({ status: 403, body: "Forbidden\n" });
+    expect(await send(upload, { Host: tailnetHost(), ...bearer(RELAY_TOKEN) }, "PUT")).toMatchObject({ status: 403, body: "Forbidden\n" });
+    expect(calls).toEqual([]);
+  });
+
+  it("admits a tokenless loopback PUT, and refuses one from a foreign Origin", async () => {
+    expect(await send(upload, { Host: `127.0.0.1:${port}` }, "PUT")).toMatchObject({ status: 200, body: "upload" });
+    expect(await send(upload, { Host: `127.0.0.1:${port}`, Origin: "http://evil.example" }, "PUT")).toMatchObject({ status: 403 });
+    expect(await send(upload, { Host: tailnetHost(), Origin: "http://evil.example", ...cookie() }, "PUT")).toMatchObject({ status: 403 });
+    expect(calls).toEqual([`uploads PUT ${upload} client=null`]);
+  });
+});
+
 describe("createRequestDispatcher: the hangar API", () => {
   it("hands a hangar or agent token to the hangar handler with what admission established", async () => {
     expect(await send("/hangar/v1/sessions", { Host: tailnetHost(), ...bearer(HANGAR_TOKEN) })).toMatchObject({ status: 200, body: "hangar" });
@@ -362,6 +390,8 @@ describe("createRequestDispatcher: the relay API", () => {
   it("refuses the relay token everywhere but the relay API and the health check", async () => {
     expect(await send("/trpc/board", { Host: tailnetHost(), ...bearer(RELAY_TOKEN) })).toMatchObject({ status: 403, body: "Forbidden\n" });
     expect(await send("/review-images/rv/r1/a.png", { Host: tailnetHost(), ...bearer(RELAY_TOKEN) })).toMatchObject({ status: 403, body: "Forbidden\n" });
+    expect(await send("/review-uploads/bd/bd-1/0a1b2c3d4e5f/01-a.png", { Host: tailnetHost(), ...bearer(RELAY_TOKEN) }, "PUT")).toMatchObject({ status: 403, body: "Forbidden\n" });
+    expect(await send("/review-uploads/bd/bd-1/0a1b2c3d4e5f", { Host: tailnetHost(), ...bearer(RELAY_TOKEN) }, "DELETE")).toMatchObject({ status: 403, body: "Forbidden\n" });
     expect(await send("/auth/connect", { Host: tailnetHost(), ...bearer(RELAY_TOKEN) })).toMatchObject({ status: 403, body: "Forbidden\n" });
     const hangar = await send("/hangar/v1/claim", { Host: tailnetHost(), ...bearer(RELAY_TOKEN) }, "POST");
     expect(hangar.status).toBe(403);
@@ -465,6 +495,7 @@ describe("routeFor", () => {
       expect(routeFor("/auth/connect", hasStatic)).toBe("connect");
       expect(routeFor("/healthz", hasStatic)).toBe("health");
       expect(routeFor("/review-images/rv/r1/a.png", hasStatic)).toBe("reviewImages");
+      expect(routeFor("/review-uploads/bd/bd-1/r/01-a.png", hasStatic)).toBe("reviewUploads");
       expect(routeFor("/trpc", hasStatic)).toBe("trpc");
       expect(routeFor("/trpc/board", hasStatic)).toBe("trpc");
       expect(routeFor("/hangar/v1/claim", hasStatic)).toBe("hangar");

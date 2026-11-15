@@ -14,6 +14,7 @@
 //   exactly AUTH_CONNECT_PATH          → the connect handler (auth-connect.ts)
 //   exactly HEALTH_PATH                → the health handler (health.ts)
 //   under REVIEW_IMAGES_PREFIX         → the review image route (review-images.ts)
+//   under REVIEW_UPLOADS_PREFIX        → review media uploads (review-uploads.ts)
 //   under HANGAR_API_PREFIX            → hangar's REST API (hangar-api.ts)
 //   under RELAY_API_PREFIX             → the laptop relay's REST API (relay-api.ts)
 //   `/trpc` or under `/trpc/`          → tRPC's standalone handler
@@ -40,6 +41,9 @@
 // the health check. On those two routes the dispatcher's own 401 and 403
 // use the API's JSON error body, so a client built against
 // docs/hangar-api.md or docs/relay.md parses one shape.
+// Review media uploads take `human` and `agent` (remote-review-media
+// decision 1): a worker files its own media, while reading media stays
+// `human`; a relay token reaches neither.
 //
 // The admitted token client, scope, and bound session are handed to tRPC through
 // `admittedClients` (context.ts), keyed on the request object, so a write's
@@ -62,6 +66,7 @@ import { admittedClients, type AdmittedClient } from "./context.js";
 import { HANGAR_API_PREFIX } from "./hangar-api.js";
 import { RELAY_API_PREFIX } from "./relay-api.js";
 import { REVIEW_IMAGES_PREFIX } from "./review-images.js";
+import { REVIEW_UPLOADS_PREFIX } from "./review-uploads.js";
 
 export const HEALTH_PATH = "/healthz";
 const TRPC_PATH = "/trpc";
@@ -78,6 +83,7 @@ export interface RequestDispatcherOptions {
   connect: Handler;
   health: Handler;
   reviewImages: Handler;
+  reviewUploads: Handler;
   /** The hangar REST API (hangar-api.ts), handed what admission established; null for a tokenless request. */
   hangar: (req: IncomingMessage, res: ServerResponse, admitted: AdmittedClient | null) => Promise<void>;
   /** The relay REST API (relay-api.ts), handed what admission established; null for a tokenless request. Without it, a relay path answers a JSON 404 (a test server that serves no relay). */
@@ -87,7 +93,7 @@ export interface RequestDispatcherOptions {
   staticClient?: Handler;
 }
 
-export type WebRoute = "connect" | "health" | "reviewImages" | "hangar" | "relay" | "trpc" | "static";
+export type WebRoute = "connect" | "health" | "reviewImages" | "reviewUploads" | "hangar" | "relay" | "trpc" | "static";
 
 /**
  * Where a raw request path goes (module header), decided before admission
@@ -100,6 +106,7 @@ export function routeFor(path: string, hasStaticClient: boolean): WebRoute {
   if (path === AUTH_CONNECT_PATH) return "connect";
   if (path === HEALTH_PATH) return "health";
   if (path.startsWith(REVIEW_IMAGES_PREFIX)) return "reviewImages";
+  if (path.startsWith(REVIEW_UPLOADS_PREFIX)) return "reviewUploads";
   if (path.startsWith(HANGAR_API_PREFIX)) return "hangar";
   if (path.startsWith(RELAY_API_PREFIX)) return "relay";
   if (path === TRPC_PATH || path.startsWith(`${TRPC_PATH}/`)) return "trpc";
@@ -135,7 +142,7 @@ function refuse(res: ServerResponse, route: WebRoute, status: 401 | 403, byCrede
   res.end(status === 401 ? "Unauthorized\n" : "Forbidden\n");
 }
 
-export function createRequestDispatcher({ port, allowedHosts, verifyToken, connect, health, reviewImages, hangar, relay, trpc, staticClient }: RequestDispatcherOptions): (req: IncomingMessage, res: ServerResponse) => void {
+export function createRequestDispatcher({ port, allowedHosts, verifyToken, connect, health, reviewImages, reviewUploads, hangar, relay, trpc, staticClient }: RequestDispatcherOptions): (req: IncomingMessage, res: ServerResponse) => void {
   const hasStaticClient = staticClient !== undefined;
   const isPublic = (method: string, path: string) => isPublicRoute(method, routeFor(path, hasStaticClient));
   const policyFor = (scopes: readonly ClientTokenScope[]): AdmissionPolicy => ({ port, allowedHosts, originCheck: "unsafe-methods", scopes, isPublic, verifyToken });
@@ -144,6 +151,7 @@ export function createRequestDispatcher({ port, allowedHosts, verifyToken, conne
     connect: policyFor(["human"]),
     health: policyFor(["human", "agent", "hangar", "relay"]),
     reviewImages: policyFor(["human"]),
+    reviewUploads: policyFor(["human", "agent"]),
     hangar: policyFor(["hangar", "agent"]),
     relay: policyFor(["relay"]),
     trpc: policyFor(["human", "agent"]),
@@ -191,6 +199,9 @@ export function createRequestDispatcher({ port, allowedHosts, verifyToken, conne
         return;
       case "reviewImages":
         await reviewImages(req, res);
+        return;
+      case "reviewUploads":
+        await reviewUploads(req, res);
         return;
       case "hangar":
         await hangar(req, res, admitted);

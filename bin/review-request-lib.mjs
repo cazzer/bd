@@ -35,9 +35,25 @@
 // path, then that video's poster), so an image-only card numbers exactly as
 // before. The legacy `images` list holds image attachments only. The image
 // form takes images only; a video given there is "not an image".
+//
+// Remote media (bd-d38.6; openspec/changes/remote-review-media). With
+// BREAKDOWN_API set, the board's host is another machine, so nothing is
+// copied locally: after `check()` and before any `bd create`, each request's
+// files are PUT one at a time to `/review-uploads/<project>/<item-id>/<run>/
+// <NN-name>` (raw body, the token's Bearer header), and the review stores
+// those relative paths, which the server resolves against its media root.
+// `<run>` is fresh random hex per request, since the review id is not known
+// yet and a closed review keeps its media. A PUT is retried on a 503 or a
+// reset connection. A failed upload DELETEs its run and refuses with nothing
+// filed; a run whose `bd update` was never attempted is DELETEd on the way
+// out (an attempted one is kept: the update may have landed and still exited
+// non-zero); a refreshed review's earlier runs are DELETEd once the update
+// lands. Those DELETEs are best-effort: a failure warns and
+// changes no exit code. Without BREAKDOWN_API nothing changes.
 
+import { randomBytes } from "node:crypto";
 import fs from "node:fs/promises";
-import { realpathSync } from "node:fs";
+import { openAsBlob, realpathSync } from "node:fs";
 import path from "node:path";
 import { parseArgs as parseNodeArgs } from "node:util";
 
@@ -59,6 +75,16 @@ export const REVIEW_ROOT_PARTS = [".local", "share", "breakdown", "reviews"];
 export const DEFAULT_BOARD_URL = "http://localhost:5310";
 const DEFAULT_SERVER_PORT = "4310";
 const FETCH_TIMEOUT_MS = 5_000;
+/** Per uploaded file; the server's own request timeout is the same 300 s. */
+const UPLOAD_TIMEOUT_MS = 300_000;
+/** Retries of one PUT after a 503 (busy) or a reset connection. */
+const UPLOAD_RETRIES = 3;
+/** Cap on the wait a 503's Retry-After asks for. */
+const MAX_RETRY_WAIT_MS = 5_000;
+const RETRY_CODES = new Set(["EPIPE", "ECONNRESET"]);
+// Removed from the server's text before it is printed: C0 and C1 controls, and bidi overrides and isolates.
+// eslint-disable-next-line no-control-regex
+const UNPRINTABLE = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g;
 // The first character is never `-`, so an id cannot be read by bd as an option.
 const ITEM_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
 const PORT = /^\d{1,5}$/;
@@ -72,8 +98,18 @@ const CONTROL_CHAR = /[\u0000-\u001f\u007f]/;
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
 // Must agree with the content types apps/web/server/review-images.ts serves.
 const VIDEO_EXTENSIONS = new Set([".mp4", ".webm"]);
-/** A video attachment's size cap. */
+/** A video attachment's size cap. Must equal MAX_REVIEW_UPLOAD_BYTES in apps/web/server/review-uploads.ts. */
 export const MAX_VIDEO_BYTES = 200 * 2 ** 20;
+// The Content-Type each upload is sent with; must agree with CONTENT_TYPES in apps/web/server/review-images.ts.
+export const MEDIA_TYPES = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".mp4": "video/mp4",
+  ".webm": "video/webm",
+};
 const MAX_SUMMARY = 2000;
 const MAX_IMAGES = 20;
 const MAX_TITLE = 120;
@@ -129,7 +165,7 @@ const NEW_REVIEW_ID_SUFFIX = `.${"9".repeat(15)}`;
  *   | { args: { itemId: string, summary: string, boardUrl: string, images: string[] } }
  *   | { args: { itemId: string, cardPaths: string[], boardUrl: string } }}
  */
-export function parseArgs(argv) {
+export function parseArgs(argv, env = {}) {
   let parsed;
   try {
     parsed = parseNodeArgs({
@@ -147,13 +183,14 @@ export function parseArgs(argv) {
   }
   const { values, positionals } = parsed;
   if (values.help) return { help: true };
+  if (env.BREAKDOWN_API && !isHttpUrl(env.BREAKDOWN_API)) return { error: `BREAKDOWN_API must be an http(s) URL: ${env.BREAKDOWN_API}` };
   const [itemId, ...images] = positionals;
   if (itemId === undefined) return { error: "missing <item-id>" };
   if (!ITEM_ID.test(itemId)) return { error: `not an issue id: ${itemId}` };
   if (values.summary === undefined && images.length > 0 && images.every((p) => p.endsWith(".md"))) {
     if (images.length > MAX_CARDS) return { error: `at most ${MAX_CARDS} cards in one call, got ${images.length}` };
-    const boardUrl = values["board-url"] ?? DEFAULT_BOARD_URL;
-    if (!isHttpUrl(boardUrl)) return { error: `--board-url must be an http(s) URL: ${boardUrl}` };
+    const boardUrl = values["board-url"] ?? (env.BREAKDOWN_UI || DEFAULT_BOARD_URL);
+    if (!isHttpUrl(boardUrl)) return { error: `${boardSource(values)} must be an http(s) URL: ${boardUrl}` };
     return { args: { itemId, cardPaths: images, boardUrl } };
   }
   if (values.summary === undefined && images.some((p) => p.endsWith(".md"))) {
@@ -164,10 +201,12 @@ export function parseArgs(argv) {
   if (summary.length > MAX_SUMMARY) return { error: `--summary is longer than ${MAX_SUMMARY} characters` };
   if (images.length === 0) return { error: "at least one image is required" };
   if (images.length > MAX_IMAGES) return { error: `at most ${MAX_IMAGES} images, got ${images.length}` };
-  const boardUrl = values["board-url"] ?? DEFAULT_BOARD_URL;
-  if (!isHttpUrl(boardUrl)) return { error: `--board-url must be an http(s) URL: ${boardUrl}` };
+  const boardUrl = values["board-url"] ?? (env.BREAKDOWN_UI || DEFAULT_BOARD_URL);
+  if (!isHttpUrl(boardUrl)) return { error: `${boardSource(values)} must be an http(s) URL: ${boardUrl}` };
   return { args: { itemId, summary, boardUrl, images } };
 }
+
+const boardSource = (values) => (values["board-url"] === undefined ? "BREAKDOWN_UI" : "--board-url");
 
 function isHttpUrl(value) {
   try {
@@ -178,7 +217,9 @@ function isHttpUrl(value) {
   }
 }
 
+/** $BREAKDOWN_API (validated by parseArgs), else the local server: the same names as bin/inbox. */
 export function apiBase(env) {
+  if (env.BREAKDOWN_API) return env.BREAKDOWN_API.replace(/\/+$/, "");
   const port = PORT.test(env.WEB_SERVER_PORT ?? "") ? env.WEB_SERVER_PORT : DEFAULT_SERVER_PORT;
   return `http://127.0.0.1:${port}`;
 }
@@ -753,10 +794,15 @@ function blocksOn(item, id) {
 
 class Refusal extends Error {}
 
-async function fetchProjects(fetchFn, url) {
+/** `authorization: Bearer $BREAKDOWN_TOKEN` when set: needed off loopback (a tailnet host). */
+export function authHeaders(env) {
+  return env.BREAKDOWN_TOKEN ? { authorization: `Bearer ${env.BREAKDOWN_TOKEN}` } : {};
+}
+
+async function fetchProjects(fetchFn, url, headers = {}) {
   let response;
   try {
-    response = await fetchFn(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+    response = await fetchFn(url, { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
   } catch (err) {
     if (err?.name === "TimeoutError") throw new Error(`no answer within ${FETCH_TIMEOUT_MS / 1000} s`);
     throw new Error(err?.cause?.code ?? err?.cause?.message ?? err?.message ?? String(err));
@@ -832,11 +878,12 @@ async function showInChrome(deps, boardUrl, link) {
 /**
  * @param deps {{ argv: string[], cwd: string, env: Record<string, string|undefined>, homedir: string,
  *   run: (cmd: string, args: string[], opts: { cwd: string }) => Promise<{ code: number, stdout: string, stderr: string }>,
- *   fetch: typeof fetch, out: (line: string) => void, warn: (line: string) => void, breakdownRoot: string }}
+ *   fetch: typeof fetch, out: (line: string) => void, warn: (line: string) => void, breakdownRoot: string,
+ *   sleep?: (ms: number) => Promise<void> }}
  * @returns {Promise<{ exitCode: number }>}
  */
 export async function requestReview(deps) {
-  const parsed = parseArgs(deps.argv);
+  const parsed = parseArgs(deps.argv, deps.env);
   if ("help" in parsed) {
     deps.out(USAGE);
     return { exitCode: 0 };
@@ -855,7 +902,10 @@ export async function requestReview(deps) {
     for (const [index, request] of requests.entries()) {
       if (request.card) checkCardSize(deps, request, { project: plan.project, existing: chosen[index] });
     }
-    for (const request of requests) stagedAll.push(await stageFiles(deps, plan.project.key, request.files));
+    const remote = Boolean(deps.env.BREAKDOWN_API);
+    for (const request of requests) {
+      stagedAll.push(remote ? await uploadFiles(deps, plan.project.key, request.itemId, request.files) : await stageFiles(deps, plan.project.key, request.files));
+    }
     const result = await fileAll(deps, requests, plan, chosen, stagedAll);
     if (result.exitCode === 0 && "summary" in parsed.args) {
       const warning = summaryWarning(parsed.args, deps.breakdownRoot);
@@ -868,7 +918,10 @@ export async function requestReview(deps) {
     return { exitCode: 1 };
   } finally {
     // Already gone once the files were moved into place; on any other path nothing may be left behind.
-    for (const staged of stagedAll) await fs.rm(staged.dir, { recursive: true, force: true });
+    for (const staged of stagedAll) {
+      if (!staged.remote) await fs.rm(staged.dir, { recursive: true, force: true });
+      else if (!staged.committed) await removeRun(deps, staged, staged.run, "uploaded");
+    }
   }
 }
 
@@ -1036,11 +1089,12 @@ async function check(deps, args) {
   const api = apiBase(deps.env);
   let projects;
   try {
-    projects = await fetchProjects(deps.fetch, `${api}/trpc/beadsProjects`);
+    projects = await fetchProjects(deps.fetch, `${api}/trpc/beadsProjects`, authHeaders(deps.env));
   } catch (err) {
-    throw new Refusal(
-      `cannot reach the breakdown server at ${api}/trpc/beadsProjects (${err.message}). Start it with \`pnpm dev\` in ${deps.breakdownRoot}, then retry. Nothing was filed.`,
-    );
+    const fix = deps.env.BREAKDOWN_API
+      ? "Check BREAKDOWN_API and BREAKDOWN_TOKEN and that the server is up"
+      : `Start it with \`pnpm dev\` in ${deps.breakdownRoot}`;
+    throw new Refusal(`cannot reach the breakdown server at ${api}/trpc/beadsProjects (${err.message}). ${fix}, then retry. Nothing was filed.`);
   }
   const project = findProject(projects, realMain);
   if (!project) {
@@ -1104,6 +1158,116 @@ async function stageFiles(deps, key, files) {
     if (dir) await fs.rm(dir, { recursive: true, force: true });
     throw new Refusal(`could not copy the attachments under ${projectDir}: ${err.message}. Nothing was filed.`);
   }
+}
+
+/** Why a fetch threw, in a few words: a timeout, else the socket's error code. Never a header. */
+function fetchFailure(err, timeoutMs) {
+  if (err?.name === "TimeoutError") return `no answer within ${timeoutMs / 1000} s`;
+  return err?.cause?.code ?? err?.cause?.message ?? err?.message ?? String(err);
+}
+
+function runUrl(deps, { projectKey, itemId }, run) {
+  return `${apiBase(deps.env)}/review-uploads/${projectKey}/${itemId}/${run}`;
+}
+
+/** DELETEs one run on the server: null when done, else why not. */
+async function deleteRun(deps, owner, run) {
+  try {
+    const response = await deps.fetch(runUrl(deps, owner, run), {
+      method: "DELETE",
+      headers: authHeaders(deps.env),
+      redirect: "error",
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+    return response.ok ? null : `HTTP ${response.status}`;
+  } catch (err) {
+    return fetchFailure(err, FETCH_TIMEOUT_MS);
+  }
+}
+
+/** deleteRun, warning on failure (best-effort; module header). */
+async function removeRun(deps, owner, run, which) {
+  const why = await deleteRun(deps, owner, run);
+  if (why !== null) deps.warn(`${PREFIX}could not remove ${which} media ${owner.projectKey}/${owner.itemId}/${run} on the server (${why}).`);
+}
+
+/**
+ * One PUT, retried up to UPLOAD_RETRIES times on a 503 (after its
+ * Retry-After, at most MAX_RETRY_WAIT_MS) or a reset connection: null once
+ * stored, else why not. A 409 on a retry counts as stored. The server's
+ * text is cut to one line, UNPRINTABLE removed, before it is ever printed.
+ */
+async function putFile(deps, url, name, file) {
+  const sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  for (let attempt = 0; ; attempt++) {
+    let retryAfterMs = 1_000;
+    let why;
+    try {
+      const response = await deps.fetch(url, {
+        method: "PUT",
+        headers: { ...authHeaders(deps.env), "content-type": MEDIA_TYPES[path.extname(name).toLowerCase()] },
+        body: await openAsBlob(file),
+        redirect: "error",
+        signal: AbortSignal.timeout(UPLOAD_TIMEOUT_MS),
+      });
+      if (response.ok) return null;
+      // The run is fresh and this token's: a 409 on a retry is the earlier attempt's file, whose 204 was lost.
+      if (attempt > 0 && response.status === 409) return null;
+      const detail = (await response.text().catch(() => "")).trim().split("\n")[0].replace(UNPRINTABLE, "").slice(0, 200);
+      why = `HTTP ${response.status}${detail ? `: ${detail}` : ""}`;
+      if (response.status !== 503) return why;
+      const header = response.headers?.get?.("retry-after");
+      const seconds = header ? Number(header) : NaN;
+      if (Number.isFinite(seconds) && seconds >= 0) retryAfterMs = seconds * 1000;
+    } catch (err) {
+      why = fetchFailure(err, UPLOAD_TIMEOUT_MS);
+      if (!RETRY_CODES.has(err?.cause?.code ?? err?.code)) return why;
+    }
+    if (attempt === UPLOAD_RETRIES) return why;
+    await sleep(Math.min(retryAfterMs, MAX_RETRY_WAIT_MS));
+  }
+}
+
+/**
+ * Uploads one request's files, in order, to a fresh run on the server
+ * (module header); a failure DELETEs the run and refuses with nothing filed.
+ * The stored paths are relative to the server's media root.
+ */
+async function uploadFiles(deps, projectKey, itemId, files) {
+  const owner = { projectKey, itemId };
+  const run = randomBytes(6).toString("hex");
+  const stored = [];
+  for (const [index, given] of files.entries()) {
+    const name = copiedName(index, given);
+    const why = await putFile(deps, `${runUrl(deps, owner, run)}/${name}`, name, path.resolve(deps.cwd, given));
+    if (why !== null) {
+      await removeRun(deps, owner, run, "uploaded");
+      throw new Refusal(`could not upload the attachments to ${apiBase(deps.env)}: ${name}: ${why}. Nothing was filed.`);
+    }
+    stored.push(`${projectKey}/${itemId}/${run}/${name}`);
+  }
+  return { remote: true, projectKey, itemId, run, stored, committed: false };
+}
+
+/**
+ * The runs of this item's uploaded media a review records, other than
+ * `keepRun`: every relative image, attachment path, and poster shaped
+ * `<projectKey>/<itemId>/<run>/<name>`. Absolute (local) paths are skipped.
+ */
+export function previousRuns(review, projectKey, itemId, keepRun) {
+  const recorded = review?.metadata?.review;
+  const paths = [
+    ...(Array.isArray(recorded?.images) ? recorded.images : []),
+    ...(Array.isArray(recorded?.attachments) ? recorded.attachments.flatMap((a) => [a?.path, a?.poster]) : []),
+  ];
+  const runs = new Set();
+  for (const stored of paths) {
+    if (typeof stored !== "string") continue;
+    const parts = stored.split("/");
+    if (parts.length !== 4 || parts[0] !== projectKey || parts[1] !== itemId || !parts.every((part) => SAFE_SEGMENT.test(part))) continue;
+    if (parts[2] !== keepRun) runs.add(parts[2]);
+  }
+  return [...runs];
 }
 
 /** Swaps the staged files in as the bead's directory; the previous files stay until the new ones are in place. */
@@ -1195,12 +1359,16 @@ async function fileOne(deps, request, { project, item, bdCwd }, existing, staged
   const id = review.id;
   const partial = (step, detail) => ({ ok: false, id, filedNothing: false, message: `review ${id} was filed but ${step} failed: ${detail}.` });
 
-  if (!SAFE_SEGMENT.test(id)) return partial("moving images into place", `issue id ${JSON.stringify(id)} is not a directory name`);
   let stored;
-  try {
-    stored = await placeImages(deps, project.key, id, staged);
-  } catch (err) {
-    return partial("moving images into place", err.message);
+  if (staged.remote) {
+    stored = staged.stored;
+  } else {
+    if (!SAFE_SEGMENT.test(id)) return partial("moving images into place", `issue id ${JSON.stringify(id)} is not a directory name`);
+    try {
+      stored = await placeImages(deps, project.key, id, staged);
+    } catch (err) {
+      return partial("moving images into place", err.message);
+    }
   }
 
   const metadata = request.card
@@ -1210,8 +1378,15 @@ async function fileOne(deps, request, { project, item, bdCwd }, existing, staged
   if (existing) updateArgs.push("--description", request.description);
   if (existing && (review.labels ?? []).includes(CHANGES_LABEL)) updateArgs.push("--remove-label", CHANGES_LABEL);
   if (existing && request.card && review.title !== title) updateArgs.push("--title", title);
+  // Once bd update has run, the review may point at this run even if it exited non-zero, so it is never removed.
+  if (staged.remote) staged.committed = true;
   const updated = await deps.run("bd", updateArgs, bdCwd);
   if (updated.code !== 0) return partial("bd update", firstLine(updated));
+  if (staged.remote) {
+    if (existing) {
+      for (const run of previousRuns(review, project.key, request.itemId, staged.run)) await removeRun(deps, staged, run, "earlier");
+    }
+  }
 
   if (existing && finishedBefore(review)) {
     const commented = await deps.run("bd", ["comments", "add", id, `Review updated: ${request.headline}`], bdCwd);

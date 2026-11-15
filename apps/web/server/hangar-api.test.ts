@@ -72,6 +72,7 @@ async function listen(hangarReadOnly: boolean): Promise<number> {
     connect: async (_req, res) => void res.writeHead(500).end(),
     health: async (_req, res) => void res.writeHead(500).end(),
     reviewImages: async (_req, res) => void res.writeHead(500).end(),
+    reviewUploads: async (_req, res) => void res.writeHead(500).end(),
     hangar: createHangarHandler({
       db,
       readOnly: hangarReadOnly,

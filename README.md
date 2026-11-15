@@ -164,7 +164,7 @@ pnpm -s client-token list                           # client, scope, bound sessi
 pnpm -s client-token revoke phone
 ```
 
-The scope is required. `human` is for a person's devices (phone, laptop): it works on the web API and MCP. `agent` is for workers and the driver: it works on MCP, and on the web API it reaches only what `bin/inbox`, `bin/inbox-watch`, and `bin/review-request` call — filing an inbox request (`inboxRequest`), completing one a person accepted (`inboxComplete`), listing the inbox (`inbox`), and listing beads projects (`beadsProjects`). Every other procedure, and the review images, answer an `agent` token with 403, so an agent can't approve its own inbox request, decide a review, or edit the graph from the web API. Each tRPC procedure declares the scopes it accepts. A tokenless loopback request counts as `human`. The third scope, `hangar`, belongs to the hangar service alone and reaches only its endpoints under `/hangar/v1/` (see [Hangar](#hangar)). The fourth, `relay`, belongs to the laptop relay alone and reaches only `/relay/v1/` (see [Laptop relay](#laptop-relay)).
+The scope is required. `human` is for a person's devices (phone, laptop): it works on the web API and MCP. `agent` is for workers and the driver: it works on MCP, and on the web API it reaches only what `bin/inbox`, `bin/inbox-watch`, and `bin/review-request` call — filing an inbox request (`inboxRequest`), completing one a person accepted (`inboxComplete`), listing the inbox (`inbox`), and listing beads projects (`beadsProjects`), plus uploading and removing review media under `/review-uploads/`. Every other procedure, and reading the review images (`/review-images/`), answer an `agent` token with 403, so an agent can't approve its own inbox request, decide a review, or edit the graph from the web API. Each tRPC procedure declares the scopes it accepts. A tokenless loopback request counts as `human`. The third scope, `hangar`, belongs to the hangar service alone and reaches only its endpoints under `/hangar/v1/` (see [Hangar](#hangar)). The fourth, `relay`, belongs to the laptop relay alone and reaches only `/relay/v1/` (see [Laptop relay](#laptop-relay)).
 
 The inbox scripts send `$BREAKDOWN_TOKEN` as `Authorization: Bearer` when it is set, so a worker on another tailnet machine runs them with `BREAKDOWN_API=https://<host> BREAKDOWN_TOKEN=bdt_… bin/inbox request …`. Both variables belong to the scripts; the server reads neither.
 
@@ -272,11 +272,13 @@ docker compose -f docker-compose.app.yml exec -T breakdown node dist/token.mjs r
 
 ### Media
 
-Until review media moves into the database (`bd-d38.6`), seed the media volume from the host's review directory:
+A `review-request` run with `BREAKDOWN_API` pointing here uploads its media into this volume. Reviews filed before that existed, from the host's review directory, need seeding once:
 
 ```bash
 docker cp ~/.local/share/breakdown/reviews/. "$(docker compose -f docker-compose.app.yml ps -q breakdown)":/data/media/
 ```
+
+The reverse doesn't hold: a review filed against a remote host stores its media there, so a board on the Mac can't show it.
 
 ### Building for the Jetson
 
@@ -325,6 +327,8 @@ It files (or refreshes) a `review` child bead of the item, copies the images und
 ```bash
 ln -sf "$PWD/bin/review-request" ~/.local/bin/review-request
 ```
+
+To file against another Breakdown (the Jetson over the tailnet), set the same variables as `bin/inbox`: `BREAKDOWN_API` (the web server, e.g. `http://skyos-jetson.tailfa708d.ts.net:4310`), `BREAKDOWN_TOKEN` (an `agent` or `human` token, sent as `Authorization: Bearer`), and `BREAKDOWN_UI` (the board URL the link and Chrome tab use; `--board-url` still wins). With `BREAKDOWN_API` set, images, videos, and posters are uploaded to that server (`PUT /review-uploads/...`) instead of copied here, all of them before any bead is written; a failed upload files nothing. Re-running `review-request` for a review, in either form, removes that review's earlier uploads from the server.
 
 For a decision rather than a look (an architecture choice, a risky operational step, a pick between layouts), file a decision card instead: `review-request <item-id> <card.md>`. The card is one markdown file whose YAML frontmatter holds a `question`, `options` (each with a `label`, `what`, and `risk`), the `recommend`ed option, `on_accept` steps, and `attachments` (images, optionally a `before`/`after` pair; `mermaid` diagrams; `diff`s), and whose body is the evidence in markdown (tables, `diff` and `mermaid` fences), at most 300 words outside its fenced blocks: evidence for the decision, not a build log. The board shows the question and the recommendation first, with the evidence one expand away; Accept takes the recommended option and "Choose X" another, and the decision written back names it (`Accepted: B — <message>`). Examples and the full contract: [`fixtures/review-cards/`](fixtures/review-cards/README.md). A `--summary` over 280 characters is still filed, with a warning pointing to the card form.
 

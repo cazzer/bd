@@ -75,6 +75,7 @@ async function listen(readOnly: boolean): Promise<number> {
     connect: refuse,
     health: refuse,
     reviewImages: refuse,
+    reviewUploads: refuse,
     hangar: async (_req, res) => void res.writeHead(500).end(),
     relay: createRelayHandler({
       db,
