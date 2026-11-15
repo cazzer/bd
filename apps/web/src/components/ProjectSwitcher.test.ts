@@ -2,8 +2,9 @@
 //
 // The project switcher (roadmap-milestones tasks.md 3.2): a labelled native
 // select offering "All projects" and each offered project, reading the
-// address's state, and reporting a choice — with "N projects" shown, never
-// offered, for an address naming several.
+// address's state, and reporting a choice — with the several projects an
+// old link names shown, never offered; disabled while the projects load;
+// plain text when only one is offered.
 
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -29,8 +30,8 @@ afterEach(() => {
 
 const OFFERED = ["skyos", "tides", "strides"];
 
-function render(address: string[], onChoose = vi.fn()) {
-  act(() => root.render(createElement(ProjectSwitcher, { offered: OFFERED, address, onChoose })));
+function render(address: string[], onChoose = vi.fn(), offered: string[] | null = OFFERED) {
+  act(() => root.render(createElement(ProjectSwitcher, { offered, address, onChoose })));
   const select = container.querySelector("select")!;
   return { select, onChoose };
 }
@@ -59,11 +60,25 @@ describe("ProjectSwitcher", () => {
     expect(onChoose).toHaveBeenLastCalledWith(ALL_PROJECTS_CHOICE);
   });
 
-  test("reads N projects for several, as an option that cannot be chosen", () => {
+  test("names several projects as an option that cannot be chosen", () => {
     const { select } = render(["tides", "strides"]);
     const shown = select.selectedOptions[0]!;
-    expect(shown.textContent).toBe("2 projects");
+    expect(shown.textContent).toBe("tides + strides");
     expect(shown.disabled).toBe(true);
     expect(shown.hidden).toBe(true);
+  });
+
+  test("is disabled while the projects load, reading the address's one key or All projects", () => {
+    const { select } = render(["rmf"], vi.fn(), null);
+    expect(select.disabled).toBe(true);
+    expect([...select.options].map((o) => o.textContent)).toEqual(["rmf"]);
+    render([], vi.fn(), null);
+    expect(container.querySelector("select")!.selectedOptions[0]?.textContent).toBe("All projects");
+  });
+
+  test("shows the only offered project as text, with nothing to choose", () => {
+    render([], vi.fn(), ["solo"]);
+    expect(container.querySelector("select")).toBeNull();
+    expect(container.textContent).toBe("Project: solo");
   });
 });

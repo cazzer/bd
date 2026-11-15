@@ -4,13 +4,13 @@ import {
   addHighlights,
   BOARD_COLUMN_ORDER,
   buildLanes,
-  chosenChips,
+  chosenProjects,
   compareCards,
   filterProjects,
   HIGHLIGHT_MS,
   MAX_BOARD_PROJECTS,
   nextHighlightExpiry,
-  offeredChips,
+  offeredProjects,
   PROJECT_KEY_PATTERN,
   pruneHighlights,
   readableProjects,
@@ -83,7 +83,7 @@ describe("compareCards", () => {
   });
 });
 
-describe("chips", () => {
+describe("projects", () => {
   it("reads the project predicate from a view filter, or null when it names none", () => {
     expect(filterProjects([{ key: "project", op: "equals", value: "bd" }])).toEqual(["bd"]);
     expect(filterProjects([{ key: "status", op: "equals", value: "x" }, { key: "project", op: "oneOf", values: ["a", "b", 3] }])).toEqual(["a", "b"]);
@@ -92,15 +92,15 @@ describe("chips", () => {
   });
 
   it("offers the view's projects, else the registry", () => {
-    expect(offeredChips(["b", "a"], ["x"])).toEqual(["b", "a"]);
-    expect(offeredChips(null, ["x", "y", "x"])).toEqual(["x", "y"]);
+    expect(offeredProjects(["b", "a"], ["x"])).toEqual(["b", "a"]);
+    expect(offeredProjects(null, ["x", "y", "x"])).toEqual(["x", "y"]);
   });
 
-  it("selects every chip for an empty or stale address, else the address's chips in chip order", () => {
+  it("chooses every project for an empty or stale address, else the address's projects in offered order", () => {
     const offered = ["a", "b", "c"];
-    expect(chosenChips(offered, [])).toEqual(offered);
-    expect(chosenChips(offered, ["nope"])).toEqual(offered);
-    expect(chosenChips(offered, ["c", "a", "nope"])).toEqual(["a", "c"]);
+    expect(chosenProjects(offered, [])).toEqual(offered);
+    expect(chosenProjects(offered, ["nope"])).toEqual(offered);
+    expect(chosenProjects(offered, ["c", "a", "nope"])).toEqual(["a", "c"]);
   });
 
   it("drops keys the server would refuse and caps the list", () => {

@@ -15,10 +15,12 @@
 // header's switcher (ProjectSwitcher.tsx, roadmap-milestones design.md
 // decision 5) picks one of them or all, and the choice lives in the
 // address, so a switch is a history push and a reload reproduces the board.
-// An old link naming several projects still shows them all. The Board /
-// Roadmap toggle beside it (WorkViewToggle.tsx) carries the projects to
-// `/roadmap` and drops the open item. A lane header names its epic's
-// milestone, which the board read answers with each epic.
+// An old link naming several projects still shows them all; a switch drops
+// the open item. The Board / Roadmap toggle beside it (WorkViewToggle.tsx)
+// carries the projects to `/roadmap` and drops the open item. Only a saved
+// view's title is a visible heading, so the switcher and toggle sit at the
+// same place here and on the roadmap. A lane header names its epic's
+// milestone (LaneMilestone.tsx), which the board read answers with each epic.
 //
 // The drawer (board-visual-reviews, task 4.4): activating a card pushes its
 // external id as `item`; closing pushes the address without it and returns
@@ -57,10 +59,10 @@ import {
   addHighlights,
   BOARD_COLUMN_ORDER,
   buildLanes,
-  chosenChips,
+  chosenProjects,
   filterProjects,
   nextHighlightExpiry,
-  offeredChips,
+  offeredProjects,
   pruneHighlights,
   readableProjects,
   type BoardCardRow,
@@ -71,12 +73,13 @@ import { describeRefresh } from "../lib/relayAction.js";
 import { drawerProject } from "../lib/reviewDrawer.js";
 import { formatRoute, type BoardRoute, type GraphRoute } from "../lib/route.js";
 import { viewFilterOf, type ViewNode } from "../lib/viewFilter.js";
-import { boardToRoadmap, chooseProject } from "../lib/workViewNav.js";
+import { boardToRoadmap, chooseProject, viewCarriedProjects } from "../lib/workViewNav.js";
 import { trpc } from "../trpc.js";
 import { HangarStatusPill } from "./HangarStatusPill.js";
 import { RelayStatusPill } from "./RelayStatusPill.js";
 import { ReviewDrawer, useWideDrawer } from "./ReviewDrawer.js";
 import { HeaderSearch } from "./HeaderSearch.js";
+import { LaneMilestone } from "./LaneMilestone.js";
 import { ProjectSwitcher } from "./ProjectSwitcher.js";
 import { ReviewQueuePill, storeDraft, useShellDrawer } from "./ReviewQueue.js";
 import { WorkViewToggle } from "./WorkViewToggle.js";
@@ -90,7 +93,7 @@ type ViewState =
   | { kind: "error"; message: string }
   | { kind: "ready"; forViewId: string | null; title: string; viewProjects: string[] | null };
 
-/** The board with no `view` in its address: every registered project. Titled "Board", since the switcher beside the heading names the projects shown. */
+/** The board with no `view` in its address: every registered project. Its heading is for screen readers only (see the header's h1). */
 const ALL_PROJECTS: ViewState = { kind: "ready", forViewId: null, title: "Board", viewProjects: null };
 
 type BeadsProjectsAnswer = Awaited<ReturnType<typeof trpc.beadsProjects.query>>["projects"];
@@ -200,14 +203,14 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
         let registry: BeadsProjectsAnswer;
         let board: BoardData["board"];
         if (viewProjects !== null) {
-          // The chips are known without the registry, so both reads go out together.
-          const readable = readableProjects(chosenChips(offeredChips(viewProjects, []), address));
+          // The offered projects are known without the registry, so both reads go out together.
+          const readable = readableProjects(chosenProjects(offeredProjects(viewProjects, []), address));
           const [reg, b] = await Promise.all([trpc.beadsProjects.query(), readable.length > 0 ? trpc.board.query({ projects: readable }) : Promise.resolve(EMPTY_BOARD)]);
           registry = reg.projects;
           board = b;
         } else {
           registry = (await trpc.beadsProjects.query()).projects;
-          const readable = readableProjects(chosenChips(offeredChips(null, registry.map((p) => p.key)), address));
+          const readable = readableProjects(chosenProjects(offeredProjects(null, registry.map((p) => p.key)), address));
           board = readable.length > 0 ? await trpc.board.query({ projects: readable }) : EMPTY_BOARD;
         }
         if (disposed) return;
@@ -297,8 +300,8 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
     }
   }
 
-  const offered = view && data ? offeredChips(view.viewProjects, data.registry.map((p) => p.key)) : [];
-  const chosen = chosenChips(offered, projects);
+  const offered = view && data ? offeredProjects(view.viewProjects, data.registry.map((p) => p.key)) : [];
+  const chosen = chosenProjects(offered, projects);
 
   // A hand-edited or stale address is rewritten to the canonical selection (offered order, empty when every offered project is chosen).
   const canonicalProjects = chosen.length === offered.length ? [] : chosen;
@@ -369,15 +372,23 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
     });
   }
 
-  const heading = view ? view.title || "(untitled view)" : "Board";
+  // Only a saved view's title is a visible heading. Otherwise the h1 is for
+  // screen readers, so the switcher and the toggle lead the header at the
+  // same place on the board and the roadmap (RoadmapView.tsx).
+  const heading = view && viewId !== null ? view.title || "(untitled view)" : null;
+  // The switcher keeps its place while the projects load (disabled, reading
+  // the address), and is left off only once none is offered or the address
+  // names no board view.
+  const switcherOffered = view && data ? offered : null;
+  const switcherShown = (viewState.kind === "loading" || viewState.kind === "ready") && switcherOffered?.length !== 0;
 
   return (
     <main className={`flex h-dvh w-screen flex-col overflow-hidden ${drawerOpen || shellDrawerOpen ? "sm:pr-[492px]" : ""}`}>
       <div aria-hidden="true" className="ambience pointer-events-none fixed inset-0 -z-10" />
       <header inert={drawerOpen && !wide} className="glass m-3 mb-0 flex flex-wrap items-center gap-x-4 gap-y-2 p-3">
-        <h1 className="min-w-0 truncate text-base font-semibold text-fg">{heading}</h1>
-        {view && offered.length > 0 && <ProjectSwitcher offered={offered} address={projects} onChoose={chooseFromSwitcher} />}
-        <WorkViewToggle current="board" board={route} roadmap={boardToRoadmap(route, view?.viewProjects ? chosen : null)} />
+        {heading === null ? <h1 className="sr-only">Board</h1> : <h1 className="min-w-0 truncate text-base font-semibold text-fg">{heading}</h1>}
+        {switcherShown && <ProjectSwitcher offered={switcherOffered} address={projects} onChoose={chooseFromSwitcher} />}
+        <WorkViewToggle current="board" board={route} roadmap={boardToRoadmap(route, viewCarriedProjects(view?.viewProjects ?? null, projects))} />
         <div className="ml-auto flex flex-wrap items-center justify-end gap-3 text-xs text-fg-muted">
           <HeaderSearch />
           <HangarStatusPill />
@@ -543,13 +554,7 @@ function LaneSection({
             {open ? "▾" : "▸"}
           </span>
           <span className="truncate">{lane.title}</span>
-          {lane.milestone !== null && (
-            <span className="min-w-0 max-w-[16rem] shrink truncate text-xs font-normal text-fg-muted">
-              <span aria-hidden="true">◇ </span>
-              <span className="sr-only">milestone </span>
-              {lane.milestone}
-            </span>
-          )}
+          {lane.milestone !== null && <LaneMilestone title={lane.milestone} />}
           {lane.status && <span className="shrink-0 rounded-full border border-hairline px-2 py-0.5 text-[11px] font-normal text-fg-muted">{lane.status}</span>}
           <span className="shrink-0 text-xs font-normal text-fg-muted">{lane.cardCount}</span>
         </button>

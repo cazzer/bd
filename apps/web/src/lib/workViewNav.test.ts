@@ -6,7 +6,7 @@
 import { describe, expect, it } from "vitest";
 import { PROJECT_KEY_PATTERN } from "./boardRow.js";
 import { formatRoute, parseRoute, type BoardRoute, type RoadmapRoute } from "./route.js";
-import { ALL_PROJECTS_CHOICE, boardToRoadmap, chooseProject, roadmapToBoard, SEVERAL_PROJECTS_VALUE, switcherState } from "./workViewNav.js";
+import { ALL_PROJECTS_CHOICE, boardToRoadmap, chooseProject, roadmapToBoard, SEVERAL_PROJECTS_VALUE, switcherState, viewCarriedProjects } from "./workViewNav.js";
 
 const OFFERED = ["skyos", "tides", "strides"];
 
@@ -16,18 +16,32 @@ function board(projects: string[] = [], over: Partial<BoardRoute> = {}): BoardRo
 
 describe("switcherState", () => {
   it("reads All projects for an empty, stale, or every-project address", () => {
-    expect(switcherState(OFFERED, [])).toEqual({ label: "All projects", value: ALL_PROJECTS_CHOICE });
-    expect(switcherState(OFFERED, ["gone"])).toEqual({ label: "All projects", value: ALL_PROJECTS_CHOICE });
-    expect(switcherState(OFFERED, ["strides", "skyos", "tides"])).toEqual({ label: "All projects", value: ALL_PROJECTS_CHOICE });
+    const all = { label: "All projects", value: ALL_PROJECTS_CHOICE, title: null };
+    expect(switcherState(OFFERED, [])).toEqual(all);
+    expect(switcherState(OFFERED, ["gone"])).toEqual(all);
+    expect(switcherState(OFFERED, ["strides", "skyos", "tides"])).toEqual(all);
   });
 
   it("reads the one chosen key", () => {
-    expect(switcherState(OFFERED, ["tides"])).toEqual({ label: "tides", value: "tides" });
-    expect(switcherState(OFFERED, ["gone", "tides"])).toEqual({ label: "tides", value: "tides" });
+    expect(switcherState(OFFERED, ["tides"])).toEqual({ label: "tides", value: "tides", title: null });
+    expect(switcherState(OFFERED, ["gone", "tides"])).toEqual({ label: "tides", value: "tides", title: null });
   });
 
-  it("counts an address naming several offered projects (the old multi-project link)", () => {
-    expect(switcherState(OFFERED, ["tides", "strides"])).toEqual({ label: "2 projects", value: SEVERAL_PROJECTS_VALUE });
+  it("names two or three chosen projects (the old multi-project link), in offered order", () => {
+    expect(switcherState(OFFERED, ["strides", "tides"])).toEqual({ label: "tides + strides", value: SEVERAL_PROJECTS_VALUE, title: null });
+    const five = ["a", "b", "c", "d", "e"];
+    expect(switcherState(five, ["a", "b", "c"]).label).toBe("a + b + c");
+  });
+
+  it("counts more than three, naming them in the title", () => {
+    const five = ["a", "b", "c", "d", "e"];
+    expect(switcherState(five, ["d", "a", "b", "c"])).toEqual({ label: "4 projects", value: SEVERAL_PROJECTS_VALUE, title: "a, b, c, d" });
+  });
+
+  it("reads the address alone while the offered projects load", () => {
+    expect(switcherState(null, [])).toEqual({ label: "All projects", value: ALL_PROJECTS_CHOICE, title: null });
+    expect(switcherState(null, ["rmf"])).toEqual({ label: "rmf", value: "rmf", title: null });
+    expect(switcherState(null, ["rmf", "rmb"]).label).toBe("rmf + rmb");
   });
 
   it("never collides with a project key", () => {
@@ -54,8 +68,9 @@ describe("chooseProject", () => {
     expect(chooseProject(board(["tides", "strides"]), OFFERED, "tides").projects).toEqual(["tides"]);
   });
 
-  it("keeps the view and the open item", () => {
-    expect(chooseProject(board(["tides"], { viewId: "v1", item: "tides-r1" }), OFFERED, "skyos")).toEqual(board(["skyos"], { viewId: "v1", item: "tides-r1" }));
+  it("keeps the view and drops the open item", () => {
+    expect(chooseProject(board(["tides"], { viewId: "v1", item: "tides-r1" }), OFFERED, "skyos")).toEqual(board(["skyos"], { viewId: "v1", item: null }));
+    expect(formatRoute(chooseProject(board(["tides"], { item: "tides-r1" }), OFFERED, ALL_PROJECTS_CHOICE))).toBe("/board");
   });
 
   it("spells every-project as no project: an unoffered key or the only offered one", () => {
@@ -64,7 +79,7 @@ describe("chooseProject", () => {
   });
 
   it("works on the roadmap's route too", () => {
-    const roadmap: RoadmapRoute = { view: "roadmap", projects: [], item: null };
+    const roadmap: RoadmapRoute = { view: "roadmap", projects: [], item: "sky-1" };
     expect(formatRoute(chooseProject(roadmap, OFFERED, "tides"))).toBe("/roadmap?project=tides");
   });
 });
@@ -80,6 +95,14 @@ describe("Board / Roadmap toggle", () => {
     expect(formatRoute(boardToRoadmap(board([], { viewId: "v1" }), ["tides", "skyos"]))).toBe("/roadmap?project=tides&project=skyos");
     expect(formatRoute(boardToRoadmap(board(["skyos"], { viewId: "v1" }), ["tides", "skyos"]))).toBe("/roadmap?project=skyos");
     expect(formatRoute(boardToRoadmap(board([], { viewId: "v1" }), null))).toBe("/roadmap");
+  });
+
+  it("knows a view's carried projects without the registry", () => {
+    expect(viewCarriedProjects(null, ["tides"])).toBeNull();
+    expect(viewCarriedProjects(["tides", "skyos", "tides"], [])).toEqual(["tides", "skyos"]);
+    expect(viewCarriedProjects(["tides", "skyos"], ["skyos", "gone"])).toEqual(["skyos"]);
+    expect(viewCarriedProjects(["tides", "skyos"], ["gone"])).toEqual(["tides", "skyos"]);
+    expect(formatRoute(boardToRoadmap(board([], { viewId: "v1" }), viewCarriedProjects(["tides", "skyos"], [])))).toBe("/roadmap?project=tides&project=skyos");
   });
 
   it("carries the project and drops the item from roadmap to board", () => {
