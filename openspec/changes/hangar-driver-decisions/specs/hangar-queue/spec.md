@@ -58,3 +58,26 @@ The session's driver, with an `agent` token that is not a session token, SHALL b
 
 - **WHEN** the driver tables stopped session S
 - **THEN** S's outcome is `tabled` with `outcome_by` the driver's client, and no inbox item is filed
+
+### Requirement: An escalation never strands its decision
+
+An escalated decision whose review is not filed yet SHALL remain answerable by the driver, which SHALL withdraw the queued relay action. A `review_request` that fails, whether reported or failed when claimed, SHALL put its decision back to pending. Filing a new decision SHALL withdraw the queued action of the one it supersedes.
+
+#### Scenario: The relay never files it
+
+- **WHEN** the driver escalates S's decision and the relay never runs the `review_request`
+- **THEN** the driver can still answer the decision, and the queued action is failed as withdrawn
+
+#### Scenario: The claim abandons it
+
+- **WHEN** the `review_request` is failed when claimed, with no report
+- **THEN** S's decision is pending again, with the error, and can be escalated again
+
+### Requirement: The driver answers only the decision it read
+
+A driver's answer naming a decision id SHALL be refused when the session's open decision is another.
+
+#### Scenario: The worker re-filed meanwhile
+
+- **WHEN** the driver answers decision D1 after S has filed D2
+- **THEN** the answer is refused naming D2, and nothing is sent

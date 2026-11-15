@@ -133,6 +133,8 @@ export function mapError(toolName: string, err: unknown): CallToolResult {
     const hint =
       err.reason === "escalated"
         ? "Nothing was written. Wait for the person's decision on the review; it goes to the session by itself."
+        : err.reason === "superseded"
+          ? "Nothing was written. Read the session's current pendingDecision with brain_hangar_sessions and decide that one."
         : err.reason === "session_ended" || err.reason === "session_state"
           ? "Nothing was written. The session has ended; if it still holds a disk, release it with brain_hangar_outcome."
           : "Nothing was written. Read the session's pendingDecision with brain_hangar_sessions.";
@@ -142,7 +144,7 @@ export function mapError(toolName: string, err: unknown): CallToolResult {
     return actionable(err, "Nothing was escalated. Another review for this work item is still waiting for the laptop relay to file it; retry once it has.");
   }
   if (err instanceof InvalidRelayActionError && toolName === "brain_hangar_escalate") {
-    return actionable(err, "Nothing was escalated: the review could not be queued for the laptop relay. Shorten the card or body and retry.");
+    return actionable(err, "Nothing was escalated: the review's payload breaks the laptop relay's contract (the field is named above). Fix that field — usually a card or body over its limit — and retry.");
   }
 
   // --- Nodes (brain_write) ---
@@ -273,7 +275,9 @@ export function mapError(toolName: string, err: unknown): CallToolResult {
       err,
       err.kind === "state"
         ? "Nothing was set. Release a session only once it has stopped or failed (a merged or closed PR ends it); check its state with brain_hangar_sessions."
-        : "Nothing was set. Hangar has already released this session, so its outcome is final.",
+        : err.kind === "person"
+          ? "Nothing was set. A person decided this session's outcome; leave it as they set it."
+          : "Nothing was set. Hangar has already released this session, so its outcome is final.",
     );
   }
   if (err instanceof HangarSessionNotFoundError && toolName === "brain_hangar_outcome") {

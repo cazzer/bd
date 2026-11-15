@@ -28,6 +28,16 @@
 // (`unsafeRouteInboxDecisionInTx`) — never on anything a writer of the
 // review or the item could set, so the binding is the server's.
 //
+// The escalation stores the card the person is shown (`escalation.card`), so
+// an option they choose is checked against that card, not the worker's.
+// Until its review is filed (no `review_id` yet: the relay is offline, does
+// not know the kind, or failed it), the driver can still answer an escalated
+// decision, which withdraws the queued relay action; superseding one
+// withdraws it too, so no stale review is filed later and a later
+// escalation of the same work item is not blocked by it. An answer is
+// delivered while the session can still read it — queued (after a requeue:
+// the next worker reads the stream from the start), claimed, or running.
+//
 // The app makes no model call: all of this is pure Postgres.
 
 import { sql } from "drizzle-orm";
@@ -67,9 +77,13 @@ export interface HangarDecisionCard {
 }
 
 /** Where an escalated decision went (module header). */
+/** The card the person is shown on an escalation, without its evidence. */
+export type HangarEscalationCard = Pick<HangarDecisionCard, "question" | "options" | "recommend">;
+
 export type HangarEscalation =
-  | { via: "review"; project_key: string; issue_id: string; review_key: string; relay_action_id: number; review_id?: string; error?: string }
-  | { via: "inbox"; item_id: string };
+  | { via: "review"; project_key: string; issue_id: string; review_key: string; relay_action_id: number; card?: HangarEscalationCard; review_id?: string; error?: string }
+  /** `item_id` is null only while the item is being filed. */
+  | { via: "inbox"; item_id: string | null; card?: HangarEscalationCard };
 
 export interface HangarDecisionAnswer {
   decision: HangarDecideDecision;
@@ -293,13 +307,29 @@ async function sessionState(tx: Tx, sessionId: string, lock: "share" | "update")
   return row.state;
 }
 
+/** States that file a decision: a worker is running. */
 const LIVE_STATES = ["claimed", "running"];
+/** States an answer is delivered in: a requeued (queued) session's next worker reads its stream from the start (module header). */
+const DELIVERABLE_STATES = ["queued", "claimed", "running"];
 
-async function assertSessionLive(tx: Tx, sessionId: string): Promise<void> {
+async function assertSessionReads(tx: Tx, sessionId: string): Promise<void> {
   const state = await sessionState(tx, sessionId, "share");
-  if (state === null || !LIVE_STATES.includes(state)) {
+  if (state === null || !DELIVERABLE_STATES.includes(state)) {
     throw new HangarDecisionRefusedError(sessionId, "session_ended", state === null ? "no such hangar session" : `the session is ${state}, so it reads no more messages`);
   }
+}
+
+/** Whether an escalation's review has not been filed yet: queued for the relay, with no bead id recorded (module header). */
+export function hangarEscalationUnfiled(escalation: HangarEscalation | null): boolean {
+  return escalation !== null && escalation.via === "review" && escalation.review_id === undefined;
+}
+
+/** Fails a still-queued relay action Breakdown no longer wants run (a withdrawn or superseded escalation). A claimed one is the relay's already. */
+async function withdrawRelayActions(tx: Tx, where: ReturnType<typeof sql>, reason: string): Promise<void> {
+  await tx.execute(sql`
+    UPDATE relay_actions SET state = 'failed', finished_at = now(), error = ${reason}
+    WHERE kind = 'review_request' AND state = 'queued' AND id IN (${where})
+  `);
 }
 
 // --- Filing --------------------------------------------------------------------------------
@@ -339,6 +369,12 @@ export async function fileHangarDecision(db: Database, input: FileHangarDecision
     if (state === null || !LIVE_STATES.includes(state)) {
       throw new HangarDecisionRefusedError(sessionId, "session_state", state === null ? "no such hangar session" : `the session is ${state}; only a claimed or running session files a decision`);
     }
+    await withdrawRelayActions(
+      tx,
+      sql`SELECT (escalation->>'relay_action_id')::bigint FROM hangar_decisions
+          WHERE session_id = ${sessionId}::uuid AND state IN ('pending', 'escalated') AND escalation->>'via' = 'review' AND NOT (escalation ? 'review_id')`,
+      "withdrawn: the session filed a new decision before this review was filed",
+    );
     await tx.execute(sql`
       UPDATE hangar_decisions SET state = 'superseded', updated_at = now()
       WHERE session_id = ${sessionId}::uuid AND state IN ('pending', 'escalated')
@@ -401,6 +437,8 @@ async function resolveInTx(tx: Tx, decision: HangarDecision, answer: HangarDecis
 
 export interface DecideHangarDecisionInput {
   sessionId: string;
+  /** The decision the driver read; refused (`superseded`) when the session's open decision is another. */
+  decisionId?: string;
   decision: unknown;
   option?: unknown;
   note?: unknown;
@@ -416,8 +454,10 @@ export interface DecideHangarDecisionResult {
 /**
  * The driver answers its session's open decision (module header). Refused
  * (`HangarDecisionRefusedError`, nothing written) when the session has none,
- * when it was escalated (only the person answers it), and when the session
- * has ended. The answer is checked against the card
+ * when `decisionId` names another (`superseded`), when it was escalated and
+ * its review filed (only the person answers it), and when the session has
+ * ended. An escalation whose review is not filed yet is withdrawn: its
+ * queued relay action is failed. The answer is checked against the card
  * (`checkHangarDecisionAnswer`).
  */
 export async function decideHangarDecision(db: Database, input: DecideHangarDecisionInput): Promise<DecideHangarDecisionResult> {
@@ -426,11 +466,17 @@ export async function decideHangarDecision(db: Database, input: DecideHangarDeci
   return db.transaction(async (tx) => {
     const open = await lockOpenDecision(tx, sessionId);
     if (open === null) throw new HangarDecisionRefusedError(sessionId, "none", "the session has no decision waiting; it files one when it has a PR or a question");
-    if (open.state === "escalated") {
+    if (input.decisionId !== undefined && input.decisionId.toLowerCase() !== open.id) {
+      throw new HangarDecisionRefusedError(sessionId, "superseded", `decision ${input.decisionId} is no longer the session's open one; it now waits on ${open.id} ("${open.title}"): read it with brain_hangar_sessions`);
+    }
+    if (open.state === "escalated" && !hangarEscalationUnfiled(open.escalation)) {
       throw new HangarDecisionRefusedError(sessionId, "escalated", `decision ${open.id} was escalated to the person; only their decision on the review answers it`);
     }
     const answer = checkHangarDecisionAnswer(open, { decision: input.decision, option: input.option, note: input.note, by, via: "driver" });
-    await assertSessionLive(tx, sessionId);
+    await assertSessionReads(tx, sessionId);
+    if (open.escalation?.via === "review" && open.state === "escalated") {
+      await withdrawRelayActions(tx, sql`SELECT ${open.escalation.relay_action_id}::bigint`, "withdrawn: the driver decided it before the review was filed");
+    }
     const { messageId } = await resolveInTx(tx, open, answer, true);
     return { decision: { ...open, state: "decided", decision: answer }, messageId: messageId! };
   });
@@ -438,30 +484,60 @@ export async function decideHangarDecision(db: Database, input: DecideHangarDeci
 
 // --- Escalation bookkeeping (hangar-escalation.ts) -------------------------------------------------
 
+/** Refuses a decision that cannot be escalated now: none open, the one read is gone, or it is escalated already. Pure. */
+function assertEscalatable(sessionId: string, open: HangarDecision | null, decisionId?: string): HangarDecision {
+  if (open === null) throw new HangarDecisionRefusedError(sessionId, "none", "the session has no decision waiting to escalate");
+  if (decisionId !== undefined && decisionId !== open.id) throw new HangarDecisionRefusedError(sessionId, "superseded", `decision ${decisionId} was answered or superseded while it was being escalated; it now waits on ${open.id}`);
+  if (open.state === "escalated") throw new HangarDecisionRefusedError(sessionId, "escalated", `decision ${open.id} is already escalated to the person`);
+  return open;
+}
+
 /**
  * The session's open decision as it can be escalated: pending, with the
- * session live. Refused otherwise (`none`, `escalated`, `session_ended`).
- * Unlocked: the escalation files outside a transaction, and
- * `markHangarDecisionEscalated` decides.
+ * session still reading messages. Refused otherwise (`none`, `escalated`,
+ * `session_ended`). Unlocked: a read to build the escalation from;
+ * `unsafeLockEscalatableInTx` decides.
  */
 export async function getEscalatableHangarDecision(db: Database, sessionId: string): Promise<HangarDecision> {
   const id = sessionIdOf(sessionId);
   return db.transaction(async (tx) => {
-    const open = await lockOpenDecision(tx, id);
-    if (open === null) throw new HangarDecisionRefusedError(id, "none", "the session has no decision waiting to escalate");
-    if (open.state === "escalated") throw new HangarDecisionRefusedError(id, "escalated", `decision ${open.id} is already escalated to the person`);
-    await assertSessionLive(tx, id);
+    const open = assertEscalatable(id, await lockOpenDecision(tx, id));
+    await assertSessionReads(tx, id);
     return open;
   });
 }
 
-/** Marks a pending decision escalated with where it went; false when it is no longer pending (it was superseded or decided meanwhile). */
-export async function markHangarDecisionEscalated(db: Database, input: { id: string; escalation: HangarEscalation }): Promise<boolean> {
+/** `getEscalatableHangarDecision`'s locked check, in the caller's transaction, for the decision it read (`decisionId`). */
+export async function unsafeLockEscalatableInTx(tx: Tx, sessionId: string, decisionId: string): Promise<HangarDecision> {
+  const id = sessionIdOf(sessionId);
+  const open = assertEscalatable(id, await lockOpenDecision(tx, id), decisionId);
+  await assertSessionReads(tx, id);
+  return open;
+}
+
+/** Marks the decision locked by `unsafeLockEscalatableInTx` escalated, in the same transaction. */
+export async function unsafeMarkEscalatedInTx(tx: Tx, id: string, escalation: HangarEscalation): Promise<void> {
+  await tx.execute(sql`
+    UPDATE hangar_decisions SET state = 'escalated', escalation = ${JSON.stringify(escalation)}::jsonb, updated_at = now()
+    WHERE id = ${id}::uuid
+  `);
+}
+
+/** The fallback inbox item for an inbox escalation is filed: record its id, which the person's decision is matched on. */
+export async function recordHangarEscalationItem(db: Database, input: { id: string; itemId: string }): Promise<boolean> {
   const updated = await db.execute(sql`
-    UPDATE hangar_decisions SET state = 'escalated', escalation = ${JSON.stringify(input.escalation)}::jsonb, updated_at = now()
-    WHERE id = ${input.id}::uuid AND state = 'pending'
+    UPDATE hangar_decisions SET escalation = escalation || jsonb_build_object('item_id', ${input.itemId}::text), updated_at = now()
+    WHERE id = ${input.id}::uuid AND state = 'escalated' AND escalation->>'via' = 'inbox'
   `);
   return (updated.rowCount ?? 0) > 0;
+}
+
+/** Filing the fallback inbox item failed: the decision is pending again. */
+export async function revertHangarEscalation(db: Database, id: string): Promise<void> {
+  await db.execute(sql`
+    UPDATE hangar_decisions SET state = 'pending', escalation = NULL, updated_at = now()
+    WHERE id = ${id}::uuid AND state = 'escalated' AND escalation->>'via' = 'inbox' AND escalation->>'item_id' IS NULL
+  `);
 }
 
 /** The relay filed the escalation's review: record its bead id, which the person's decision is matched on. */
@@ -499,7 +575,9 @@ export interface RouteReviewDecisionInput {
  * A person decided a review: when it is an escalated hangar decision's
  * review (matched on its project and bead id, module header), the decision
  * is recorded and, while the session is live, appended to its messages.
- * Null when the review is no escalation's. Never throws for a mismatch: the
+ * An option is kept when the escalation's card offers it. Delivered while
+ * the session reads messages (DELIVERABLE_STATES). Null when the review is
+ * no escalation's. Never throws for a mismatch: the
  * review decision itself is already written.
  */
 export async function routeReviewDecision(db: Database, input: RouteReviewDecisionInput): Promise<{ decisionId: string; sessionId: string; messageId: number | null } | null> {
@@ -515,11 +593,13 @@ export async function routeReviewDecision(db: Database, input: RouteReviewDecisi
     const row = found.rows[0];
     if (row === undefined) return null;
     const decision = toDecision(row);
-    const offered = decision.card?.options ?? [];
+    // The person chose among the card they were shown: the escalation's, else (an escalation before cards were kept) the worker's.
+    const shown = decision.escalation?.card ?? decision.card;
+    const offered = shown?.options ?? [];
     const option = input.option !== undefined && offered.some((o) => o.id === input.option) ? input.option : undefined;
     const answer: HangarDecisionAnswer = { decision: input.decision, outcome: OUTCOME_OF[input.decision], ...(option === undefined ? {} : { option }), message: input.message.trim(), by: actorOf(input.by), via: "review" };
     const state = await sessionState(tx, decision.sessionId, "share");
-    const { messageId } = await resolveInTx(tx, decision, answer, state !== null && LIVE_STATES.includes(state));
+    const { messageId } = await resolveInTx(tx, decision, answer, state !== null && DELIVERABLE_STATES.includes(state));
     return { decisionId: decision.id, sessionId: decision.sessionId, messageId };
   });
 }

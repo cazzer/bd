@@ -73,7 +73,8 @@ import {
   REVIEW_DECISION_MESSAGE_REFUSED_CHARS,
   REVIEW_OPTION_ID_PATTERN,
 } from "./reviews.js";
-import { sqlArray } from "./sql-helpers.js";
+import { failHangarEscalation } from "./hangar-decisions.js";
+import { sqlArray, type Tx } from "./sql-helpers.js";
 import { PROJECT_KEY_PATTERN } from "./work-items.js";
 
 export { RELAY_ACTION_KINDS, RELAY_ACTION_STATES, type RelayActionKind, type RelayActionState };
@@ -394,7 +395,7 @@ export interface FindOpenRelayActionInput {
 }
 
 /** The queued or claimed action on a target, or null. Served by the open-target index. */
-export async function findOpenRelayAction(db: Database, input: FindOpenRelayActionInput): Promise<RelayAction | null> {
+export async function findOpenRelayAction(db: Database | Tx, input: FindOpenRelayActionInput): Promise<RelayAction | null> {
   const kind = relayKind(input.kind);
   if (kind === "herdr_prompt") throw new InvalidRelayActionError("kind", kind, "has no target: herdr prompts are never folded into one another");
   if (typeof input.projectKey !== "string" || !PROJECT_KEY_PATTERN.test(input.projectKey)) {
@@ -433,9 +434,11 @@ export interface EnqueueRelayActionResult {
  * and the allowlist. A second open action on a target already held is
  * refused with RelayActionPendingError naming the open one, except a
  * re-ingest, which answers the open re-ingest instead (`created: false`):
- * one pending re-ingest covers every request for it.
+ * one pending re-ingest covers every request for it. Takes a transaction
+ * too, so a caller can queue an action and record it atomically (a hangar
+ * escalation, hangar-escalation.ts).
  */
-export async function enqueueRelayAction(db: Database, input: EnqueueRelayActionInput): Promise<EnqueueRelayActionResult> {
+export async function enqueueRelayAction(db: Database | Tx, input: EnqueueRelayActionInput): Promise<EnqueueRelayActionResult> {
   const kind = relayKind(input.kind);
   const payload = parseRelayPayload(kind, input.payload);
   const requestedBy = requiredText("requestedBy", input.requestedBy, MAX_RELAY_FIELD_LENGTH);
@@ -551,6 +554,8 @@ export async function claimRelayAction(db: Database, input: ClaimRelayActionInpu
       }
       if (failure !== null) {
         await tx.execute(sql`UPDATE relay_actions SET state = 'failed', finished_at = now(), error = ${failure} WHERE id = ${row.id}::bigint`);
+        // No report follows a failure here, so the escalation it was filing goes back to its driver now (hangar-decisions.ts).
+        if (row.kind === "review_request") await failHangarEscalation(tx, { relayActionId: Number(row.id), error: failure });
         continue;
       }
 

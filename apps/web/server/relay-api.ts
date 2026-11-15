@@ -279,10 +279,10 @@ export function createRelayHandler({ db, readOnly = false, shutdownSignal, watch
         ...(body.error === undefined ? {} : { error: body.error }),
       });
       // A hangar escalation's review, or a person's decision on one, goes on to its session
-      // (core hangar-escalation.ts). The report is recorded either way.
-      if (!reported.alreadyFinished) {
-        await onRelayActionReported(db, reported.action).catch((err: unknown) => console.error(`[breakdown-web] relay action ${reported.action.id}: hangar follow-up failed:`, err));
-      }
+      // (core hangar-escalation.ts). The report is recorded either way. It runs on a repeated
+      // report too, from the stored action: the follow-up is idempotent, so a relay retrying a
+      // report whose answer was lost (or whose follow-up died with the server) completes it.
+      await onRelayActionReported(db, reported.action).catch((err: unknown) => console.error(`[breakdown-web] relay action ${reported.action.id}: hangar follow-up failed:`, err));
       sendJson(res, 200, { action: { id: reported.action.id, state: reported.action.state }, already_finished: reported.alreadyFinished });
     },
 

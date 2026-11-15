@@ -13,20 +13,22 @@ import { inArray, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { hangarDecisions, hangarMessages, nodes, relayActions, type Database } from "@breakdown/db";
 import { HangarDecisionRefusedError, InvalidHangarDecisionError } from "./errors.js";
-import { claimSession, readHangarMessages, requestSession, updateSession } from "./hangar.js";
+import { claimSession, getSessionsByIds, readHangarMessages, requeueSession, requestSession, setHangarSessionOutcome, updateSession } from "./hangar.js";
 import {
   decideHangarDecision,
   fileHangarDecision,
   getOpenHangarDecisions,
   normalizeHangarDecisionCard,
+  getHangarDecision,
   routeReviewDecision,
+  unsafeLockEscalatableInTx,
 } from "./hangar-decisions.js";
 import { escalateHangarDecision, hangarEscalationReviewKey, onRelayActionReported } from "./hangar-escalation.js";
-import { decideInboxItem, listInbox } from "./inbox.js";
+import { decideInboxItem, listInbox, requestInboxItem } from "./inbox.js";
 import { closeIngestRun, openIngestRun, type IngestRunHandle } from "./ingest-runs.js";
 import { upsertNodes } from "./nodes.js";
 import { isAllowedBdArgs, relayReviewCreateArgs, relayReviewListArgs } from "./relay-allowlist.js";
-import { claimRelayAction, parseRelayPayload, reportRelayAction } from "./relay.js";
+import { claimRelayAction, getRelayAction, parseRelayPayload, reportRelayAction } from "./relay.js";
 import { connectTestDb, uniqueSuffix, type TestPool } from "./test-helpers.js";
 
 let pool: TestPool;
@@ -224,8 +226,7 @@ describe("escalateHangarDecision to a review", () => {
     expect(isAllowedBdArgs(["update", `${PROJECT}-r1`, "--metadata", JSON.stringify({ review: payload.review })])).toBe(true);
     expect(isAllowedBdArgs(["dep", "add", payload.issue_id, `${PROJECT}-r1`, "--type", "blocks"])).toBe(true);
 
-    // The driver cannot decide it now, nor escalate it twice.
-    expect(await refusal(() => decideHangarDecision(db, { sessionId: s.id, decision: "accept", option: "a", actor: DRIVER }))).toMatchObject({ reason: "escalated" });
+    // It cannot be escalated twice.
     expect(await refusal(() => escalateHangarDecision(db, { sessionId: s.id, card: CARD, actor: DRIVER }))).toMatchObject({ reason: "escalated" });
 
     // The relay files it and reports the bead id.
@@ -234,6 +235,8 @@ describe("escalateHangarDecision to a review", () => {
     const reported = await reportRelayAction(db, { relay: RELAY, id: claimed!.id, state: "done", result: { review_id: `${PROJECT}-r1`, reused: false } });
     await onRelayActionReported(db, reported.action);
     expect((await getOpenHangarDecisions(db, [s.id])).get(s.id)?.escalation).toMatchObject({ via: "review", review_id: `${PROJECT}-r1` });
+    // Once the review is filed, only the person answers it: the driver's decide is refused.
+    expect(await refusal(() => decideHangarDecision(db, { sessionId: s.id, decision: "accept", option: "a", actor: DRIVER }))).toMatchObject({ reason: "escalated" });
 
     // A decision on some other review routes nowhere; the person's decision on this one reaches the session.
     expect(await routeReviewDecision(db, { projectKey: PROJECT, reviewId: `${PROJECT}-other`, decision: "accept", message: "", by: "human" })).toBeNull();
@@ -315,5 +318,142 @@ describe("the review_request relay payload", () => {
     expect(isAllowedBdArgs(create.map((a) => (a === "review" ? "review:changes" : a)))).toBe(false);
     expect(isAllowedBdArgs(["dep", "add", "bd-a1", "bd-r1", "--type", "related"])).toBe(false);
     expect(isAllowedBdArgs(relayReviewListArgs("bd-a1").map((a) => (a === "review" ? "x" : a)))).toBe(false);
+  });
+});
+
+describe("review fixes (PR #12)", () => {
+  const relayFiles = async (relayActionId: number, reviewId: string) => {
+    const claimed = await claimRelayAction(db, { relay: RELAY, kinds: ["review_request"], projects: [PROJECT], among: [relayActionId] });
+    expect(claimed?.id).toBe(relayActionId);
+    const reported = await reportRelayAction(db, { relay: RELAY, id: relayActionId, state: "done", result: { review_id: reviewId, reused: false } });
+    await onRelayActionReported(db, reported.action);
+    return reported;
+  };
+  const relayActionOf = (r: Awaited<ReturnType<typeof escalateHangarDecision>>) => (r.via === "review" ? r.relayActionId : -1);
+
+  it("1: an option the person picks on the escalation's card reaches the session, though the worker's decision had no card", async () => {
+    const s = await session({ beads: true });
+    await fileHangarDecision(db, { sessionId: s.id, kind: "question", title: "Which DB?" });
+    const escalated = await escalateHangarDecision(db, { sessionId: s.id, card: { question: "Postgres or SQLite?", options: [{ id: "a", label: "Postgres" }, { id: "b", label: "SQLite" }], recommend: "a" }, actor: DRIVER });
+    expect((await getOpenHangarDecisions(db, [s.id])).get(s.id)?.escalation).toMatchObject({ card: { question: "Postgres or SQLite?", recommend: "a", options: [{ id: "a" }, { id: "b" }] } });
+    await relayFiles(relayActionOf(escalated), `${PROJECT}-o1`);
+    await routeReviewDecision(db, { projectKey: PROJECT, reviewId: `${PROJECT}-o1`, decision: "accept", option: "b", message: "", by: "human" });
+    const [message] = (await readHangarMessages(db, { sessionId: s.id })).messages;
+    expect(message?.body).toMatchObject({ decision: "accept", option: "b", via: "review" });
+  });
+
+  it("2: a review_request the claim itself fails (abandoned) puts the decision back to pending, so the driver can decide or escalate again", async () => {
+    const s = await session({ beads: true });
+    await fileHangarDecision(db, { sessionId: s.id, kind: "question", title: "Q" });
+    const escalated = await escalateHangarDecision(db, { sessionId: s.id, card: CARD, actor: DRIVER });
+    await db.execute(sql`UPDATE relay_actions SET attempts = 3 WHERE id = ${relayActionOf(escalated)}`);
+    expect(await claimRelayAction(db, { relay: RELAY, kinds: ["review_request"], projects: [PROJECT], among: [relayActionOf(escalated)] })).toBeNull();
+    expect((await getRelayAction(db, relayActionOf(escalated)))?.state).toBe("failed");
+    expect((await getOpenHangarDecisions(db, [s.id])).get(s.id)).toMatchObject({ state: "pending", escalation: { error: expect.stringMatching(/abandoned/) } });
+    expect((await escalateHangarDecision(db, { sessionId: s.id, card: CARD, actor: DRIVER })).via).toBe("review");
+  });
+
+  it("2: the driver can still answer an escalation whose review is not filed yet, which withdraws the queued relay action", async () => {
+    const s = await session({ beads: true });
+    const filed = await fileHangarDecision(db, { sessionId: s.id, kind: "question", title: "Q" });
+    const escalated = await escalateHangarDecision(db, { sessionId: s.id, card: CARD, actor: DRIVER });
+    const decided = await decideHangarDecision(db, { sessionId: s.id, decisionId: filed.id, decision: "accept", note: "Relay is away; Postgres.", actor: DRIVER });
+    expect(decided.decision.state).toBe("decided");
+    expect(await getRelayAction(db, relayActionOf(escalated))).toMatchObject({ state: "failed", error: expect.stringMatching(/^withdrawn: the driver decided/) });
+    expect((await readHangarMessages(db, { sessionId: s.id })).messages[0]?.body).toMatchObject({ item_id: filed.id, via: "driver" });
+  });
+
+  it("2: a repeated report runs the follow-up again, so a review id lost with the first one is recorded", async () => {
+    const s = await session({ beads: true });
+    await fileHangarDecision(db, { sessionId: s.id, kind: "question", title: "Q" });
+    const escalated = await escalateHangarDecision(db, { sessionId: s.id, card: CARD, actor: DRIVER });
+    await claimRelayAction(db, { relay: RELAY, kinds: ["review_request"], projects: [PROJECT], among: [relayActionOf(escalated)] });
+    await reportRelayAction(db, { relay: RELAY, id: relayActionOf(escalated), state: "done", result: { review_id: `${PROJECT}-l1` } });
+    // The server died before its follow-up; the relay never got the answer and reports again.
+    const again = await reportRelayAction(db, { relay: RELAY, id: relayActionOf(escalated), state: "done", result: { review_id: `${PROJECT}-l1` } });
+    expect(again.alreadyFinished).toBe(true);
+    await onRelayActionReported(db, again.action);
+    expect((await getOpenHangarDecisions(db, [s.id])).get(s.id)?.escalation).toMatchObject({ review_id: `${PROJECT}-l1` });
+  });
+
+  it("3: superseding a queued escalation withdraws its relay action, and the new decision escalates on the same work item", async () => {
+    const s = await session({ beads: true });
+    await fileHangarDecision(db, { sessionId: s.id, kind: "question", title: "Q1" });
+    const first = await escalateHangarDecision(db, { sessionId: s.id, card: CARD, actor: DRIVER });
+    await fileHangarDecision(db, { sessionId: s.id, kind: "question", title: "Q2" });
+    expect(await getRelayAction(db, relayActionOf(first))).toMatchObject({ state: "failed", error: expect.stringMatching(/^withdrawn: the session filed a new decision/) });
+    const second = await escalateHangarDecision(db, { sessionId: s.id, card: CARD, actor: DRIVER });
+    expect(second.via).toBe("review");
+    expect(relayActionOf(second)).not.toBe(relayActionOf(first));
+  });
+
+  it("3: the escalation's lock refuses a decision superseded since it was read, so no relay action is queued for it", async () => {
+    const s = await session({ beads: true });
+    const read = await fileHangarDecision(db, { sessionId: s.id, kind: "question", title: "Q1" });
+    await fileHangarDecision(db, { sessionId: s.id, kind: "question", title: "Q2" });
+    expect(await refusal(() => db.transaction((tx) => unsafeLockEscalatableInTx(tx, s.id, read.id)))).toMatchObject({ reason: "superseded" });
+    expect(await db.select({ id: relayActions.id }).from(relayActions).where(sql`payload->>'issue_id' = ${s.workItem.externalId}`)).toEqual([]);
+  });
+
+  it("4: a body that starts with a markdown list or rule escalates: the description starts with its heading", async () => {
+    for (const body of ["- first bullet\n- second", "---\nA rule first."]) {
+      const s = await session({ beads: true });
+      await fileHangarDecision(db, { sessionId: s.id, kind: "question", title: "Q" });
+      const escalated = await escalateHangarDecision(db, { sessionId: s.id, card: { ...CARD, body }, actor: DRIVER });
+      const action = await getRelayAction(db, relayActionOf(escalated));
+      const payload = parseRelayPayload("review_request", action!.payload);
+      expect(payload.description.startsWith(`### Escalated by the hangar driver \`${DRIVER}\``)).toBe(true);
+      expect(payload.description).toContain(body);
+    }
+  });
+
+  it("5: nobody but the escalation writes its inbox item: the session's own resend at that key is refused", async () => {
+    const s = await session();
+    await fileHangarDecision(db, { sessionId: s.id, kind: "question", title: "Q" });
+    const escalated = await escalateHangarDecision(db, { sessionId: s.id, card: CARD, actor: DRIVER });
+    const itemId = escalated.via === "inbox" ? escalated.inboxItemId : "";
+    const [{ external_id: key } = { external_id: "" }] = (await db.execute<{ external_id: string }>(sql`SELECT external_id FROM nodes WHERE id = ${itemId}::uuid`)).rows;
+    const err = await refusal(() => requestInboxItem(db, { externalId: key, title: "Decide: rewritten", content: "pick b", metadata: { source: "hangar", options: [{ id: "a", label: "Delete prod" }, { id: "b", label: "SQLite" }] }, actor: `session-${s.id}`, session: s.id }));
+    expect((err as Error).name).toBe("ReservedInboxItemError");
+    expect((await listInbox(db, { ids: [itemId] })).items[0]).toMatchObject({ title: `Decide: ${CARD.question}`, options: CARD.options });
+  });
+
+  it("6: a driver never overwrites an outcome a person set, and its note is stored", async () => {
+    const s = await session({ state: "stopped" });
+    const set = await setHangarSessionOutcome(db, { id: s.id, outcome: "accepted", actor: DRIVER, via: "driver", note: "PR merged:\nhttps://github.com/cazzer/bd/pull/12" });
+    expect(set.session).toMatchObject({ outcome: "accepted", outcomeBy: DRIVER, outcomeVia: "driver", outcomeNote: "PR merged: https://github.com/cazzer/bd/pull/12" });
+    // A driver can change its own; a person can change the driver's, and then the driver can't.
+    expect((await setHangarSessionOutcome(db, { id: s.id, outcome: "tabled", actor: DRIVER, via: "driver" })).session).toMatchObject({ outcome: "tabled", outcomeNote: null });
+    expect((await setHangarSessionOutcome(db, { id: s.id, outcome: "accepted", actor: "phone" })).session).toMatchObject({ outcomeVia: "person", outcomeBy: "phone" });
+    expect(await refusal(() => setHangarSessionOutcome(db, { id: s.id, outcome: "tabled", actor: DRIVER, via: "driver" }))).toMatchObject({ kind: "person" });
+    expect((await setHangarSessionOutcome(db, { id: s.id, outcome: "accepted", actor: DRIVER, via: "driver" })).changed).toBe(false);
+    const [stored] = await getSessionsByIds(db, [s.id]);
+    expect(stored).toMatchObject({ outcome: "accepted", outcomeBy: "phone" });
+  });
+
+  it("7a: a decisionId the driver read is refused once the session has filed another", async () => {
+    const s = await session();
+    const read = await fileHangarDecision(db, { sessionId: s.id, kind: "question", title: "Q1" });
+    const current = await fileHangarDecision(db, { sessionId: s.id, kind: "question", title: "Q2" });
+    expect(await refusal(() => decideHangarDecision(db, { sessionId: s.id, decisionId: read.id, decision: "accept", actor: DRIVER }))).toMatchObject({ reason: "superseded" });
+    expect((await readHangarMessages(db, { sessionId: s.id })).messages).toEqual([]);
+    expect((await decideHangarDecision(db, { sessionId: s.id, decisionId: current.id, decision: "dismiss", actor: DRIVER })).decision.id).toBe(current.id);
+  });
+
+  it("7b: the person's decision reaches a requeued (queued) session's stream, for its next worker", async () => {
+    // Requeue is only from claimed: a session claimed, its decision escalated and filed, then given back.
+    const item = await workItem({ beads: true });
+    const { session: q } = await requestSession(db, { repo: "cazzer/bd", workItemId: item.id, flavor: "headless", actor: ACTOR, requestedAt: new Date(Date.UTC(2999, 0, 1)) });
+    sessionIds.push(q.id);
+    const hangar = `${ACTOR}-hangar`;
+    await claimSession(db, { hangar, flavors: ["headless"], among: [q.id] });
+    const filed = await fileHangarDecision(db, { sessionId: q.id, kind: "question", title: "Q" });
+    const escalated = await escalateHangarDecision(db, { sessionId: q.id, card: CARD, actor: DRIVER });
+    await relayFiles(relayActionOf(escalated), `${PROJECT}-q1`);
+    await requeueSession(db, { hangar, id: q.id, reason: "disk budget full" });
+    const routed = await routeReviewDecision(db, { projectKey: PROJECT, reviewId: `${PROJECT}-q1`, decision: "changes", message: "Use SQLite.", by: "phone" });
+    expect(routed?.messageId).toEqual(expect.any(Number));
+    expect((await readHangarMessages(db, { sessionId: q.id })).messages[0]?.body).toMatchObject({ item_id: filed.id, decision: "changes", via: "review" });
+    expect((await getHangarDecision(db, filed.id))?.state).toBe("decided");
   });
 });

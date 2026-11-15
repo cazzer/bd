@@ -36,9 +36,24 @@ With no registered beads project for the work item, the escalation files an inbo
 
 An escalated decision refuses `brain_hangar_decide`. Review decisions remain the `human`-only `reviewDecision` procedure. Session tokens are refused all three new tools.
 
+### 9. Review fixes (PR #12)
+
+- **The escalation keeps the card the person sees** (`escalation.card`: question, options, recommend), and the person's option is checked against it, not against the worker's card, which may have none.
+- **No stuck escalations.** Three things can leave a decision `escalated` with no review: a `review_request` the claim fails itself (abandoned, or a stored payload that breaks its schema), a relay that never runs the kind, and a crash between the report and its follow-up. In order:
+  - the claim path fails the escalation in its own transaction;
+  - the driver may answer an escalation whose review is not filed yet (no `review_id`), which withdraws the still-queued action;
+  - the relay API runs the follow-up on a repeated report too, since it is idempotent.
+- **Superseding withdraws.** Filing a new decision fails the queued `review_request` of the one it supersedes, so no stale review is filed later and the same work item can be escalated again. The review path queues its action in the transaction that marks the decision escalated, after re-locking the decision it read, so a racing decide or re-file leaves no orphan action. The inbox path marks first, then files the item; a failed filing reverts the mark.
+- **The description starts with a heading** naming the driver and session, so a body that opens with a markdown list or rule passes the relay's "never starts with `-`" argument rule.
+- **The fallback item's key is reserved** (`hangar-decision:`), like `hangar-outcome:`. Only the escalation writes it, so the worker it routes to cannot rewrite the card.
+- **Outcomes record who set them** (`outcome_via`: driver or person; a legacy one is a person's). A driver never overwrites a person's outcome. Its note is stored (`outcome_note`).
+- **`decisionId` on decide** refuses an answer to a decision the driver didn't read.
+- **Delivery to a requeued session.** A `queued` session (after a requeue) still gets its answer, since the next worker reads the stream from the start.
+
 ## Risks / Trade-offs
 
 - **The relay is in the path.** With the Mac asleep, an escalation waits; the session waits with it. That is the person's queue anyway.
 - **A superseded escalation leaves its review open.** If the session re-files after escalating, the review's eventual decision routes nowhere. Acceptable for now; closing it would need another relay action.
-- **Driver identity is any agent token.** Any `agent` token (not a session token) can decide any session's pending decision. Reasonably constrained, not ironclad: drivers and the person's own sessions share the scope today. Binding a session to its requesting client is a follow-up if needed.
+- **Driver identity is any agent token.** Any `agent` token (not a session token) can decide, release, or escalate any session. This is deliberate: a driver must be able to act on sessions another driver requested. There is no ownership check by requester.
+- **A withdrawn escalation the relay had already claimed** still files its review; that review routes nowhere.
 - **Version skew.** An older hangar keeps filing inbox items and keeps working; a newer hangar falls back on `404` from an older Breakdown.

@@ -35,22 +35,26 @@ import { getSessionsByIds } from "./hangar.js";
 import {
   failHangarEscalation,
   getEscalatableHangarDecision,
-  markHangarDecisionEscalated,
   normalizeHangarDecisionCard,
+  recordHangarEscalationItem,
   recordHangarEscalationReview,
+  revertHangarEscalation,
   routeReviewDecision,
+  unsafeLockEscalatableInTx,
+  unsafeMarkEscalatedInTx,
   type HangarDecision,
   type HangarDecisionCard,
+  type HangarEscalationCard,
 } from "./hangar-decisions.js";
-import { requestInboxItem } from "./inbox.js";
+import { HANGAR_DECISION_KEY_PREFIX, unsafeRequestEscalationInboxItem } from "./inbox.js";
 import { getNodes } from "./lookup.js";
 import { isRelayIssueId, MAX_RELAY_REVIEW_DESCRIPTION_LENGTH, MAX_RELAY_REVIEW_TITLE_LENGTH } from "./relay-allowlist.js";
 import { enqueueRelayAction, type RelayAction, type ReviewDecisionPayload } from "./relay.js";
 import { fitText } from "./fit-text.js";
 import { PROJECT_KEY_PATTERN } from "./work-items.js";
 
-/** The inbox key an escalation that falls back to the inbox files under. */
-export const HANGAR_ESCALATION_INBOX_KEY_PREFIX = "hangar-decision:";
+/** The inbox key an escalation that falls back to the inbox files under (reserved: inbox.ts `HANGAR_DECISION_KEY_PREFIX`). */
+export const HANGAR_ESCALATION_INBOX_KEY_PREFIX = HANGAR_DECISION_KEY_PREFIX;
 export const MAX_HANGAR_ESCALATION_NOTE_LENGTH = 2000;
 
 /** The review key an escalation's review carries: `hangar-` and the decision id's 32 hex digits (39 characters, within REVIEW_KEY_PATTERN). */
@@ -63,21 +67,25 @@ function reviewTitle(question: string): string {
   return fitText(`Review: ${question}`, MAX_RELAY_REVIEW_TITLE_LENGTH) as string;
 }
 
-/** The evidence the person reads: the driver's body, its note, and where the decision came from. */
+/**
+ * The evidence the person reads: a heading naming where the decision came
+ * from (first, so the description never starts with a markdown list or rule,
+ * which the relay's argument rule would refuse as a flag), the driver's
+ * body, and its note.
+ */
 export function hangarEscalationEvidence(decision: HangarDecision, card: HangarDecisionCard, context: { note?: string; driver: string; repo: string; workItem: string | null }): string {
-  const parts: string[] = [];
-  if (card.body !== undefined && card.body !== "") parts.push(card.body);
-  else if (decision.summary !== "") parts.push(decision.summary);
-  else parts.push(card.question);
-  if (context.note !== undefined && context.note !== "") parts.push(`**Why it comes to you** (${context.driver}): ${context.note}`);
+  const heading = `### Escalated by the hangar driver \`${context.driver}\``;
   const facts = [
-    `Escalated by the driver \`${context.driver}\` from hangar session \`${decision.sessionId}\` on \`${context.repo}\`${context.workItem === null ? "" : `, for work item \`${context.workItem}\``}.`,
+    `From hangar session \`${decision.sessionId}\` on \`${context.repo}\`${context.workItem === null ? "" : `, for work item \`${context.workItem}\``}.`,
     `The session asked: ${decision.kind === "pr" ? "review PR" : "question"} "${decision.title}"${decision.prUrl === null ? "" : ` (${decision.prUrl})`}.`,
     "Your decision goes to the session: accepting carries it out, sending it back with a note has it rework.",
   ];
-  parts.push(`---\n${facts.join(" ")}`);
-  const text = parts.join("\n\n");
-  return fitText(text, MAX_RELAY_REVIEW_DESCRIPTION_LENGTH) as string;
+  const parts: string[] = [`${heading}\n\n${facts.join(" ")}`];
+  if (context.note !== undefined && context.note !== "") parts.push(`**Why it comes to you:** ${context.note}`);
+  if (card.body !== undefined && card.body !== "") parts.push(card.body);
+  else if (decision.summary !== "") parts.push(decision.summary);
+  else parts.push(card.question);
+  return fitText(parts.join("\n\n"), MAX_RELAY_REVIEW_DESCRIPTION_LENGTH) as string;
 }
 
 export interface EscalateHangarDecisionInput {
@@ -98,10 +106,19 @@ export type EscalateHangarDecisionResult =
  * refused (`HangarDecisionRefusedError`) when it has none, it is already
  * escalated, or the session has ended. A review under the work item when it
  * has a registered beads project, an inbox item bound to the session
- * otherwise. Nothing is written when the card is refused.
+ * otherwise. The escalation records the card the person is shown, so their
+ * option is checked against it. The review's relay action is queued in the
+ * transaction that marks the decision escalated, so a racing decide or
+ * re-file leaves no orphan action; the inbox item is filed after the mark,
+ * which a failed filing reverts. Nothing is written when the card is refused.
  */
 export async function escalateHangarDecision(db: Database, input: EscalateHangarDecisionInput): Promise<EscalateHangarDecisionResult> {
   const card = normalizeHangarDecisionCard(input.card);
+  const shown: HangarEscalationCard = {
+    question: card.question,
+    ...(card.options === undefined ? {} : { options: card.options }),
+    ...(card.recommend === undefined ? {} : { recommend: card.recommend }),
+  };
   const note = input.note?.trim() === "" ? undefined : input.note?.trim().slice(0, MAX_HANGAR_ESCALATION_NOTE_LENGTH);
   const decision = await getEscalatableHangarDecision(db, input.sessionId);
   const [session] = await getSessionsByIds(db, [decision.sessionId]);
@@ -112,31 +129,22 @@ export async function escalateHangarDecision(db: Database, input: EscalateHangar
       ? await getRegisteredBeadsProject(db, project)
       : null;
   const evidence = hangarEscalationEvidence(decision, card, { ...(note === undefined ? {} : { note }), driver: input.actor, repo: session?.repo ?? "", workItem: workItem?.externalId ?? null });
-  const lost = () => new HangarDecisionRefusedError(decision.sessionId, "none", `decision ${decision.id} was answered or superseded while it was being escalated`);
 
   if (registered !== null && workItem !== null) {
     const reviewKey = hangarEscalationReviewKey(decision.id);
-    const review = {
-      images: [],
-      summary: card.question,
-      key: reviewKey,
-      question: card.question,
-      ...(card.options === undefined ? {} : { options: card.options }),
-      ...(card.recommend === undefined ? {} : { recommend: card.recommend }),
-      ...(card.on_accept === undefined ? {} : { on_accept: card.on_accept }),
-    };
-    const { action } = await enqueueRelayAction(db, {
-      kind: "review_request",
-      payload: { project_key: registered.key, cwd: registered.path, issue_id: workItem.externalId, title: reviewTitle(card.question), description: evidence, review },
-      requestedBy: input.actor,
-      originNodeId: workItem.id,
+    const review = { images: [], summary: card.question, key: reviewKey, ...shown, ...(card.on_accept === undefined ? {} : { on_accept: card.on_accept }) };
+    const relayActionId = await db.transaction(async (tx) => {
+      await unsafeLockEscalatableInTx(tx, decision.sessionId, decision.id);
+      const { action } = await enqueueRelayAction(tx, {
+        kind: "review_request",
+        payload: { project_key: registered.key, cwd: registered.path, issue_id: workItem.externalId, title: reviewTitle(card.question), description: evidence, review },
+        requestedBy: input.actor,
+        originNodeId: workItem.id,
+      });
+      await unsafeMarkEscalatedInTx(tx, decision.id, { via: "review", project_key: registered.key, issue_id: workItem.externalId, review_key: reviewKey, relay_action_id: action.id, card: shown });
+      return action.id;
     });
-    const marked = await markHangarDecisionEscalated(db, {
-      id: decision.id,
-      escalation: { via: "review", project_key: registered.key, issue_id: workItem.externalId, review_key: reviewKey, relay_action_id: action.id },
-    });
-    if (!marked) throw lost();
-    return { via: "review", decisionId: decision.id, projectKey: registered.key, workItem: workItem.externalId, reviewKey, relayActionId: action.id };
+    return { via: "review", decisionId: decision.id, projectKey: registered.key, workItem: workItem.externalId, reviewKey, relayActionId };
   }
 
   const reason =
@@ -147,26 +155,35 @@ export async function escalateHangarDecision(db: Database, input: EscalateHangar
         : project === null
           ? "its work item names no beads project"
           : `beads project "${project}" has no registered checkout`;
-  const filed = await requestInboxItem(db, {
-    externalId: `${HANGAR_ESCALATION_INBOX_KEY_PREFIX}${decision.id}`,
-    title: fitText(`Decide: ${card.question}`, 200) as string,
-    content: evidence,
-    metadata: {
-      source: "hangar",
-      action: decision.kind === "question" ? "reply" : "decide",
-      from: `hangar driver ${input.actor}`.slice(0, 200),
-      question: card.question,
-      ...(card.options === undefined ? {} : { options: card.options }),
-      ...(card.recommend === undefined ? {} : { recommend: card.recommend }),
-      ...(card.on_accept === undefined ? {} : { on_accept: card.on_accept }),
-      ...(decision.prUrl === null ? {} : { links: [{ label: "PR", url: decision.prUrl }] }),
-      priority: 1,
-    },
-    actor: input.actor,
-    session: decision.sessionId,
+  await db.transaction(async (tx) => {
+    await unsafeLockEscalatableInTx(tx, decision.sessionId, decision.id);
+    await unsafeMarkEscalatedInTx(tx, decision.id, { via: "inbox", item_id: null, card: shown });
   });
-  const marked = await markHangarDecisionEscalated(db, { id: decision.id, escalation: { via: "inbox", item_id: filed.id } });
-  if (!marked) throw lost();
+  let filed;
+  try {
+    filed = await unsafeRequestEscalationInboxItem(db, {
+      externalId: `${HANGAR_ESCALATION_INBOX_KEY_PREFIX}${decision.id}`,
+      title: fitText(`Decide: ${card.question}`, 200) as string,
+      content: evidence,
+      metadata: {
+        source: "hangar",
+        action: decision.kind === "question" ? "reply" : "decide",
+        from: `hangar driver ${input.actor}`.slice(0, 200),
+        ...shown,
+        ...(card.on_accept === undefined ? {} : { on_accept: card.on_accept }),
+        ...(decision.prUrl === null ? {} : { links: [{ label: "PR", url: decision.prUrl }] }),
+        priority: 1,
+      },
+      actor: input.actor,
+      session: decision.sessionId,
+    });
+  } catch (err) {
+    await revertHangarEscalation(db, decision.id);
+    throw err;
+  }
+  if (!(await recordHangarEscalationItem(db, { id: decision.id, itemId: filed.id }))) {
+    throw new HangarDecisionRefusedError(decision.sessionId, "superseded", `decision ${decision.id} was superseded while its inbox item was filed; the item routes nowhere`);
+  }
   return { via: "inbox", decisionId: decision.id, inboxItemId: filed.id, reason };
 }
 

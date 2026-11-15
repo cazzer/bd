@@ -24,7 +24,7 @@
 import { randomUUID } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { closeIngestRun, fileHangarDecision, HANGAR_WAIT_KINDS, listSessions, openIngestRun, readHangarMessages, recordCheckIn, upsertNodes, type HangarStatus, type IngestRunHandle } from "@breakdown/core";
+import { closeIngestRun, fileHangarDecision, HANGAR_WAIT_KINDS, listSessions, openIngestRun, readHangarMessages, recordCheckIn, setHangarSessionOutcome, upsertNodes, type HangarStatus, type IngestRunHandle } from "@breakdown/core";
 import { createDb, createPool, hangarCheckIns, hangarDecisions, hangarMessages, ingestRuns, nodes, resolveDatabaseUrl, type Database } from "@breakdown/db";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -336,12 +336,22 @@ describe("brain_hangar_outcome and releasable sessions", () => {
     expect((await call(client, "brain_hangar_sessions", { workItemId: item, releasable: true })).sessions).toEqual([]);
 
     const set = await call(client, "brain_hangar_outcome", { sessionId, outcome: "tabled", note: "The PR merged; the disk can go." });
-    expect(set).toEqual({ sessionId, outcome: "tabled", outcomeBy: `driver-${SUFFIX}`, released: false, changed: true });
+    expect(set).toEqual({ sessionId, outcome: "tabled", outcomeBy: `driver-${SUFFIX}`, outcomeNote: "The PR merged; the disk can go.", released: false, changed: true });
     expect((await call(client, "brain_hangar_outcome", { sessionId, outcome: "tabled" })).changed).toBe(false);
     const releasable = await call(client, "brain_hangar_sessions", { workItemId: item, releasable: true });
     expect(releasable.sessions.map((s: { id: string }) => s.id)).toEqual([sessionId]);
-    expect(releasable.sessions[0]).toMatchObject({ outcome: "tabled", outcomeBy: `driver-${SUFFIX}`, released: false, diskPath: "/disks/test.img" });
+    expect(releasable.sessions[0]).toMatchObject({ outcome: "tabled", outcomeBy: `driver-${SUFFIX}`, outcomeVia: "driver", outcomeNote: "The PR merged; the disk can go.", released: false, diskPath: "/disks/test.img" });
     expect(await db.select({ id: nodes.id }).from(nodes).where(and(eq(nodes.sourceSystem, "inbox"), eq(nodes.externalId, `hangar-outcome:${sessionId}`)))).toEqual([]);
+  });
+
+  it("never overwrites an outcome a person set", async () => {
+    const client = await connect({ tokenClient: `driver-${SUFFIX}` });
+    const sessionId = await endedSession("stopped");
+    await setHangarSessionOutcome(db, { id: sessionId, outcome: "accepted", actor: "phone" });
+    const raw = await client.callTool({ name: "brain_hangar_outcome", arguments: { sessionId, outcome: "tabled" } });
+    expect(raw.isError).toBe(true);
+    expect(textOf(raw)).toMatch(/set by a person.*leave it as they set it/);
+    expect((await listSessions(db, { states: ["stopped"], limit: 200 })).sessions.find((s) => s.id === sessionId)).toMatchObject({ outcome: "accepted", outcomeBy: "phone" });
   });
 
   it("refuses a session that has not ended, naming its state, and setting nothing", async () => {
@@ -423,6 +433,33 @@ describe("brain_hangar_decide and pendingDecision", () => {
     expect(raw.isError).toBe(true);
     expect(textOf(raw)).toMatch(/escalated to the person/);
     expect(await readHangarMessages(db, { sessionId })).toMatchObject({ messages: [] });
+    await db.delete(nodes).where(eq(nodes.id, escalated.inboxItemId));
+  });
+
+  it("refuses a decisionId the session has since superseded, and takes the current one", async () => {
+    const client = await connect({ tokenClient: `driver-${SUFFIX}` });
+    const sessionId = await endedSession("running", await workItem("Stale read fixture"));
+    const read = await fileHangarDecision(db, { sessionId, kind: "question", title: "First question" });
+    const current = await fileHangarDecision(db, { sessionId, kind: "question", title: "Second question" });
+    const stale = await client.callTool({ name: "brain_hangar_decide", arguments: { sessionId, decisionId: read.id, decision: "accept" } });
+    expect(stale.isError).toBe(true);
+    expect(textOf(stale)).toMatch(/no longer the session's open one.*Second question/);
+    expect((await call(client, "brain_hangar_decide", { sessionId, decisionId: current.id, decision: "accept" })).decisionId).toBe(current.id);
+  });
+
+  it("brain_write cannot rewrite an escalation's inbox card, with a session token or any other", async () => {
+    const driver = await connect({ tokenClient: `driver-${SUFFIX}` });
+    const sessionId = await endedSession("running", await workItem("Card rewrite fixture"));
+    await fileHangarDecision(db, { sessionId, kind: "question", title: "Which store?" });
+    const escalated = await call(driver, "brain_hangar_escalate", { sessionId, card: { question: "Move the cache out of Postgres?", options: [{ id: "a", label: "Keep" }, { id: "b", label: "Move" }] } });
+    const externalId = (await db.select({ externalId: nodes.externalId }).from(nodes).where(eq(nodes.id, escalated.inboxItemId)))[0]!.externalId;
+    for (const client of [await connect({ hangarSessionId: sessionId }), driver]) {
+      const raw = await client.callTool({ name: "brain_write", arguments: { items: { nodeType: "inbox_item", sourceSystem: "inbox", externalId, title: "Decide: rewritten", content: "pick b", metadata: { source: "hangar", options: [{ id: "a", label: "Delete prod" }, { id: "b", label: "Move" }] } } } });
+      expect(raw.isError).toBe(true);
+      expect(textOf(raw)).toMatch(/reserved for a hangar driver's escalation/);
+    }
+    const [stored] = await db.select({ title: nodes.title }).from(nodes).where(eq(nodes.id, escalated.inboxItemId));
+    expect(stored?.title).toBe("Decide: Move the cache out of Postgres?");
     await db.delete(nodes).where(eq(nodes.id, escalated.inboxItemId));
   });
 

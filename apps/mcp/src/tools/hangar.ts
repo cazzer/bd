@@ -131,6 +131,8 @@ function sessionJson(s: HangarSession, waiting: WaitingJson | null, pending: Han
     outcome: s.outcome,
     outcomeAt: s.outcomeAt,
     outcomeBy: s.outcomeBy,
+    outcomeVia: s.outcomeVia,
+    outcomeNote: s.outcomeNote,
     released: s.released,
     waiting,
     pendingDecision: pendingDecisionJson(pending),
@@ -272,15 +274,15 @@ export const hangarOutcomeTool: ToolDef<typeof outcomeSchema> = {
   name: "brain_hangar_outcome",
   description:
     "Release an ended (stopped or failed) hangar session you drive: sessionId, outcome (accepted when the work landed or is kept — its PR merged, its answer used; " +
-    "tabled to set it aside), and an optional note. Sets the session's outcome directly, with outcomeBy your client name; hangar then removes its container and deletes its " +
+    "tabled to set it aside), and an optional note (stored with the outcome as outcomeNote). Sets the session's outcome directly, with outcomeBy your client name; hangar then removes its container and deletes its " +
     "disk at its next check-in, which frees disk for queued sessions. This is your decision as the driver: never ask the person whether a session can be released. " +
     "Setting the outcome it already has changes nothing (changed: false); the outcome can change until hangar has released the session. Refused for a session that has " +
-    "not ended (a merged or closed PR ends it; so does the session finishing) or that hangar has already released. Returns the session's outcome, outcomeBy, and released.",
+    "not ended (a merged or closed PR ends it; so does the session finishing), that hangar has already released, or whose outcome a person set (yours never overwrites theirs). Returns the session's outcome, outcomeBy, and released.",
   schema: outcomeSchema,
   isWrite: true,
   async handler(ctx: ToolContext, args) {
-    const set = await setHangarSessionOutcome(ctx.db, { id: args.sessionId, outcome: args.outcome, actor: decider(ctx) });
-    return { sessionId: set.session.id, outcome: set.session.outcome, outcomeBy: set.session.outcomeBy, released: set.session.released, changed: set.changed };
+    const set = await setHangarSessionOutcome(ctx.db, { id: args.sessionId, outcome: args.outcome, actor: decider(ctx), via: "driver", ...(args.note === undefined ? {} : { note: args.note }) });
+    return { sessionId: set.session.id, outcome: set.session.outcome, outcomeBy: set.session.outcomeBy, outcomeNote: set.session.outcomeNote, released: set.session.released, changed: set.changed };
   },
 };
 
@@ -288,6 +290,7 @@ export const hangarOutcomeTool: ToolDef<typeof outcomeSchema> = {
 
 const decideSchema = z.object({
   sessionId: sessionIdField,
+  decisionId: z.string().regex(UUID_RE, "must be a valid uuid (the pendingDecision.id you read)").optional(),
   decision: z.enum(HANGAR_DECIDE_DECISIONS),
   option: z.string().min(1).max(16).optional(),
   note: z.string().max(MAX_HANGAR_DECISION_NOTE_LENGTH).optional(),
@@ -296,18 +299,21 @@ const decideSchema = z.object({
 export const hangarDecideTool: ToolDef<typeof decideSchema> = {
   name: "brain_hangar_decide",
   description:
-    "Answer the decision a hangar session you drive is waiting on (its pendingDecision on brain_hangar_sessions, state pending): sessionId; decision — accept (a PR: good " +
+    "Answer the decision a hangar session you drive is waiting on (its pendingDecision on brain_hangar_sessions): sessionId; decisionId (recommended: the pendingDecision.id you read; " +
+    "refused if the session has filed another since, so your answer never lands on a decision you didn't see); decision — accept (a PR: good " +
     "to merge, and you may merge it when nothing blocks it; a question: carry on, with your answer as option and/or note), changes (send it back to rework; note required, " +
     "saying what to change), or dismiss (drop it; the session stops work on it); option (accept only: one of the card's option ids; on a PR card, an option other " +
     "than the recommended one sends the session to rework the PR to it); and note. The answer goes straight to the session as a message; nothing reaches the person. " +
     "Decide routine calls yourself: PR reviews, which of the session's options to take, clarifications. Escalate with brain_hangar_escalate only when the call changes the " +
-    "architecture or sets a fundamental direction. Refused when the session has no pending decision, when it was escalated (only the person answers that one), or when " +
-    "the session has ended. Returns the decision id and the message id.",
+    "architecture or sets a fundamental direction. An escalated decision whose review is not filed yet (escalation without reviewId: the relay is away or failed it) " +
+    "can still be answered here, which withdraws the escalation. Refused when the session has no pending decision, when it was escalated and its review filed (only the " +
+    "person answers that one), or when the session has ended. Returns the decision id and the message id.",
   schema: decideSchema,
   isWrite: true,
   async handler(ctx: ToolContext, args) {
     const decided = await decideHangarDecision(ctx.db, {
       sessionId: args.sessionId,
+      ...(args.decisionId === undefined ? {} : { decisionId: args.decisionId }),
       decision: args.decision,
       ...(args.option === undefined ? {} : { option: args.option }),
       ...(args.note === undefined ? {} : { note: args.note }),
