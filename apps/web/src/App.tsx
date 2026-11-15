@@ -3,7 +3,7 @@
 // (src/components/GraphView.tsx, where everything this file used to be
 // now lives, verbatim), FeedView under `/feed`, CodeView under `/code`,
 // or TimelineView under `/timeline` (the last two lazy — see their
-// imports below), and the board, the inbox, and SearchView under `/search`
+// imports below), and the board, the roadmap, the inbox, and SearchView under `/search`
 // (search-results-view), lazy too. It re-reads `location`
 // on `popstate` and whenever a view calls the shared `navigate`
 // (lib/navigate.ts), which notifies the subscriber registered below
@@ -70,6 +70,9 @@ const TimelineView = lazy(async () => ({ default: (await import("./components/Ti
 // The board (live-beads-board): lazy like the timeline; a placeholder until
 // the board component lands (task group 4).
 const BoardView = lazy(async () => ({ default: (await import("./components/BoardView.js")).BoardView }));
+
+// The roadmap (roadmap-milestones): lazy like the board.
+const RoadmapView = lazy(async () => ({ default: (await import("./components/RoadmapView.js")).RoadmapView }));
 
 // The inbox: lazy like the board.
 const InboxView = lazy(async () => ({ default: (await import("./components/InboxView.js")).InboxView }));
@@ -150,6 +153,12 @@ function renderView(route: Route) {
       return (
         <Suspense fallback={LOADING_VIEW}>
           <BoardView key="board" viewId={route.viewId} projects={route.projects} item={route.item} />
+        </Suspense>
+      );
+    case "roadmap":
+      return (
+        <Suspense fallback={LOADING_VIEW}>
+          <RoadmapView key="roadmap" projects={route.projects} item={route.item} />
         </Suspense>
       );
     case "inbox":

@@ -14,16 +14,14 @@ import {
   PROJECT_KEY_PATTERN,
   pruneHighlights,
   readableProjects,
-  toggleChip,
   type BoardCardRow,
   type BoardEpicRow,
 } from "./boardRow.js";
-import { formatRoute, parseRoute } from "./route.js";
 
 function card(id: string, over: Partial<BoardCardRow> = {}): BoardCardRow {
   return { id, externalId: id, title: id, project: "p", priority: 2, issueType: "task", column: "ready", epicId: null, blockedFlag: false, updatedAt: "2026-10-01T00:00:00.000Z", review: false, ...over };
 }
-const epic = (id: string, status = "open", title = id): BoardEpicRow => ({ id, title, status, project: "p" });
+const epic = (id: string, status = "open", title = id, milestone: BoardEpicRow["milestone"] = null): BoardEpicRow => ({ id, title, status, project: "p", milestone });
 
 describe("columns", () => {
   it("run Ready, Blocked, In progress, Deferred, Closed and match core's ids and pattern", () => {
@@ -66,6 +64,11 @@ describe("buildLanes", () => {
     expect(lane!.collapsedByDefault).toBe(false);
   });
 
+  it("names each lane epic's milestone, and none for No epic or an epic without one", () => {
+    const lanes = buildLanes([card("a", { epicId: "e1" }), card("b")], [epic("e1", "open", "A", { id: "m1", title: "Ship v1" }), epic("e2", "open", "B")]);
+    expect(lanes.map((l) => [l.title, l.milestone])).toEqual([["A", "Ship v1"], ["B", null], ["No epic", null]]);
+  });
+
   it("keeps an epic with no cards as a header-only lane and omits an empty No epic lane", () => {
     const lanes = buildLanes([], [epic("e")]);
     expect(lanes.map((l) => [l.title, l.cardCount])).toEqual([["e", 0]]);
@@ -98,32 +101,6 @@ describe("chips", () => {
     expect(chosenChips(offered, [])).toEqual(offered);
     expect(chosenChips(offered, ["nope"])).toEqual(offered);
     expect(chosenChips(offered, ["c", "a", "nope"])).toEqual(["a", "c"]);
-  });
-
-  it("toggles in chip order, spells all-selected as an empty address, and keeps the last chip", () => {
-    const offered = ["a", "b", "c"];
-    expect(toggleChip(offered, [], "b")).toEqual(["a", "c"]);
-    expect(toggleChip(offered, ["a", "c"], "b")).toEqual([]);
-    expect(toggleChip(offered, ["c", "a"], "a")).toEqual(["c"]);
-    expect(toggleChip(offered, ["c"], "c")).toEqual(["c"]);
-    expect(toggleChip(["a"], [], "a")).toEqual([]);
-  });
-
-  it("toggles against a stale address by first reducing it to the offered chips", () => {
-    const offered = ["a", "b", "c"];
-    expect(toggleChip(offered, ["gone", "b"], "a")).toEqual(["a", "b"]);
-    expect(toggleChip(offered, ["gone"], "b")).toEqual(["a", "c"]);
-    expect(toggleChip(offered, ["gone", "b"], "b")).toEqual(["b"]);
-  });
-
-  it("round-trips the toggled selection through the address", () => {
-    const offered = ["a", "b", "c"];
-    const projects = toggleChip(offered, [], "b");
-    const url = formatRoute({ view: "board", viewId: "v1", projects, item: null });
-    expect(url).toBe("/board?view=v1&project=a&project=c");
-    const route = parseRoute("/board", url.slice(url.indexOf("?")));
-    expect(route).toEqual({ view: "board", viewId: "v1", projects, item: null });
-    expect(chosenChips(offered, route && route.view === "board" ? route.projects : [])).toEqual(["a", "c"]);
   });
 
   it("drops keys the server would refuse and caps the list", () => {

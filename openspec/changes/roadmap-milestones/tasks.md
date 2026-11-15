@@ -18,11 +18,11 @@
 
 ## 3. Board switcher and Board/Roadmap toggle
 
-- [ ] 3.1 `lib/route.ts`: `RoadmapRoute` (`/roadmap?project=&item=`) parse/format with tests; unknown-path redirect unchanged
-- [ ] 3.2 Project switcher component (menu button: "All projects", each offered project, "N projects" label for a multi-project address) replacing the chip row in `BoardView`; choosing replaces/drops `project`; keyboard-operable; tests on the pure choose→route logic
-- [ ] 3.3 Board/Roadmap toggle in the board header, carrying projects and dropping `item`
-- [ ] 3.4 Lane header shows the epic's milestone title
-- [ ] 3.5 Live check against a local stack (headless Playwright per the `headless-live-check` memory): switch project, toggle, reload reproduces; screenshots attached to a review request
+- [x] 3.1 `lib/route.ts`: `RoadmapRoute` (`/roadmap?project=&item=`) parse/format with tests; unknown-path redirect unchanged
+- [x] 3.2 Project switcher component (menu button: "All projects", each offered project, "N projects" label for a multi-project address) replacing the chip row in `BoardView`; choosing replaces/drops `project`; keyboard-operable; tests on the pure choose→route logic
+- [x] 3.3 Board/Roadmap toggle in the board header, carrying projects and dropping `item`
+- [x] 3.4 Lane header shows the epic's milestone title
+- [x] 3.5 Live check against a local stack (headless Playwright per the `headless-live-check` memory): switch project, toggle, reload reproduces; screenshots attached to a review request
 
 ## 4. Roadmap view
 

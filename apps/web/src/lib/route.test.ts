@@ -9,7 +9,7 @@
 // parameters and nothing else).
 
 import { describe, expect, it } from "vitest";
-import { BOARD_VIEW_PATH, CODE_VIEW_PATH, FEED_VIEW_PATH, formatRoute, GRAPH_VIEW_PATH, graphRouteFromSearch, parseRoute, SEARCH_VIEW_PATH, TIMELINE_VIEW_PATH, type BoardRoute, type CodeRoute, type FeedRoute, type GraphRoute, type Route, type SearchRoute, type TimelineRoute } from "./route.js";
+import { BOARD_VIEW_PATH, CODE_VIEW_PATH, FEED_VIEW_PATH, formatRoute, GRAPH_VIEW_PATH, graphRouteFromSearch, parseRoute, ROADMAP_VIEW_PATH, SEARCH_VIEW_PATH, TIMELINE_VIEW_PATH, type BoardRoute, type CodeRoute, type FeedRoute, type GraphRoute, type RoadmapRoute, type Route, type SearchRoute, type TimelineRoute } from "./route.js";
 
 function graph(partial: Partial<Omit<GraphRoute, "view">> = {}): GraphRoute {
   return { view: "graph", q: null, types: [], node: null, ...partial };
@@ -428,6 +428,36 @@ describe("board route", () => {
 
   it("round-trips with an item, including characters that need escaping", () => {
     for (const r of [board(null, [], "bd-1"), board("v1", ["tides"], "tides-r1"), board(null, ["a"], "x y&z=#?")]) {
+      expect(roundTrip(r)).toEqual(r);
+    }
+  });
+});
+
+describe("roadmap route (roadmap-milestones)", () => {
+  function roadmap(projects: string[] = [], item: string | null = null): RoadmapRoute {
+    return { view: "roadmap", projects, item };
+  }
+
+  it("parses /roadmap with its projects in order and its item", () => {
+    expect(ROADMAP_VIEW_PATH).toBe("/roadmap");
+    expect(parseRoute("/roadmap", "?project=skyos")).toEqual(roadmap(["skyos"]));
+    expect(parseRoute("/roadmap/", "?project=tides&project=bd&item=tides-r1")).toEqual(roadmap(["tides", "bd"], "tides-r1"));
+    expect(parseRoute("/roadmap", "")).toEqual(roadmap());
+  });
+
+  it("degrades malformed parameters the board's way and ignores the board's view", () => {
+    expect(parseRoute("/roadmap", "?view=v1&project=&project=%20a%20&project=a&item=%20&q=x")).toEqual(roadmap(["a"]));
+    expect(parseRoute("/roadmap/x", "")).toBeNull();
+  });
+
+  it("formats each project in order, then item, and omits absent ones", () => {
+    expect(formatRoute(roadmap())).toBe("/roadmap");
+    expect(formatRoute(roadmap(["b", "a"]))).toBe("/roadmap?project=b&project=a");
+    expect(formatRoute(roadmap([], "bd-1"))).toBe("/roadmap?item=bd-1");
+  });
+
+  it("round-trips", () => {
+    for (const r of [roadmap(), roadmap(["skyos"]), roadmap(["tides", "sky.os"], "x y&z=#?")]) {
       expect(roundTrip(r)).toEqual(r);
     }
   });

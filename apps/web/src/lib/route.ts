@@ -7,7 +7,7 @@
 // `Route` is a discriminated union on `view`: the graph view, — node-
 // views, design.md decision 5 — the feed view, — code-view, design.md
 // decision 2 — the code view, — timeline-view, design.md decision 4 —
-// the timeline view, the board, the inbox, and — search-results-view,
+// the timeline view, the board, the roadmap, the inbox, and — search-results-view,
 // design.md decision 6 — the search results view. Another way of looking at the same items is added by
 // widening the union and teaching `parseRoute`/`formatRoute` its name;
 // nothing about the existing views has to move, which is exactly what
@@ -40,6 +40,9 @@ export const TIMELINE_VIEW_PATH = "/timeline";
 
 /** The board view's path (live-beads-board). `parseRoute` also accepts it with one trailing slash. */
 export const BOARD_VIEW_PATH = "/board";
+
+/** The roadmap view (roadmap-milestones, design.md decision 6). `parseRoute` also accepts it with one trailing slash. */
+export const ROADMAP_VIEW_PATH = "/roadmap";
 
 /** The inbox view (inbox.ts in core). `parseRoute` also accepts it with one trailing slash. */
 export const INBOX_VIEW_PATH = "/inbox";
@@ -111,6 +114,19 @@ export interface BoardRoute {
 }
 
 /**
+ * The roadmap (roadmap-milestones, design.md decision 6): the chosen
+ * project keys as repeated `project` parameters, the board's rule, and the
+ * external id of the item whose drawer is open. An empty `projects` is
+ * every registered project; `null` for the item means no drawer is open.
+ * A route, not a view-node renderer, so it has no `view` parameter.
+ */
+export interface RoadmapRoute {
+  view: "roadmap";
+  projects: string[];
+  item: string | null;
+}
+
+/**
  * The inbox: the selected item — an inbox item's id, or `<project>/<bead>`
  * for a board review listed in Needs me — or `null` for the first one; and
  * the source filter (`review`, or an inbox source such as `gmail`), or
@@ -138,7 +154,7 @@ export interface SearchRoute {
 }
 
 /** Every addressable view. A future view widens this union. */
-export type Route = GraphRoute | FeedRoute | CodeRoute | TimelineRoute | BoardRoute | InboxRoute | SearchRoute;
+export type Route = GraphRoute | FeedRoute | CodeRoute | TimelineRoute | BoardRoute | RoadmapRoute | InboxRoute | SearchRoute;
 
 /** `s` trimmed, or `null` when it is missing or whitespace-only — mirrors `runSearch`'s own trim, so `?q=%20` and no `q` at all mean the same thing. */
 function nonEmpty(s: string | null): string | null {
@@ -222,6 +238,12 @@ function boardRouteFromSearch(search: string): BoardRoute {
   return { view: "board", viewId: nonEmpty(params.get("view")), projects: projectsFrom(params), item: nonEmpty(params.get("item")) };
 }
 
+/** The roadmap's parameters from a query string alone: `project` through the board's collector, `item` through the same trim; anything else (a board's `view` included) is ignored. */
+function roadmapRouteFromSearch(search: string): RoadmapRoute {
+  const params = new URLSearchParams(search);
+  return { view: "roadmap", projects: projectsFrom(params), item: nonEmpty(params.get("item")) };
+}
+
 /** Every `project` parameter, trimmed, empties dropped, duplicates collapsed to their first occurrence, order otherwise kept — the board's rule, which the search view shares. */
 function projectsFrom(params: URLSearchParams): string[] {
   const projects: string[] = [];
@@ -249,10 +271,10 @@ function searchRouteFromSearch(search: string): SearchRoute {
  * The route a `pathname` + `search` pair names, or `null` when the path is
  * not a view we have — the caller's cue to redirect to
  * `formatRoute(graphRouteFromSearch(search))`. Exactly `/graph`, `/feed`,
- * `/code`, `/timeline`, `/board`, `/inbox`, or `/search` (one trailing slash
- * tolerated, no case folding) is a view; `/`, `/list`, `/graph/x`,
- * `/feed/x`, `/code/x`, `/timeline/x`, `/board/x`, `/search/x` are all
- * unknown.
+ * `/code`, `/timeline`, `/board`, `/roadmap`, `/inbox`, or `/search` (one
+ * trailing slash tolerated, no case folding) is a view; `/`, `/list`,
+ * `/graph/x`, `/feed/x`, `/code/x`, `/timeline/x`, `/board/x`,
+ * `/roadmap/x`, `/search/x` are all unknown.
  */
 export function parseRoute(pathname: string, search: string): Route | null {
   const path = pathname.length > 1 && pathname.endsWith("/") ? pathname.slice(0, -1) : pathname;
@@ -271,6 +293,9 @@ export function parseRoute(pathname: string, search: string): Route | null {
   if (path === BOARD_VIEW_PATH) {
     return boardRouteFromSearch(search);
   }
+  if (path === ROADMAP_VIEW_PATH) {
+    return roadmapRouteFromSearch(search);
+  }
   if (path === SEARCH_VIEW_PATH) {
     return searchRouteFromSearch(search);
   }
@@ -287,7 +312,8 @@ export function parseRoute(pathname: string, search: string): Route | null {
  * emitted in a fixed order — for the graph `q`, each `type` in order,
  * `node`; for the feed just `view`; for the code view `view` then `node`;
  * for the timeline `view`, `node`, then each `type` in order; for the board
- * `view`, each `project` in order, then `item`; for the search view `q`,
+ * `view`, each `project` in order, then `item`; for the roadmap each
+ * `project` in order, then `item`; for the search view `q`,
  * each `type`, each `project`, then `review=1` only when set — and
  * absent ones are omitted, so two structurally equal routes always
  * format to the same string: lib/navigate.ts relies on that to skip a
@@ -305,6 +331,8 @@ export function formatRoute(route: Route): string {
       return formatTimelineRoute(route);
     case "board":
       return formatBoardRoute(route);
+    case "roadmap":
+      return formatRoadmapRoute(route);
     case "search":
       return formatSearchRoute(route);
     case "inbox": {
@@ -381,6 +409,18 @@ function formatBoardRoute(route: BoardRoute): string {
   }
   const query = params.toString();
   return query.length > 0 ? `${BOARD_VIEW_PATH}?${query}` : BOARD_VIEW_PATH;
+}
+
+function formatRoadmapRoute(route: RoadmapRoute): string {
+  const params = new URLSearchParams();
+  for (const project of route.projects) {
+    params.append("project", project);
+  }
+  if (route.item !== null) {
+    params.set("item", route.item);
+  }
+  const query = params.toString();
+  return query.length > 0 ? `${ROADMAP_VIEW_PATH}?${query}` : ROADMAP_VIEW_PATH;
 }
 
 function formatSearchRoute(route: SearchRoute): string {
