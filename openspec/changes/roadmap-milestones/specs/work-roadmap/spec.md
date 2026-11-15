@@ -6,7 +6,7 @@ Shows each project's plan over time: milestones in date order, the epics that ma
 
 ### Requirement: Progress rolls up from items to epics to milestones
 
-An epic's progress SHALL count every non-epic, non-milestone item that has the epic among its ancestors, nested epics' items included. A milestone's progress SHALL count every non-epic, non-milestone item that belongs to it, whether through an epic or directly. Progress SHALL be shown as the share of counted items that are closed, alongside the in-progress count, and deferred items SHALL be shown separately and left out of the share. An epic or milestone with no counted items SHALL show no share, not 0% or 100%.
+An epic's progress SHALL count every non-epic, non-milestone item that has the epic among its ancestors, nested epics' items included. A milestone's progress SHALL count every non-epic, non-milestone item that belongs to it, whether through an epic or directly. Progress SHALL be shown as the share of counted items that are closed, alongside the in-progress count, and deferred items SHALL be shown separately and left out of the share. An epic or milestone with no counted items SHALL show no share, not 0% or 100%. Only items in the projects shown SHALL be counted: an item of another project under a shown epic or milestone is left out.
 
 #### Scenario: Milestone across two epics
 
@@ -22,6 +22,11 @@ An epic's progress SHALL count every non-epic, non-milestone item that has the e
 
 - **WHEN** an epic has no child items yet
 - **THEN** it shows no percentage and reads as having no items
+
+#### Scenario: Item from a project not shown
+
+- **WHEN** the roadmap shows only `tides`, and a `skyos` task sits under a `tides` epic
+- **THEN** the epic's progress does not count the `skyos` task
 
 ### Requirement: The roadmap lays milestones and epics on a timeline
 

@@ -4,14 +4,16 @@
 // nothing asserts a store-wide count. Registry rows (for the all-projects
 // read) are written under 'beads' with unique keys and deleted by key.
 
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Database } from "@breakdown/db";
 import { edges, ingestRuns, nodes } from "@breakdown/db";
-import { getWorkBoard } from "./board.js";
+import { ancestorAliasCte, buildAncestorWalkCte, getWorkBoard } from "./board.js";
 import { upsertEdges } from "./edges.js";
 import { InvalidLookupOptionError } from "./errors.js";
 import { closeIngestRun, openIngestRun, type IngestRunHandle } from "./ingest-runs.js";
+import { mergeNodes } from "./merge.js";
+import { MAX_RESOLVE_DEPTH } from "./views.js";
 import { upsertNodes } from "./nodes.js";
 import { getRoadmap, MAX_ROADMAP_ROWS, type Roadmap, type RoadmapEpic, type RoadmapMilestone, type RoadmapProgress } from "./roadmap.js";
 import { connectTestDb, type TestPool, uniqueSuffix } from "./test-helpers.js";
@@ -25,6 +27,7 @@ let run: IngestRunHandle;
 let beadsRun: IngestRunHandle;
 let testNo = 0;
 const registered: string[] = [];
+const extraRunIds: string[] = [];
 
 beforeAll(async () => {
   ({ pool, db } = connectTestDb());
@@ -40,7 +43,7 @@ afterAll(async () => {
   if (registered.length > 0) {
     await db.delete(nodes).where(and(eq(nodes.sourceSystem, "beads"), inArray(nodes.externalId, registered.map((k) => `project:${k}`))));
   }
-  await db.delete(ingestRuns).where(inArray(ingestRuns.id, [run.id, beadsRun.id]));
+  await db.delete(ingestRuns).where(inArray(ingestRuns.id, [run.id, beadsRun.id, ...extraRunIds]));
   await pool.end();
 });
 
@@ -159,7 +162,7 @@ describe("getRoadmap rollup", () => {
     expect(milestone(roadmap, id("m")).progress).toEqual(progress(8, 4, 1));
     expect(milestone(roadmap, id("m")).unepicked).toEqual(progress(0, 0));
     expect([share(epic(roadmap, id("ea")).progress), share(epic(roadmap, id("eb")).progress), share(milestone(roadmap, id("m")).progress)]).toEqual([75, 25, 50]);
-    expect(epic(roadmap, id("ea")).milestoneId).toBe(id("m"));
+    expect(epic(roadmap, id("ea")).milestone).toEqual({ id: id("m"), title: "Beta", dueAt: "2026-12-15T00:00:00.000Z" });
     expect(milestone(roadmap, id("m"))).toMatchObject({ externalId: `${tag}-m`, title: "Beta", status: "open", project: a, dueAt: "2026-12-15T00:00:00.000Z" });
     expect(roadmap.truncated).toBe(false);
     // Leaves are counted, never returned; no content either.
@@ -185,7 +188,7 @@ describe("getRoadmap rollup", () => {
     expect(epic(roadmap, id("empty")).progress).toEqual(progress(0, 0));
     expect(share(epic(roadmap, id("empty")).progress)).toBeNull();
     expect(epic(roadmap, id("empty")).firstStartedAt).toBeNull();
-    expect(epic(roadmap, id("empty")).milestoneId).toBeNull();
+    expect(epic(roadmap, id("empty")).milestone).toBeNull();
   });
 
   it("counts a nested epic's items in both epics", async () => {
@@ -232,7 +235,68 @@ describe("getRoadmap rollup", () => {
     expect(epic(roadmap, id("e")).progress).toEqual(progress(2, 1));
     expect(milestone(roadmap, id("m")).progress).toEqual(progress(2, 1));
     expect(milestone(roadmap, id("m")).unepicked).toEqual(progress(0, 0));
-    expect(epic(roadmap, id("e")).milestoneId).toBe(id("m"));
+    expect(epic(roadmap, id("e")).milestone?.id).toBe(id("m"));
+  });
+
+  it("walks no further than the first milestone on a path, so a cycle above it does not run to the depth cap", async () => {
+    const { a, tag } = scope();
+    const ids = await items([
+      { ext: `${tag}-m`, project: a, issueType: "milestone" },
+      { ext: `${tag}-e`, project: a, issueType: "epic" },
+      { ext: `${tag}-t`, project: a },
+    ]);
+    const id = (n: string) => ids.get(`${tag}-${n}`)!;
+    await childOf([
+      [id("t"), id("e")],
+      [id("e"), id("m")],
+      [id("m"), id("e")],
+    ]);
+    const deepest = async (stopAtMilestone: boolean) => {
+      const result = await db.execute<{ depth: number; rows: number }>(sql`
+        WITH RECURSIVE ${ancestorAliasCte()},
+        ${buildAncestorWalkCte("walk", sql`SELECT ${id("t")}::uuid AS id`, { stopAtMilestone })}
+        SELECT max(depth)::int AS depth, count(*)::int AS rows FROM walk`);
+      return result.rows[0]!;
+    };
+
+    expect(await deepest(true)).toEqual({ depth: 2, rows: 3 });
+    expect((await deepest(false)).depth).toBe(MAX_RESOLVE_DEPTH);
+  });
+
+  it("folds merges: an edge on a merged-away epic or a merged-away duplicate leaf counts for the survivor, once", async () => {
+    const { a, tag } = scope();
+    const ids = await items([
+      { ext: `${tag}-m`, project: a, issueType: "milestone", title: "M" },
+      { ext: `${tag}-survivor`, project: a, issueType: "epic" },
+      { ext: `${tag}-loser`, project: a, issueType: "epic" },
+      { ext: `${tag}-t1`, project: a, status: "closed" },
+      { ext: `${tag}-t2`, project: a },
+      { ext: `${tag}-t2-dup`, project: a, status: "closed" },
+    ]);
+    const id = (n: string) => ids.get(`${tag}-${n}`)!;
+    await childOf([
+      // Asserted on the merged-away epic: its milestone link and a child's link fold onto the survivor.
+      [id("loser"), id("m")],
+      [id("t1"), id("loser")],
+      // Only the duplicate carries t2's link; t2 is reached through it, and the duplicate is not counted itself.
+      [id("t2-dup"), id("survivor")],
+    ]);
+    const mergeRun = await openIngestRun(db, SRC, { actor: "roadmap-test-merge" });
+    try {
+      await mergeNodes(db, id("loser"), id("survivor"), mergeRun);
+      await mergeNodes(db, id("t2-dup"), id("t2"), mergeRun);
+    } finally {
+      await closeIngestRun(db, mergeRun);
+      extraRunIds.push(mergeRun.id);
+    }
+
+    const roadmap = await getRoadmap(db, { projects: [a] });
+
+    expect(roadmap.epics.map((e) => e.id)).toEqual([id("survivor")]);
+    expect(epic(roadmap, id("survivor")).progress).toEqual(progress(2, 1));
+    expect(epic(roadmap, id("survivor")).milestone).toEqual({ id: id("m"), title: "M", dueAt: null });
+    expect(milestone(roadmap, id("m")).progress).toEqual(progress(2, 1));
+    expect(milestone(roadmap, id("m")).unepicked).toEqual(progress(0, 0));
   });
 
   it("counts a task directly under a milestone only toward the milestone and its items outside epics", async () => {
@@ -281,9 +345,9 @@ describe("getRoadmap rollup", () => {
     const roadmap = await getRoadmap(db, { projects: [a] });
 
     expect(epic(roadmap, id("outer")).progress).toEqual(progress(1, 0));
-    expect(epic(roadmap, id("outer")).milestoneId).toBe(id("top"));
+    expect(epic(roadmap, id("outer")).milestone?.id).toBe(id("top"));
     expect(epic(roadmap, id("inner")).progress).toEqual(progress(1, 1));
-    expect(epic(roadmap, id("inner")).milestoneId).toBe(id("m"));
+    expect(epic(roadmap, id("inner")).milestone?.id).toBe(id("m"));
     expect(milestone(roadmap, id("m")).progress).toEqual(progress(2, 1));
     expect(milestone(roadmap, id("m")).unepicked).toEqual(progress(1, 0));
     // `own` belongs to top through outer; x and t stop at m.
@@ -388,6 +452,28 @@ describe("getRoadmap projects and bounds", () => {
     expect(mine.map((e) => e.id).sort()).toEqual([id("ea"), id("eb")].sort());
   });
 
+  it("names an epic's milestone in a project not shown, with its due date, without listing or counting it", async () => {
+    const { a, b, tag } = scope();
+    const ids = await items([
+      { ext: `${tag}-mb`, project: b, issueType: "milestone", title: "Launch", dueAt: "2027-02-01T00:00:00.000Z" },
+      { ext: `${tag}-ea`, project: a, issueType: "epic" },
+      { ext: `${tag}-ta`, project: a },
+    ]);
+    const id = (n: string) => ids.get(`${tag}-${n}`)!;
+    await childOf([
+      [id("ea"), id("mb")],
+      [id("ta"), id("ea")],
+    ]);
+
+    const onlyA = await getRoadmap(db, { projects: [a] });
+
+    expect(onlyA.milestones).toEqual([]);
+    expect(epic(onlyA, id("ea")).milestone).toEqual({ id: id("mb"), title: "Launch", dueAt: "2027-02-01T00:00:00.000Z" });
+    expect(epic(onlyA, id("ea")).progress.total).toBe(1);
+    // Read with b too, the milestone counts a's task through a's epic.
+    expect(milestone(await getRoadmap(db, { projects: [a, b] }), id("mb")).progress.total).toBe(1);
+  });
+
   it("answers an empty roadmap for an explicit empty selection", async () => {
     expect(await getRoadmap(db, { projects: [] })).toEqual({ milestones: [], epics: [], truncated: false });
   });
@@ -468,6 +554,10 @@ describe("getRoadmap and getWorkBoard agree on ancestry (tasks 2.3)", () => {
     }
     for (const c of board.cards) {
       if (c.epicId !== null) expect(roadmap.epics.map((e) => e.id)).toContain(c.epicId);
+    }
+    expect(board.epics.map((e) => e.id).sort()).toEqual(roadmap.epics.map((e) => e.id).sort());
+    for (const e of board.epics) {
+      expect(e.milestone?.id ?? null, e.title).toBe(epic(roadmap, e.id).milestone?.id ?? null);
     }
     // x is the one no-epic card under a milestone; loose is under none.
     expect(board.cards.filter((c) => c.epicId === null).map((c) => c.id).sort()).toEqual([id("x"), id("loose")].sort());

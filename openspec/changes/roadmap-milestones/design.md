@@ -23,6 +23,7 @@ See proposal.md for why. Current state that shapes the approach:
 
 2. **The roadmap read is its own statement in `packages/core/src/roadmap.ts`**, not a mode of `getWorkBoard`. CTEs:
    - `filtered`: canonical `work_item` rows in the selected projects (the board's `metadata @> ANY(...)` containment against `registeredProjectsCte()`), with `issue_type`, `status`, dates read from metadata.
+     Only these rows are counted or returned: an item of a project not selected is not counted under a selected epic or milestone (an epic's milestone is still named, with its due date, wherever it lives).
    - `ancestors`: the board's upward `child_of` walk, seeded from every filtered item, with the same alias/fold/guard/depth cap. Keep the board's version and this one in step by extracting the walk into a shared `buildAncestorWalkCte(seedSql)` in `board.ts` and using it from both — the board's `nearest_epic` and this module must not disagree about ancestry.
    - `item_epic` / `item_milestone`: per leaf (non-epic, non-milestone) item, every epic ancestor (for nested-epic rollup), and the nearest milestone ancestor (`DISTINCT ON`, nearest first, lesser id on a tie, as `nearest_epic`).
    - `epic_milestone`: nearest milestone ancestor of each epic.

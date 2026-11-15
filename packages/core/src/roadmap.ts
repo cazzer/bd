@@ -19,14 +19,20 @@
 //                milestones first, then not-closed before closed, then most
 //                recently updated, then id, and cut at the cap + 1 so
 //                `truncated` can be read off it (the board's pattern). The
-//                cap (MAX_ROADMAP_ROWS) bounds rows returned; leaves are not
-//                capped, as the board does not cap its walk seed.
+//                cap (MAX_ROADMAP_ROWS) bounds rows returned. Leaves are not
+//                capped (the board's walk seed is, at MAX_BOARD_ITEMS):
+//                progress must count every item, so each leaf's walk is
+//                bounded instead — by the milestone stop below and
+//                MAX_RESOLVE_DEPTH.
 //   alias,
 //   ancestors    the board's upward child_of walk (`buildAncestorWalkCte`:
 //                alias probe, merged_into fold, self-loop guard,
 //                MAX_RESOLVE_DEPTH cap), seeded once from every leaf and
 //                every epic head, so the board and the roadmap cannot
-//                disagree about ancestry.
+//                disagree about ancestry. It stops at the first milestone on
+//                each path (`stopAtMilestone`), as the board's does: nothing
+//                past an item's nearest milestone is walked, and a cycle
+//                above a milestone does not run to the depth cap.
 //   item_epic    per leaf, EVERY epic ancestor (nested epics each count the
 //                item) that is not past a milestone (`notPastMilestoneCondition`,
 //                the board's boundary rule): a milestone bounds epic lookup,
@@ -35,6 +41,10 @@
 //                epic for a card is therefore always one of its item_epic
 //                rows. Epics of any project count here, as on the board, so
 //                "outside epics" below agrees with the board's "No epic".
+//                The NOT EXISTS is kept beside the stop: they differ only for
+//                an item with two parents, one a milestone and one leading
+//                to an epic, where the board's rule (any milestone nearer
+//                than the epic) refuses the epic and so must this.
 //   nearest_milestone  per leaf and per epic head, the nearest milestone
 //                ancestor (DISTINCT ON, nearest first, lesser id on a tie —
 //                the board's `nearest_epic` rule). An item belongs to at
@@ -43,7 +53,9 @@
 //   milestone_progress  `count(DISTINCT leaf)` per status group; the
 //                DISTINCT is what makes a child_of cycle count an item once.
 //                An epic also gets `min(started_at)` over its counted items,
-//                so its bar can start when the first item was claimed. A
+//                so its bar can start when the first item was claimed. Only
+//                leaf items are counted, so a claimed inner epic with no
+//                claimed task gives the outer epic no start (and no bar). A
 //                milestone also gets `unepicked`: the same counts over its
 //                items that belong to no epic.
 //
@@ -60,8 +72,17 @@
 // the whole read.
 //
 // Cross-project parents: only the selected projects' items are leaves, and
-// only their milestones and epics are heads. An epic's items in a project
-// that is not selected are not counted under it.
+// only their milestones and epics are heads (work-roadmap spec: only items
+// in the shown projects are counted). An epic's items in a project that is
+// not selected are not counted under it. An epic's milestone is answered
+// with its id, title, and due date wherever it lives, so the view can name
+// a milestone of another project and use its due date as the target.
+//
+// Two parents: beads gives an item one parent, but an agent can assert a
+// second child_of edge. Then an item's epics (every epic on any path) and
+// its milestone (the nearest on any path) need not line up, so an epic's
+// counts and its milestone's counts can disagree. Accepted: the spec's
+// "at most one milestone" holds, and the board shares the same rule.
 
 import { sql, type SQL } from "drizzle-orm";
 import type { Database } from "@breakdown/db";
@@ -120,8 +141,8 @@ export interface RoadmapEpic {
   title: string;
   status: string;
   project: string;
-  /** Canonical id of the epic's nearest milestone ancestor; null when it has none. */
-  milestoneId: string | null;
+  /** The epic's nearest milestone ancestor, of any project; null when it has none. */
+  milestone: { id: string; title: string; dueAt: string | null } | null;
   dueAt: string | null;
   startedAt: string | null;
   closedAt: string | null;
@@ -142,9 +163,9 @@ export interface Roadmap {
 
 const EMPTY_PROGRESS_JSON = JSON.stringify({ total: 0, closed: 0, inProgress: 0, deferred: 0, open: 0 } satisfies RoadmapProgress);
 
-/** A metadata date read only in its canonical form (module header). `key` is a fixed literal, never input. */
-function canonicalDate(key: "due_at" | "started_at" | "closed_at"): SQL {
-  const field = sql.raw(`metadata->>'${key}'`);
+/** A metadata date read only in its canonical form (module header). `key` and `alias` are fixed literals, never input. */
+function canonicalDate(key: "due_at" | "started_at" | "closed_at", alias: "" | "mn" = ""): SQL {
+  const field = sql.raw(`${alias === "" ? "" : `${alias}.`}metadata->>'${key}'`);
   return sql`CASE WHEN ${field} ~ ${CANONICAL_INSTANT_PATTERN}::text THEN ${field} END`;
 }
 
@@ -193,7 +214,7 @@ heads AS (
   SELECT * FROM heads_raw ORDER BY ${headOrder} LIMIT ${maxRows}::int
 ),
 ${ancestorAliasCte()},
-${buildAncestorWalkCte("ancestors", sql`SELECT id FROM leaves UNION ALL SELECT id FROM heads WHERE issue_type = 'epic'`)},
+${buildAncestorWalkCte("ancestors", sql`SELECT id FROM leaves UNION ALL SELECT id FROM heads WHERE issue_type = 'epic'`, { stopAtMilestone: true })},
 item_epic AS (
   SELECT DISTINCT anc.start_id AS item_id, anc.node_id AS epic_id
   FROM ancestors anc
@@ -246,13 +267,16 @@ SELECT jsonb_build_object(
   'epics', COALESCE((
     SELECT jsonb_agg(jsonb_build_object(
       'id', h.id, 'externalId', h.external_id, 'title', h.title, 'status', h.status,
-      'project', h.project, 'milestoneId', nm.milestone_id,
+      'project', h.project,
+      'milestone', CASE WHEN mn.id IS NULL THEN NULL
+                        ELSE jsonb_build_object('id', mn.id, 'title', mn.title, 'dueAt', ${canonicalDate("due_at", "mn")}) END,
       'dueAt', h.due_at, 'startedAt', h.started_at, 'closedAt', h.closed_at,
       'firstStartedAt', ep.first_started_at,
       'progress', COALESCE(ep.progress, ${EMPTY_PROGRESS_JSON}::jsonb)
     ) ORDER BY h.project, h.title, h.id)
     FROM heads h
     LEFT JOIN nearest_milestone nm ON nm.start_id = h.id
+    LEFT JOIN resolved_nodes mn ON mn.id = nm.milestone_id
     LEFT JOIN epic_progress ep ON ep.epic_id = h.id
     WHERE h.issue_type = 'epic'
   ), '[]'::jsonb),

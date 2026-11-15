@@ -40,7 +40,9 @@
 //                endpoints folded through `merged_into`, a self-loop guard
 //                (`<>`), and the MAX_RESOLVE_DEPTH cap — which is what ends a
 //                child_of cycle (there is no acyclicity trigger on
-//                child_of), never the statement timeout. Built by
+//                child_of), never the statement timeout. The walk stops at
+//                the first milestone on each path (`stopAtMilestone`): no
+//                reader below looks past one. Built by
 //                `ancestorAliasCte` and `buildAncestorWalkCte` (seed
 //                subquery in, CTE out), which the roadmap read
 //                (roadmap-milestones, design.md decision 2) builds its own
@@ -281,10 +283,28 @@ export function ancestorAliasCte(): SQL {
  * Shared by the board's lane and milestone reads and the roadmap read, so
  * they cannot disagree about an item's ancestry. `name` is a fixed
  * identifier chosen by the caller, never input.
+ *
+ * With `stopAtMilestone`, a row at depth >= 1 whose node is a work item of
+ * issue type `milestone` is kept but not expanded, so nothing past an
+ * item's nearest milestone on a path is walked, and a cycle above a
+ * milestone no longer runs to the depth cap. For every reader that only
+ * looks at epics not past a milestone (`notPastMilestoneCondition`) or at
+ * the nearest milestone, the answer is unchanged: a pruned row is deeper
+ * than a milestone row of the same start, so that condition already
+ * refused it as an epic and it can never be the nearest milestone.
  */
-export function buildAncestorWalkCte(name: string, seed: SQL): SQL {
+export function buildAncestorWalkCte(name: string, seed: SQL, options: { stopAtMilestone?: boolean } = {}): SQL {
   if (!/^[a-z_]+$/.test(name)) throw new Error(`buildAncestorWalkCte: ${JSON.stringify(name)} is not a plain identifier`);
   const walk = sql.raw(name);
+  const stop = options.stopAtMilestone
+    ? sql`
+    AND NOT (anc.depth >= 1 AND EXISTS (
+      SELECT 1 FROM resolved_nodes sm
+      WHERE sm.id = anc.node_id
+        AND sm.node_type = ${WORK_ITEM_NODE_TYPE}
+        AND sm.metadata->>'issue_type' = 'milestone'
+    ))`
+    : sql``;
   return sql`${walk}(start_id, node_id, depth, probe_ids) AS (
   SELECT s.id, s.id, 0, ARRAY[s.id] || COALESCE(a.alias_ids, ARRAY[]::uuid[])
   FROM (${seed}) s
@@ -298,7 +318,7 @@ export function buildAncestorWalkCte(name: string, seed: SQL): SQL {
   CROSS JOIN LATERAL (SELECT COALESCE(d.merged_into, d.id) AS canonical_id) p
   LEFT JOIN alias a ON a.canonical_id = p.canonical_id
   WHERE anc.depth < ${MAX_RESOLVE_DEPTH}::int
-    AND p.canonical_id <> anc.node_id
+    AND p.canonical_id <> anc.node_id${stop}
 )`;
 }
 
@@ -392,7 +412,7 @@ items AS (
 ),
 ${buildBlockingCtes()},
 ${ancestorAliasCte()},
-${buildAncestorWalkCte("ancestors", sql`SELECT id FROM items WHERE issue_type IS DISTINCT FROM 'epic'`)},
+${buildAncestorWalkCte("ancestors", sql`SELECT id FROM items WHERE issue_type IS DISTINCT FROM 'epic'`, { stopAtMilestone: true })},
 nearest_epic AS (
   SELECT DISTINCT ON (anc.start_id) anc.start_id, anc.node_id AS epic_id
   FROM ancestors anc
@@ -433,7 +453,7 @@ lane_epics AS (
   FROM resolved_nodes n
   WHERE n.id IN (SELECT epic_id FROM classified WHERE epic_id IS NOT NULL)
 ),
-${buildAncestorWalkCte("epic_ancestors", sql`SELECT id FROM lane_epics`)},
+${buildAncestorWalkCte("epic_ancestors", sql`SELECT id FROM lane_epics`, { stopAtMilestone: true })},
 epic_milestone AS (
   SELECT DISTINCT ON (anc.start_id) anc.start_id AS epic_id, n.id, n.title
   FROM epic_ancestors anc
