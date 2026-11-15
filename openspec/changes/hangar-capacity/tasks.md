@@ -1,0 +1,8 @@
+## 1. Hangar capacity and why requests wait (bd-d38.5)
+
+- [ ] 1.1 Migration: `capacity_at timestamptz` on `hangar_check_ins` (backfilled from `last_seen_at` where capacity is set); drizzle schema updated; `recordCheckIn` sets/clears it, claims leave it alone; tests (throwaway DB in bd-postgres-1 on :5442, created, migrated, dropped after — never the .env DATABASE_URL)
+- [ ] 1.2 Core: lenient `parseHangarCapacity` (per-field, never throws, `usage` validated and capped) and `getHangarStatus` returns `capacity`/`capacityAt`; unit tests for each field's fallback
+- [ ] 1.3 Core: pure `classifyQueuedWait` and batch `explainQueuedSessions` (two statements: check-ins + awaiting-review sessions with work items; queued sessions with `ahead` by window), shared `text` summary; tests for every reason (offline, never, unknown, next with ahead, not_offered, disk_awaiting_review with and without usage, disk with nothing awaiting → capacity, ram → capacity, a second hangar with room → next) on the throwaway DB
+- [ ] 1.4 MCP: `brain_hangar_status` shows capacity and reported time; `brain_hangar_sessions` attaches `waiting` to queued sessions; tests
+- [ ] 1.5 Web: tRPC `hangarStatus` adds capacity, `hangarSessions` adds `waiting`; `HangarStatusPill` shows slots/blocked; `HangarSessions` shows a queued session's reason and links awaiting-review sessions to their work items; jsdom tests
+- [ ] 1.6 Docs: `docs/hangar-api.md` check-in section documents the capacity shape, `usage`, the `disk:` prefix, and `capacity_at`; the check-ins-and-status section names the wait reasons; contract test green; `pnpm check` green
