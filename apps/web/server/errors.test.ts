@@ -29,6 +29,7 @@ describe("mapCoreError", () => {
     expect(trpcErr.message).toContain('occurred_at (got "last Tuesday")');
     expect(trpcErr.message).toContain("2026-03-04T08:00:00.000Z");
     expect(trpcErr.cause).toBeUndefined();
+    expect(mapCoreError("write", new InvalidEventTimeError(null, "soon", "must parse as an instant", "due_at")).message).toContain("Fix due_at on the named item");
   });
 
   it("maps InboxCardChangedError on a merged-away id to CONFLICT in the person's words, and a rewritten card to its own hint (hangar-release)", () => {

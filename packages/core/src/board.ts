@@ -48,8 +48,10 @@
 //   nearest_epic DISTINCT ON (start_id) over ancestors at depth >= 1 that
 //                are work items of issue type `epic`, nearest first, lesser
 //                node id on a tie. Depth 0 is excluded: an item is never in
-//                its own lane. A cycle yields the nearest epic reached before
-//                the depth cap, or none ("No epic").
+//                its own lane. An epic past a milestone does not count
+//                (`notPastMilestoneCondition`, below). A cycle yields the
+//                nearest epic reached before the depth cap, or none ("No
+//                epic").
 //   cards        the column CASE and the per-project closed rank.
 //   lane_epics   the epics that head lanes (below).
 //   epic_ancestors,
@@ -68,10 +70,14 @@
 // Milestones (roadmap-milestones, design.md decision 4) are neither cards
 // nor lanes: items whose issue_type is `milestone` are left out of
 // `filtered`, so they are not ranked, capped, or returned. The walk still
-// passes through them, so an item placed directly under a milestone with no
-// epic between has no nearest epic and lands in "No epic", and the lane
-// rule ("nearest epic") is untouched. A lane epic carries its milestone
-// from epic_milestone, so its lane header can name it.
+// passes through them, but a milestone is a boundary for epic lookup: an
+// epic counts as an item's nearest epic only when no milestone sits between
+// the item and it (no milestone ancestor at a smaller depth for the same
+// start). So an item placed directly under a milestone with no epic between
+// lands in "No epic" even when the milestone itself sits under an epic, and
+// no item is counted under two milestones. An epic between the item and the
+// milestone is unaffected. A lane epic carries its milestone from
+// epic_milestone, so its lane header can name it.
 //
 // Column rules (work-board spec): closed -> Closed; deferred -> Deferred;
 // in_progress -> In progress, flagged blocked when it has an open blocker or
@@ -290,6 +296,36 @@ export function buildAncestorWalkCte(name: string, seed: SQL): SQL {
 )`;
 }
 
+/**
+ * A condition on one row (`rowAlias`) of the walk `walkName` (built by
+ * `buildAncestorWalkCte`): true unless a work item of issue type
+ * `milestone` sits between the row's start and its node — at depth >= 1
+ * and at a smaller depth than the row, for the same start. A milestone is
+ * a boundary for epic lookup (module header): an epic above a milestone
+ * does not contain the items under it, so no item is counted under two
+ * milestones. The nearest milestone row itself passes, so a milestone
+ * read may use the same condition. Shared by the board's `nearest_epic`
+ * and the roadmap read. Both names are fixed identifiers chosen by the
+ * caller, never input.
+ */
+export function notPastMilestoneCondition(walkName: string, rowAlias: string): SQL {
+  for (const name of [walkName, rowAlias]) {
+    if (!/^[a-z_]+$/.test(name)) throw new Error(`notPastMilestoneCondition: ${JSON.stringify(name)} is not a plain identifier`);
+  }
+  const walk = sql.raw(walkName);
+  const row = sql.raw(rowAlias);
+  return sql`NOT EXISTS (
+    SELECT 1
+    FROM ${walk} past
+    JOIN resolved_nodes pm ON pm.id = past.node_id
+    WHERE past.start_id = ${row}.start_id
+      AND past.depth >= 1
+      AND past.depth < ${row}.depth
+      AND pm.node_type = ${WORK_ITEM_NODE_TYPE}
+      AND pm.metadata->>'issue_type' = 'milestone'
+  )`;
+}
+
 /** Pure: builds the board statement from already-validated project keys (null = every registered project; non-empty otherwise) and a validated item cap. */
 export function buildWorkBoardQuery(projects: readonly string[] | null, maxItems: number = MAX_BOARD_ITEMS): SQL {
   const projectKeys =
@@ -349,6 +385,7 @@ nearest_epic AS (
   WHERE anc.depth >= 1
     AND n.node_type = ${WORK_ITEM_NODE_TYPE}
     AND n.metadata->>'issue_type' = 'epic'
+    AND ${notPastMilestoneCondition("ancestors", "anc")}
   ORDER BY anc.start_id, anc.depth, anc.node_id
 ),
 classified AS (

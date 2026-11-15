@@ -40,7 +40,7 @@ Loading a beads project SHALL carry each issue's `due_at` and `started_at`, when
 
 ### Requirement: A milestone contains epics through the parent relationship
 
-A work item of issue type `milestone` SHALL be an ordinary work item. Its contents SHALL be the items that name it as parent (`child_of`), directly or through further parents: usually epics, and also any item placed directly under it. An item's milestone SHALL be its nearest ancestor along parent relationships that is a work item of issue type `milestone`; an item SHALL belong to at most one milestone. A parent cycle SHALL NOT prevent any read from answering.
+A work item of issue type `milestone` SHALL be an ordinary work item. Its contents SHALL be the items that name it as parent (`child_of`), directly or through further parents: usually epics, and also any item placed directly under it. An item's milestone SHALL be its nearest ancestor along parent relationships that is a work item of issue type `milestone`; an item SHALL belong to at most one milestone. A milestone SHALL bound epic containment: an epic that is an ancestor of a milestone SHALL NOT contain the items under that milestone. A parent cycle SHALL NOT prevent any read from answering.
 
 #### Scenario: Epic under a milestone
 
@@ -51,6 +51,11 @@ A work item of issue type `milestone` SHALL be an ordinary work item. Its conten
 
 - **WHEN** an epic's parent is another epic whose parent is a milestone
 - **THEN** the inner epic, and its items, belong to that milestone
+
+#### Scenario: Milestone under an epic
+
+- **WHEN** a milestone's parent is an epic, and an item's parent is that milestone
+- **THEN** the item does not belong to the outer epic, and an epic placed between the item and the milestone still contains it
 
 #### Scenario: No milestone
 

@@ -140,6 +140,8 @@ export interface NormalizeWorkItemOptions {
   now?: Date;
   /** Batch position, carried into `InvalidWorkItemError` so a writer can find the item. */
   index?: number;
+  /** How `InvalidEventTimeError` names the item on a bad `due_at` / `started_at` (event-time.ts's option); wins over `index` there. */
+  itemLabel?: string;
 }
 
 /**
@@ -156,7 +158,7 @@ export function normalizeWorkItemMetadata(
   options: NormalizeWorkItemOptions = {},
 ): Record<string, unknown> {
   const input = metadata ?? {};
-  const { index } = options;
+  const { index, itemLabel } = options;
   const out: Record<string, unknown> = { ...input };
 
   const status = input[KEY.status] ?? DEFAULT_WORK_ITEM_STATUS;
@@ -196,7 +198,10 @@ export function normalizeWorkItemMetadata(
   }
 
   for (const key of [DUE_AT_KEY, STARTED_AT_KEY]) {
-    const normalized = normalizeInstantKey(input, key, index === undefined ? {} : { index });
+    const normalized = normalizeInstantKey(input, key, {
+      ...(index === undefined ? {} : { index }),
+      ...(itemLabel === undefined ? {} : { itemLabel }),
+    });
     if (key in normalized) out[key] = normalized[key];
     else delete out[key];
   }

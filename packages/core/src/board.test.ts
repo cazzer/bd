@@ -269,6 +269,29 @@ describe("getWorkBoard lanes", () => {
     expect(card(board, id("direct")).epicId).toBeNull();
   });
 
+  it("treats a milestone as a boundary for epic lookup: an epic above a milestone holds none of the items under it", async () => {
+    const { a, tag } = scope();
+    const ids = await items([
+      { ext: `${tag}-outer`, project: a, issueType: "epic", title: "Outer" },
+      { ext: `${tag}-m`, project: a, issueType: "milestone", title: "M" },
+      { ext: `${tag}-inner`, project: a, issueType: "epic", title: "Inner" },
+      { ext: `${tag}-x`, project: a },
+      { ext: `${tag}-t`, project: a },
+    ]);
+    const id = (n: string) => ids.get(`${tag}-${n}`)!;
+    await link(id("m"), id("outer"), "child_of");
+    await link(id("x"), id("m"), "child_of");
+    await link(id("inner"), id("m"), "child_of");
+    await link(id("t"), id("inner"), "child_of");
+
+    const board = await getWorkBoard(db, { projects: [a] });
+
+    expect(card(board, id("x")).epicId).toBeNull();
+    expect(card(board, id("t")).epicId).toBe(id("inner"));
+    expect(board.epics.find((e) => e.id === id("inner"))?.milestone).toEqual({ id: id("m"), title: "M" });
+    expect(board.epics.find((e) => e.id === id("outer"))?.milestone).toBeNull();
+  });
+
   it("answers an epic's milestone on a child_of cycle through milestones and epics", async () => {
     const { a, tag } = scope();
     const ids = await items([

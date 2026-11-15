@@ -275,6 +275,7 @@ describe("mapError: work-items change", () => {
     expect(text).toMatch(/nothing from this call was persisted/i);
     expect(text).toContain("2026-03-04T08:00:00.000Z");
     expect(text).not.toMatch(STACK_LINE);
+    expect(textOf(mapError("brain_write", new InvalidEventTimeError("at batch index 1 (agent/m)", "soon", "must parse as an instant", "due_at")))).toContain("Fix due_at on the named item");
   });
 });
 
