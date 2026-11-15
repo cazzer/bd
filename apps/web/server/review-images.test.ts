@@ -206,6 +206,7 @@ describe("createReviewImageHandler over HTTP", () => {
     expect(res.headers.get("cache-control")).toBe("no-store");
     expect(res.headers.get("x-content-type-options")).toBe("nosniff");
     expect(res.headers.get("cross-origin-resource-policy")).toBe("same-origin");
+    expect(res.headers.get("content-security-policy")).toBe("default-src 'none'; sandbox");
     expect(Buffer.from(await res.arrayBuffer())).toEqual(PNG);
   });
 

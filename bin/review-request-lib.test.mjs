@@ -191,7 +191,7 @@ function fakeFetch(projects) {
 }
 
 /** Runs requestReview against fakes; `handlers` keys are `cmd arg0 arg1`, values a result or (args, n) => result. */
-async function harness(fx, { item, children = [], handlers = {}, env = { HERDR_PANE_ID: "w1:p2", HERDR_SOCKET_PATH: SOCKET }, fetch, argv, importYaml } = {}) {
+async function harness(fx, { item, children = [], handlers = {}, env = { HERDR_PANE_ID: "w1:p2", HERDR_SOCKET_PATH: SOCKET }, fetch, argv, importYaml, sleep } = {}) {
   const calls = [];
   const counts = {};
   const defaults = {
@@ -223,6 +223,7 @@ async function harness(fx, { item, children = [], handlers = {}, env = { HERDR_P
     warn: (l) => warn.push(l),
     breakdownRoot: BREAKDOWN_ROOT,
     ...(importYaml === undefined ? {} : { importYaml }),
+    ...(sleep === undefined ? {} : { sleep }),
   });
   return { result, calls, out, warn };
 }
@@ -1677,8 +1678,9 @@ describe("remote media (bd-d38.6)", () => {
       log.push(`${method} ${at}`);
       if (method === "GET") return { ok: true, status: 200, json: async () => ({ result: { data: { projects: [{ key: "scratch", path: fx.repo }] } } }) };
       sent.push({ method, url: at, headers: init.headers, redirect: init.redirect, body: init.body === undefined ? undefined : await init.body.text() });
-      const answer = (method === "PUT" ? put : del)?.(at) ?? { status: 204 };
-      return { ok: answer.status < 300, status: answer.status, text: async () => answer.text ?? "" };
+      const answer = (method === "PUT" ? put : del)?.(at, sent.length) ?? { status: 204 };
+      if (answer.throws) throw answer.throws;
+      return { ok: answer.status < 300, status: answer.status, headers: new Headers(answer.headers ?? {}), text: async () => answer.text ?? "" };
     };
     const handlers = {
       "bd create --title": () => {
@@ -1720,6 +1722,36 @@ describe("remote media (bd-d38.6)", () => {
     const run = RUN_URL.exec(host.sent[0].url)[1];
     assert.deepEqual(host.sent.filter((r) => r.method === "DELETE").map((r) => r.url), [`/review-uploads/scratch/scr-1/${run}`]);
     noSecret(h);
+  });
+
+  it("retries a PUT after a 503 (Retry-After capped at 5 s) and a reset connection", async () => {
+    const fx = await fixture();
+    const reset = Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNRESET" } });
+    const answers = [{ status: 503, headers: { "retry-after": "9" } }, { status: 503, headers: { "retry-after": "1" } }, { throws: reset }];
+    const host = remoteHost(fx, { put: (_at, n) => answers[n - 1] });
+    const slept = [];
+    const h = await harness(fx, { env: remoteEnv, fetch: host.fetch, handlers: host.handlers, sleep: async (ms) => void slept.push(ms) });
+    assert.equal(h.result.exitCode, 0, h.warn.join("\n"));
+    assert.deepEqual(slept, [5000, 1000, 1000]);
+    assert.deepEqual(host.sent.map((r) => r.url.split("/").pop()), ["01-a.png", "01-a.png", "01-a.png", "01-a.png", "02-b.png"]);
+    assert.equal(host.sent.every((r) => r.body === (r.url.endsWith("01-a.png") ? "A1" : "B1")), true);
+  });
+
+  it("gives up after three retries, and prints the server's text without control characters", async () => {
+    const fx = await fixture();
+    const host = remoteHost(fx, { put: () => ({ status: 503, text: "Too many\u001b[31m uploads\u0007\nsecond line" }) });
+    const h = await harness(fx, { env: remoteEnv, fetch: host.fetch, handlers: host.handlers, sleep: async () => {} });
+    await assertNothingFiled(fx, h);
+    assert.deepEqual(h.warn, [`review-request: could not upload the attachments to ${REMOTE}: 01-a.png: HTTP 503: Too many[31m uploads. Nothing was filed.`]);
+    assert.deepEqual(host.sent.map((r) => r.method), ["PUT", "PUT", "PUT", "PUT", "DELETE"]);
+  });
+
+  it("never removes a run once bd update has been attempted, even when it fails", async () => {
+    const fx = await fixture();
+    const host = remoteHost(fx);
+    const h = await harness(fx, { env: remoteEnv, fetch: host.fetch, handlers: { ...host.handlers, [`bd update ${REVIEW}`]: fail("Error: database is locked") } });
+    assert.equal(h.result.exitCode, 1);
+    assert.deepEqual(host.sent.map((r) => r.method), ["PUT", "PUT"]);
   });
 
   it("removes the uploaded run when bd create fails", async () => {

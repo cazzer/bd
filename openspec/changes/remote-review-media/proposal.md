@@ -4,7 +4,7 @@ The board is moving to the Jetson (bd-d38.10). `review-request` can already file
 
 ## What Changes
 
-- **An upload route.** `PUT /review-uploads/<project>/<item-id>/<run>/<NN-name>` writes one file, with a raw body, into the server's media root. `DELETE /review-uploads/<project>/<item-id>/<run>` removes one run. The route checks the raw path shape, the extension and its Content-Type, a 200 MB cap, concurrency, free space, and symlinks, and it writes atomically (tmp file, fsync, rename).
+- **An upload route.** `PUT /review-uploads/<project>/<item-id>/<run>/<NN-name>` writes one file, with a raw body, into the server's media root. `DELETE /review-uploads/<project>/<item-id>/<run>` removes one run. The route checks the raw path shape, the extension and its Content-Type, a 200 MB cap, concurrency, free space and inodes, symlinks, and the run's owner. It writes atomically and never replaces a file (tmp file, fsync, link). `BRAIN_READ_ONLY` refuses it.
 - **Relative stored paths.** With `BREAKDOWN_API` set, `review-request` uploads every file after its checks and before any `bd create`, and stores `<project>/<item-id>/<run>/<NN-name>`. The server resolves that path against its media root. The review contract accepts these relative paths beside absolute ones, so reviews filed before this change still render.
 - **Refresh cleanup.** A run whose `bd update` never landed is deleted on the way out. When a review is refreshed, its earlier runs are deleted once the update lands. Both deletes are best-effort, and a failure only warns.
 - **Agent scope.** `agent` tokens reach `/review-uploads/`, because a worker files its own media. Reading media at `/review-images/` stays `human`-only.

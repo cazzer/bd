@@ -74,12 +74,13 @@ services:
       - "${BREAKDOWN_PUBLISH_ADDR:-127.0.0.1}:${BREAKDOWN_WEB_PORT:-4310}:${BREAKDOWN_WEB_PORT:-4310}"
       - "${BREAKDOWN_PUBLISH_ADDR:-127.0.0.1}:${BREAKDOWN_MCP_PORT:-5320}:${BREAKDOWN_MCP_PORT:-5320}"
     volumes:
-      # Read-write: review media is still copied in by an operator with
-      # `docker cp` until it moves into the database (bd-d38.6).
+      # Read-write: the web server stores review media uploads here
+      # (`/review-uploads/`); older reviews are seeded with `docker cp`.
       - ${BREAKDOWN_MEDIA:-breakdown-media}:/data/media
-    # Nothing but the media volume and /tmp is written at runtime:
-    # migrations, both servers, the token CLI, and the healthcheck write only
-    # to the database. The ports are above 1024, so no capability is needed.
+    # Nothing but the media volume and /tmp is written at runtime: the web
+    # server writes review media uploads to the volume, and otherwise
+    # migrations, both servers, the token CLI, and the healthcheck write to
+    # the database. The ports are above 1024, so no capability is needed.
     read_only: true
     tmpfs:
       - /tmp

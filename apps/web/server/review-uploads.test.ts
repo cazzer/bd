@@ -8,7 +8,9 @@ import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createReviewUploadHandler, MAX_REVIEW_UPLOAD_BYTES, parseUploadTarget } from "./review-uploads.js";
+import { admittedClients } from "./context.js";
+import { CONTENT_TYPES } from "./review-images.js";
+import { createReviewUploadHandler, LOOPBACK_OWNER, MAX_REVIEW_UPLOAD_BYTES, parseUploadTarget } from "./review-uploads.js";
 
 let base: string;
 let root: string;
@@ -30,7 +32,15 @@ afterAll(async () => {
 
 async function serve(options: Parameters<typeof createReviewUploadHandler>[0] = {}): Promise<number> {
   const handler = createReviewUploadHandler({ root, minFreeBytes: 0, ...options });
-  const srv = createServer((req: IncomingMessage, res: ServerResponse) => void handler(req, res));
+  // `x-test-client: <client>/<scope>` stands in for what the dispatcher's admission hands over.
+  const srv = createServer((req: IncomingMessage, res: ServerResponse) => {
+    const as = req.headers["x-test-client"];
+    if (typeof as === "string") {
+      const [client, scope] = as.split("/") as [string, "human" | "agent"];
+      admittedClients.set(req, { client, scope, sessionId: null });
+    }
+    void handler(req, res);
+  });
   await new Promise<void>((resolve) => srv.listen(0, "127.0.0.1", resolve));
   servers.push(srv);
   return (srv.address() as AddressInfo).port;
@@ -90,16 +100,19 @@ describe("parseUploadTarget", () => {
 });
 
 describe("createReviewUploadHandler: PUT", () => {
-  it("writes the file with modes 0644/0755, leaves no tmp file, and a re-PUT replaces it", async () => {
+  it("writes the file with modes 0644/0755, records the owner, leaves no tmp file, and never replaces a file", async () => {
     const port = await serve();
     expect(await send(port, "PUT", "/review-uploads/p1/i1/r1/01-a.png", { ...png, "content-length": String(PNG.length) }, [PNG])).toMatchObject({ status: 204 });
     const dir = path.join(root, "p1", "i1", "r1");
     expect(await readFile(path.join(dir, "01-a.png"))).toEqual(PNG);
     expect((await stat(path.join(dir, "01-a.png"))).mode & 0o777).toBe(0o644);
     expect((await stat(dir)).mode & 0o777).toBe(0o755);
-    expect(await send(port, "PUT", "/review-uploads/p1/i1/r1/01-a.png", { "content-type": "image/png; charset=binary" }, [Buffer.from("x"), Buffer.from("y")])).toMatchObject({ status: 204 });
-    expect(await readFile(path.join(dir, "01-a.png"), "utf8")).toBe("xy");
-    expect(await readdir(dir)).toEqual(["01-a.png"]);
+    expect(await readFile(path.join(dir, ".owner"), "utf8")).toBe(LOOPBACK_OWNER);
+    expect(await send(port, "PUT", "/review-uploads/p1/i1/r1/02-b.png", { "content-type": "image/png; charset=binary" }, [Buffer.from("x"), Buffer.from("y")])).toMatchObject({ status: 204 });
+    expect(await readFile(path.join(dir, "02-b.png"), "utf8")).toBe("xy");
+    expect(await send(port, "PUT", "/review-uploads/p1/i1/r1/01-a.png", png, [Buffer.from("swap")])).toMatchObject({ status: 409 });
+    expect(await readFile(path.join(dir, "01-a.png"))).toEqual(PNG);
+    expect((await readdir(dir)).sort()).toEqual([".owner", "01-a.png", "02-b.png"]);
   });
 
   it("refuses an over-cap Content-Length with 413 before creating anything", async () => {
@@ -110,11 +123,18 @@ describe("createReviewUploadHandler: PUT", () => {
     await expect(lstat(path.join(root, "p2"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("refuses a chunked body past the cap with 413, keeping no file and no tmp", async () => {
+  it("refuses a chunked body past the cap with 413, keeping no file, no tmp, and none of the directories it made", async () => {
     const port = await serve({ maxBytes: 10 });
     const chunk = Buffer.alloc(8, 1);
     expect(await send(port, "PUT", "/review-uploads/p3/i/r/01-a.png", png, [chunk, chunk, chunk])).toMatchObject({ status: 413 });
-    expect(await readdir(path.join(root, "p3", "i", "r"))).toEqual([]);
+    await expect(lstat(path.join(root, "p3"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("keeps a run that already held files when a later PUT into it fails", async () => {
+    const port = await serve({ maxBytes: 10 });
+    expect(await send(port, "PUT", "/review-uploads/p3b/i/r/01-a.png", png, [PNG])).toMatchObject({ status: 204 });
+    expect(await send(port, "PUT", "/review-uploads/p3b/i/r/02-b.png", png, [Buffer.alloc(11, 1)])).toMatchObject({ status: 413 });
+    expect((await readdir(path.join(root, "p3b", "i", "r"))).sort()).toEqual([".owner", "01-a.png"]);
   });
 
   it("refuses a Content-Type that is not the extension's with 415", async () => {
@@ -176,6 +196,39 @@ describe("createReviewUploadHandler: PUT", () => {
   });
 });
 
+describe("createReviewUploadHandler: run owners", () => {
+  const as = (who: string) => ({ "x-test-client": who });
+
+  it("lets only the creating client or a human add to or remove a run", async () => {
+    const port = await serve();
+    expect(await send(port, "PUT", "/review-uploads/o1/i/r/01-a.png", { ...png, ...as("worker-1/agent") }, [PNG])).toMatchObject({ status: 204 });
+    expect(await readFile(path.join(root, "o1", "i", "r", ".owner"), "utf8")).toBe("worker-1");
+    expect(await send(port, "PUT", "/review-uploads/o1/i/r/02-b.png", { ...png, ...as("worker-2/agent") }, [PNG])).toMatchObject({ status: 403 });
+    expect(await send(port, "DELETE", "/review-uploads/o1/i/r", as("worker-2/agent"))).toMatchObject({ status: 403 });
+    expect(await send(port, "PUT", "/review-uploads/o1/i/r/02-b.png", { ...png, ...as("worker-1/agent") }, [PNG])).toMatchObject({ status: 204 });
+    expect(await send(port, "PUT", "/review-uploads/o1/i/r/03-c.png", { ...png, ...as("phone/human") }, [PNG])).toMatchObject({ status: 204 });
+    expect((await readdir(path.join(root, "o1", "i", "r"))).sort()).toEqual([".owner", "01-a.png", "02-b.png", "03-c.png"]);
+    expect(await send(port, "DELETE", "/review-uploads/o1/i/r", as("phone/human"))).toMatchObject({ status: 204 });
+    await expect(lstat(path.join(root, "o1", "i", "r"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("admits only a human to a run with no owner file", async () => {
+    const port = await serve();
+    await mkdir(path.join(root, "o2", "i", "r"), { recursive: true });
+    expect(await send(port, "DELETE", "/review-uploads/o2/i/r", as("worker-1/agent"))).toMatchObject({ status: 403 });
+    expect(await send(port, "DELETE", "/review-uploads/o2/i/r")).toMatchObject({ status: 204 });
+  });
+
+  it("refuses every write with 403 read_only when read-only", async () => {
+    const port = await serve({ readOnly: true });
+    const put = await send(port, "PUT", "/review-uploads/o3/i/r/01-a.png", png, [PNG]);
+    expect(put.status).toBe(403);
+    expect(put.body).toMatch(/^read_only/);
+    expect(await send(port, "DELETE", "/review-uploads/o3/i/r")).toMatchObject({ status: 403 });
+    await expect(lstat(path.join(root, "o3"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+});
+
 describe("createReviewUploadHandler: DELETE", () => {
   it("removes a run, and answers 204 for one that is missing", async () => {
     const port = await serve();
@@ -208,7 +261,8 @@ describe("createReviewUploadHandler: DELETE", () => {
 // The CLI is untyped .mjs outside this package; a non-literal specifier keeps tsc from resolving it.
 const CLI_LIB = path.join(import.meta.dirname, "..", "..", "..", "bin", "review-request-lib.mjs");
 
-it("caps uploads exactly where the CLI caps videos", async () => {
-  const cli = (await import(CLI_LIB)) as { MAX_VIDEO_BYTES: number };
+it("caps uploads exactly where the CLI caps videos, and types them as the CLI sends them", async () => {
+  const cli = (await import(CLI_LIB)) as { MAX_VIDEO_BYTES: number; MEDIA_TYPES: Record<string, string> };
   expect(MAX_REVIEW_UPLOAD_BYTES).toBe(cli.MAX_VIDEO_BYTES);
+  expect(cli.MEDIA_TYPES).toEqual(CONTENT_TYPES);
 });

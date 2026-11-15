@@ -156,7 +156,7 @@ async function main(): Promise<void> {
       connect: createConnectHandler({ verifyToken }),
       health: createHealthHandler(pool),
       reviewImages: createReviewImageHandler({ root: reviewImageRoot }),
-      reviewUploads: createReviewUploadHandler({ root: reviewImageRoot }),
+      reviewUploads: createReviewUploadHandler({ root: reviewImageRoot, readOnly }),
       hangar: createHangarHandler({ db, readOnly, shutdownSignal: shutdown.signal }),
       trpc: trpcHandler,
       ...(staticClient !== undefined ? { staticClient } : {}),

@@ -201,6 +201,8 @@ const COMMON_HEADERS = {
   "Cache-Control": "no-store",
   "X-Content-Type-Options": "nosniff",
   "Cross-Origin-Resource-Policy": "same-origin",
+  // A stored file never runs as a page, even opened directly.
+  "Content-Security-Policy": "default-src 'none'; sandbox",
 } as const;
 
 function refuse(res: ServerResponse, status: number, text: string, extraHeaders: Record<string, string> = {}): void {

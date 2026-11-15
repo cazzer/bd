@@ -43,10 +43,12 @@
 // <NN-name>` (raw body, the token's Bearer header), and the review stores
 // those relative paths, which the server resolves against its media root.
 // `<run>` is fresh random hex per request, since the review id is not known
-// yet and a closed review keeps its media. A failed upload DELETEs its run
-// and refuses with nothing filed; a run whose `bd update` never landed is
-// DELETEd on the way out; a refreshed review's earlier runs are DELETEd once
-// the update lands. Those DELETEs are best-effort: a failure warns and
+// yet and a closed review keeps its media. A PUT is retried on a 503 or a
+// reset connection. A failed upload DELETEs its run and refuses with nothing
+// filed; a run whose `bd update` was never attempted is DELETEd on the way
+// out (an attempted one is kept: the update may have landed and still exited
+// non-zero); a refreshed review's earlier runs are DELETEd once the update
+// lands. Those DELETEs are best-effort: a failure warns and
 // changes no exit code. Without BREAKDOWN_API nothing changes.
 
 import { randomBytes } from "node:crypto";
@@ -75,6 +77,11 @@ const DEFAULT_SERVER_PORT = "4310";
 const FETCH_TIMEOUT_MS = 5_000;
 /** Per uploaded file; the server's own request timeout is the same 300 s. */
 const UPLOAD_TIMEOUT_MS = 300_000;
+/** Retries of one PUT after a 503 (busy) or a reset connection. */
+const UPLOAD_RETRIES = 3;
+/** Cap on the wait a 503's Retry-After asks for. */
+const MAX_RETRY_WAIT_MS = 5_000;
+const RETRY_CODES = new Set(["EPIPE", "ECONNRESET"]);
 // The first character is never `-`, so an id cannot be read by bd as an option.
 const ITEM_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
 const PORT = /^\d{1,5}$/;
@@ -91,7 +98,7 @@ const VIDEO_EXTENSIONS = new Set([".mp4", ".webm"]);
 /** A video attachment's size cap. Must equal MAX_REVIEW_UPLOAD_BYTES in apps/web/server/review-uploads.ts. */
 export const MAX_VIDEO_BYTES = 200 * 2 ** 20;
 // The Content-Type each upload is sent with; must agree with CONTENT_TYPES in apps/web/server/review-images.ts.
-const MEDIA_TYPES = {
+export const MEDIA_TYPES = {
   ".png": "image/png",
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
@@ -868,7 +875,8 @@ async function showInChrome(deps, boardUrl, link) {
 /**
  * @param deps {{ argv: string[], cwd: string, env: Record<string, string|undefined>, homedir: string,
  *   run: (cmd: string, args: string[], opts: { cwd: string }) => Promise<{ code: number, stdout: string, stderr: string }>,
- *   fetch: typeof fetch, out: (line: string) => void, warn: (line: string) => void, breakdownRoot: string }}
+ *   fetch: typeof fetch, out: (line: string) => void, warn: (line: string) => void, breakdownRoot: string,
+ *   sleep?: (ms: number) => Promise<void> }}
  * @returns {Promise<{ exitCode: number }>}
  */
 export async function requestReview(deps) {
@@ -1181,6 +1189,40 @@ async function removeRun(deps, owner, run, which) {
 }
 
 /**
+ * One PUT, retried up to UPLOAD_RETRIES times on a 503 (after its
+ * Retry-After, at most MAX_RETRY_WAIT_MS) or a reset connection: null once
+ * stored, else why not. The server's text is cut to one line, control
+ * characters removed, before it is ever printed.
+ */
+async function putFile(deps, url, name, file) {
+  const sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  for (let attempt = 0; ; attempt++) {
+    let retryAfterMs = 1_000;
+    let why;
+    try {
+      const response = await deps.fetch(url, {
+        method: "PUT",
+        headers: { ...authHeaders(deps.env), "content-type": MEDIA_TYPES[path.extname(name).toLowerCase()] },
+        body: await openAsBlob(file),
+        redirect: "error",
+        signal: AbortSignal.timeout(UPLOAD_TIMEOUT_MS),
+      });
+      if (response.ok) return null;
+      const detail = (await response.text().catch(() => "")).trim().split("\n")[0].replace(new RegExp(CONTROL_CHAR.source, "g"), "").slice(0, 200);
+      why = `HTTP ${response.status}${detail ? `: ${detail}` : ""}`;
+      if (response.status !== 503) return why;
+      const seconds = Number(response.headers?.get?.("retry-after"));
+      if (Number.isFinite(seconds) && seconds >= 0) retryAfterMs = seconds * 1000;
+    } catch (err) {
+      why = fetchFailure(err, UPLOAD_TIMEOUT_MS);
+      if (!RETRY_CODES.has(err?.cause?.code ?? err?.code)) return why;
+    }
+    if (attempt === UPLOAD_RETRIES) return why;
+    await sleep(Math.min(retryAfterMs, MAX_RETRY_WAIT_MS));
+  }
+}
+
+/**
  * Uploads one request's files, in order, to a fresh run on the server
  * (module header); a failure DELETEs the run and refuses with nothing filed.
  * The stored paths are relative to the server's media root.
@@ -1191,22 +1233,7 @@ async function uploadFiles(deps, projectKey, itemId, files) {
   const stored = [];
   for (const [index, given] of files.entries()) {
     const name = copiedName(index, given);
-    let why = null;
-    try {
-      const response = await deps.fetch(`${runUrl(deps, owner, run)}/${name}`, {
-        method: "PUT",
-        headers: { ...authHeaders(deps.env), "content-type": MEDIA_TYPES[path.extname(name).toLowerCase()] },
-        body: await openAsBlob(path.resolve(deps.cwd, given)),
-        redirect: "error",
-        signal: AbortSignal.timeout(UPLOAD_TIMEOUT_MS),
-      });
-      if (!response.ok) {
-        const detail = (await response.text().catch(() => "")).trim().split("\n")[0].slice(0, 200);
-        why = `HTTP ${response.status}${detail ? `: ${detail}` : ""}`;
-      }
-    } catch (err) {
-      why = fetchFailure(err, UPLOAD_TIMEOUT_MS);
-    }
+    const why = await putFile(deps, `${runUrl(deps, owner, run)}/${name}`, name, path.resolve(deps.cwd, given));
     if (why !== null) {
       await removeRun(deps, owner, run, "uploaded");
       throw new Refusal(`could not upload the attachments to ${apiBase(deps.env)}: ${name}: ${why}. Nothing was filed.`);
@@ -1345,10 +1372,11 @@ async function fileOne(deps, request, { project, item, bdCwd }, existing, staged
   if (existing) updateArgs.push("--description", request.description);
   if (existing && (review.labels ?? []).includes(CHANGES_LABEL)) updateArgs.push("--remove-label", CHANGES_LABEL);
   if (existing && request.card && review.title !== title) updateArgs.push("--title", title);
+  // Once bd update has run, the review may point at this run even if it exited non-zero, so it is never removed.
+  if (staged.remote) staged.committed = true;
   const updated = await deps.run("bd", updateArgs, bdCwd);
   if (updated.code !== 0) return partial("bd update", firstLine(updated));
   if (staged.remote) {
-    staged.committed = true;
     if (existing) {
       for (const run of previousRuns(review, project.key, request.itemId, staged.run)) await removeRun(deps, staged, run, "earlier");
     }
