@@ -98,6 +98,40 @@ describe("mapBeadsIssueToNode", () => {
     expect((thrown as InvalidEventTimeError).message).toContain("occurred_at");
   });
 
+  it("carries a milestone's due_at and a claimed task's started_at, canonicalized, and no key when beads reports none", () => {
+    const milestone = mapBeadsIssueToNode({ ...base, issue_type: "milestone", due_at: "2026-12-15T00:00:00Z" });
+    expect(milestone.metadata).toMatchObject({ issue_type: "milestone", due_at: "2026-12-15T00:00:00.000Z" });
+    expect(milestone.metadata).not.toHaveProperty("started_at");
+    const claimed = mapBeadsIssueToNode({ ...base, status: "in_progress", started_at: "2026-11-15T16:22:12Z" });
+    expect(claimed.metadata).toMatchObject({ started_at: "2026-11-15T16:22:12.000Z" });
+    expect(claimed.metadata).not.toHaveProperty("due_at");
+    for (const issue of [base, { ...base, due_at: null, started_at: null }]) {
+      const node = mapBeadsIssueToNode(issue);
+      expect(node.metadata).not.toHaveProperty("due_at");
+      expect(node.metadata).not.toHaveProperty("started_at");
+    }
+  });
+
+  it("fails on an unreadable due_at or started_at, naming the issue and the field", () => {
+    for (const [field, value] of [
+      ["due_at", "someday"],
+      ["started_at", "2026-11-15T10:00:00"],
+    ] as const) {
+      let thrown: unknown;
+      try {
+        mapBeadsIssueToNode({ ...base, [field]: value }, 6);
+      } catch (err) {
+        thrown = err;
+      }
+      expect(thrown).toBeInstanceOf(InvalidEventTimeError);
+      const e = thrown as InvalidEventTimeError;
+      expect(e.field).toBe(field);
+      expect(e.item).toBe("at batch index 6 (issue bd-abc)");
+      expect(e.message).toContain(`${field} (got ${JSON.stringify(value)})`);
+    }
+    expect(() => mapBeadsIssueToNode({ ...base, due_at: "someday" })).toThrow(/invalid event time issue bd-abc: due_at/);
+  });
+
   it("maps a closed issue's closed_at and close_reason, normalizing the timestamp", () => {
     const node = mapBeadsIssueToNode({ ...base, status: "closed", closed_at: "2026-09-02T21:41:14Z", close_reason: "shipped" });
     expect(node.metadata).toMatchObject({ status: "closed", closed_at: "2026-09-02T21:41:14.000Z", closed_reason: "shipped" });

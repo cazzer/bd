@@ -1,12 +1,12 @@
 ## 1. Planning dates and milestones in the store
 
-- [ ] 1.1 Factor a single-key instant normalizer out of `normalizeOccurredAt` in `packages/core/src/event-time.ts`; `normalizeOccurredAt` uses it unchanged (existing tests pass)
-- [ ] 1.2 `normalizeWorkItemMetadata` normalizes optional `due_at` and `started_at` with it; refusal names item, field, value; tests for date-only, zoned, zoneless-refused, null-deletes
-- [ ] 1.3 `BeadsIssue` gains `due_at`/`started_at`; `mapBeadsIssueToNode` carries them; an unreadable value fails the load naming issue and field; tests in `beads.test.ts`
-- [ ] 1.4 Ingest test: a fixture with a milestone (due), an epic under it, a claimed task under the epic loads with `child_of` milestone←epic←task and the dates; a second load reports all unchanged
-- [ ] 1.5 Extract the board's upward `child_of` walk into a shared CTE builder in `board.ts`; board tests pass unchanged
-- [ ] 1.6 Board excludes `milestone` items from cards and lane epics, and returns each lane epic's nearest milestone (`id`, `title`); tests: milestone not a card, epic lane names its milestone, task directly under a milestone is in "No epic"
-- [ ] 1.7 `pnpm check` passes
+- [x] 1.1 Factor a single-key instant normalizer out of `normalizeOccurredAt` in `packages/core/src/event-time.ts`; `normalizeOccurredAt` uses it unchanged (existing tests pass)
+- [x] 1.2 `normalizeWorkItemMetadata` normalizes optional `due_at` and `started_at` with it; refusal names item, field, value; tests for date-only, zoned, zoneless-refused, null-deletes
+- [x] 1.3 `BeadsIssue` gains `due_at`/`started_at`; `mapBeadsIssueToNode` carries them; an unreadable value fails the load naming issue and field; tests in `beads.test.ts`
+- [x] 1.4 Ingest test: a fixture with a milestone (due), an epic under it, a claimed task under the epic loads with `child_of` milestone←epic←task and the dates; a second load reports all unchanged
+- [x] 1.5 Extract the board's upward `child_of` walk into a shared CTE builder in `board.ts`; board tests pass unchanged
+- [x] 1.6 Board excludes `milestone` items from cards and lane epics, and returns each lane epic's nearest milestone (`id`, `title`); tests: milestone not a card, epic lane names its milestone, task directly under a milestone is in "No epic"
+- [x] 1.7 `pnpm check` passes
 
 ## 2. Roadmap read
 

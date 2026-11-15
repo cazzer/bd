@@ -14,9 +14,9 @@
 // the tail (the least urgent, oldest-updated of the last column order) when
 // the serialized answer would exceed the response budget, naming them in
 // `droppedCardIds`. `truncated` is the OR of the two, so the board has one
-// honest flag. Epics are unbounded here: at most one row per item, a title
-// and three short fields each, and dropping a lane header would orphan its
-// cards.
+// honest flag. Epics are unbounded here: at most one row per item, a title,
+// three short fields, and the milestone's id and title each, and dropping a
+// lane header would orphan its cards.
 //
 // `boardItem` (board-visual-reviews, design.md decision 2) is the drawer's
 // read: one item of one project by its external id, with content, labels,

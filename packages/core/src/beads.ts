@@ -13,7 +13,11 @@
 // `close_reason` becomes `closed_reason`. The issue's `created_at` is also
 // written as `occurred_at` through `normalizeOccurredAt` (timeline-view
 // design.md decision 2: the moment a person would place the item at on a
-// timeline), with `source_created_at` kept beside it untouched.
+// timeline), with `source_created_at` kept beside it untouched. The
+// issue's `due_at` and `started_at` (roadmap-milestones, design.md
+// decision 1) are carried as the contract's planning dates, normalized
+// before the contract with the issue id in the item label, so an
+// unreadable one fails the load naming the issue and the field.
 //
 // Fit-and-keep, as the git loader does for a commit subject: a tracker's
 // history cannot be rewritten, and one long close reason must not refuse a
@@ -31,17 +35,19 @@
 // other issue gains a key, so a tracker with no reviews loads unchanged.
 
 import type { EdgeInput } from "./edges.js";
-import { normalizeOccurredAt, OCCURRED_AT_KEY } from "./event-time.js";
+import { normalizeInstantKey, normalizeOccurredAt, OCCURRED_AT_KEY } from "./event-time.js";
 import { fitText } from "./fit-text.js";
 import { DEFAULT_MAX_METADATA_LENGTH, DEFAULT_MAX_TITLE_LENGTH, type NodeInput } from "./nodes.js";
 import { normalizeReviewComments, normalizeReviewMetadata, REVIEW_COMMENT_COUNT_KEY, REVIEW_COMMENTS_KEY, REVIEW_LABEL, REVIEW_METADATA_KEY } from "./reviews.js";
 import {
   BLOCKS_EDGE_TYPE,
   CHILD_OF_EDGE_TYPE,
+  DUE_AT_KEY,
   MAX_ASSIGNEE_LENGTH,
   MAX_CLOSED_REASON_LENGTH,
   MAX_SPEC_ID_LENGTH,
   normalizeWorkItemMetadata,
+  STARTED_AT_KEY,
   WORK_ITEM_NODE_TYPE,
 } from "./work-items.js";
 
@@ -62,6 +68,10 @@ export interface BeadsIssue {
   updated_at?: string | null;
   closed_at?: string | null;
   close_reason?: string | null;
+  /** The date the issue is meant to be done by (`bd create --due`); a date-only due is UTC midnight. */
+  due_at?: string | null;
+  /** When the issue was claimed. */
+  started_at?: string | null;
   spec_id?: string | null;
   acceptance_criteria?: string | null;
   design?: string | null;
@@ -109,9 +119,10 @@ function section(heading: string, body: string | null | undefined): string {
  * Maps one beads issue to a `work_item` node. Content is the description
  * followed by the acceptance criteria, design, and notes sections when
  * present, so full-text search sees everything a person wrote. Throws
- * `InvalidEventTimeError` when `created_at` does not parse and
- * `InvalidWorkItemError` when the row violates the work-item contract,
- * each naming `index`. `options.project`, when given, is written as the
+ * `InvalidEventTimeError` when `created_at` does not parse (naming
+ * `occurred_at` and `index`) or `due_at` / `started_at` does not (naming
+ * that field, `index`, and the issue id), and `InvalidWorkItemError` when
+ * the row violates the work-item contract, naming `index`. `options.project`, when given, is written as the
  * item's `project` key (validated by the contract, so a bad key is an
  * `InvalidWorkItemError` naming `project`). For a review issue
  * (`isReviewIssue`) only: `metadata.review`, when present and not null, is
@@ -141,15 +152,22 @@ export function mapBeadsIssueToNode(issue: BeadsIssue, index?: number, options: 
     source_created_at: issue.created_at ?? null,
     source_updated_at: issue.updated_at ?? null,
     [OCCURRED_AT_KEY]: issue.created_at ?? null,
+    [DUE_AT_KEY]: issue.due_at ?? null,
+    [STARTED_AT_KEY]: issue.started_at ?? null,
     ...(options.project === undefined ? {} : { project: options.project }),
     ...(issue.labels && issue.labels.length > 0 ? { labels: issue.labels } : {}),
     ...(rawReview === undefined || rawReview === null ? {} : { [REVIEW_METADATA_KEY]: normalizeReviewMetadata(rawReview) }),
     ...(comments.length > 0 ? { [REVIEW_COMMENTS_KEY]: comments } : {}),
     ...(commentCount === undefined ? {} : { [REVIEW_COMMENT_COUNT_KEY]: commentCount }),
   };
-  // Event time first, so an unparseable created_at is named as occurred_at
-  // rather than surfacing through the work-item contract.
-  const normalized = normalizeWorkItemMetadata(normalizeOccurredAt(metadata, { index }), { index });
+  // Event time and the planning dates first, so an unparseable created_at
+  // is named as occurred_at, and a bad due_at or started_at names the issue
+  // id as well as the field, rather than surfacing through the work-item
+  // contract.
+  const itemLabel = index === undefined ? `issue ${issue.id}` : `at batch index ${index} (issue ${issue.id})`;
+  let dated = normalizeOccurredAt(metadata, { index });
+  for (const key of [DUE_AT_KEY, STARTED_AT_KEY]) dated = normalizeInstantKey(dated, key, { itemLabel });
+  const normalized = normalizeWorkItemMetadata(dated, { index });
   if (JSON.stringify(normalized).length > DEFAULT_MAX_METADATA_LENGTH) {
     delete normalized[REVIEW_COMMENTS_KEY];
     if (REVIEW_METADATA_KEY in normalized && JSON.stringify(normalized).length > DEFAULT_MAX_METADATA_LENGTH) {

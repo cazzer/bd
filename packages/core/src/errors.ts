@@ -526,22 +526,24 @@ export class NotAWorkItemError extends KnowledgeStoreError {
 // --- Event time (timeline-view change) --------------------------------------
 
 /**
- * A node's `occurred_at` is neither absent, null, nor a value that parses
- * as an instant (knowledge-store spec, "Nodes may carry a validated event
- * time"): a number, an object, an empty or unparseable string, an invalid
- * `Date`, or an instant outside the years the fixed-width canonical form
- * covers. The key is the contract's one field, so the message names it
- * itself (`OCCURRED_AT_KEY` in event-time.ts). `item` is however the
- * writer labels the item — the MCP write tool passes its batch index and
- * key — so a writer knows which item to fix.
+ * An instant-valued metadata key is neither absent, null, nor a value that
+ * parses as an instant (knowledge-store spec, "Nodes may carry a validated
+ * event time"; work-items spec, "Work items may carry planning dates"): a
+ * number, an object, an empty or unparseable string, a zone-less
+ * date-time, an invalid `Date`, or an instant outside the years the
+ * fixed-width canonical form covers. `field` is the key — `occurred_at`
+ * on any node, `due_at` or `started_at` on a work item — and the message
+ * names it. `item` is however the writer labels the item — the MCP write
+ * tool passes its batch index and key — so a writer knows which item to fix.
  */
 export class InvalidEventTimeError extends KnowledgeStoreError {
   constructor(
     readonly item: string | null,
     readonly value: unknown,
     reason: string,
+    readonly field: string = "occurred_at",
   ) {
-    super(`invalid event time${item === null ? "" : ` ${item}`}: occurred_at (got ${JSON.stringify(value)}) ${reason}`);
+    super(`invalid event time${item === null ? "" : ` ${item}`}: ${field} (got ${JSON.stringify(value)}) ${reason}`);
   }
 }
 
