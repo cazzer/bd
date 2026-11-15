@@ -31,6 +31,7 @@ import {
   HangarSessionNotClaimedByError,
   HangarSessionNotFoundError,
   HangarTransitionError,
+  HangarOutcomeRefusedError,
   HangarSessionMergeError,
   KnowledgeStoreError,
   LookupFailedError,
@@ -221,6 +222,17 @@ export function mapError(toolName: string, err: unknown): CallToolResult {
   }
   if (err instanceof InvalidHangarSessionError) {
     return actionable(err, "Fix that argument and retry; nothing was queued. flavor is one of headless, display-godot, display-browser; repo is 1-200 characters with no control characters; states are queued, claimed, running, stopped, failed.");
+  }
+  if (err instanceof HangarOutcomeRefusedError) {
+    return actionable(
+      err,
+      err.kind === "state"
+        ? "Nothing was filed. Ask for an outcome only once the session has stopped or failed; check its state with brain_hangar_sessions."
+        : "Nothing was filed. Hangar has already released this session, so its outcome is final.",
+    );
+  }
+  if (err instanceof HangarSessionNotFoundError && toolName === "brain_hangar_outcome_request") {
+    return actionable(err, "Nothing was filed. Pass the id of a hangar session from brain_hangar_sessions.");
   }
   // Only hangar's REST API claims and reports sessions; no MCP tool reaches
   // these today, but a session-state refusal is never something to retry.

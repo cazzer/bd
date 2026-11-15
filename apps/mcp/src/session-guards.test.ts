@@ -1,8 +1,8 @@
 // The hangar-queue security review's guards, through the real MCP protocol:
-// a session-bound server neither lists nor runs brain_merge and
-// brain_hangar_request; brain_merge refuses a hangar session; brain_link
-// refuses edges only the hangar queue writes; brain_write never lets an
-// agent set an inbox item's decision or feedback; and a session-bound
+// a session-bound server neither lists nor runs brain_merge,
+// brain_hangar_request, or brain_hangar_outcome_request; brain_merge refuses
+// a hangar session; brain_link refuses edges only the hangar queue writes;
+// brain_write never lets an agent set an inbox item's decision or feedback; and a session-bound
 // brain_write touches only new inbox keys and its own session's items.
 //
 // The database is shared with live data, so every fixture is this file's
@@ -85,17 +85,21 @@ async function session(): Promise<string> {
 }
 
 describe("a session-bound server", () => {
-  it("neither lists nor runs brain_merge and brain_hangar_request, and serves the other tools", async () => {
+  it("neither lists nor runs brain_merge, brain_hangar_request, and brain_hangar_outcome_request, and serves the other tools", async () => {
     const hangarSessionId = randomUUID();
     const client = await connect({ hangarSessionId });
     const names = (await client.listTools()).tools.map((t) => t.name);
     expect(names).not.toContain("brain_merge");
     expect(names).not.toContain("brain_hangar_request");
+    expect(names).not.toContain("brain_hangar_outcome_request");
     expect(names).toEqual(expect.arrayContaining(["brain_write", "brain_link", "brain_search", "brain_hangar_sessions"]));
 
     const [a, b] = [await fixture("dupe a", "doc"), await fixture("dupe b", "doc")];
     expect(await refusal(client, "brain_merge", { loserId: a, survivorId: b })).toContain(`'brain_merge' is not available to a hangar session's token (session ${hangarSessionId})`);
     expect(await refusal(client, "brain_hangar_request", { repo: "cazzer/bd", workItemId: await fixture("more work"), flavor: "headless" })).toContain("'brain_hangar_request' is not available");
+    const ended = randomUUID();
+    expect(await refusal(client, "brain_hangar_outcome_request", { sessionId: ended, outcome: "tabled", note: "my own disk" })).toContain("'brain_hangar_outcome_request' is not available");
+    expect(await db.select({ id: nodes.id }).from(nodes).where(and(eq(nodes.sourceSystem, "inbox"), eq(nodes.externalId, `hangar-outcome:${ended}`)))).toEqual([]);
     const [row] = await db.select({ mergedInto: nodes.mergedInto }).from(nodes).where(eq(nodes.id, a));
     expect(row?.mergedInto).toBeNull();
 
@@ -104,7 +108,7 @@ describe("a session-bound server", () => {
 
   it("is the only kind narrowed: a host-minted token's server lists both", async () => {
     const names = (await (await connect({ tokenClient: "laptop" })).listTools()).tools.map((t) => t.name);
-    expect(names).toEqual(expect.arrayContaining(["brain_merge", "brain_hangar_request"]));
+    expect(names).toEqual(expect.arrayContaining(["brain_merge", "brain_hangar_request", "brain_hangar_outcome_request"]));
   });
 });
 

@@ -23,7 +23,7 @@
 // own stderr via `console.error` below, for whoever is running this
 // locally to read — never sent to the client.
 
-import { HostBinaryUnavailableError, InboxCardChangedError, InboxDecisionConflictError, InboxItemNotThisSessionError, InboxItemSessionEndedError, InvalidInboxItemError, NotAnInboxItemError, type HostBinary } from "@breakdown/core";
+import { HangarOutcomeRefusedError, HangarSessionNotFoundError, HostBinaryUnavailableError, InboxCardChangedError, InboxDecisionConflictError, InboxItemNotThisSessionError, InboxItemSessionEndedError, InvalidHangarSessionError, InvalidInboxItemError, NotAnInboxItemError, type HostBinary } from "@breakdown/core";
 import {
   asPgError,
   ContentTooLargeError,
@@ -162,6 +162,15 @@ export function mapCoreError(procedureName: string, err: unknown): TRPCError {
   if (err instanceof InboxItemSessionEndedError) {
     // Worded for the person at the card; the core message (ids) is for logs.
     return new TRPCError({ code: "CONFLICT", message: INBOX_SESSION_ENDED_MESSAGE });
+  }
+  if (err instanceof HangarOutcomeRefusedError) {
+    return actionable("CONFLICT", err, err.kind === "state" ? "Wait until the session has stopped or failed." : "Hangar has already acted on the decision.");
+  }
+  if (err instanceof HangarSessionNotFoundError) {
+    return actionable("NOT_FOUND", err, "Reload the board; the session is gone.");
+  }
+  if (err instanceof InvalidHangarSessionError) {
+    return actionable("BAD_REQUEST", err, "Fix that field and retry.");
   }
   if (err instanceof InboxItemNotThisSessionError) {
     return actionable("FORBIDDEN", err, "A session token completes or re-sends only the items its own session filed.");

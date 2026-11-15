@@ -5,10 +5,18 @@
 // or a worker may want. Dates go out as ISO strings, the database's own
 // `now` included, so the pill measures "offline since …" from the server's
 // clock, never the browser's.
+//
+// `hangarSessionOutcome` (hangar-release): the person accepts or tables an
+// ended session (hangar.ts `setHangarSessionOutcome`). `human` only: an agent
+// token can only ask (brain_hangar_outcome_request), and no procedure takes
+// a hangar token. Attributed to the admitted client, or "human" for the
+// tokenless local person.
 
-import { getHangarStatus } from "@breakdown/core";
+import { getHangarStatus, HANGAR_OUTCOMES, setHangarSessionOutcome, type HangarOutcome, type HangarSessionState } from "@breakdown/core";
+import { TRPCError } from "@trpc/server";
+import { z } from "zod";
 import { mapCoreError } from "../errors.js";
-import { agentProcedure, router } from "../trpc.js";
+import { agentProcedure, humanProcedure, router } from "../trpc.js";
 
 export interface HangarStatusDto {
   status: "online" | "offline" | "never";
@@ -42,4 +50,27 @@ const hangarStatusProcedure = agentProcedure.query(async ({ ctx }): Promise<Hang
   }
 });
 
-export const hangarRouter = router({ hangarStatus: hangarStatusProcedure });
+export interface HangarSessionOutcomeDto {
+  id: string;
+  state: HangarSessionState;
+  outcome: HangarOutcome | null;
+  outcomeAt: string | null;
+  outcomeBy: string | null;
+  released: boolean;
+  /** False when the session already had this outcome: nothing was written. */
+  changed: boolean;
+}
+
+export const hangarSessionOutcomeInputSchema = z.object({ id: z.string().uuid(), outcome: z.enum(HANGAR_OUTCOMES) });
+
+const hangarSessionOutcomeProcedure = humanProcedure.input(hangarSessionOutcomeInputSchema).mutation(async ({ ctx, input }): Promise<HangarSessionOutcomeDto> => {
+  if (ctx.readOnly) throw new TRPCError({ code: "FORBIDDEN", message: "The server is read-only (BRAIN_READ_ONLY); setting a session's outcome is refused." });
+  try {
+    const { session, changed } = await setHangarSessionOutcome(ctx.db, { id: input.id, outcome: input.outcome, actor: ctx.client ?? undefined });
+    return { id: session.id, state: session.state, outcome: session.outcome, outcomeAt: session.outcomeAt, outcomeBy: session.outcomeBy, released: session.released, changed };
+  } catch (err) {
+    throw mapCoreError("hangarSessionOutcome", err);
+  }
+});
+
+export const hangarRouter = router({ hangarStatus: hangarStatusProcedure, hangarSessionOutcome: hangarSessionOutcomeProcedure });

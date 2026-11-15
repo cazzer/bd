@@ -732,6 +732,26 @@ export class HangarSessionNotClaimedByError extends KnowledgeStoreError {
 }
 
 /**
+ * A person's outcome (hangar.ts `setHangarSessionOutcome`) that the session
+ * cannot take: it has not ended (`state`), or hangar has already released it
+ * (`released`: an outcome is set and its disk is gone, so the decision was
+ * acted on). Nothing was written.
+ */
+export class HangarOutcomeRefusedError extends KnowledgeStoreError {
+  constructor(
+    readonly sessionId: string,
+    readonly kind: "state" | "released",
+    readonly detail: string,
+  ) {
+    super(
+      kind === "state"
+        ? `hangar session ${sessionId} is ${detail}; only a stopped or failed session can be accepted or tabled`
+        : `hangar session ${sessionId} is already released (its outcome is ${detail} and hangar has deleted its disk), so its outcome can no longer change`,
+    );
+  }
+}
+
+/**
  * A generic writer (brain_write) was given a node only the hangar paths
  * write: node_type `hangar_session`, or anything under source system
  * `hangar`. Nothing was written.

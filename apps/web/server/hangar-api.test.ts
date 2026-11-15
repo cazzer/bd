@@ -17,7 +17,7 @@
 import { randomUUID } from "node:crypto";
 import { createServer, request, type IncomingHttpHeaders, type Server } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
-import { appendHangarMessage, closeIngestRun, createClientToken, openIngestRun, requestSession, upsertNodes, verifyClientToken, type IngestRunHandle } from "@breakdown/core";
+import { appendHangarMessage, closeIngestRun, createClientToken, openIngestRun, requestSession, setHangarSessionOutcome, upsertNodes, verifyClientToken, type IngestRunHandle } from "@breakdown/core";
 import { clientTokens, createDb, createPool, hangarCheckIns, hangarMessages, nodes, resolveDatabaseUrl, type Database } from "@breakdown/db";
 import { createHTTPHandler } from "@trpc/server/adapters/standalone";
 import { and, eq, inArray, like, sql } from "drizzle-orm";
@@ -351,6 +351,73 @@ describe("PATCH /hangar/v1/sessions/:id and GET /hangar/v1/sessions", () => {
     expect(badState.status).toBe(400);
     const twice = await send("/hangar/v1/sessions?limit=1&limit=2", { token: tokens[HANGAR_A] });
     expect(twice.status).toBe(400);
+  });
+});
+
+// hangar-release (cazzer/hangar docs/release-contract.md): a person's
+// outcome on an ended session, hangar's failure reason, and its release ack.
+describe("releasing sessions", () => {
+  const PERSON = `${PREFIX}-person`;
+
+  async function ended(state: "stopped" | "failed"): Promise<string> {
+    const { id } = await queued();
+    await claim(id);
+    expect((await patch(id, { state: "running", container: `hangar-${id}`, disk_path: `/disks/${id}.img` })).status).toBe(200);
+    expect((await patch(id, { state })).status).toBe(200);
+    return id;
+  }
+
+  it("serves the outcome fields on every session, null until a person decides", async () => {
+    const id = await ended("stopped");
+    const listed = await send("/hangar/v1/sessions?state=stopped&state=failed&limit=200", { token: tokens[HANGAR_A] });
+    const session = (listed.json["sessions"] as Record<string, unknown>[]).find((s) => s["id"] === id);
+    expect(session).toMatchObject({ outcome: null, outcome_at: null, outcome_by: null, released: false, disk_path: `/disks/${id}.img` });
+  });
+
+  it("lists a session a person just tabled first, and the ack PATCH releases it", async () => {
+    const older = await ended("failed");
+    const id = await ended("stopped");
+    await setHangarSessionOutcome(db, { id: older, outcome: "tabled", actor: PERSON });
+    const listedIds = async (): Promise<string[]> => ((await send("/hangar/v1/sessions?state=stopped&state=failed&limit=200", { token: tokens[HANGAR_A] })).json["sessions"] as { id: string }[]).map((s) => s.id);
+    expect((await listedIds())[0]).toBe(older);
+
+    await setHangarSessionOutcome(db, { id, outcome: "tabled", actor: PERSON });
+    expect((await listedIds())[0]).toBe(id);
+    const listed = await send("/hangar/v1/sessions?state=stopped&state=failed&limit=200", { token: tokens[HANGAR_A] });
+    expect((listed.json["sessions"] as Record<string, unknown>[])[0]).toMatchObject({ id, outcome: "tabled", outcome_by: PERSON, outcome_at: expect.stringMatching(/Z$/), released: false });
+
+    const acked = await patch(id, { container: null, disk_path: null });
+    expect(acked.status, acked.body).toBe(200);
+    expect(acked.json["session"]).toMatchObject({ state: "stopped", container: null, disk_path: null, outcome: "tabled", released: true });
+  });
+
+  it("clears container and disk_path with null on a final session with no outcome", async () => {
+    const id = await ended("failed");
+    const cleared = await patch(id, { container: null, disk_path: null });
+    expect(cleared.status, cleared.body).toBe(200);
+    expect(cleared.json["session"]).toMatchObject({ state: "failed", container: null, disk_path: null, outcome: null, released: false });
+  });
+
+  it("ignores an outcome hangar sends", async () => {
+    const id = await ended("stopped");
+    const sent = await patch(id, { outcome: "tabled", host: "hangar-linux" });
+    expect(sent.status, sent.body).toBe(200);
+    expect(sent.json["session"]).toMatchObject({ outcome: null, host: "hangar-linux" });
+    expect((await metadataOf(id))["outcome"]).toBeUndefined();
+  });
+
+  it("stores reason with failed as failure_reason, and refuses it with any other state", async () => {
+    const { id } = await queued();
+    await claim(id);
+    for (const body of [{ state: "running", reason: "worker exited 3" }, { reason: "worker exited 3" }, { state: "failed", reason: "" }, { state: "failed", reason: "x".repeat(501) }]) {
+      const refused = await patch(id, body);
+      expect(refused.status, JSON.stringify(body)).toBe(400);
+      expect(refused.json.error).toMatchObject({ code: "invalid_request", message: expect.stringContaining("reason") });
+    }
+    expect((await metadataOf(id))["state"]).toBe("claimed");
+    const failed = await patch(id, { state: "failed", reason: "git clone exited 128" });
+    expect(failed.status, failed.body).toBe(200);
+    expect(failed.json["session"]).toMatchObject({ state: "failed", failure_reason: "git clone exited 128" });
   });
 });
 

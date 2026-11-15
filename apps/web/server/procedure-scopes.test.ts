@@ -68,6 +68,8 @@ describe("procedure scopes", () => {
     expect(createNote).toMatchObject({ code: "FORBIDDEN", message: "An agent token cannot call createNote." });
     const decide = await refusal(() => agent.inboxDecision({} as never));
     expect(decide).toMatchObject({ code: "FORBIDDEN", message: "An agent token cannot call inboxDecision." });
+    const outcome = await refusal(() => agent.hangarSessionOutcome({} as never));
+    expect(outcome).toMatchObject({ code: "FORBIDDEN", message: "An agent token cannot call hangarSessionOutcome." });
   });
 
   it("lets a tokenless caller (the local person) past the gate, to input validation", async () => {

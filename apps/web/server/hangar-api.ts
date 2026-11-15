@@ -47,6 +47,7 @@ import {
   InvalidLookupIdError,
   listSessions,
   MAX_HANGAR_DISK_PATH_LENGTH,
+  MAX_HANGAR_FAILURE_REASON_LENGTH,
   MAX_HANGAR_FIELD_LENGTH,
   MAX_HANGAR_REQUEUE_REASON_LENGTH,
   MAX_HANGAR_SESSIONS_LIMIT,
@@ -123,12 +124,17 @@ const claimSchema = z.object({
   wait_s: z.number().int().min(0).max(MAX_HANGAR_WAIT_S).default(0),
 });
 
-const updateSchema = z.object({
-  state: z.enum(HANGAR_SESSION_STATES).optional(),
-  container: z.string().max(MAX_HANGAR_FIELD_LENGTH).nullable().optional(),
-  host: z.string().max(MAX_HANGAR_FIELD_LENGTH).nullable().optional(),
-  disk_path: z.string().max(MAX_HANGAR_DISK_PATH_LENGTH).nullable().optional(),
-});
+// `outcome` is not a field here: only a person sets it, so a sent one is
+// dropped like any unknown field (hangar-release; docs/hangar-api.md).
+const updateSchema = z
+  .object({
+    state: z.enum(HANGAR_SESSION_STATES).optional(),
+    container: z.string().max(MAX_HANGAR_FIELD_LENGTH).nullable().optional(),
+    host: z.string().max(MAX_HANGAR_FIELD_LENGTH).nullable().optional(),
+    disk_path: z.string().max(MAX_HANGAR_DISK_PATH_LENGTH).nullable().optional(),
+    reason: z.string().trim().min(1).max(MAX_HANGAR_FAILURE_REASON_LENGTH).optional(),
+  })
+  .refine((body) => body.reason === undefined || body.state === "failed", { path: ["reason"], message: 'is taken only with state "failed"' });
 
 const requeueSchema = z.object({
   reason: z.string().trim().min(1).max(MAX_HANGAR_REQUEUE_REASON_LENGTH),
@@ -180,6 +186,10 @@ async function sessionsJson(db: Database, sessions: readonly HangarSession[]): P
     claimed_by: s.claimedBy,
     claimed_at: s.claimedAt,
     requested_at: s.occurredAt,
+    outcome: s.outcome,
+    outcome_at: s.outcomeAt,
+    outcome_by: s.outcomeBy,
+    released: s.released,
   }));
 }
 
@@ -263,6 +273,7 @@ export function createHangarHandler({ db, readOnly = false, shutdownSignal, clai
         ...(body.container === undefined ? {} : { container: body.container }),
         ...(body.host === undefined ? {} : { host: body.host }),
         ...(body.disk_path === undefined ? {} : { diskPath: body.disk_path }),
+        ...(body.reason === undefined ? {} : { reason: body.reason }),
       });
       sendJson(res, 200, { session: await sessionJson(db, result.session) });
     },

@@ -15,7 +15,7 @@
 import { randomUUID } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { closeIngestRun, listSessions, openIngestRun, upsertNodes, type HangarStatus, type IngestRunHandle } from "@breakdown/core";
+import { closeIngestRun, listInbox, listSessions, openIngestRun, setHangarSessionOutcome, upsertNodes, type HangarStatus, type IngestRunHandle } from "@breakdown/core";
 import { createDb, createPool, ingestRuns, nodes, resolveDatabaseUrl, type Database } from "@breakdown/db";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -40,6 +40,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  if (sessionIds.length > 0) await db.delete(nodes).where(and(eq(nodes.sourceSystem, "inbox"), inArray(nodes.externalId, sessionIds.map((id) => `hangar-outcome:${id}`))));
   if (sessionIds.length > 0) await db.delete(nodes).where(inArray(nodes.id, sessionIds));
   await db.delete(nodes).where(eq(nodes.sourceSystem, FIXTURE_SOURCE));
   await closeIngestRun(db, fixtureRun);
@@ -193,6 +194,59 @@ describe("brain_hangar_sessions", () => {
     const badState = await client.callTool({ name: "brain_hangar_sessions", arguments: { states: ["paused"] } });
     expect(badState.isError).toBe(true);
     expect(textOf(badState)).toMatch(/states/);
+  });
+});
+
+/** An ended session holding a disk, written straight to the store (never queued, so no real hangar claims it). */
+async function endedSession(state: string, workItemId?: string): Promise<string> {
+  const result = await upsertNodes(db, fixtureRun, [
+    { nodeType: "hangar_session", sourceSystem: "hangar", externalId: randomUUID(), title: "Hangar headless session: test", metadata: { state, flavor: "headless", repo: "cazzer/bd", claimed_by: `test-${SUFFIX}`, disk_path: "/disks/test.img" } },
+  ]);
+  const id = result.rows[0]!.id;
+  sessionIds.push(id);
+  if (workItemId !== undefined) await db.execute(sql`INSERT INTO edges (src_id, dst_id, edge_type, source_system, ingest_run_id) VALUES (${id}::uuid, ${workItemId}::uuid, 'run_by', 'hangar', ${fixtureRun.id}::uuid)`);
+  return id;
+}
+
+describe("brain_hangar_outcome_request and releasable sessions", () => {
+  it("files a pending inbox item for a stopped session without setting its outcome; once the person tables it, it is releasable", async () => {
+    const client = await connect();
+    const item = await workItem("Outcome fixture");
+    const sessionId = await endedSession("stopped", item);
+    const filed = await call(client, "brain_hangar_outcome_request", { sessionId, outcome: "tabled", note: "The PR merged; the disk can go." });
+    expect(filed).toMatchObject({ status: "pending", action: "created", sessionId, requested: "tabled" });
+    const [inboxItem] = (await listInbox(db, { ids: [filed.inboxItemId] })).items;
+    expect(inboxItem).toMatchObject({ status: "pending", hangarOutcome: { sessionId, requested: "tabled" }, recommend: "table" });
+
+    const listed = await call(client, "brain_hangar_sessions", { workItemId: item });
+    expect(listed.sessions[0]).toMatchObject({ id: sessionId, outcome: null, outcomeAt: null, outcomeBy: null, released: false });
+    expect((await call(client, "brain_hangar_sessions", { workItemId: item, releasable: true })).sessions).toEqual([]);
+
+    await setHangarSessionOutcome(db, { id: sessionId, outcome: "tabled", actor: ACTOR });
+    const releasable = await call(client, "brain_hangar_sessions", { workItemId: item, releasable: true });
+    expect(releasable.sessions.map((s: { id: string }) => s.id)).toEqual([sessionId]);
+    expect(releasable.sessions[0]).toMatchObject({ outcome: "tabled", outcomeBy: ACTOR, released: false, diskPath: "/disks/test.img" });
+  });
+
+  it("refuses a session that has not ended, naming its state, and filing nothing", async () => {
+    const client = await connect();
+    const sessionId = await endedSession("running");
+    const raw = await client.callTool({ name: "brain_hangar_outcome_request", arguments: { sessionId, outcome: "accepted", note: "Done." } });
+    expect(raw.isError).toBe(true);
+    expect(textOf(raw)).toMatch(/is running.*stopped or failed/);
+    expect(await db.select({ id: nodes.id }).from(nodes).where(and(eq(nodes.sourceSystem, "inbox"), eq(nodes.externalId, `hangar-outcome:${sessionId}`)))).toEqual([]);
+    const badOutcome = await client.callTool({ name: "brain_hangar_outcome_request", arguments: { sessionId, outcome: "shelved", note: "x" } });
+    expect(badOutcome.isError).toBe(true);
+  });
+
+  it("is not advertised in read-only mode, and is refused when called anyway", async () => {
+    const client = await connect({ readOnly: true });
+    expect((await client.listTools()).tools.map((t) => t.name)).not.toContain("brain_hangar_outcome_request");
+    const sessionId = await endedSession("stopped");
+    const raw = await client.callTool({ name: "brain_hangar_outcome_request", arguments: { sessionId, outcome: "tabled", note: "x" } });
+    expect(raw.isError).toBe(true);
+    expect(textOf(raw)).toMatch(/read-only/i);
+    expect(await db.select({ id: nodes.id }).from(nodes).where(and(eq(nodes.sourceSystem, "inbox"), eq(nodes.externalId, `hangar-outcome:${sessionId}`)))).toEqual([]);
   });
 });
 

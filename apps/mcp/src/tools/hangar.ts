@@ -1,17 +1,24 @@
-// The three hangar tools (hangar-queue change, design decision 7; brain-mcp
-// spec, "Hangar tools"): brain_hangar_request queues a session for a work
-// item, brain_hangar_status reports hangar's liveness and the open session
-// counts, brain_hangar_sessions lists sessions. Hangar itself claims and
-// reports over the web server's REST API (docs/hangar-api.md); nothing here
-// claims, changes a session's state, or returns a token. Only
-// brain_hangar_request writes, so read-only mode refuses it alone.
+// The four hangar tools (hangar-queue change, design decision 7; brain-mcp
+// spec, "Hangar tools"; hangar-release): brain_hangar_request queues a
+// session for a work item, brain_hangar_status reports hangar's liveness and
+// the open session counts, brain_hangar_sessions lists sessions, and
+// brain_hangar_outcome_request asks the person to accept or table an ended
+// session through an inbox item. Hangar itself claims and reports over the
+// web server's REST API (docs/hangar-api.md); nothing here claims, changes a
+// session's state or outcome, or returns a token: only a person sets an
+// outcome. brain_hangar_request and brain_hangar_outcome_request write, so
+// read-only mode refuses them; a session token is refused both
+// (server.ts SESSION_REFUSED_TOOLS).
 
 import {
   getHangarStatus,
   HANGAR_FLAVORS,
+  HANGAR_OUTCOMES,
   HANGAR_SESSION_STATES,
   listSessions,
+  MAX_HANGAR_OUTCOME_NOTE_LENGTH,
   MAX_HANGAR_REPO_LENGTH,
+  requestHangarOutcome,
   requestSession,
   type HangarSession,
   type HangarStatus,
@@ -54,6 +61,10 @@ function sessionJson(s: HangarSession): Record<string, unknown> {
     diskPath: s.diskPath,
     requeueReason: s.requeueReason,
     failureReason: s.failureReason,
+    outcome: s.outcome,
+    outcomeAt: s.outcomeAt,
+    outcomeBy: s.outcomeBy,
+    released: s.released,
     updatedAt: s.updatedAt.toISOString(),
   };
 }
@@ -106,21 +117,25 @@ export const hangarStatusTool: ToolDef<typeof statusSchema> = {
 const sessionsSchema = z.object({
   states: z.array(z.enum(HANGAR_SESSION_STATES)).min(1).max(HANGAR_SESSION_STATES.length).optional(),
   workItemId: workItemIdField.optional(),
+  releasable: z.boolean().optional(),
   limit: z.number().int().min(1).max(MAX_SESSIONS_LIMIT).optional(),
 });
 
 export const hangarSessionsTool: ToolDef<typeof sessionsSchema> = {
   name: "brain_hangar_sessions",
   description:
-    `List hangar sessions, most recently changed first: filter by states (${HANGAR_SESSION_STATES.join(", ")}) and by workItemId (the work item a session runs for). ` +
+    `List hangar sessions, most recently changed first: filter by states (${HANGAR_SESSION_STATES.join(", ")}), by workItemId (the work item a session runs for), ` +
+    "and with releasable: true to only those a person has accepted or tabled whose disk hangar still holds. " +
     `limit is 1-${MAX_SESSIONS_LIMIT}, default ${DEFAULT_SESSIONS_LIMIT}; hasMore says more sessions matched. Each session carries its state, flavor, repo, work item, ` +
-    "who requested it, which hangar claimed it and when, where it runs (container, host, diskPath), why it was last requeued, and why a claim marked it failed (failureReason). Read-only.",
+    "who requested it, which hangar claimed it and when, where it runs (container, host, diskPath), why it was last requeued, why it failed (failureReason), " +
+    "the person's outcome (accepted, tabled, or null) with when and by whom, and released (hangar has deleted its disk). Read-only.",
   schema: sessionsSchema,
   isWrite: false,
   async handler(ctx: ToolContext, args) {
     const listed = await listSessions(ctx.db, {
       ...(args.states === undefined ? {} : { states: args.states }),
       ...(args.workItemId === undefined ? {} : { workItemId: args.workItemId }),
+      ...(args.releasable === undefined ? {} : { releasable: args.releasable }),
       limit: args.limit ?? DEFAULT_SESSIONS_LIMIT,
     });
     return boundResponse(
@@ -145,4 +160,29 @@ export const hangarSessionsTool: ToolDef<typeof sessionsSchema> = {
   },
 };
 
-export const hangarTools: ToolDef[] = [hangarRequestTool, hangarStatusTool, hangarSessionsTool];
+// --- brain_hangar_outcome_request -----------------------------------------------
+
+const outcomeRequestSchema = z.object({
+  sessionId: z.string().regex(UUID_RE, "must be a valid uuid (a hangar session id returned by brain_hangar_sessions)"),
+  outcome: z.enum(HANGAR_OUTCOMES),
+  note: z.string().trim().min(1).max(MAX_HANGAR_OUTCOME_NOTE_LENGTH),
+});
+
+export const hangarOutcomeRequestTool: ToolDef<typeof outcomeRequestSchema> = {
+  name: "brain_hangar_outcome_request",
+  description:
+    "Ask the person to accept or table an ended (stopped or failed) hangar session: sessionId, outcome (accepted when the work is done or kept, tabled to set it aside), and note (why, 1-" +
+    `${MAX_HANGAR_OUTCOME_NOTE_LENGTH} characters, shown to them). Files one inbox item for the session, with Accept and Table options and your outcome recommended; ` +
+    "the person's choice sets the session's outcome, and hangar then deletes its disk and container. This tool sets no outcome itself: only a person does. " +
+    "A repeat request for the same session updates its pending item; once the person has decided or dismissed it, status says so and nothing is re-asked. " +
+    "Refused for a session that has not ended or that hangar has already released. Returns the inbox item id and its status.",
+  schema: outcomeRequestSchema,
+  isWrite: true,
+  async handler(ctx: ToolContext, args) {
+    const actor = ctx.actor();
+    const filed = await requestHangarOutcome(ctx.db, { sessionId: args.sessionId, outcome: args.outcome, note: args.note, ...(actor === undefined ? {} : { actor }) });
+    return { inboxItemId: filed.id, status: filed.status, action: filed.action, sessionId: filed.sessionId, requested: filed.requested };
+  },
+};
+
+export const hangarTools: ToolDef[] = [hangarRequestTool, hangarStatusTool, hangarSessionsTool, hangarOutcomeRequestTool];

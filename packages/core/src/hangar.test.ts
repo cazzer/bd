@@ -16,6 +16,7 @@ import { clientTokens, hangarCheckIns, hangarMessages, nodes, type Database } fr
 import { sessionTokenClient, verifyClientToken } from "./client-tokens.js";
 import { upsertEdges } from "./edges.js";
 import {
+  HangarOutcomeRefusedError,
   HangarSessionNotClaimedByError,
   HangarSessionNotFoundError,
   HangarTransitionError,
@@ -40,6 +41,7 @@ import {
   recordCheckIn,
   requestSession,
   requeueSession,
+  setHangarSessionOutcome,
   updateSession,
   type HangarSessionState,
 } from "./hangar.js";
@@ -144,6 +146,10 @@ describe("normalizeHangarSessionMetadata", () => {
     [{ ...base, requeue_reason: "x".repeat(501) }, "requeue_reason"],
     [{ ...base, claimed_at: "yesterday" }, "claimed_at"],
     [{ ...base, claimed_at: 12 }, "claimed_at"],
+    [{ ...base, outcome: "shelved" }, "outcome"],
+    [{ ...base, outcome: true }, "outcome"],
+    [{ ...base, outcome_at: "later" }, "outcome_at"],
+    [{ ...base, outcome_by: "x".repeat(201) }, "outcome_by"],
   ])("refuses %j naming %s", (metadata, field) => {
     const refused = (() => {
       try {
@@ -156,6 +162,13 @@ describe("normalizeHangarSessionMetadata", () => {
     expect(refused).toBeInstanceOf(InvalidHangarSessionError);
     expect((refused as InvalidHangarSessionError).field).toBe(field);
     expect((refused as Error).message).toContain("at batch index 3");
+  });
+
+  it("keeps a known outcome with its time and author, and drops a null or empty one", () => {
+    const out = normalizeHangarSessionMetadata({ ...base, state: "stopped", outcome: "tabled", outcome_at: "2026-11-14T10:00:00+01:00", outcome_by: " phone " });
+    expect(out).toEqual({ ...base, state: "stopped", outcome: "tabled", outcome_at: "2026-11-14T09:00:00.000Z", outcome_by: "phone" });
+    expect(normalizeHangarSessionMetadata({ ...base, outcome: null })).toEqual(base);
+    expect(normalizeHangarSessionMetadata({ ...base, outcome: "" })).toEqual(base);
   });
 
   it("accepts the longest allowed disk path and requeue reason", () => {
@@ -671,5 +684,110 @@ describe("run_by integrity", () => {
     expect(refused).toBeInstanceOf(ReservedHangarEdgeError);
     expect((refused as Error).message).toContain("batch index 1");
     await expect(assertNoReservedHangarEdges(db, [{ srcId: work, sourceSystem: "agent" }])).resolves.toBeUndefined();
+  });
+});
+
+describe("a person's outcome and hangar's release", () => {
+  const PERSON = `${ACTOR_PREFIX}-person`;
+  const runsBy = async (actor: string): Promise<number> => (await db.execute(sql`SELECT 1 FROM ingest_runs WHERE actor = ${actor}`)).rows.length;
+
+  /** A session claimed by a fresh hangar, moved to `state` with a disk (unless `state` is claimed). */
+  async function ended(label: string, state: HangarSessionState, workItemId?: string) {
+    const session = await request("headless", workItemId);
+    const hangar = hangarNamed(label);
+    if ((await claimSession(db, { hangar, flavors: ["headless"], among: [session.id] })) === null) throw new Error("fixture claim failed");
+    await updateSession(db, { hangar, id: session.id, state: "running", container: `hangar-${session.id}`, diskPath: `/disks/${session.id}.img` });
+    if (state !== "running") await updateSession(db, { hangar, id: session.id, state });
+    return { id: session.id, hangar };
+  }
+
+  it("sets an outcome on a stopped session, attributed to the person, as a revision that moves it to the front of hangar's listing", async () => {
+    const first = await ended("front", "stopped");
+    const second = await request("headless");
+    if ((await claimSession(db, { hangar: first.hangar, flavors: ["headless"], among: [second.id] })) === null) throw new Error("fixture claim failed");
+    await updateSession(db, { hangar: first.hangar, id: second.id, state: "stopped" });
+    expect((await listSessions(db, { claimedBy: first.hangar, states: ["stopped", "failed"] })).sessions.map((s) => s.id)).toEqual([second.id, first.id]);
+
+    const before = (await listSessions(db, { claimedBy: first.hangar, states: ["stopped"] })).sessions.find((s) => s.id === first.id)!;
+    const set = await setHangarSessionOutcome(db, { id: first.id, outcome: "tabled", actor: PERSON });
+    expect(set.changed).toBe(true);
+    expect(set.session).toMatchObject({ id: first.id, state: "stopped", outcome: "tabled", outcomeBy: PERSON, released: false, diskPath: `/disks/${first.id}.img` });
+    expect(set.session.outcomeAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    expect(set.session.updatedAt.getTime()).toBeGreaterThan(before.updatedAt.getTime());
+    expect((await listSessions(db, { claimedBy: first.hangar, states: ["stopped", "failed"] })).sessions.map((s) => s.id)).toEqual([first.id, second.id]);
+
+    const [latest] = (await getNodeHistory(db, first.id)).revisions;
+    expect(latest!.metadata).toMatchObject({ state: "stopped", outcome: "tabled", outcome_by: PERSON });
+    expect(latest!.ingestRun).toMatchObject({ actor: PERSON, sourceSystem: "hangar" });
+  });
+
+  it("sets one on a failed session", async () => {
+    const { id } = await ended("failed", "failed");
+    expect((await setHangarSessionOutcome(db, { id, outcome: "accepted", actor: PERSON })).session).toMatchObject({ state: "failed", outcome: "accepted" });
+  });
+
+  it.each(["queued", "claimed", "running"] as const)("refuses a %s session naming its state, writing nothing and opening no run", async (state) => {
+    let id: string;
+    if (state === "queued") id = (await request("headless")).id;
+    else if (state === "claimed") {
+      id = (await request("headless")).id;
+      await claimSession(db, { hangar: hangarNamed(`open-${state}`), flavors: ["headless"], among: [id] });
+    } else id = (await ended(`open-${state}`, "running")).id;
+    const actor = `${PERSON}-${state}`;
+    const before = await stateOf(id);
+    const refused = await setHangarSessionOutcome(db, { id, outcome: "accepted", actor }).catch((e: unknown) => e);
+    expect(refused).toBeInstanceOf(HangarOutcomeRefusedError);
+    expect((refused as Error).message).toContain(`is ${state}`);
+    expect(await stateOf(id)).toEqual(before);
+    expect(await runsBy(actor)).toBe(0);
+  });
+
+  it("refuses an unknown outcome and a node that is not a session", async () => {
+    const { id } = await ended("unknown", "stopped");
+    await expect(setHangarSessionOutcome(db, { id, outcome: "shelved", actor: PERSON })).rejects.toBeInstanceOf(InvalidHangarSessionError);
+    await expect(setHangarSessionOutcome(db, { id: await fixtureNode("work_item", "Not a session"), outcome: "tabled", actor: PERSON })).rejects.toBeInstanceOf(HangarSessionNotFoundError);
+  });
+
+  it("is a no-op for the outcome it already has, and can change until hangar releases it", async () => {
+    const { id, hangar } = await ended("change", "stopped");
+    await setHangarSessionOutcome(db, { id, outcome: "accepted", actor: PERSON });
+    const revisions = (await getNodeHistory(db, id)).revisions.length;
+    const again = await setHangarSessionOutcome(db, { id, outcome: "accepted", actor: `${PERSON}-again` });
+    expect(again.changed).toBe(false);
+    expect(again.session.outcomeBy).toBe(PERSON);
+    expect((await getNodeHistory(db, id)).revisions).toHaveLength(revisions);
+    expect(await runsBy(`${PERSON}-again`)).toBe(0);
+
+    expect((await setHangarSessionOutcome(db, { id, outcome: "tabled", actor: PERSON })).session.outcome).toBe("tabled");
+
+    // Hangar releases it: the ack clears the placement and keeps the outcome.
+    const acked = await updateSession(db, { hangar, id, container: null, diskPath: null });
+    expect(acked.session).toMatchObject({ state: "stopped", outcome: "tabled", container: null, diskPath: null, released: true });
+    const refused = await setHangarSessionOutcome(db, { id, outcome: "accepted", actor: PERSON }).catch((e: unknown) => e);
+    expect(refused).toBeInstanceOf(HangarOutcomeRefusedError);
+    expect((refused as Error).message).toContain("already released");
+    expect((await setHangarSessionOutcome(db, { id, outcome: "tabled", actor: PERSON })).changed).toBe(false);
+  });
+
+  it("stores hangar's failure reason, taken only with failed", async () => {
+    const { id, hangar } = await ended("reason", "running");
+    await expect(updateSession(db, { hangar, id, state: "stopped", reason: "worker exited 3" })).rejects.toBeInstanceOf(InvalidHangarSessionError);
+    await expect(updateSession(db, { hangar, id, reason: "worker exited 3" })).rejects.toBeInstanceOf(InvalidHangarSessionError);
+    await expect(updateSession(db, { hangar, id, state: "failed", reason: "x".repeat(501) })).rejects.toBeInstanceOf(InvalidHangarSessionError);
+    expect((await stateOf(id))["state"]).toBe("running");
+    const failed = await updateSession(db, { hangar, id, state: "failed", reason: "  git clone exited 128 " });
+    expect(failed.session).toMatchObject({ state: "failed", failureReason: "git clone exited 128" });
+  });
+
+  it("lists releasable sessions: an outcome set and the disk still held", async () => {
+    const workItemId = await fixtureNode("work_item", "Releasable");
+    const decided = await ended("rel-decided", "stopped", workItemId);
+    const released = await ended("rel-released", "failed", workItemId);
+    const undecided = await ended("rel-undecided", "stopped", workItemId);
+    await setHangarSessionOutcome(db, { id: decided.id, outcome: "tabled", actor: PERSON });
+    await setHangarSessionOutcome(db, { id: released.id, outcome: "accepted", actor: PERSON });
+    await updateSession(db, { hangar: released.hangar, id: released.id, container: null, diskPath: null });
+    expect((await listSessions(db, { workItemId, releasable: true })).sessions.map((s) => s.id)).toEqual([decided.id]);
+    expect((await listSessions(db, { workItemId })).sessions.map((s) => s.id).sort()).toEqual([decided.id, released.id, undecided.id].sort());
   });
 });
