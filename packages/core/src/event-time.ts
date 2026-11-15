@@ -27,6 +27,12 @@
 // with a trailing `Z` or `±HH:MM`, or as a date alone (`YYYY-MM-DD`, which
 // the grammar reads as UTC midnight). A `Date` already is an instant and
 // needs no rule.
+//
+// The rule is one function over one key, `normalizeInstantKey`, so every
+// instant-valued key shares it: `occurred_at` here, and the work-item
+// contract's planning dates `due_at` and `started_at` (work-items.ts),
+// which the roadmap compares and takes `min()` of as text for the same
+// fixed-width reason.
 
 import { InvalidEventTimeError } from "./errors.js";
 
@@ -36,51 +42,63 @@ const CANONICAL_LENGTH = "2026-03-04T08:00:00.000Z".length;
 const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const ZONED_RE = /(?:Z|[+-]\d{2}:\d{2})$/;
 
-export interface NormalizeOccurredAtOptions {
+export interface NormalizeInstantOptions {
   /** Batch position, named as `at batch index N` when `itemLabel` is absent. */
   index?: number;
   /** How `InvalidEventTimeError` names the item — e.g. `at batch index 2 (agent/open-work)`. Wins over `index`. */
   itemLabel?: string;
 }
 
+export type NormalizeOccurredAtOptions = NormalizeInstantOptions;
+
 /**
- * Applies the event-time contract to any node's metadata. Pure; returns a
- * copy. A `Date`, or a string that parses as an instant and carries a zone
- * (`Z` or `±HH:MM`) or is a date alone (`YYYY-MM-DD`, UTC midnight), is
- * rewritten to the canonical form; an absent or `null` value leaves the
- * copy without the key; anything else — a number, an object, an empty or
- * unparseable string, a zone-less date-time, an invalid `Date`, an
- * instant outside years 0000–9999 — throws `InvalidEventTimeError` naming
- * the item and `occurred_at`. Every other key passes through untouched.
+ * Applies the instant rule to one metadata key. Pure; returns a copy. A
+ * `Date`, or a string that parses as an instant and carries a zone (`Z` or
+ * `±HH:MM`) or is a date alone (`YYYY-MM-DD`, UTC midnight), is rewritten
+ * to the canonical form; an absent or `null` value leaves the copy without
+ * the key; anything else — a number, an object, an empty or unparseable
+ * string, a zone-less date-time, an invalid `Date`, an instant outside
+ * years 0000–9999 — throws `InvalidEventTimeError` naming the item and
+ * `key`. Every other key passes through untouched.
  */
-export function normalizeOccurredAt(
+export function normalizeInstantKey(
   metadata: Record<string, unknown> | undefined,
-  options: NormalizeOccurredAtOptions = {},
+  key: string,
+  options: NormalizeInstantOptions = {},
 ): Record<string, unknown> {
   const input = metadata ?? {};
   const out: Record<string, unknown> = { ...input };
-  const value = input[OCCURRED_AT_KEY];
+  const value = input[key];
 
   if (value === undefined || value === null) {
-    delete out[OCCURRED_AT_KEY];
+    delete out[key];
     return out;
   }
 
   const item = options.itemLabel ?? (options.index === undefined ? null : `at batch index ${options.index}`);
+  const refuse = (reason: string) => new InvalidEventTimeError(item, value, reason, key);
   const parsed = typeof value === "string" ? new Date(value) : value instanceof Date ? value : null;
   if (parsed === null) {
-    throw new InvalidEventTimeError(item, value, "must be an ISO-8601 timestamp string, a Date, or null");
+    throw refuse("must be an ISO-8601 timestamp string, a Date, or null");
   }
   if (Number.isNaN(parsed.getTime())) {
-    throw new InvalidEventTimeError(item, value, "must parse as an instant (an ISO-8601 timestamp such as 2026-03-04T08:00:00.000Z)");
+    throw refuse("must parse as an instant (an ISO-8601 timestamp such as 2026-03-04T08:00:00.000Z)");
   }
   if (typeof value === "string" && !DATE_ONLY_RE.test(value) && !ZONED_RE.test(value)) {
-    throw new InvalidEventTimeError(item, value, "must carry a zone (Z or ±HH:MM), or be a date alone (YYYY-MM-DD, read as UTC midnight)");
+    throw refuse("must carry a zone (Z or ±HH:MM), or be a date alone (YYYY-MM-DD, read as UTC midnight)");
   }
   const canonical = parsed.toISOString();
   if (canonical.length !== CANONICAL_LENGTH) {
-    throw new InvalidEventTimeError(item, value, "must fall within years 0000 to 9999");
+    throw refuse("must fall within years 0000 to 9999");
   }
-  out[OCCURRED_AT_KEY] = canonical;
+  out[key] = canonical;
   return out;
+}
+
+/** Applies the event-time contract to any node's metadata: `normalizeInstantKey` on `occurred_at`. */
+export function normalizeOccurredAt(
+  metadata: Record<string, unknown> | undefined,
+  options: NormalizeOccurredAtOptions = {},
+): Record<string, unknown> {
+  return normalizeInstantKey(metadata, OCCURRED_AT_KEY, options);
 }

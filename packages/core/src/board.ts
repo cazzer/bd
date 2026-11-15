@@ -13,8 +13,9 @@
 //                (jsonb_path_ops) serves; `metadata ? 'project'` is not
 //                servable by that opclass and would seq-scan. A work item
 //                whose project is not registered is not on the all-projects
-//                board (work-board spec). Closed cards are ranked here, per
-//                project, over the whole filtered set.
+//                board (work-board spec). Milestones are left out here
+//                (below). Closed cards are ranked here, per project, over
+//                the whole filtered set.
 //   items_raw    every filtered row except closed cards past rank
 //                CLOSED_PER_PROJECT, ordered open-work-first (non-closed rows
 //                and epics, newest first, then kept closed rows) and cut at
@@ -39,18 +40,46 @@
 //                endpoints folded through `merged_into`, a self-loop guard
 //                (`<>`), and the MAX_RESOLVE_DEPTH cap — which is what ends a
 //                child_of cycle (there is no acyclicity trigger on
-//                child_of), never the statement timeout.
+//                child_of), never the statement timeout. The walk stops at
+//                the first milestone on each path (`stopAtMilestone`): no
+//                reader below looks past one. Built by
+//                `ancestorAliasCte` and `buildAncestorWalkCte` (seed
+//                subquery in, CTE out), which the roadmap read
+//                (roadmap-milestones, design.md decision 2) builds its own
+//                walk with, so the two reads cannot disagree about ancestry.
 //   nearest_epic DISTINCT ON (start_id) over ancestors at depth >= 1 that
 //                are work items of issue type `epic`, nearest first, lesser
 //                node id on a tie. Depth 0 is excluded: an item is never in
-//                its own lane. A cycle yields the nearest epic reached before
-//                the depth cap, or none ("No epic").
+//                its own lane. An epic past a milestone does not count
+//                (`notPastMilestoneCondition`, below). A cycle yields the
+//                nearest epic reached before the depth cap, or none ("No
+//                epic").
 //   cards        the column CASE and the per-project closed rank.
+//   lane_epics   the epics that head lanes (below).
+//   epic_ancestors,
+//   epic_milestone  a second walk from the same builder, seeded from
+//                lane_epics, and DISTINCT ON (start_id) over its ancestors at
+//                depth >= 1 that are work items of issue type `milestone`,
+//                nearest first, lesser node id on a tie — nearest_epic's
+//                rule. Each lane epic is answered with that milestone's id
+//                and title, or null.
 //
 // Epics head lanes and are not cards: items whose issue_type is `epic` are
 // left out of `cards` and returned in `epics` (with any epic a card's lane
 // names that the project filter did not select, e.g. a cross-project
 // parent), so a lane with no cards still has a header.
+//
+// Milestones (roadmap-milestones, design.md decision 4) are neither cards
+// nor lanes: items whose issue_type is `milestone` are left out of
+// `filtered`, so they are not ranked, capped, or returned. The walk still
+// passes through them, but a milestone is a boundary for epic lookup: an
+// epic counts as an item's nearest epic only when no milestone sits between
+// the item and it (no milestone ancestor at a smaller depth for the same
+// start). So an item placed directly under a milestone with no epic between
+// lands in "No epic" even when the milestone itself sits under an epic, and
+// no item is counted under two milestones. An epic between the item and the
+// milestone is unaffected. A lane epic carries its milestone from
+// epic_milestone, so its lane header can name it.
 //
 // Column rules (work-board spec): closed -> Closed; deferred -> Deferred;
 // in_progress -> In progress, flagged blocked when it has an open blocker or
@@ -170,6 +199,8 @@ export interface BoardEpic {
   title: string;
   status: string;
   project: string | null;
+  /** The epic's nearest milestone ancestor along child_of (module header); null when it has none. */
+  milestone: { id: string; title: string } | null;
 }
 
 export interface WorkBoard {
@@ -193,7 +224,13 @@ export interface BeadsProject {
   updatedAt: Date;
 }
 
-function resolveBoardProjects(options: WorkBoardOptions): string[] | null {
+/**
+ * Validates a board-style project selection: null for absent (every
+ * registered project), else the de-duplicated keys. Throws
+ * `InvalidLookupOptionError` naming `projects`. Shared with the roadmap
+ * read (roadmap.ts) so the two refuse the same selections.
+ */
+export function resolveBoardProjects(options: { projects?: readonly string[] }): string[] | null {
   const projects = options.projects;
   if (projects === undefined || projects === null) return null;
   if (!Array.isArray(projects)) {
@@ -223,15 +260,116 @@ export function registeredProjectsCte(): SQL {
 )`;
 }
 
+/**
+ * The `alias(canonical_id, alias_ids)` CTE: every merged-away node grouped
+ * by its survivor (views.ts's alias CTE). Declared once, before any walk
+ * `buildAncestorWalkCte` builds, in the same `WITH RECURSIVE` list.
+ */
+export function ancestorAliasCte(): SQL {
+  return sql`alias AS (
+  SELECT merged_into AS canonical_id, array_agg(id ORDER BY id) AS alias_ids
+  FROM nodes WHERE merged_into IS NOT NULL GROUP BY merged_into
+)`;
+}
+
+/**
+ * The upward `child_of` walk (module header), as the recursive CTE
+ * `name(start_id, node_id, depth, probe_ids)`: one depth-0 row per id the
+ * `seed` subquery selects (a single column `id` of canonical node ids),
+ * then each parent reached, folded through `merged_into`, at its depth.
+ * UNION, not UNION ALL; the MAX_RESOLVE_DEPTH cap ends a cycle and the
+ * `<>` guard drops merge-induced self-loops. Requires `ancestorAliasCte()`
+ * earlier in the same `WITH RECURSIVE` list; carries no trailing comma.
+ * Shared by the board's lane and milestone reads and the roadmap read, so
+ * they cannot disagree about an item's ancestry. `name` is a fixed
+ * identifier chosen by the caller, never input.
+ *
+ * With `stopAtMilestone`, a row at depth >= 1 whose node is a work item of
+ * issue type `milestone` is kept but not expanded, so nothing past an
+ * item's nearest milestone on a path is walked, and a cycle above a
+ * milestone no longer runs to the depth cap. For every reader that only
+ * looks at epics not past a milestone (`notPastMilestoneCondition`) or at
+ * the nearest milestone, the answer is unchanged: a pruned row is deeper
+ * than a milestone row of the same start, so that condition already
+ * refused it as an epic and it can never be the nearest milestone.
+ */
+export function buildAncestorWalkCte(name: string, seed: SQL, options: { stopAtMilestone?: boolean } = {}): SQL {
+  if (!/^[a-z_]+$/.test(name)) throw new Error(`buildAncestorWalkCte: ${JSON.stringify(name)} is not a plain identifier`);
+  const walk = sql.raw(name);
+  const stop = options.stopAtMilestone
+    ? sql`
+    AND NOT (anc.depth >= 1 AND EXISTS (
+      SELECT 1 FROM resolved_nodes sm
+      WHERE sm.id = anc.node_id
+        AND sm.node_type = ${WORK_ITEM_NODE_TYPE}
+        AND sm.metadata->>'issue_type' = 'milestone'
+    ))`
+    : sql``;
+  return sql`${walk}(start_id, node_id, depth, probe_ids) AS (
+  SELECT s.id, s.id, 0, ARRAY[s.id] || COALESCE(a.alias_ids, ARRAY[]::uuid[])
+  FROM (${seed}) s
+  LEFT JOIN alias a ON a.canonical_id = s.id
+  UNION
+  SELECT anc.start_id, p.canonical_id, anc.depth + 1,
+         ARRAY[p.canonical_id] || COALESCE(a.alias_ids, ARRAY[]::uuid[])
+  FROM ${walk} anc
+  JOIN edges e ON e.src_id = ANY (anc.probe_ids) AND e.edge_type = ${CHILD_OF_EDGE_TYPE}
+  JOIN nodes d ON d.id = e.dst_id
+  CROSS JOIN LATERAL (SELECT COALESCE(d.merged_into, d.id) AS canonical_id) p
+  LEFT JOIN alias a ON a.canonical_id = p.canonical_id
+  WHERE anc.depth < ${MAX_RESOLVE_DEPTH}::int
+    AND p.canonical_id <> anc.node_id${stop}
+)`;
+}
+
+/**
+ * A condition on one row (`rowAlias`) of the walk `walkName` (built by
+ * `buildAncestorWalkCte`): true unless a work item of issue type
+ * `milestone` sits between the row's start and its node — at depth >= 1
+ * and at a smaller depth than the row, for the same start. A milestone is
+ * a boundary for epic lookup (module header): an epic above a milestone
+ * does not contain the items under it, so no item is counted under two
+ * milestones. The nearest milestone row itself passes, so a milestone
+ * read may use the same condition. Shared by the board's `nearest_epic`
+ * and the roadmap read. Both names are fixed identifiers chosen by the
+ * caller, never input.
+ */
+export function notPastMilestoneCondition(walkName: string, rowAlias: string): SQL {
+  for (const name of [walkName, rowAlias]) {
+    if (!/^[a-z_]+$/.test(name)) throw new Error(`notPastMilestoneCondition: ${JSON.stringify(name)} is not a plain identifier`);
+  }
+  const walk = sql.raw(walkName);
+  const row = sql.raw(rowAlias);
+  return sql`NOT EXISTS (
+    SELECT 1
+    FROM ${walk} past
+    JOIN resolved_nodes pm ON pm.id = past.node_id
+    WHERE past.start_id = ${row}.start_id
+      AND past.depth >= 1
+      AND past.depth < ${row}.depth
+      AND pm.node_type = ${WORK_ITEM_NODE_TYPE}
+      AND pm.metadata->>'issue_type' = 'milestone'
+  )`;
+}
+
+/**
+ * The jsonb array that `metadata @> ANY (...)` selects a project set with
+ * (module header, `filtered`): one `{"project": k}` per named key, or per
+ * `registered` key when `projects` is null (the caller declares
+ * `registeredProjectsCte()`). Shared with the roadmap read.
+ */
+export function projectContainmentArray(projects: readonly string[] | null): SQL {
+  return projects === null
+    ? sql`ARRAY(SELECT jsonb_build_object('project', r.key) FROM registered r)`
+    : sqlArray(
+        projects.map((k) => JSON.stringify({ project: k })),
+        "jsonb",
+      );
+}
+
 /** Pure: builds the board statement from already-validated project keys (null = every registered project; non-empty otherwise) and a validated item cap. */
 export function buildWorkBoardQuery(projects: readonly string[] | null, maxItems: number = MAX_BOARD_ITEMS): SQL {
-  const projectKeys =
-    projects === null
-      ? sql`ARRAY(SELECT jsonb_build_object('project', r.key) FROM registered r)`
-      : sqlArray(
-          projects.map((k) => JSON.stringify({ project: k })),
-          "jsonb",
-        );
+  const projectKeys = projectContainmentArray(projects);
   return sql`
 WITH RECURSIVE
 ${registeredProjectsCte()},
@@ -251,6 +389,8 @@ filtered AS (
   FROM resolved_nodes
   WHERE node_type = ${WORK_ITEM_NODE_TYPE}
     AND metadata @> ANY (${projectKeys})
+    -- A milestone is neither a card nor a lane (module header).
+    AND metadata->>'issue_type' IS DISTINCT FROM 'milestone'
 ),
 filtered_ranked AS (
   SELECT f.*,
@@ -271,29 +411,8 @@ items AS (
   SELECT * FROM items_raw ORDER BY closed_card, updated_at DESC, id LIMIT ${maxItems}::int
 ),
 ${buildBlockingCtes()},
--- Every merged-away node grouped by its survivor (views.ts's alias CTE).
-alias AS (
-  SELECT merged_into AS canonical_id, array_agg(id ORDER BY id) AS alias_ids
-  FROM nodes WHERE merged_into IS NOT NULL GROUP BY merged_into
-),
--- Upward child_of walk from every non-epic item. UNION, not UNION ALL; the
--- depth cap ends a cycle and the <> guard drops merge-induced self-loops
--- (see the module header).
-ancestors(start_id, node_id, depth, probe_ids) AS (
-  SELECT s.id, s.id, 0, ARRAY[s.id] || COALESCE(a.alias_ids, ARRAY[]::uuid[])
-  FROM (SELECT id FROM items WHERE issue_type IS DISTINCT FROM 'epic') s
-  LEFT JOIN alias a ON a.canonical_id = s.id
-  UNION
-  SELECT anc.start_id, p.canonical_id, anc.depth + 1,
-         ARRAY[p.canonical_id] || COALESCE(a.alias_ids, ARRAY[]::uuid[])
-  FROM ancestors anc
-  JOIN edges e ON e.src_id = ANY (anc.probe_ids) AND e.edge_type = ${CHILD_OF_EDGE_TYPE}
-  JOIN nodes d ON d.id = e.dst_id
-  CROSS JOIN LATERAL (SELECT COALESCE(d.merged_into, d.id) AS canonical_id) p
-  LEFT JOIN alias a ON a.canonical_id = p.canonical_id
-  WHERE anc.depth < ${MAX_RESOLVE_DEPTH}::int
-    AND p.canonical_id <> anc.node_id
-),
+${ancestorAliasCte()},
+${buildAncestorWalkCte("ancestors", sql`SELECT id FROM items WHERE issue_type IS DISTINCT FROM 'epic'`, { stopAtMilestone: true })},
 nearest_epic AS (
   SELECT DISTINCT ON (anc.start_id) anc.start_id, anc.node_id AS epic_id
   FROM ancestors anc
@@ -301,6 +420,7 @@ nearest_epic AS (
   WHERE anc.depth >= 1
     AND n.node_type = ${WORK_ITEM_NODE_TYPE}
     AND n.metadata->>'issue_type' = 'epic'
+    AND ${notPastMilestoneCondition("ancestors", "anc")}
   ORDER BY anc.start_id, anc.depth, anc.node_id
 ),
 classified AS (
@@ -332,6 +452,16 @@ lane_epics AS (
   SELECT n.id, n.title, COALESCE(n.metadata->>'status', 'open'), n.metadata->>'project'
   FROM resolved_nodes n
   WHERE n.id IN (SELECT epic_id FROM classified WHERE epic_id IS NOT NULL)
+),
+${buildAncestorWalkCte("epic_ancestors", sql`SELECT id FROM lane_epics`, { stopAtMilestone: true })},
+epic_milestone AS (
+  SELECT DISTINCT ON (anc.start_id) anc.start_id AS epic_id, n.id, n.title
+  FROM epic_ancestors anc
+  JOIN resolved_nodes n ON n.id = anc.node_id
+  WHERE anc.depth >= 1
+    AND n.node_type = ${WORK_ITEM_NODE_TYPE}
+    AND n.metadata->>'issue_type' = 'milestone'
+  ORDER BY anc.start_id, anc.depth, anc.node_id
 )
 SELECT jsonb_build_object(
   'cards', COALESCE((
@@ -348,9 +478,11 @@ SELECT jsonb_build_object(
   ), '[]'::jsonb),
   'epics', COALESCE((
     SELECT jsonb_agg(jsonb_build_object(
-      'id', le.id, 'title', le.title, 'status', le.status, 'project', le.project
+      'id', le.id, 'title', le.title, 'status', le.status, 'project', le.project,
+      'milestone', CASE WHEN em.id IS NULL THEN NULL ELSE jsonb_build_object('id', em.id, 'title', em.title) END
     ) ORDER BY le.project NULLS LAST, le.title, le.id)
     FROM lane_epics le
+    LEFT JOIN epic_milestone em ON em.epic_id = le.id
   ), '[]'::jsonb),
   'omitted_closed', COALESCE((
     SELECT jsonb_object_agg(o.project, o.omitted)

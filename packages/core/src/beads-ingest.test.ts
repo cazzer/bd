@@ -117,6 +117,42 @@ describe("ingestBeadsCheckout", () => {
     expect(changed.changedNodeIds.map((id) => byId.get(id)).sort()).toEqual([`${PREFIX}-2`, `${PREFIX}-3`]);
   });
 
+  it("loads a milestone, an epic under it, and a claimed task under the epic with child_of links and dates; a re-load is all unchanged", async () => {
+    const project = keyOf("roadmap");
+    const [m, e, t] = [`${PREFIX}-120`, `${PREFIX}-121`, `${PREFIX}-122`];
+    const issues = [
+      issue(120, { issue_type: "milestone", due_at: "2026-12-15T00:00:00Z" }),
+      issue(121, { issue_type: "epic", dependencies: [{ issue_id: e, depends_on_id: m, type: "parent-child" }] }),
+      issue(122, { status: "in_progress", started_at: "2026-11-15T16:22:12Z", dependencies: [{ issue_id: t, depends_on_id: e, type: "parent-child" }] }),
+    ];
+
+    const first = await load(issues, { project });
+    expect(first.nodes).toEqual({ created: 4, updated: 0, unchanged: 0 });
+
+    const rows = await rowsOf([m, e, t]);
+    const byExt = new Map(rows.map((r) => [r.externalId, r]));
+    expect(byExt.get(m)?.metadata).toMatchObject({ issue_type: "milestone", due_at: "2026-12-15T00:00:00.000Z" });
+    expect(byExt.get(t)?.metadata).toMatchObject({ status: "in_progress", started_at: "2026-11-15T16:22:12.000Z" });
+    expect(byExt.get(e)?.metadata).not.toHaveProperty("due_at");
+    expect(byExt.get(e)?.metadata).not.toHaveProperty("started_at");
+
+    const links = await db
+      .select({ src: edges.srcId, dst: edges.dstId })
+      .from(edges)
+      .where(and(eq(edges.edgeType, "child_of"), inArray(edges.srcId, rows.map((r) => r.id))));
+    expect(links).toHaveLength(2);
+    expect(links).toEqual(
+      expect.arrayContaining([
+        { src: byExt.get(e)!.id, dst: byExt.get(m)!.id },
+        { src: byExt.get(t)!.id, dst: byExt.get(e)!.id },
+      ]),
+    );
+
+    const second = await load(issues, { project });
+    expect(second.nodes).toEqual({ created: 0, updated: 0, unchanged: 4 });
+    expect(second.changedNodeIds).toEqual([]);
+  });
+
   it("refuses an item owned by another project with nothing persisted", async () => {
     const owner = keyOf("owner");
     const intruder = keyOf("intruder");

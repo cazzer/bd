@@ -1121,6 +1121,16 @@ describe("event-time contract in brain_write", () => {
     expect(firstText(item)).toMatch(/invalid event time at batch index 0/);
     expect(firstText(item)).toMatch(/occurred_at \(got 1772611200000\)/);
 
+    // A work item's zoneless started_at is named by the work-item contract
+    // with the same item label (roadmap-milestones).
+    const dated = await client.callTool({
+      name: "brain_write",
+      arguments: { items: { nodeType: "work_item", sourceSystem: src, externalId: "wi-dated", title: "wi", metadata: { status: "open", started_at: "2026-11-15T10:00:00" } } },
+    });
+    expect(dated.isError).toBe(true);
+    expect(firstText(dated)).toContain(`invalid event time at batch index 0 (${src}/wi-dated): started_at (got "2026-11-15T10:00:00")`);
+    expect(firstText(dated)).toContain("Fix started_at on the named item");
+
     const persisted = await db.select({ id: nodes.id }).from(nodes).where(eq(nodes.sourceSystem, src));
     expect(persisted).toHaveLength(0);
   });

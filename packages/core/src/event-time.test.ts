@@ -4,7 +4,7 @@
 
 import { describe, expect, it } from "vitest";
 import { InvalidEventTimeError } from "./errors.js";
-import { normalizeOccurredAt, OCCURRED_AT_KEY } from "./event-time.js";
+import { normalizeInstantKey, normalizeOccurredAt, OCCURRED_AT_KEY } from "./event-time.js";
 
 function rejection(metadata: Record<string, unknown>, options?: Parameters<typeof normalizeOccurredAt>[1]): InvalidEventTimeError {
   let thrown: unknown;
@@ -81,5 +81,27 @@ describe("normalizeOccurredAt", () => {
     const nulled = { occurred_at: null };
     normalizeOccurredAt(nulled);
     expect(nulled).toEqual({ occurred_at: null });
+  });
+});
+
+describe("normalizeInstantKey", () => {
+  it("applies the same rule to any one key, naming that key on refusal and leaving occurred_at alone", () => {
+    expect(normalizeInstantKey({ due_at: "2026-12-15", occurred_at: "raw" }, "due_at")).toEqual({ due_at: "2026-12-15T00:00:00.000Z", occurred_at: "raw" });
+    expect(normalizeInstantKey({ due_at: null }, "due_at")).toEqual({});
+    let thrown: unknown;
+    try {
+      normalizeInstantKey({ started_at: "2026-11-15T10:00:00" }, "started_at", { itemLabel: "at batch index 1 (issue bd-x)" });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(InvalidEventTimeError);
+    expect((thrown as InvalidEventTimeError).field).toBe("started_at");
+    expect((thrown as InvalidEventTimeError).message).toBe(
+      'invalid event time at batch index 1 (issue bd-x): started_at (got "2026-11-15T10:00:00") must carry a zone (Z or ±HH:MM), or be a date alone (YYYY-MM-DD, read as UTC midnight)',
+    );
+  });
+
+  it("is what normalizeOccurredAt applies, field occurred_at", () => {
+    expect(rejection({ occurred_at: "nope" }).field).toBe(OCCURRED_AT_KEY);
   });
 });

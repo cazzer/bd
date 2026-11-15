@@ -1,6 +1,6 @@
 // Pure helpers behind the board view (live-beads-board, design.md decisions
-// 6-7): column order and labels, epic lanes, card order, project chips and
-// their round-trip through the address, and highlight expiry. The only
+// 6-7): column order and labels, epic lanes, card order, the offered and
+// chosen projects and their round-trip through the address, and highlight expiry. The only
 // import from @breakdown/core is a TYPE — a runtime import would drag the
 // server package (postgres, drizzle) into the browser bundle — so the
 // column list and the project-key pattern are duplicated here, and
@@ -47,6 +47,8 @@ export interface BoardEpicRow {
   title: string;
   status: string;
   project: string | null;
+  /** The epic's nearest milestone, or null when it has none (roadmap-milestones, design.md decision 4). */
+  milestone: { id: string; title: string } | null;
 }
 
 export interface BoardLane {
@@ -55,6 +57,8 @@ export interface BoardLane {
   title: string;
   status: string | null;
   project: string | null;
+  /** The lane epic's milestone title; null for "No epic" and an epic with no milestone. */
+  milestone: string | null;
   collapsedByDefault: boolean;
   cardCount: number;
   columns: Record<BoardColumn, BoardCardRow[]>;
@@ -84,9 +88,9 @@ export function buildLanes(cards: readonly BoardCardRow[], epics: readonly Board
   const known = new Map(epics.map((e) => [e.id, e]));
   const lanes = new Map<string | null, BoardLane>();
   for (const epic of epics) {
-    lanes.set(epic.id, { epicId: epic.id, title: epic.title, status: epic.status, project: epic.project, collapsedByDefault: false, cardCount: 0, columns: emptyColumns() });
+    lanes.set(epic.id, { epicId: epic.id, title: epic.title, status: epic.status, project: epic.project, milestone: epic.milestone?.title ?? null, collapsedByDefault: false, cardCount: 0, columns: emptyColumns() });
   }
-  const noEpic: BoardLane = { epicId: null, title: NO_EPIC_TITLE, status: null, project: null, collapsedByDefault: false, cardCount: 0, columns: emptyColumns() };
+  const noEpic: BoardLane = { epicId: null, title: NO_EPIC_TITLE, status: null, project: null, milestone: null, collapsedByDefault: false, cardCount: 0, columns: emptyColumns() };
   lanes.set(null, noEpic);
 
   for (const card of cards) {
@@ -107,10 +111,10 @@ export function buildLanes(cards: readonly BoardCardRow[], epics: readonly Board
   return noEpic.cardCount > 0 ? [...epicLanes, noEpic] : epicLanes;
 }
 
-// ---------------------------------------------------------------- chips
+// ------------------------------------------------------------- projects
 
 /**
- * The project keys a view's filter offers as chips: its `project` predicate
+ * The project keys a view's filter offers: its `project` predicate
  * (`equals` or `oneOf`), or null when it names none — the caller then
  * offers every registered project. Only string values count.
  */
@@ -129,34 +133,22 @@ export function filterProjects(where: unknown): string[] | null {
   return named ? keys : null;
 }
 
-/** The chips offered: the view's projects, or every registered key when it names none. Order is the view's own (or the registry's), deduplicated. */
-export function offeredChips(viewProjects: readonly string[] | null, registered: readonly string[]): string[] {
+/** The projects offered: the view's projects, or every registered key when it names none. Order is the view's own (or the registry's), deduplicated. */
+export function offeredProjects(viewProjects: readonly string[] | null, registered: readonly string[]): string[] {
   return [...new Set(viewProjects ?? registered)];
 }
 
 /**
- * The chips that are selected: the address's projects that are offered, in
- * chip order; every offered chip when the address names none that is
+ * The projects chosen: the address's projects that are offered, in offered
+ * order; every offered project when the address names none that is
  * offered (a stale or hand-edited `?project=` degrades to the full board).
  */
-export function chosenChips(offered: readonly string[], address: readonly string[]): string[] {
+export function chosenProjects(offered: readonly string[], address: readonly string[]): string[] {
   const picked = offered.filter((key) => address.includes(key));
   return picked.length > 0 ? picked : [...offered];
 }
 
-/**
- * The address's `project` list after toggling `key`, put in chip order; the
- * empty list (all chips selected) when the result is every chip. The last
- * selected chip cannot be deselected — the address has no way to say "none".
- */
-export function toggleChip(offered: readonly string[], address: readonly string[], key: string): string[] {
-  const chosen = chosenChips(offered, address);
-  const next = chosen.includes(key) ? chosen.filter((k) => k !== key) : offered.filter((k) => k === key || chosen.includes(k));
-  if (next.length === 0) return chosen.length === offered.length ? [] : [...chosen];
-  return next.length === offered.length ? [] : next;
-}
-
-/** The `projects` a `board` read may carry: chosen chips the server would accept, at most the server's cap. Empty means nothing is readable (nothing is offered). */
+/** The `projects` a `board` read may carry: chosen projects the server would accept, at most the server's cap. Empty means nothing is readable (nothing is offered). */
 export function readableProjects(chosen: readonly string[]): string[] {
   return chosen.filter((k) => PROJECT_KEY_PATTERN.test(k)).slice(0, MAX_BOARD_PROJECTS);
 }

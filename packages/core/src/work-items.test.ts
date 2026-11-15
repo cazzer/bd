@@ -96,6 +96,43 @@ describe("normalizeWorkItemMetadata", () => {
     }
   });
 
+  it("canonicalizes due_at and started_at like occurred_at: a date alone is UTC midnight, a zone is folded to Z", () => {
+    expect(normalizeWorkItemMetadata({ due_at: "2026-12-15" })).toMatchObject({ due_at: "2026-12-15T00:00:00.000Z" });
+    expect(normalizeWorkItemMetadata({ due_at: "2026-12-15T00:00:00Z", started_at: "2026-11-15T10:22:12-06:00" })).toMatchObject({
+      due_at: "2026-12-15T00:00:00.000Z",
+      started_at: "2026-11-15T16:22:12.000Z",
+    });
+    expect(normalizeWorkItemMetadata({ started_at: new Date(Date.UTC(2026, 10, 15, 16, 22, 12)) })).toMatchObject({ started_at: "2026-11-15T16:22:12.000Z" });
+  });
+
+  it("drops a null or absent planning date", () => {
+    const cleared = normalizeWorkItemMetadata({ due_at: null, started_at: null });
+    expect(cleared).not.toHaveProperty("due_at");
+    expect(cleared).not.toHaveProperty("started_at");
+    expect(normalizeWorkItemMetadata({})).not.toHaveProperty("due_at");
+  });
+
+  it("refuses a zoneless or unreadable planning date, naming the item, the field, and the value", () => {
+    for (const [field, value] of [
+      ["started_at", "2026-11-15T10:00:00"],
+      ["due_at", "next Friday"],
+      ["due_at", 1765756800000],
+    ] as const) {
+      let thrown: unknown;
+      try {
+        normalizeWorkItemMetadata({ [field]: value }, { index: 3 });
+      } catch (err) {
+        thrown = err;
+      }
+      expect(thrown).toBeInstanceOf(InvalidEventTimeError);
+      const e = thrown as InvalidEventTimeError;
+      expect(e.field).toBe(field);
+      expect(e.value).toBe(value);
+      expect(e.item).toBe("at batch index 3");
+      expect(e.message).toContain(`at batch index 3: ${field} (got ${JSON.stringify(value)})`);
+    }
+  });
+
   it("rejects a status outside the contract, naming the field and value", () => {
     let thrown: unknown;
     try {
@@ -232,6 +269,18 @@ describe("patchWorkItem", () => {
     await expect(patchWorkItem(db, run, bad, { priority: 0 })).rejects.toThrow(/occurred_at \(got "last Tuesday"\)/);
     const [badRow] = await db.select({ metadata: nodes.metadata }).from(nodes).where(eq(nodes.id, bad));
     expect(badRow?.metadata).toEqual({ spec_id: SPEC, status: "open", occurred_at: "last Tuesday" });
+  });
+
+  it("canonicalizes the planning dates a row carries, and refuses a zoneless one naming started_at and persisting nothing", async () => {
+    const good = await writeItem("patch-dates-good", { status: "open", due_at: "2026-12-15", started_at: "2026-11-15T16:22:12Z" });
+    await patchWorkItem(db, run, good, { priority: 0 });
+    const [goodRow] = await db.select({ metadata: nodes.metadata }).from(nodes).where(eq(nodes.id, good));
+    expect(goodRow?.metadata).toMatchObject({ due_at: "2026-12-15T00:00:00.000Z", started_at: "2026-11-15T16:22:12.000Z" });
+
+    const bad = await writeItem("patch-dates-bad", { status: "open", started_at: "2026-11-15T10:00:00" });
+    await expect(patchWorkItem(db, run, bad, { priority: 0 })).rejects.toThrow(/started_at \(got "2026-11-15T10:00:00"\)/);
+    const [badRow] = await db.select({ metadata: nodes.metadata }).from(nodes).where(eq(nodes.id, bad));
+    expect(badRow?.metadata).toEqual({ spec_id: SPEC, status: "open", started_at: "2026-11-15T10:00:00" });
   });
 
   it("applies a patch aimed at a merged-away node to its survivor", async () => {

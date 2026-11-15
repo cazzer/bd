@@ -9,11 +9,19 @@
 // its renderer must be `board`; an unknown view and a view of another
 // renderer are empty states at this address, never redirects. No view at
 // all is a board of every registered project (board-visual-reviews, design.md
-// decision 3), so the review CLI's link needs no view id. The chips are the
-// view filter's `project` predicate, or every registered project when it
-// names none or there is no view (lib/boardRow.ts); the chosen set lives in
-// the address, so a toggle is a history push and a reload reproduces the
-// board.
+// decision 3), so the review CLI's link needs no view id. The offered
+// projects are the view filter's `project` predicate, or every registered
+// project when it names none or there is no view (lib/boardRow.ts); the
+// header's switcher (ProjectSwitcher.tsx, roadmap-milestones design.md
+// decision 5) picks one of them or all — live as soon as the offered
+// projects are known, even when the board read fails — and the choice lives
+// in the address, so a switch is a history push and a reload reproduces the board.
+// An old link naming several projects still shows them all; a switch drops
+// the open item. The Board / Roadmap toggle beside it (WorkViewToggle.tsx)
+// carries the projects to `/roadmap` and drops the open item. Only a saved
+// view's title is a visible heading, so the switcher and toggle sit at the
+// same place here and on the roadmap. A lane header names its epic's
+// milestone (LaneMilestone.tsx), which the board read answers with each epic.
 //
 // The drawer (board-visual-reviews, task 4.4): activating a card pushes its
 // external id as `item`; closing pushes the address without it and returns
@@ -34,9 +42,9 @@
 // it past 1 s), and reads never overlap: one requested while another runs
 // sets a dirty flag and exactly one follow-up runs after it, so sustained
 // writes cannot starve the board (lib/readScheduler.ts). The registration is
-// keyed on the view alone; a chip toggle re-reads on it (the chosen projects
-// live in a ref), and the previous board stays on screen, filtered to the
-// chosen chips and marked aria-busy, until the answer lands.
+// keyed on the view alone; a project switch re-reads on it (the chosen
+// projects live in a ref), and the previous board stays on screen, filtered
+// to the chosen projects and marked aria-busy, until the answer lands.
 //
 // The stream's state is shown by the review queue's pill in the header
 // (components/ReviewQueue.tsx), which replaced the board's own live label;
@@ -52,13 +60,12 @@ import {
   addHighlights,
   BOARD_COLUMN_ORDER,
   buildLanes,
-  chosenChips,
+  chosenProjects,
   filterProjects,
   nextHighlightExpiry,
-  offeredChips,
+  offeredProjects,
   pruneHighlights,
   readableProjects,
-  toggleChip,
   type BoardCardRow,
   type BoardLane,
   type Highlights,
@@ -67,12 +74,16 @@ import { describeRefresh } from "../lib/relayAction.js";
 import { drawerProject } from "../lib/reviewDrawer.js";
 import { formatRoute, type BoardRoute, type GraphRoute } from "../lib/route.js";
 import { viewFilterOf, type ViewNode } from "../lib/viewFilter.js";
+import { boardToRoadmap, chooseProject, switcherOffer, viewCarriedProjects } from "../lib/workViewNav.js";
 import { trpc } from "../trpc.js";
 import { HangarStatusPill } from "./HangarStatusPill.js";
 import { RelayStatusPill } from "./RelayStatusPill.js";
 import { ReviewDrawer, useWideDrawer } from "./ReviewDrawer.js";
 import { HeaderSearch } from "./HeaderSearch.js";
+import { LaneMilestone } from "./LaneMilestone.js";
+import { ProjectSwitcher } from "./ProjectSwitcher.js";
 import { ReviewQueuePill, storeDraft, useShellDrawer } from "./ReviewQueue.js";
+import { WorkViewToggle } from "./WorkViewToggle.js";
 
 const GRAPH_HOME: GraphRoute = { view: "graph", q: null, types: [], node: null };
 
@@ -83,8 +94,8 @@ type ViewState =
   | { kind: "error"; message: string }
   | { kind: "ready"; forViewId: string | null; title: string; viewProjects: string[] | null };
 
-/** The board with no `view` in its address: every registered project. */
-const ALL_PROJECTS: ViewState = { kind: "ready", forViewId: null, title: "All projects", viewProjects: null };
+/** The board with no `view` in its address: every registered project. Its heading is for screen readers only (see the header's h1). */
+const ALL_PROJECTS: ViewState = { kind: "ready", forViewId: null, title: "Board", viewProjects: null };
 
 type BeadsProjectsAnswer = Awaited<ReturnType<typeof trpc.beadsProjects.query>>["projects"];
 type BoardAnswer = Awaited<ReturnType<typeof trpc.board.query>>;
@@ -122,6 +133,9 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
   const [reading, setReading] = useState(false);
   const [announcement, setAnnouncement] = useState("");
   const [boardVersion, setBoardVersion] = useState(0);
+  /** The registry's keys as last read, kept apart from `data` so the switcher works while the board read fails. */
+  const [registryKeys, setRegistryKeys] = useState<string[] | null>(null);
+  const [registryFailed, setRegistryFailed] = useState(false);
   const boardRegionRef = useRef<HTMLDivElement>(null);
   /** The project each opened item resolved to (see openProject). */
   const pinnedProjects = useRef(new Map<string, string>());
@@ -189,18 +203,32 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
     async function readOnce() {
       const ids = [...pending];
       const address = projectsRef.current;
+      // The registry lands on its own, so the switcher is live even when the board read then fails.
+      const registryRead = trpc.beadsProjects.query().then(
+        (reg) => {
+          if (!disposed) {
+            setRegistryKeys(reg.projects.map((p) => p.key));
+            setRegistryFailed(false);
+          }
+          return reg.projects;
+        },
+        (err: unknown) => {
+          if (!disposed) setRegistryFailed(true);
+          throw err;
+        },
+      );
       try {
         let registry: BeadsProjectsAnswer;
         let board: BoardData["board"];
         if (viewProjects !== null) {
-          // The chips are known without the registry, so both reads go out together.
-          const readable = readableProjects(chosenChips(offeredChips(viewProjects, []), address));
-          const [reg, b] = await Promise.all([trpc.beadsProjects.query(), readable.length > 0 ? trpc.board.query({ projects: readable }) : Promise.resolve(EMPTY_BOARD)]);
-          registry = reg.projects;
+          // The offered projects are known without the registry, so both reads go out together.
+          const readable = readableProjects(chosenProjects(offeredProjects(viewProjects, []), address));
+          const [reg, b] = await Promise.all([registryRead, readable.length > 0 ? trpc.board.query({ projects: readable }) : Promise.resolve(EMPTY_BOARD)]);
+          registry = reg;
           board = b;
         } else {
-          registry = (await trpc.beadsProjects.query()).projects;
-          const readable = readableProjects(chosenChips(offeredChips(null, registry.map((p) => p.key)), address));
+          registry = await registryRead;
+          const readable = readableProjects(chosenProjects(offeredProjects(null, registry.map((p) => p.key)), address));
           board = readable.length > 0 ? await trpc.board.query({ projects: readable }) : EMPTY_BOARD;
         }
         if (disposed) return;
@@ -257,7 +285,7 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
     };
   }, [view?.forViewId]);
 
-  // A chip toggle re-reads on the live registration instead of re-registering.
+  // A project switch re-reads on the live registration instead of re-registering.
   useEffect(() => {
     if (appliedKeyRef.current === projectsKey) return;
     appliedKeyRef.current = projectsKey;
@@ -290,10 +318,10 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
     }
   }
 
-  const offered = view && data ? offeredChips(view.viewProjects, data.registry.map((p) => p.key)) : [];
-  const chosen = chosenChips(offered, projects);
+  const offered = view && data ? offeredProjects(view.viewProjects, data.registry.map((p) => p.key)) : [];
+  const chosen = chosenProjects(offered, projects);
 
-  // A hand-edited or stale address is rewritten to the canonical selection (chip order, empty when every chip is chosen).
+  // A hand-edited or stale address is rewritten to the canonical selection (offered order, empty when every offered project is chosen).
   const canonicalProjects = chosen.length === offered.length ? [] : chosen;
   const canonicalKey = canonicalProjects.join("\u0000");
   useEffect(() => {
@@ -313,12 +341,19 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
   const lanes = buildLanes(cards, epics);
   const omitted = data ? Object.entries(data.board.omittedClosed).filter(([project]) => chosen.includes(project)) : [];
 
-  function toggleProject(key: string) {
-    if (chosen.length === 1 && chosen[0] === key) return;
-    navigate({ view: "board", viewId, projects: toggleChip(offered, projects, key), item }, "push");
-  }
-
   const route: BoardRoute = { view: "board", viewId, projects, item };
+
+  // The switcher is live as soon as the offered projects are known — the
+  // view's own, or the registry's — whether or not the board read succeeds,
+  // so a reader can always switch away from a project that fails to read.
+  // With the registry unreadable too, it offers the address's projects and
+  // "All projects" (ProjectSwitcher's `fallback`).
+  const { offered: switcherOffered, fallback: switcherFallback } =
+    view === null ? { offered: null, fallback: false } : switcherOffer({ viewProjects: view.viewProjects, registry: registryKeys, registryFailed, address: projects });
+
+  function chooseFromSwitcher(choice: string) {
+    navigate(chooseProject(route, switcherOffered ?? [], choice), "push");
+  }
   const drawerOpen = view !== null && item !== null;
 
   // The drawer's project. A project is pinned for an item only once it is
@@ -363,36 +398,22 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
     });
   }
 
-  const heading = view ? view.title || "(untitled view)" : "Board";
+  // Only a saved view's title is a visible heading. Otherwise the h1 is for
+  // screen readers, so the switcher and the toggle lead the header at the
+  // same place on the board and the roadmap (RoadmapView.tsx).
+  const heading = view && viewId !== null ? view.title || "(untitled view)" : null;
+  // The switcher keeps its place while the projects load (disabled, reading
+  // the address), and is left off only once none is offered or the address
+  // names no board view.
+  const switcherShown = (viewState.kind === "loading" || viewState.kind === "ready") && (switcherFallback || switcherOffered?.length !== 0);
 
   return (
     <main className={`flex h-dvh w-screen flex-col overflow-hidden ${drawerOpen || shellDrawerOpen ? "sm:pr-[492px]" : ""}`}>
       <div aria-hidden="true" className="ambience pointer-events-none fixed inset-0 -z-10" />
       <header inert={drawerOpen && !wide} className="glass m-3 mb-0 flex flex-wrap items-center gap-x-4 gap-y-2 p-3">
-        <h1 className="min-w-0 truncate text-base font-semibold text-fg">{heading}</h1>
-        {view && offered.length > 0 && (
-          <div role="group" aria-label="Projects" className="flex flex-wrap gap-1.5">
-            {offered.map((key) => {
-              const on = chosen.includes(key);
-              const locked = on && chosen.length === 1;
-              return (
-                <button
-                  key={key}
-                  type="button"
-                  aria-pressed={on}
-                  aria-disabled={locked ? "true" : undefined}
-                  title={locked ? "At least one project must stay selected" : undefined}
-                  onClick={() => toggleProject(key)}
-                  className={`min-h-11 rounded-full border px-2.5 py-0.5 text-xs focus:outline-none focus:ring-2 focus:ring-accent sm:min-h-0 ${locked ? "cursor-not-allowed " : ""}${
-                    on ? "border-accent bg-accent/20 text-fg" : "border-hairline text-fg-muted hover:bg-surface-strong"
-                  }`}
-                >
-                  {key}
-                </button>
-              );
-            })}
-          </div>
-        )}
+        {heading === null ? <h1 className="sr-only">Board</h1> : <h1 className="min-w-0 truncate text-base font-semibold text-fg">{heading}</h1>}
+        {switcherShown && <ProjectSwitcher offered={switcherOffered} address={projects} onChoose={chooseFromSwitcher} fallback={switcherFallback} />}
+        <WorkViewToggle current="board" board={route} roadmap={boardToRoadmap(route, viewCarriedProjects(view?.viewProjects ?? null, projects))} />
         <div className="ml-auto flex flex-wrap items-center justify-end gap-3 text-xs text-fg-muted">
           <HeaderSearch />
           <HangarStatusPill />
@@ -558,6 +579,7 @@ function LaneSection({
             {open ? "▾" : "▸"}
           </span>
           <span className="truncate">{lane.title}</span>
+          {lane.milestone !== null && <LaneMilestone title={lane.milestone} />}
           {lane.status && <span className="shrink-0 rounded-full border border-hairline px-2 py-0.5 text-[11px] font-normal text-fg-muted">{lane.status}</span>}
           <span className="shrink-0 text-xs font-normal text-fg-muted">{lane.cardCount}</span>
         </button>

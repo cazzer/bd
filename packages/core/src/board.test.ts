@@ -221,7 +221,97 @@ describe("getWorkBoard lanes", () => {
     expect(board.cards.map((c) => c.id)).not.toContain(id("outer"));
     expect(board.cards.map((c) => c.id)).not.toContain(id("inner"));
     expect(board.epics.map((e) => e.id).sort()).toEqual([id("outer"), id("inner")].sort());
-    expect(board.epics.find((e) => e.id === id("outer"))).toEqual({ id: id("outer"), title: "Outer", status: "open", project: a });
+    expect(board.epics.find((e) => e.id === id("outer"))).toEqual({ id: id("outer"), title: "Outer", status: "open", project: a, milestone: null });
+  });
+
+  it("shows no milestone card, names each epic's nearest milestone, and puts an item directly under a milestone in No epic", async () => {
+    const { a, tag } = scope();
+    const ids = await items([
+      { ext: `${tag}-m1`, project: a, issueType: "milestone", title: "Beta" },
+      { ext: `${tag}-m2`, project: a, issueType: "milestone", title: "GA", status: "closed", closedAt: "2026-10-01T00:00:00.000Z" },
+      { ext: `${tag}-e1`, project: a, issueType: "epic", title: "Sync" },
+      { ext: `${tag}-e2`, project: a, issueType: "epic", title: "Search" },
+      { ext: `${tag}-nested`, project: a, issueType: "epic", title: "Nested" },
+      { ext: `${tag}-free`, project: a, issueType: "epic", title: "Free" },
+      { ext: `${tag}-t1`, project: a },
+      { ext: `${tag}-t2`, project: a },
+      { ext: `${tag}-direct`, project: a },
+    ]);
+    const id = (n: string) => ids.get(`${tag}-${n}`)!;
+    await link(id("e1"), id("m1"), "child_of");
+    await link(id("e2"), id("m1"), "child_of");
+    await link(id("nested"), id("e2"), "child_of");
+    // m1 sits under m2: the nearer milestone wins, as nearest_epic does.
+    await link(id("m1"), id("m2"), "child_of");
+    await link(id("t1"), id("e1"), "child_of");
+    await link(id("t2"), id("nested"), "child_of");
+    await link(id("direct"), id("m1"), "child_of");
+
+    const board = await getWorkBoard(db, { projects: [a] });
+
+    const cardIds = board.cards.map((c) => c.id);
+    expect(cardIds).not.toContain(id("m1"));
+    expect(cardIds).not.toContain(id("m2"));
+    expect(cardIds.sort()).toEqual([id("t1"), id("t2"), id("direct")].sort());
+    expect(board.epics.map((e) => e.id)).not.toContain(id("m1"));
+    expect(board.epics.map((e) => e.id)).not.toContain(id("m2"));
+    expect(board.omittedClosed).toEqual({});
+
+    const beta = { id: id("m1"), title: "Beta" };
+    const milestoneOf = (n: string) => board.epics.find((e) => e.id === id(n))?.milestone;
+    expect(milestoneOf("e1")).toEqual(beta);
+    expect(milestoneOf("e2")).toEqual(beta);
+    expect(milestoneOf("nested")).toEqual(beta);
+    expect(milestoneOf("free")).toBeNull();
+
+    expect(card(board, id("t1")).epicId).toBe(id("e1"));
+    expect(card(board, id("t2")).epicId).toBe(id("nested"));
+    expect(card(board, id("direct")).epicId).toBeNull();
+  });
+
+  it("treats a milestone as a boundary for epic lookup: an epic above a milestone holds none of the items under it", async () => {
+    const { a, tag } = scope();
+    const ids = await items([
+      { ext: `${tag}-outer`, project: a, issueType: "epic", title: "Outer" },
+      { ext: `${tag}-m`, project: a, issueType: "milestone", title: "M" },
+      { ext: `${tag}-inner`, project: a, issueType: "epic", title: "Inner" },
+      { ext: `${tag}-x`, project: a },
+      { ext: `${tag}-t`, project: a },
+    ]);
+    const id = (n: string) => ids.get(`${tag}-${n}`)!;
+    await link(id("m"), id("outer"), "child_of");
+    await link(id("x"), id("m"), "child_of");
+    await link(id("inner"), id("m"), "child_of");
+    await link(id("t"), id("inner"), "child_of");
+
+    const board = await getWorkBoard(db, { projects: [a] });
+
+    expect(card(board, id("x")).epicId).toBeNull();
+    expect(card(board, id("t")).epicId).toBe(id("inner"));
+    expect(board.epics.find((e) => e.id === id("inner"))?.milestone).toEqual({ id: id("m"), title: "M" });
+    expect(board.epics.find((e) => e.id === id("outer"))?.milestone).toBeNull();
+  });
+
+  it("answers an epic's milestone on a child_of cycle through milestones and epics", async () => {
+    const { a, tag } = scope();
+    const ids = await items([
+      { ext: `${tag}-m`, project: a, issueType: "milestone", title: "M" },
+      { ext: `${tag}-e`, project: a, issueType: "epic" },
+      { ext: `${tag}-loop`, project: a, issueType: "epic" },
+      { ext: `${tag}-t`, project: a },
+    ]);
+    const id = (x: string) => ids.get(`${tag}-${x}`)!;
+    await link(id("e"), id("m"), "child_of");
+    await link(id("m"), id("e"), "child_of");
+    await link(id("loop"), id("loop"), "child_of");
+    await link(id("t"), id("e"), "child_of");
+
+    const board = await getWorkBoard(db, { projects: [a] });
+
+    expect(board.cards.map((c) => c.id)).toEqual([id("t")]);
+    expect(card(board, id("t")).epicId).toBe(id("e"));
+    expect(board.epics.find((e) => e.id === id("e"))?.milestone).toEqual({ id: id("m"), title: "M" });
+    expect(board.epics.find((e) => e.id === id("loop"))?.milestone).toBeNull();
   });
 
   it("lists an epic with no cards, and an epic of another project that a card's lane names", async () => {

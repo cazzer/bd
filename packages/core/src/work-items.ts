@@ -8,7 +8,10 @@
 // primitive below, the beads importer — calls `normalizeWorkItemMetadata`,
 // so the three cannot disagree about what a valid item is. The event-time
 // contract (event-time.ts) is applied beside it wherever a document is
-// written, so `occurred_at` on a work item is canonical too.
+// written, so `occurred_at` on a work item is canonical too. The planning
+// dates `due_at` and `started_at` (roadmap-milestones, design.md decision 1)
+// are contract keys normalized by that same instant rule
+// (`normalizeInstantKey`), so the roadmap compares them as text.
 //
 // `patchWorkItem` is a read-modify-write under `SELECT ... FOR UPDATE`,
 // written through the same unsafe upsert kit `annotateNode` uses, inside
@@ -39,7 +42,7 @@ import {
   NodeUpsertFailedError,
   NotAWorkItemError,
 } from "./errors.js";
-import { normalizeOccurredAt } from "./event-time.js";
+import { normalizeInstantKey, normalizeOccurredAt } from "./event-time.js";
 import type { IngestRunHandle } from "./ingest-runs.js";
 import {
   DEFAULT_MAX_CONTENT_LENGTH,
@@ -66,6 +69,9 @@ export const DEFAULT_WORK_ITEM_PRIORITY = 2;
 export const MAX_ASSIGNEE_LENGTH = 200;
 export const MAX_SPEC_ID_LENGTH = 200;
 export const MAX_CLOSED_REASON_LENGTH = 2000;
+/** Optional planning dates (roadmap-milestones): stored in event-time.ts's canonical instant form. */
+export const DUE_AT_KEY = "due_at";
+export const STARTED_AT_KEY = "started_at";
 
 /** Source blocks target: the source must be closed before the target can be worked. */
 export const BLOCKS_EDGE_TYPE = "blocks";
@@ -134,6 +140,8 @@ export interface NormalizeWorkItemOptions {
   now?: Date;
   /** Batch position, carried into `InvalidWorkItemError` so a writer can find the item. */
   index?: number;
+  /** How `InvalidEventTimeError` names the item on a bad `due_at` / `started_at` (event-time.ts's option); wins over `index` there. */
+  itemLabel?: string;
 }
 
 /**
@@ -141,14 +149,16 @@ export interface NormalizeWorkItemOptions {
  * items carry a validated lifecycle contract"): defaults a missing status
  * and priority, validates every contract key, applies the closing rules,
  * and passes every other key through untouched. Pure. Throws
- * `InvalidWorkItemError` naming the first offending field.
+ * `InvalidWorkItemError` naming the first offending field, or
+ * `InvalidEventTimeError` naming `due_at` or `started_at` when a planning
+ * date is not a zoned instant or a date alone (null or absent deletes it).
  */
 export function normalizeWorkItemMetadata(
   metadata: Record<string, unknown> | undefined,
   options: NormalizeWorkItemOptions = {},
 ): Record<string, unknown> {
   const input = metadata ?? {};
-  const { index } = options;
+  const { index, itemLabel } = options;
   const out: Record<string, unknown> = { ...input };
 
   const status = input[KEY.status] ?? DEFAULT_WORK_ITEM_STATUS;
@@ -185,6 +195,15 @@ export function normalizeWorkItemMetadata(
     else if (!PROJECT_KEY_PATTERN.test(project)) {
       throw new InvalidWorkItemError(KEY.project, projectRaw, "must be 1 to 64 characters of lowercase letters, digits, '.', '_' or '-'", index);
     } else out[KEY.project] = project;
+  }
+
+  for (const key of [DUE_AT_KEY, STARTED_AT_KEY]) {
+    const normalized = normalizeInstantKey(input, key, {
+      ...(index === undefined ? {} : { index }),
+      ...(itemLabel === undefined ? {} : { itemLabel }),
+    });
+    if (key in normalized) out[key] = normalized[key];
+    else delete out[key];
   }
 
   const closedAtRaw = input[KEY.closedAt];

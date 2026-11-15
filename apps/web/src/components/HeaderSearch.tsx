@@ -51,7 +51,7 @@ export function HeaderSearch({ initialText = "", onSubmit }: HeaderSearchProps) 
         onChange={(e) => setText(e.target.value)}
         placeholder="Search…"
         aria-label="Search everything"
-        className="min-h-11 w-36 min-w-0 rounded-lg border border-hairline bg-surface-strong px-2.5 py-1 text-xs text-fg placeholder:text-fg-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent sm:min-h-0 sm:w-48"
+        className="min-h-11 w-36 min-w-0 rounded-lg border border-hairline bg-surface-strong px-2.5 py-1 text-base text-fg placeholder:text-fg-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent sm:min-h-0 sm:w-48 sm:text-xs"
       />
       <button
         type="submit"

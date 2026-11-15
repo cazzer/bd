@@ -57,12 +57,13 @@
 // `sm` the drawer is a modal sheet, so the view underneath is made inert,
 // as BoardView does for its own.
 //
-// The board's own drawer (`/board?item=`) and this one are never open
-// together. Opening this one on the board while the board's is open pushes
-// the address without `item` (closing the board's drawer — the one address
-// change this makes, and only on the board; Back reopens the board's
-// drawer, which closes this one); the board's drawer opening (a card
-// picked, back/forward) closes this one and the popover. The popover and
+// The board's own drawer (`/board?item=`, and the roadmap's, which is the
+// same drawer at `/roadmap?item=`) and this one are never open together.
+// Opening this one on the board or roadmap while that drawer is open pushes
+// the address without `item` (closing that drawer — the one address change
+// this makes, and only there; Back reopens it, which closes this one); that
+// drawer opening (a card or row picked, back/forward) closes this one and
+// the popover. The popover and
 // the drawer remember the view they opened on and draw only there, so a
 // change of view never shows them for a frame over the next view.
 //
@@ -220,7 +221,7 @@ export function ReviewQueueProvider({ queue, live, route, children }: ReviewQueu
   function openReview(review: QueueReview) {
     setPopover({ open: false });
     decided.current.delete(review.id);
-    if (route.view === "board" && route.item !== null) navigate({ ...route, item: null }, "push");
+    if ((route.view === "board" || route.view === "roadmap") && route.item !== null) navigate({ ...route, item: null }, "push");
     setPicked({ review, view: route.view });
   }
 
@@ -245,7 +246,7 @@ export function ReviewQueueProvider({ queue, live, route, children }: ReviewQueu
   }
 
   // The board's drawer opening closes this one, and the popover over it.
-  const boardItem = route.view === "board" ? route.item : null;
+  const boardItem = route.view === "board" || route.view === "roadmap" ? route.item : null;
   useEffect(() => {
     if (boardItem === null) return;
     setPicked(null);
