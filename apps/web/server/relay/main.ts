@@ -222,6 +222,7 @@ export async function runRelay(options: RelayOptions, deps: RelayDeps = {}): Pro
       }
       return writer;
     },
+    bdFor: (project: string) => runners.bdFor(project),
     runHerdr: runners.runHerdr,
     reingest,
     kinds,

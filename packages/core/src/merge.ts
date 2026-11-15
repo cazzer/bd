@@ -2,7 +2,7 @@ import { sql } from "drizzle-orm";
 import type { Database } from "@breakdown/db";
 import { HangarOutcomeMergeError, HangarSessionMergeError, MergeFailedError, NodeNotFoundError, SelfMergeError } from "./errors.js";
 import { HANGAR_SESSION_NODE_TYPE, HANGAR_SOURCE_SYSTEM } from "./hangar.js";
-import { HANGAR_OUTCOME_KEY, HANGAR_OUTCOME_KEY_PREFIX, INBOX_ITEM_NODE_TYPE, INBOX_SOURCE_SYSTEM } from "./inbox.js";
+import { HANGAR_DECISION_KEY_PREFIX, HANGAR_OUTCOME_KEY, HANGAR_OUTCOME_KEY_PREFIX, INBOX_ITEM_NODE_TYPE, INBOX_SOURCE_SYSTEM } from "./inbox.js";
 import type { IngestRunHandle } from "./ingest-runs.js";
 import { asPgError, formatPgInfo } from "./sql-helpers.js";
 
@@ -23,6 +23,7 @@ type NodeMergeRow = {
   merged_into: string | null;
   hangar: boolean;
   outcome: boolean;
+  escalation: boolean;
 }
 
 /** Postgres SQLSTATE for a detected deadlock. */
@@ -77,7 +78,11 @@ const MAX_DEADLOCK_RETRIES = 3;
  * click on one card land on another, and an outcome request's accept
  * deletes a session's disk (hangar-release, security review). Inbox
  * decisions also refuse a merged-away id (inbox.ts), so this is the second
- * of two locks, not the only one.
+ * of two locks, not the only one. A hangar escalation's inbox item (any node
+ * at an `inbox` key starting `hangar-decision:`) is refused the same way
+ * (`HangarOutcomeMergeError` with kind `escalation`): its decision is routed
+ * to the session on its id, which a merge would fold away
+ * (hangar-driver-decisions).
  *
  * Every step above runs inside one transaction, so a failure at any point
  * leaves no partial redirect. A genuine database failure (not one of the
@@ -130,18 +135,22 @@ const IS_HANGAR = sql`(node_type = ${HANGAR_SESSION_NODE_TYPE} OR source_system 
 
 const IS_HANGAR_OUTCOME = sql`((node_type = ${INBOX_ITEM_NODE_TYPE} AND metadata ? ${HANGAR_OUTCOME_KEY}) OR (source_system = ${INBOX_SOURCE_SYSTEM} AND starts_with(external_id, ${HANGAR_OUTCOME_KEY_PREFIX})))`;
 
-/** Throws for the first row that is a hangar session or an outcome request. */
-function refuseReserved(rows: readonly { id: string; hangar: boolean; outcome: boolean }[], loserId: string, survivorId: string): void {
+const IS_HANGAR_ESCALATION = sql`(source_system = ${INBOX_SOURCE_SYSTEM} AND starts_with(external_id, ${HANGAR_DECISION_KEY_PREFIX}))`;
+
+/** Throws for the first row that is a hangar session, an outcome request, or an escalation's inbox item. */
+function refuseReserved(rows: readonly { id: string; hangar: boolean; outcome: boolean; escalation: boolean }[], loserId: string, survivorId: string): void {
   const session = rows.find((r) => r.hangar);
   if (session) throw new HangarSessionMergeError(loserId, survivorId, session.id);
   const outcome = rows.find((r) => r.outcome);
   if (outcome) throw new HangarOutcomeMergeError(loserId, survivorId, outcome.id);
+  const escalation = rows.find((r) => r.escalation);
+  if (escalation) throw new HangarOutcomeMergeError(loserId, survivorId, escalation.id, "escalation");
 }
 
 async function runMergeTransaction(db: Database, loserId: string, survivorId: string, run: IngestRunHandle): Promise<MergeResult> {
   return db.transaction(async (tx) => {
     const lookup = await tx.execute<NodeMergeRow>(sql`
-      SELECT id, merged_into, ${IS_HANGAR} AS hangar, ${IS_HANGAR_OUTCOME} AS outcome FROM nodes WHERE id = ${loserId} OR id = ${survivorId} FOR UPDATE
+      SELECT id, merged_into, ${IS_HANGAR} AS hangar, ${IS_HANGAR_OUTCOME} AS outcome, ${IS_HANGAR_ESCALATION} AS escalation FROM nodes WHERE id = ${loserId} OR id = ${survivorId} FOR UPDATE
     `);
     refuseReserved([loserId, survivorId].flatMap((id) => lookup.rows.filter((r) => r.id === id)), loserId, survivorId);
 
@@ -182,8 +191,8 @@ async function runMergeTransaction(db: Database, loserId: string, survivorId: st
     // it if the FK were ever relaxed). The resolved survivor is locked and
     // checked with them: none of these rows may be a hangar session or an
     // outcome request.
-    const affected = await tx.execute<{ id: string; hangar: boolean; outcome: boolean }>(sql`
-      SELECT id, ${IS_HANGAR} AS hangar, ${IS_HANGAR_OUTCOME} AS outcome FROM nodes WHERE id = ${loserId} OR merged_into = ${loserId} OR id = ${canonicalId} FOR UPDATE
+    const affected = await tx.execute<{ id: string; hangar: boolean; outcome: boolean; escalation: boolean }>(sql`
+      SELECT id, ${IS_HANGAR} AS hangar, ${IS_HANGAR_OUTCOME} AS outcome, ${IS_HANGAR_ESCALATION} AS escalation FROM nodes WHERE id = ${loserId} OR merged_into = ${loserId} OR id = ${canonicalId} FOR UPDATE
     `);
     refuseReserved(affected.rows, loserId, survivorId);
 

@@ -1,0 +1,248 @@
+// Escalating a hangar decision to the person (hangar-driver-decisions
+// change). The driver answers its sessions' decisions itself
+// (hangar-decisions.ts); a call that changes the architecture or sets a
+// fundamental direction is the person's, and goes to them as a review: a
+// beads issue labelled `review` under the session's work item, carrying the
+// driver's decision card, the same review `bin/review-request` files. It
+// shows in the board's review queue and in Needs me.
+//
+// Breakdown never runs `bd` for this: it queues a `review_request` relay
+// action (relay.ts), and the laptop relay files the review in the project's
+// registered checkout and reports its bead id, which is recorded on the
+// decision. A Breakdown host that has `bd` itself runs a relay against
+// itself. The person decides the review on the board as any other
+// (`reviewDecision`); once that decision is written to the tracker — at
+// once with `bd` on the server, or when the relay reports its
+// `review_decision` done — `routeReviewDecision` matches it on the review's
+// project and bead id and appends it to the session's messages.
+//
+// Fallback: a work item with no registered beads project (a work item from
+// another source, such as hangar's own) gets an inbox item with the card
+// instead, bound to the session the way a worker's own item is (key
+// `hangar-decision:<decision id>`). The person's decision on it reaches the
+// session as an `inbox_decision` (today's path) and, matched on the item's
+// id, as a `session_decision` on the decision (inbox.ts `decideInboxItem`).
+//
+// `onRelayActionReported` is the relay report's follow-up, called by the web
+// server's relay API after a report lands: a review request's bead id (or
+// its failure, which puts the decision back to pending so the driver can
+// retry), and a review decision's routing.
+
+import type { Database } from "@breakdown/db";
+import { getRegisteredBeadsProject } from "./board.js";
+import { HangarDecisionRefusedError } from "./errors.js";
+import { getSessionsByIds } from "./hangar.js";
+import {
+  failHangarEscalation,
+  getEscalatableHangarDecision,
+  normalizeHangarDecisionCard,
+  recordHangarEscalationItem,
+  recordHangarEscalationReview,
+  revertHangarEscalation,
+  routeReviewDecision,
+  unsafeLockEscalatableInTx,
+  unsafeLockStaleEscalationInTx,
+  unsafeRecordReviewWithdrawalInTx,
+  unsafeMarkEscalatedInTx,
+  type HangarDecision,
+  type HangarDecisionCard,
+  type HangarEscalationCard,
+} from "./hangar-decisions.js";
+import { HANGAR_DECISION_KEY_PREFIX, unsafeRequestEscalationInboxItem } from "./inbox.js";
+import { getNodes } from "./lookup.js";
+import { isRelayIssueId, MAX_RELAY_REVIEW_DESCRIPTION_LENGTH, MAX_RELAY_REVIEW_TITLE_LENGTH } from "./relay-allowlist.js";
+import { enqueueRelayAction, type RelayAction, type ReviewDecisionPayload } from "./relay.js";
+import { fitText } from "./fit-text.js";
+import { PROJECT_KEY_PATTERN } from "./work-items.js";
+
+/** The inbox key an escalation that falls back to the inbox files under (reserved: inbox.ts `HANGAR_DECISION_KEY_PREFIX`). */
+export const HANGAR_ESCALATION_INBOX_KEY_PREFIX = HANGAR_DECISION_KEY_PREFIX;
+export const MAX_HANGAR_ESCALATION_NOTE_LENGTH = 2000;
+
+/** The review key an escalation's review carries: `hangar-` and the decision id's 32 hex digits (39 characters, within REVIEW_KEY_PATTERN). */
+export function hangarEscalationReviewKey(decisionId: string): string {
+  return `hangar-${decisionId.replace(/-/g, "").toLowerCase()}`;
+}
+
+/** `Review: <question>` within the relay's title cap, as bin/review-request titles a card review. */
+function reviewTitle(question: string): string {
+  return fitText(`Review: ${question}`, MAX_RELAY_REVIEW_TITLE_LENGTH) as string;
+}
+
+/**
+ * The evidence the person reads: a heading naming where the decision came
+ * from (first, so the description never starts with a markdown list or rule,
+ * which the relay's argument rule would refuse as a flag), the driver's
+ * body, and its note.
+ */
+export function hangarEscalationEvidence(decision: HangarDecision, card: HangarDecisionCard, context: { note?: string; driver: string; repo: string; workItem: string | null }): string {
+  const heading = `### Escalated by the hangar driver \`${context.driver}\``;
+  const facts = [
+    `From hangar session \`${decision.sessionId}\` on \`${context.repo}\`${context.workItem === null ? "" : `, for work item \`${context.workItem}\``}.`,
+    `The session asked: ${decision.kind === "pr" ? "review PR" : "question"} "${decision.title}"${decision.prUrl === null ? "" : ` (${decision.prUrl})`}.`,
+    "Your decision goes to the session: accepting carries it out, sending it back with a note has it rework.",
+  ];
+  const parts: string[] = [`${heading}\n\n${facts.join(" ")}`];
+  if (context.note !== undefined && context.note !== "") parts.push(`**Why it comes to you:** ${context.note}`);
+  if (card.body !== undefined && card.body !== "") parts.push(card.body);
+  else if (decision.summary !== "") parts.push(decision.summary);
+  else parts.push(card.question);
+  return fitText(parts.join("\n\n"), MAX_RELAY_REVIEW_DESCRIPTION_LENGTH) as string;
+}
+
+export interface EscalateHangarDecisionInput {
+  sessionId: string;
+  /** The driver's card for the person (normalizeHangarDecisionCard). */
+  card: unknown;
+  note?: string;
+  /** The driver's client name: who asked, recorded on the action or item. */
+  actor: string;
+}
+
+export type EscalateHangarDecisionResult =
+  | { via: "review"; decisionId: string; projectKey: string; workItem: string; reviewKey: string; relayActionId: number }
+  | { via: "inbox"; decisionId: string; inboxItemId: string; reason: string };
+
+/**
+ * Hands the session's pending decision to the person (module header):
+ * refused (`HangarDecisionRefusedError`) when it has none, it is already
+ * escalated, or the session has ended. A review under the work item when it
+ * has a registered beads project, an inbox item bound to the session
+ * otherwise. The escalation records the card the person is shown, so their
+ * option is checked against it. The review's relay action is queued in the
+ * transaction that marks the decision escalated, so a racing decide or
+ * re-file leaves no orphan action; the inbox item is filed after the mark,
+ * which a failed filing reverts. Nothing is written when the card is refused.
+ */
+export async function escalateHangarDecision(db: Database, input: EscalateHangarDecisionInput): Promise<EscalateHangarDecisionResult> {
+  const card = normalizeHangarDecisionCard(input.card);
+  const shown: HangarEscalationCard = {
+    question: card.question,
+    ...(card.options === undefined ? {} : { options: card.options }),
+    ...(card.recommend === undefined ? {} : { recommend: card.recommend }),
+  };
+  const note = input.note?.trim() === "" ? undefined : input.note?.trim().slice(0, MAX_HANGAR_ESCALATION_NOTE_LENGTH);
+  const decision = await getEscalatableHangarDecision(db, input.sessionId);
+  const [session] = await getSessionsByIds(db, [decision.sessionId]);
+  const workItem = session?.workItemId == null ? null : ((await getNodes(db, [session.workItemId])).nodes[0] ?? null);
+  const project = typeof workItem?.metadata["project"] === "string" ? workItem.metadata["project"] : null;
+  const registered =
+    workItem !== null && workItem.sourceSystem === "beads" && project !== null && PROJECT_KEY_PATTERN.test(project) && isRelayIssueId(workItem.externalId)
+      ? await getRegisteredBeadsProject(db, project)
+      : null;
+  const evidence = hangarEscalationEvidence(decision, card, { ...(note === undefined ? {} : { note }), driver: input.actor, repo: session?.repo ?? "", workItem: workItem?.externalId ?? null });
+
+  if (registered !== null && workItem !== null) {
+    const reviewKey = hangarEscalationReviewKey(decision.id);
+    const review = { images: [], summary: card.question, key: reviewKey, ...shown, ...(card.on_accept === undefined ? {} : { on_accept: card.on_accept }) };
+    const relayActionId = await db.transaction(async (tx) => {
+      await unsafeLockEscalatableInTx(tx, decision.sessionId, decision.id);
+      const { action } = await enqueueRelayAction(tx, {
+        kind: "review_request",
+        payload: { project_key: registered.key, cwd: registered.path, issue_id: workItem.externalId, title: reviewTitle(card.question), description: evidence, review },
+        requestedBy: input.actor,
+        originNodeId: workItem.id,
+      });
+      await unsafeMarkEscalatedInTx(tx, decision.id, { via: "review", project_key: registered.key, issue_id: workItem.externalId, review_key: reviewKey, relay_action_id: action.id, card: shown });
+      return action.id;
+    });
+    return { via: "review", decisionId: decision.id, projectKey: registered.key, workItem: workItem.externalId, reviewKey, relayActionId };
+  }
+
+  const reason =
+    workItem === null
+      ? "the session has no work item"
+      : workItem.sourceSystem !== "beads"
+        ? `its work item comes from ${workItem.sourceSystem}, not beads`
+        : project === null
+          ? "its work item names no beads project"
+          : `beads project "${project}" has no registered checkout`;
+  await db.transaction(async (tx) => {
+    await unsafeLockEscalatableInTx(tx, decision.sessionId, decision.id);
+    await unsafeMarkEscalatedInTx(tx, decision.id, { via: "inbox", item_id: null, card: shown });
+  });
+  let filed;
+  try {
+    filed = await unsafeRequestEscalationInboxItem(db, {
+      externalId: `${HANGAR_ESCALATION_INBOX_KEY_PREFIX}${decision.id}`,
+      title: fitText(`Decide: ${card.question}`, 200) as string,
+      content: evidence,
+      metadata: {
+        source: "hangar",
+        action: decision.kind === "question" ? "reply" : "decide",
+        from: `hangar driver ${input.actor}`.slice(0, 200),
+        ...shown,
+        ...(card.on_accept === undefined ? {} : { on_accept: card.on_accept }),
+        ...(decision.prUrl === null ? {} : { links: [{ label: "PR", url: decision.prUrl }] }),
+        priority: 1,
+      },
+      actor: input.actor,
+      session: decision.sessionId,
+    });
+  } catch (err) {
+    await revertHangarEscalation(db, decision.id);
+    throw err;
+  }
+  if (!(await recordHangarEscalationItem(db, { id: decision.id, itemId: filed.id }))) {
+    throw new HangarDecisionRefusedError(decision.sessionId, "superseded", `decision ${decision.id} was superseded while its inbox item was filed; the item routes nowhere`);
+  }
+  return { via: "inbox", decisionId: decision.id, inboxItemId: filed.id, reason };
+}
+
+/** The reason a stale escalation's review is closed with (bd text: never starts with "-"). */
+export function staleReviewReason(decision: Pick<HangarDecision, "sessionId" | "state">): string {
+  const why = decision.state === "decided" ? "its driver decided it" : "the session filed a new decision";
+  return `Withdrawn: ${why} while this review was being filed (hangar session ${decision.sessionId}), so nothing waits on it. Closed by Breakdown.`;
+}
+
+/**
+ * A review the relay filed for a decision that had moved on meanwhile (the
+ * session re-filed during the claim): its decision would route nowhere, and
+ * it blocks its work item. Queues a `review_withdraw` that closes it, once
+ * (recorded as `withdraw_action_id`, so a repeated report queues no second).
+ */
+async function withdrawStaleReview(db: Database, action: RelayAction, reviewId: string): Promise<void> {
+  const payload = action.payload as { project_key: string; cwd: string };
+  await db.transaction(async (tx) => {
+    const stale = await unsafeLockStaleEscalationInTx(tx, action.id);
+    if (stale === null) return;
+    const { action: withdraw } = await enqueueRelayAction(tx, {
+      kind: "review_withdraw",
+      payload: { project_key: payload.project_key, cwd: payload.cwd, issue_id: reviewId, reason: staleReviewReason(stale) },
+      requestedBy: "breakdown",
+      originNodeId: action.originNodeId,
+    });
+    await unsafeRecordReviewWithdrawalInTx(tx, { id: stale.id, reviewId, withdrawActionId: withdraw.id });
+  });
+}
+
+/**
+ * The follow-up to a relay report that landed (module header): a review
+ * request done records its bead id, failed puts the decision back to
+ * pending, and one done for a decision that has moved on queues the
+ * review's withdrawal; a review decision done is routed to its session.
+ * Anything else does nothing. Idempotent, so it runs on a repeated report
+ * too. The report is recorded either way; the caller logs a failure here.
+ */
+export async function onRelayActionReported(db: Database, action: RelayAction): Promise<void> {
+  if (action.kind === "review_request") {
+    const reviewId = (action.result as Record<string, unknown> | null)?.["review_id"];
+    if (action.state === "done" && typeof reviewId === "string" && isRelayIssueId(reviewId)) {
+      if (!(await recordHangarEscalationReview(db, { relayActionId: action.id, reviewId }))) await withdrawStaleReview(db, action, reviewId);
+    } else if (action.state === "failed" || action.state === "done") {
+      await failHangarEscalation(db, { relayActionId: action.id, error: action.error ?? "the relay reported no review id" });
+    }
+    return;
+  }
+  if (action.kind === "review_decision" && action.state === "done") {
+    const payload = action.payload as ReviewDecisionPayload;
+    await routeReviewDecision(db, {
+      projectKey: payload.project_key,
+      reviewId: payload.issue_id,
+      decision: payload.decision,
+      ...(payload.option === undefined ? {} : { option: payload.option }),
+      message: payload.message,
+      by: action.requestedBy ?? "human",
+    });
+  }
+}

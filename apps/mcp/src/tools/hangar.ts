@@ -1,21 +1,38 @@
-// The four hangar tools (hangar-queue change, design decision 7; brain-mcp
-// spec, "Hangar tools"; hangar-release): brain_hangar_request queues a
-// session for a work item, brain_hangar_status reports hangar's liveness, its
-// latest capacity and when it was reported, and the open session counts,
-// brain_hangar_sessions lists sessions, each queued one with why it waits
-// (hangar-capacity: `explainQueuedSessions`, computed on read; the sessions
-// awaiting review behind a full disk are listed once, at the top level, not
-// on every queued session, to keep the response inside its budget), and
-// brain_hangar_outcome_request asks the person to accept or table an ended
-// session through an inbox item. Hangar itself claims and reports over the
-// web server's REST API (docs/hangar-api.md); nothing here claims, changes a
-// session's state or outcome, or returns a token: only a person sets an
-// outcome. brain_hangar_request and brain_hangar_outcome_request write, so
-// read-only mode refuses them; a session token is refused both
-// (server.ts SESSION_REFUSED_TOOLS).
+// The hangar tools (hangar-queue change, design decision 7; brain-mcp
+// spec, "Hangar tools"; hangar-release; hangar-driver-decisions):
+// brain_hangar_request queues a session for a work item, brain_hangar_status
+// reports hangar's liveness, its latest capacity and when it was reported,
+// and the open session counts, and brain_hangar_sessions lists sessions, each
+// queued one with why it waits (hangar-capacity: `explainQueuedSessions`,
+// computed on read; the sessions awaiting release behind a full disk are
+// listed once, at the top level, not on every queued session, to keep the
+// response inside its budget) and each open one with the decision it waits
+// on (`pendingDecision`).
+//
+// The driver — the agent that requested and runs the work — decides for its
+// sessions (hangar-driver-decisions): brain_hangar_outcome releases an ended
+// session itself (accepted or tabled, `outcome_by` its client),
+// brain_hangar_decide answers a session's pending decision (a PR, a
+// question) through the session's messages, and brain_hangar_escalate hands
+// a big call to the person as a review. brain_hangar_outcome_request is
+// retired: it files nothing and points at brain_hangar_outcome, since
+// releasing never goes to the person. Hangar itself claims and reports over
+// the web server's REST API (docs/hangar-api.md); nothing here claims,
+// changes a session's state, or returns a token. Every tool that writes is
+// refused in read-only mode, and a session token is refused each one but the
+// reads (server.ts SESSION_REFUSED_TOOLS): a worker never decides, releases,
+// or escalates its own work.
 
 import {
+  decideHangarDecision,
+  escalateHangarDecision,
   explainQueuedSessions,
+  getOpenHangarDecisions,
+  HANGAR_DECIDE_DECISIONS,
+  MAX_HANGAR_DECISION_NOTE_LENGTH,
+  MAX_HANGAR_ESCALATION_NOTE_LENGTH,
+  setHangarSessionOutcome,
+  type HangarDecision,
   getHangarStatus,
   HANGAR_FLAVORS,
   HANGAR_OUTCOMES,
@@ -24,7 +41,6 @@ import {
   listSessions,
   MAX_HANGAR_OUTCOME_NOTE_LENGTH,
   MAX_HANGAR_REPO_LENGTH,
-  requestHangarOutcome,
   requestSession,
   type HangarCapacity,
   type HangarSession,
@@ -33,10 +49,17 @@ import {
 } from "@breakdown/core";
 import { z } from "zod";
 import { boundResponse } from "../budget.js";
+import { RetiredToolError } from "../errors.js";
 import type { ToolContext, ToolDef } from "../types.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const workItemIdField = z.string().regex(UUID_RE, "must be a valid uuid (a work_item node id returned by brain_list, brain_search, or brain_get)");
+const sessionIdField = z.string().regex(UUID_RE, "must be a valid uuid (a hangar session id returned by brain_hangar_sessions)");
+
+/** Who decided, for `outcome_by` and a decision's `by`: the token's client, else the connected software, else "agent". */
+function decider(ctx: ToolContext): string {
+  return ctx.tokenClient ?? ctx.actor() ?? "agent";
+}
 
 const MAX_SESSIONS_LIMIT = 100;
 const DEFAULT_SESSIONS_LIMIT = 50;
@@ -81,8 +104,14 @@ function waitingJson(waiting: HangarWaiting): WaitingJson {
   return rest;
 }
 
+/** A session's open decision as the driver reads it (null when it waits on none). */
+function pendingDecisionJson(d: HangarDecision | undefined): Record<string, unknown> | null {
+  if (d === undefined) return null;
+  return { id: d.id, kind: d.kind, title: d.title, summary: d.summary, prUrl: d.prUrl, card: d.card, state: d.state, escalation: d.escalation, filedAt: d.createdAt.toISOString() };
+}
+
 /** `waiting` is why a queued session waits (null for every other state). */
-function sessionJson(s: HangarSession, waiting: WaitingJson | null): Record<string, unknown> {
+function sessionJson(s: HangarSession, waiting: WaitingJson | null, pending: HangarDecision | undefined): Record<string, unknown> {
   return {
     id: s.id,
     title: s.title,
@@ -102,8 +131,11 @@ function sessionJson(s: HangarSession, waiting: WaitingJson | null): Record<stri
     outcome: s.outcome,
     outcomeAt: s.outcomeAt,
     outcomeBy: s.outcomeBy,
+    outcomeVia: s.outcomeVia,
+    outcomeNote: s.outcomeNote,
     released: s.released,
     waiting,
+    pendingDecision: pendingDecisionJson(pending),
     updatedAt: s.updatedAt.toISOString(),
   };
 }
@@ -182,9 +214,13 @@ export const hangarSessionsTool: ToolDef<typeof sessionsSchema> = {
     "who requested it, which hangar claimed it and when, where it runs (container, host, diskPath), why it was last requeued, why it failed (failureReason), " +
     "the person's outcome (accepted, tabled, or null) with when and by whom, released (hangar has deleted its disk), and waiting: on a queued session, why it waits " +
     `(kind ${HANGAR_WAIT_KINDS.join(", ")}; text is a one-line summary to show the person; since, ahead, reasons, and total as the kind has them), null on any other state. ` +
+    "pendingDecision is what the session waits on you, its driver, to decide, or null: { id, kind (pr or question), title, summary, prUrl, card (question, options, " +
+    "recommend, on_accept, body: the session's decision card, or null), state (pending: yours to answer with brain_hangar_decide; escalated: the person's, on the " +
+    "review or inbox item escalation names), escalation, filedAt }. " +
     "When a queued session waits on a full disk (disk_awaiting_review), the response carries awaitingReview once: { sessions, each with id, claimedBy, workItem " +
-    "({id, externalId, title, project} or null), and diskAllocatedBytes when hangar reported it, at most 20, oldest ended first; total }. The person frees the disk by " +
-    "accepting or tabling those sessions (brain_hangar_outcome_request asks them to). awaitingReview is null otherwise. Read-only.",
+    "({id, externalId, title, project} or null), and diskAllocatedBytes when hangar reported it, at most 20, oldest ended first; total }. Those are ended sessions " +
+    "nobody has released: release the ones that are yours with brain_hangar_outcome (accepted when the work landed or is kept, tabled to set it aside) — do not ask " +
+    "the person. awaitingReview is null otherwise. Read-only.",
   schema: sessionsSchema,
   isWrite: false,
   async handler(ctx: ToolContext, args) {
@@ -194,6 +230,7 @@ export const hangarSessionsTool: ToolDef<typeof sessionsSchema> = {
       ...(args.releasable === undefined ? {} : { releasable: args.releasable }),
       limit: args.limit ?? DEFAULT_SESSIONS_LIMIT,
     });
+    const pending = await getOpenHangarDecisions(ctx.db, listed.sessions.filter((s) => s.state === "claimed" || s.state === "running").map((s) => s.id));
     const queued = listed.sessions.filter((s) => s.state === "queued").map((s) => s.id);
     const waiting = queued.length === 0 ? new Map<string, HangarWaiting>() : await explainQueuedSessions(ctx.db, { ids: queued });
     // Every disk wait from one call reads the same awaiting-review list, so the first stands for all.
@@ -202,7 +239,7 @@ export const hangarSessionsTool: ToolDef<typeof sessionsSchema> = {
     return boundResponse(
       listed.sessions.map((s) => {
         const w = waiting.get(s.id);
-        return sessionJson(s, w === undefined ? null : waitingJson(w));
+        return sessionJson(s, w === undefined ? null : waitingJson(w), pending.get(s.id));
       }),
       (s) => s["id"] as string,
       (kept, meta) => {
@@ -225,29 +262,119 @@ export const hangarSessionsTool: ToolDef<typeof sessionsSchema> = {
   },
 };
 
-// --- brain_hangar_outcome_request -----------------------------------------------
+// --- brain_hangar_outcome ----------------------------------------------------------
 
-const outcomeRequestSchema = z.object({
-  sessionId: z.string().regex(UUID_RE, "must be a valid uuid (a hangar session id returned by brain_hangar_sessions)"),
+const outcomeSchema = z.object({
+  sessionId: sessionIdField,
   outcome: z.enum(HANGAR_OUTCOMES),
-  note: z.string().trim().min(1).max(MAX_HANGAR_OUTCOME_NOTE_LENGTH),
+  note: z.string().trim().min(1).max(MAX_HANGAR_OUTCOME_NOTE_LENGTH).optional(),
 });
 
-export const hangarOutcomeRequestTool: ToolDef<typeof outcomeRequestSchema> = {
-  name: "brain_hangar_outcome_request",
+export const hangarOutcomeTool: ToolDef<typeof outcomeSchema> = {
+  name: "brain_hangar_outcome",
   description:
-    "Ask the person to accept or table an ended (stopped or failed) hangar session: sessionId, outcome (accepted when the work is done or kept, tabled to set it aside), and note (why, 1-" +
-    `${MAX_HANGAR_OUTCOME_NOTE_LENGTH} characters, shown to them). Files one inbox item for the session, with Accept and Table options and your outcome recommended; ` +
-    "the person's choice sets the session's outcome, and hangar then deletes its disk and container. This tool sets no outcome itself: only a person does. " +
-    "A repeat request for the same session updates its pending item; once the person has decided or dismissed it, status says so and nothing is re-asked. " +
-    "Refused for a session that has not ended or that hangar has already released. Returns the inbox item id and its status.",
-  schema: outcomeRequestSchema,
+    "Release an ended (stopped or failed) hangar session you drive: sessionId, outcome (accepted when the work landed or is kept — its PR merged, its answer used; " +
+    "tabled to set it aside), and an optional note (stored with the outcome as outcomeNote). Sets the session's outcome directly, with outcomeBy your client name; hangar then removes its container and deletes its " +
+    "disk at its next check-in, which frees disk for queued sessions. This is your decision as the driver: never ask the person whether a session can be released. " +
+    "Setting the outcome it already has changes nothing (changed: false); the outcome can change until hangar has released the session. Refused for a session that has " +
+    "not ended (a merged or closed PR ends it; so does the session finishing), that hangar has already released, or whose outcome a person set (yours never overwrites theirs). Returns the session's outcome, outcomeBy, and released.",
+  schema: outcomeSchema,
   isWrite: true,
   async handler(ctx: ToolContext, args) {
-    const actor = ctx.actor();
-    const filed = await requestHangarOutcome(ctx.db, { sessionId: args.sessionId, outcome: args.outcome, note: args.note, ...(actor === undefined ? {} : { actor }) });
-    return { inboxItemId: filed.id, status: filed.status, action: filed.action, sessionId: filed.sessionId, requested: filed.requested };
+    const set = await setHangarSessionOutcome(ctx.db, { id: args.sessionId, outcome: args.outcome, actor: decider(ctx), via: "driver", ...(args.note === undefined ? {} : { note: args.note }) });
+    return { sessionId: set.session.id, outcome: set.session.outcome, outcomeBy: set.session.outcomeBy, outcomeNote: set.session.outcomeNote, released: set.session.released, changed: set.changed };
   },
 };
 
-export const hangarTools: ToolDef[] = [hangarRequestTool, hangarStatusTool, hangarSessionsTool, hangarOutcomeRequestTool];
+// --- brain_hangar_decide -----------------------------------------------------------
+
+const decideSchema = z.object({
+  sessionId: sessionIdField,
+  decisionId: z.string().regex(UUID_RE, "must be a valid uuid (the pendingDecision.id you read)").optional(),
+  decision: z.enum(HANGAR_DECIDE_DECISIONS),
+  option: z.string().min(1).max(16).optional(),
+  note: z.string().max(MAX_HANGAR_DECISION_NOTE_LENGTH).optional(),
+});
+
+export const hangarDecideTool: ToolDef<typeof decideSchema> = {
+  name: "brain_hangar_decide",
+  description:
+    "Answer the decision a hangar session you drive is waiting on (its pendingDecision on brain_hangar_sessions): sessionId; decisionId (recommended: the pendingDecision.id you read; " +
+    "refused if the session has filed another since, so your answer never lands on a decision you didn't see); decision — accept (a PR: good " +
+    "to merge, and you may merge it when nothing blocks it; a question: carry on, with your answer as option and/or note), changes (send it back to rework; note required, " +
+    "saying what to change), or dismiss (drop it; the session stops work on it); option (accept only: one of the card's option ids; on a PR card, an option other " +
+    "than the recommended one sends the session to rework the PR to it); and note. The answer goes straight to the session as a message; nothing reaches the person. " +
+    "Decide routine calls yourself: PR reviews, which of the session's options to take, clarifications. Escalate with brain_hangar_escalate only when the call changes the " +
+    "architecture or sets a fundamental direction. An escalated decision whose review is not filed yet (escalation without reviewId: the relay is away or failed it) " +
+    "can still be answered here, which withdraws the escalation. Refused when the session has no pending decision, when it was escalated and its review filed (only the " +
+    "person answers that one), or when the session has ended. Returns the decision id and the message id.",
+  schema: decideSchema,
+  isWrite: true,
+  async handler(ctx: ToolContext, args) {
+    const decided = await decideHangarDecision(ctx.db, {
+      sessionId: args.sessionId,
+      ...(args.decisionId === undefined ? {} : { decisionId: args.decisionId }),
+      decision: args.decision,
+      ...(args.option === undefined ? {} : { option: args.option }),
+      ...(args.note === undefined ? {} : { note: args.note }),
+      actor: decider(ctx),
+    });
+    return { decisionId: decided.decision.id, sessionId: decided.decision.sessionId, decision: args.decision, state: decided.decision.state, messageId: decided.messageId };
+  },
+};
+
+// --- brain_hangar_escalate ------------------------------------------------------------
+
+const escalateCardSchema = z.object({
+  question: z.string(),
+  options: z.array(z.object({ id: z.string(), label: z.string(), what: z.string().optional(), risk: z.string().optional() })).optional(),
+  recommend: z.string().optional(),
+  on_accept: z.array(z.string()).optional(),
+  body: z.string().optional(),
+});
+
+const escalateSchema = z.object({
+  sessionId: sessionIdField,
+  card: escalateCardSchema,
+  note: z.string().trim().max(MAX_HANGAR_ESCALATION_NOTE_LENGTH).optional(),
+});
+
+export const hangarEscalateTool: ToolDef<typeof escalateSchema> = {
+  name: "brain_hangar_escalate",
+  description:
+    "Hand a hangar session's pending decision to the person, as a review. Use it ONLY for a big decision point: one that changes the architecture or sets a fundamental " +
+    "direction for the project. Do NOT use it for routine calls — reviewing or merging a PR, releasing a session, picking among a session's options, answering a " +
+    "clarifying question — which are yours to make with brain_hangar_decide and brain_hangar_outcome. sessionId; card, your decision card for the person: question " +
+    "(at most 140 characters), options (2 to 6 of {id, label, what?, risk?}, only for a real choice), recommend (one option id), on_accept (at most 8 steps), and body " +
+    "(markdown evidence: what is at stake, what you and the session found, a diff or mermaid diagram as a fenced block); limits are checked, never trimmed; and note " +
+    "(why this needs the person). Files a review (a beads issue labelled review) under the session's work item, through the laptop relay, so it appears in the board's " +
+    "review queue and in Needs me; when the work item has no registered beads project, it files an inbox item with the card instead. The person's decision goes back to " +
+    "the session as a message; until then brain_hangar_decide refuses the decision. Refused when the session has no pending decision, it is already escalated, or the " +
+    "session has ended. Returns via (review or inbox) and where it went.",
+  schema: escalateSchema,
+  isWrite: true,
+  async handler(ctx: ToolContext, args) {
+    const escalated = await escalateHangarDecision(ctx.db, { sessionId: args.sessionId, card: args.card, ...(args.note === undefined ? {} : { note: args.note }), actor: decider(ctx) });
+    return { sessionId: args.sessionId, ...escalated };
+  },
+};
+
+// --- brain_hangar_outcome_request (retired) -------------------------------------------
+
+const outcomeRequestSchema = z.object({}).passthrough();
+
+export const hangarOutcomeRequestTool: ToolDef<typeof outcomeRequestSchema> = {
+  name: "brain_hangar_outcome_request",
+  description: "Retired: files nothing. Releasing a session is the driver's decision, not the person's: release it yourself with brain_hangar_outcome.",
+  schema: outcomeRequestSchema,
+  isWrite: true,
+  retired: true,
+  async handler() {
+    throw new RetiredToolError(
+      "brain_hangar_outcome_request",
+      "Releasing a hangar session is the driver's decision and never goes to the person. Call brain_hangar_outcome { sessionId, outcome: accepted | tabled, note? } instead; nothing was filed.",
+    );
+  },
+};
+
+export const hangarTools: ToolDef[] = [hangarRequestTool, hangarStatusTool, hangarSessionsTool, hangarOutcomeTool, hangarDecideTool, hangarEscalateTool, hangarOutcomeRequestTool];

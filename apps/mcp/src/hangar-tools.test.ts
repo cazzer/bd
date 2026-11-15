@@ -3,7 +3,11 @@
 // session and answers hangar's status, brain_hangar_status counts and shows
 // capacity (hangar-capacity), brain_hangar_sessions lists bounded with why
 // each queued session waits, read-only mode refuses the request tool, and
-// brain_write refuses hangar sessions outright.
+// brain_write refuses hangar sessions outright. The driver's tools
+// (hangar-driver-decisions): brain_hangar_outcome releases a session with
+// outcomeBy its client, brain_hangar_decide answers a pending decision into
+// the session's messages and refuses an escalated one, the session token is
+// refused all three, and brain_hangar_outcome_request is retired.
 //
 // This file's own hangar checks in only to block display-godot on disk:
 // other suites give display-godot no slot or blocked entry, so the reason a
@@ -20,8 +24,8 @@
 import { randomUUID } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { closeIngestRun, HANGAR_WAIT_KINDS, listInbox, listSessions, openIngestRun, recordCheckIn, setHangarSessionOutcome, upsertNodes, type HangarStatus, type IngestRunHandle } from "@breakdown/core";
-import { createDb, createPool, hangarCheckIns, ingestRuns, nodes, resolveDatabaseUrl, type Database } from "@breakdown/db";
+import { closeIngestRun, fileHangarDecision, HANGAR_WAIT_KINDS, listSessions, openIngestRun, readHangarMessages, recordCheckIn, setHangarSessionOutcome, upsertNodes, type HangarStatus, type IngestRunHandle } from "@breakdown/core";
+import { createDb, createPool, hangarCheckIns, hangarDecisions, hangarMessages, ingestRuns, nodes, resolveDatabaseUrl, type Database } from "@breakdown/db";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createServer, type CreateServerOptions } from "./server.js";
@@ -48,6 +52,8 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await db.delete(hangarCheckIns).where(eq(hangarCheckIns.hangar, HANGAR));
+  if (sessionIds.length > 0) await db.delete(hangarDecisions).where(inArray(hangarDecisions.sessionId, sessionIds));
+  if (sessionIds.length > 0) await db.delete(hangarMessages).where(inArray(hangarMessages.sessionId, sessionIds));
   if (sessionIds.length > 0) await db.delete(nodes).where(and(eq(nodes.sourceSystem, "inbox"), inArray(nodes.externalId, sessionIds.map((id) => `hangar-outcome:${id}`))));
   if (sessionIds.length > 0) await db.delete(nodes).where(inArray(nodes.id, sessionIds));
   await db.delete(nodes).where(eq(nodes.sourceSystem, FIXTURE_SOURCE));
@@ -174,6 +180,8 @@ describe("brain_hangar_status", () => {
       }
     } finally {
       await db.delete(hangarCheckIns).where(eq(hangarCheckIns.hangar, HANGAR));
+  if (sessionIds.length > 0) await db.delete(hangarDecisions).where(inArray(hangarDecisions.sessionId, sessionIds));
+  if (sessionIds.length > 0) await db.delete(hangarMessages).where(inArray(hangarMessages.sessionId, sessionIds));
     }
   });
 
@@ -280,7 +288,7 @@ describe("brain_hangar_sessions says why a queued session waits", () => {
       }
       expect(queued.waiting.kind).toBe("disk_awaiting_review");
       expect(queued.waiting.reasons).toContainEqual({ hangar: HANGAR, reason: "disk: need 8192 MB, free 1200 MB" });
-      expect(queued.waiting.text).toMatch(new RegExp(`^Waiting on disk \\(.*${HANGAR} says "need 8192 MB, free 1200 MB".*\\)\\. .*accept or table (it|them) to free space\\.$`));
+      expect(queued.waiting.text).toMatch(new RegExp(`^Waiting on disk \\(.*${HANGAR} says "need 8192 MB, free 1200 MB".*\\)\\. .*releases? (it|them) \\(accepted or tabled\\) to free space\\.$`));
       expect(queued.waiting.total).toBeGreaterThanOrEqual(1);
       // The list is carried once for the whole response, not on each queued session.
       expect(queued.waiting).not.toHaveProperty("sessions");
@@ -303,6 +311,8 @@ describe("brain_hangar_sessions says why a queued session waits", () => {
       expect(endedListing.awaitingReview).toBeNull();
     } finally {
       await db.delete(hangarCheckIns).where(eq(hangarCheckIns.hangar, HANGAR));
+  if (sessionIds.length > 0) await db.delete(hangarDecisions).where(inArray(hangarDecisions.sessionId, sessionIds));
+  if (sessionIds.length > 0) await db.delete(hangarMessages).where(inArray(hangarMessages.sessionId, sessionIds));
     }
   });
 
@@ -316,45 +326,153 @@ describe("brain_hangar_sessions says why a queued session waits", () => {
   });
 });
 
-describe("brain_hangar_outcome_request and releasable sessions", () => {
-  it("files a pending inbox item for a stopped session without setting its outcome; once the person tables it, it is releasable", async () => {
-    const client = await connect();
+describe("brain_hangar_outcome and releasable sessions", () => {
+  it("releases a stopped session itself, with outcomeBy the token's client; it is then releasable, and nothing reaches the inbox", async () => {
+    const client = await connect({ tokenClient: `driver-${SUFFIX}` });
     const item = await workItem("Outcome fixture");
     const sessionId = await endedSession("stopped", item);
-    const filed = await call(client, "brain_hangar_outcome_request", { sessionId, outcome: "tabled", note: "The PR merged; the disk can go." });
-    expect(filed).toMatchObject({ status: "pending", action: "created", sessionId, requested: "tabled" });
-    const [inboxItem] = (await listInbox(db, { ids: [filed.inboxItemId] })).items;
-    expect(inboxItem).toMatchObject({ status: "pending", hangarOutcome: { sessionId, requested: "tabled" }, recommend: "table" });
-
     const listed = await call(client, "brain_hangar_sessions", { workItemId: item });
-    expect(listed.sessions[0]).toMatchObject({ id: sessionId, outcome: null, outcomeAt: null, outcomeBy: null, released: false });
+    expect(listed.sessions[0]).toMatchObject({ id: sessionId, outcome: null, outcomeAt: null, outcomeBy: null, released: false, pendingDecision: null });
     expect((await call(client, "brain_hangar_sessions", { workItemId: item, releasable: true })).sessions).toEqual([]);
 
-    await setHangarSessionOutcome(db, { id: sessionId, outcome: "tabled", actor: ACTOR });
+    const set = await call(client, "brain_hangar_outcome", { sessionId, outcome: "tabled", note: "The PR merged; the disk can go." });
+    expect(set).toEqual({ sessionId, outcome: "tabled", outcomeBy: `driver-${SUFFIX}`, outcomeNote: "The PR merged; the disk can go.", released: false, changed: true });
+    expect((await call(client, "brain_hangar_outcome", { sessionId, outcome: "tabled" })).changed).toBe(false);
     const releasable = await call(client, "brain_hangar_sessions", { workItemId: item, releasable: true });
     expect(releasable.sessions.map((s: { id: string }) => s.id)).toEqual([sessionId]);
-    expect(releasable.sessions[0]).toMatchObject({ outcome: "tabled", outcomeBy: ACTOR, released: false, diskPath: "/disks/test.img" });
+    expect(releasable.sessions[0]).toMatchObject({ outcome: "tabled", outcomeBy: `driver-${SUFFIX}`, outcomeVia: "driver", outcomeNote: "The PR merged; the disk can go.", released: false, diskPath: "/disks/test.img" });
+    expect(await db.select({ id: nodes.id }).from(nodes).where(and(eq(nodes.sourceSystem, "inbox"), eq(nodes.externalId, `hangar-outcome:${sessionId}`)))).toEqual([]);
   });
 
-  it("refuses a session that has not ended, naming its state, and filing nothing", async () => {
+  it("never overwrites an outcome a person set", async () => {
+    const client = await connect({ tokenClient: `driver-${SUFFIX}` });
+    const sessionId = await endedSession("stopped");
+    await setHangarSessionOutcome(db, { id: sessionId, outcome: "accepted", actor: "phone" });
+    const raw = await client.callTool({ name: "brain_hangar_outcome", arguments: { sessionId, outcome: "tabled" } });
+    expect(raw.isError).toBe(true);
+    expect(textOf(raw)).toMatch(/set by a person.*leave it as they set it/);
+    expect((await listSessions(db, { states: ["stopped"], limit: 200 })).sessions.find((s) => s.id === sessionId)).toMatchObject({ outcome: "accepted", outcomeBy: "phone" });
+  });
+
+  it("refuses a session that has not ended, naming its state, and setting nothing", async () => {
     const client = await connect();
     const sessionId = await endedSession("running");
-    const raw = await client.callTool({ name: "brain_hangar_outcome_request", arguments: { sessionId, outcome: "accepted", note: "Done." } });
+    const raw = await client.callTool({ name: "brain_hangar_outcome", arguments: { sessionId, outcome: "accepted" } });
     expect(raw.isError).toBe(true);
     expect(textOf(raw)).toMatch(/is running.*stopped or failed/);
-    expect(await db.select({ id: nodes.id }).from(nodes).where(and(eq(nodes.sourceSystem, "inbox"), eq(nodes.externalId, `hangar-outcome:${sessionId}`)))).toEqual([]);
-    const badOutcome = await client.callTool({ name: "brain_hangar_outcome_request", arguments: { sessionId, outcome: "shelved", note: "x" } });
+    expect((await listSessions(db, { states: ["running"], limit: 200 })).sessions.find((s) => s.id === sessionId)?.outcome).toBeNull();
+    const badOutcome = await client.callTool({ name: "brain_hangar_outcome", arguments: { sessionId, outcome: "shelved" } });
     expect(badOutcome.isError).toBe(true);
   });
 
   it("is not advertised in read-only mode, and is refused when called anyway", async () => {
     const client = await connect({ readOnly: true });
-    expect((await client.listTools()).tools.map((t) => t.name)).not.toContain("brain_hangar_outcome_request");
+    const names = (await client.listTools()).tools.map((t) => t.name);
+    for (const name of ["brain_hangar_outcome", "brain_hangar_decide", "brain_hangar_escalate", "brain_hangar_outcome_request"]) expect(names).not.toContain(name);
+    const sessionId = await endedSession("stopped");
+    const raw = await client.callTool({ name: "brain_hangar_outcome", arguments: { sessionId, outcome: "tabled" } });
+    expect(raw.isError).toBe(true);
+    expect(textOf(raw)).toMatch(/read-only/i);
+  });
+
+  it("brain_hangar_outcome_request is retired: it files nothing and points at brain_hangar_outcome", async () => {
+    const client = await connect();
     const sessionId = await endedSession("stopped");
     const raw = await client.callTool({ name: "brain_hangar_outcome_request", arguments: { sessionId, outcome: "tabled", note: "x" } });
     expect(raw.isError).toBe(true);
-    expect(textOf(raw)).toMatch(/read-only/i);
+    expect(textOf(raw)).toMatch(/retired.*brain_hangar_outcome \{/);
     expect(await db.select({ id: nodes.id }).from(nodes).where(and(eq(nodes.sourceSystem, "inbox"), eq(nodes.externalId, `hangar-outcome:${sessionId}`)))).toEqual([]);
+    expect((await listSessions(db, { states: ["stopped"], limit: 200 })).sessions.find((s) => s.id === sessionId)?.outcome).toBeNull();
+  });
+});
+
+describe("brain_hangar_decide and pendingDecision", () => {
+  const card = {
+    question: "Merge #12, which caches the board query?",
+    options: [
+      { id: "a", label: "Cache per project" },
+      { id: "b", label: "Cache globally" },
+    ],
+    recommend: "a",
+    body: "The board query ran 400 ms; cached it runs 20 ms.",
+  };
+
+  it("shows the session's filed decision, and the driver's answer reaches the session's messages with an inbox_decision's body", async () => {
+    const client = await connect({ tokenClient: `driver-${SUFFIX}` });
+    const item = await workItem("Decide fixture");
+    const sessionId = await endedSession("running", item);
+    const filed = await fileHangarDecision(db, { sessionId, kind: "pr", title: "Cache the board query", summary: "Caches it.", prUrl: "https://github.com/cazzer/bd/pull/12", card, filedBy: `session-${sessionId}` });
+    const listed = await call(client, "brain_hangar_sessions", { workItemId: item });
+    expect(listed.sessions[0].pendingDecision).toMatchObject({ id: filed.id, kind: "pr", title: "Cache the board query", prUrl: "https://github.com/cazzer/bd/pull/12", state: "pending", card: { question: card.question, recommend: "a" } });
+
+    const optionless = await client.callTool({ name: "brain_hangar_decide", arguments: { sessionId, decision: "accept", option: "z" } });
+    expect(optionless.isError).toBe(true);
+    expect(textOf(optionless)).toMatch(/option.*a, b/);
+    const noNote = await client.callTool({ name: "brain_hangar_decide", arguments: { sessionId, decision: "changes" } });
+    expect(noNote.isError).toBe(true);
+
+    const decided = await call(client, "brain_hangar_decide", { sessionId, decision: "accept", option: "b", note: "Global is simpler here." });
+    expect(decided).toMatchObject({ decisionId: filed.id, sessionId, decision: "accept", state: "decided" });
+    const { messages } = await readHangarMessages(db, { sessionId });
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({ id: decided.messageId, kind: "session_decision", body: { item_id: filed.id, title: "Cache the board query", decision: "accept", outcome: "accepted", option: "b", message: "Global is simpler here.", by: `driver-${SUFFIX}`, via: "driver" } });
+    expect(messages[0]!.body["text"]).toMatch(/^\[decision\] Accepted option b: "Cache the board query"\. Note: Global is simpler here\./);
+    expect((await call(client, "brain_hangar_sessions", { workItemId: item })).sessions[0].pendingDecision).toBeNull();
+    const again = await client.callTool({ name: "brain_hangar_decide", arguments: { sessionId, decision: "dismiss" } });
+    expect(again.isError).toBe(true);
+    expect(textOf(again)).toMatch(/no decision waiting/);
+  });
+
+  it("refuses to decide an escalated decision: only the person answers it", async () => {
+    const client = await connect({ tokenClient: `driver-${SUFFIX}` });
+    const sessionId = await endedSession("running", await workItem("Escalate fixture"));
+    await fileHangarDecision(db, { sessionId, kind: "question", title: "Which store?", card: { question: "Postgres or SQLite for the cache?" } });
+    const escalated = await call(client, "brain_hangar_escalate", { sessionId, card: { question: "Move the cache out of Postgres?", body: "It would change the deployment." }, note: "Changes the architecture." });
+    expect(escalated).toMatchObject({ sessionId, via: "inbox", reason: expect.stringMatching(/not beads/) });
+    const raw = await client.callTool({ name: "brain_hangar_decide", arguments: { sessionId, decision: "accept" } });
+    expect(raw.isError).toBe(true);
+    expect(textOf(raw)).toMatch(/escalated to the person/);
+    expect(await readHangarMessages(db, { sessionId })).toMatchObject({ messages: [] });
+    await db.delete(nodes).where(eq(nodes.id, escalated.inboxItemId));
+  });
+
+  it("refuses a decisionId the session has since superseded, and takes the current one", async () => {
+    const client = await connect({ tokenClient: `driver-${SUFFIX}` });
+    const sessionId = await endedSession("running", await workItem("Stale read fixture"));
+    const read = await fileHangarDecision(db, { sessionId, kind: "question", title: "First question" });
+    const current = await fileHangarDecision(db, { sessionId, kind: "question", title: "Second question" });
+    const stale = await client.callTool({ name: "brain_hangar_decide", arguments: { sessionId, decisionId: read.id, decision: "accept" } });
+    expect(stale.isError).toBe(true);
+    expect(textOf(stale)).toMatch(/no longer the session's open one.*Second question/);
+    expect((await call(client, "brain_hangar_decide", { sessionId, decisionId: current.id, decision: "accept" })).decisionId).toBe(current.id);
+  });
+
+  it("brain_write cannot rewrite an escalation's inbox card, with a session token or any other", async () => {
+    const driver = await connect({ tokenClient: `driver-${SUFFIX}` });
+    const sessionId = await endedSession("running", await workItem("Card rewrite fixture"));
+    await fileHangarDecision(db, { sessionId, kind: "question", title: "Which store?" });
+    const escalated = await call(driver, "brain_hangar_escalate", { sessionId, card: { question: "Move the cache out of Postgres?", options: [{ id: "a", label: "Keep" }, { id: "b", label: "Move" }] } });
+    const externalId = (await db.select({ externalId: nodes.externalId }).from(nodes).where(eq(nodes.id, escalated.inboxItemId)))[0]!.externalId;
+    for (const client of [await connect({ hangarSessionId: sessionId }), driver]) {
+      const raw = await client.callTool({ name: "brain_write", arguments: { items: { nodeType: "inbox_item", sourceSystem: "inbox", externalId, title: "Decide: rewritten", content: "pick b", metadata: { source: "hangar", options: [{ id: "a", label: "Delete prod" }, { id: "b", label: "Move" }] } } } });
+      expect(raw.isError).toBe(true);
+      expect(textOf(raw)).toMatch(/reserved for a hangar driver's escalation/);
+    }
+    const [stored] = await db.select({ title: nodes.title }).from(nodes).where(eq(nodes.id, escalated.inboxItemId));
+    expect(stored?.title).toBe("Decide: Move the cache out of Postgres?");
+    await db.delete(nodes).where(eq(nodes.id, escalated.inboxItemId));
+  });
+
+  it("a session token neither lists nor runs the driver's tools", async () => {
+    const sessionId = await endedSession("running");
+    const sessionClient = await connect({ hangarSessionId: sessionId });
+    const names = (await sessionClient.listTools()).tools.map((t) => t.name);
+    for (const name of ["brain_hangar_outcome", "brain_hangar_decide", "brain_hangar_escalate"]) {
+      expect(names).not.toContain(name);
+      const raw = await sessionClient.callTool({ name, arguments: { sessionId, outcome: "tabled", decision: "accept", card: { question: "x" } } });
+      expect(raw.isError).toBe(true);
+      expect(textOf(raw)).toContain(`'${name}' is not available to a hangar session's token`);
+    }
   });
 });
 
@@ -410,7 +528,7 @@ describe("brain_write refuses outcome requests", () => {
     }
   });
 
-  it("a session token cannot pre-create its own outcome request's key, so the agent's request files a clean card", async () => {
+  it("a session token cannot pre-create an outcome request's key", async () => {
     const sessionId = await endedSession("stopped");
     const key = `hangar-outcome:${sessionId}`;
     const sessionClient = await connect({ hangarSessionId: sessionId });
@@ -418,11 +536,6 @@ describe("brain_write refuses outcome requests", () => {
     expect(raw.isError).toBe(true);
     expect(textOf(raw)).toMatch(/reserved/);
     expect(await storedAt(key)).toEqual([]);
-
-    const filed = await call(await connect(), "brain_hangar_outcome_request", { sessionId, outcome: "accepted", note: "Merged." });
-    expect(filed).toMatchObject({ action: "created" });
-    const [item] = (await listInbox(db, { ids: [filed.inboxItemId] })).items;
-    expect(item).toMatchObject({ hangarSession: null, pane: null, hangarOutcome: { sessionId, requested: "accepted" } });
-    expect(item!.content).not.toContain("Safe to click");
   });
+
 });

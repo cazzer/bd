@@ -15,8 +15,8 @@
 // It plays four parts:
 // - a fake hangar: its own `hangar` token (minted and revoked here), which
 //   checks in, claims, reports state, and acknowledges releases;
-// - an agent: a plain `agent` token (no session), which asks the person
-//   for an outcome over MCP (brain_hangar_outcome_request);
+// - an agent: a plain `agent` token (no session), the sessions' driver,
+//   which releases a session itself over MCP (brain_hangar_outcome);
 // - the person: tokenless loopback tRPC and MCP;
 // - nobody else: every tokened call carries `X-Forwarded-For: 192.0.2.10`
 //   (a documentation address), which makes it a remote request whose token
@@ -28,12 +28,10 @@
 //      null) → released → a changed outcome is refused (CONFLICT), and so is
 //      un-releasing it (409 session_ended)
 //   B  stopped → an ack before any outcome is refused (409 session_ended) →
-//      the agent cannot write its outcome request's key with brain_write →
-//      the agent asks for `accepted` → an inbox item, pending, with the
-//      server's card and the session's facts for its banner, and the outcome
-//      still null → the agent's brain_merge of an ordinary inbox item into
-//      it, or of it into that item, is refused → the person accepts it with
-//      option `accept` → outcome accepted
+//      the agent cannot write an outcome request's key with brain_write →
+//      the retired brain_hangar_outcome_request files nothing → the driver
+//      releases it itself with brain_hangar_outcome → outcome accepted, by
+//      the agent's client (hangar-driver-decisions)
 //   C  a `reason` sent with state running is ignored → failed with a reason
 //      → failure_reason shown on the board's listing
 // Not part of `pnpm check`: it spawns servers and needs a database.
@@ -490,44 +488,22 @@ async function run(dbName) {
     return { detail: short(refused.text.split(".")[0]) };
   });
 
-  state.inboxItemId = await step("an agent token asks for B accepted (brain_hangar_outcome_request): inbox item pending with the server's card and banner facts, outcome still null", async () => {
-    const filed = await agent.call("brain_hangar_outcome_request", { sessionId: sessionOf("B").id, outcome: "accepted", note: ACCEPT_NOTE });
-    expect(filed.status === "pending" && filed.sessionId === sessionOf("B").id, `brain_hangar_outcome_request answered ${short(filed)}`);
-    const inbox = await trpcQuery("inbox", { statuses: ["pending"] });
-    const item = inbox.items.find((i) => i.id === filed.inboxItemId);
-    expect(item, `inbox item ${filed.inboxItemId} is not pending`);
-    expect(item.options.map((o) => o.label).join(",") === "Accept,Table" && item.recommend === "accept", `card reads ${short({ options: item.options, recommend: item.recommend })}`);
-    const s = item.hangarOutcomeSession;
-    expect(s?.id === sessionOf("B").id && s.state === "stopped" && s.repo === "cazzer/bd" && s.diskHeld === true && s.released === false, `banner facts read ${short(s)}`);
-    const facts = item.content.indexOf(`- Session: \`${sessionOf("B").id}\``);
-    const note = item.content.indexOf(`Requested by ${AGENT}`);
-    expect(facts >= 0 && note > facts && item.content.includes(`> ${ACCEPT_NOTE}`), `content reads ${short(item.content)}`);
+  await step("the retired brain_hangar_outcome_request files nothing and points at brain_hangar_outcome; B's outcome is still null", async () => {
+    const retired = await agent.callRaw("brain_hangar_outcome_request", { sessionId: sessionOf("B").id, outcome: "accepted", note: ACCEPT_NOTE });
+    expect(retired.isError && /retired/.test(retired.text) && /brain_hangar_outcome \{/.test(retired.text), `brain_hangar_outcome_request answered ${short(retired)}`);
+    const inbox = await trpcQuery("inbox", { statuses: ["pending", "undigested"] });
+    expect(!inbox.items.some((i) => i.externalId === `hangar-outcome:${sessionOf("B").id}`), "an outcome request was filed");
     const b = (await endedSessions()).find((s) => s.id === sessionOf("B").id);
-    expect(b.outcome === null, `B's outcome is ${b.outcome} before the person decided`);
-    return { value: filed.inboxItemId, detail: `inbox item ${filed.inboxItemId} pending; B outcome null` };
+    expect(b.outcome === null, `B's outcome is ${b.outcome}`);
+    return { detail: short(retired.text.split(".")[0]) };
   });
 
-  await step("the agent's brain_merge of an ordinary inbox item into B's outcome request is refused, either way: nothing merged, the card still pending", async () => {
-    const written = await agent.call("brain_write", {
-      items: { nodeType: "inbox_item", sourceSystem: "inbox", externalId: `e2e-release-ordinary-${RUN}`, title: `e2e-release ${RUN}: archive a thread?`, content: "Written by bin/hangar-release-e2e.mjs.", metadata: { source: "agent", question: "Archive it?", options: [{ id: "accept", label: "Archive" }, { id: "table", label: "Later" }] } },
-    });
-    const ordinaryId = written.items?.[0]?.id;
-    expect(ordinaryId, `brain_write returned no id: ${short(written)}`);
-    const into = await agent.callRaw("brain_merge", { loserId: ordinaryId, survivorId: state.inboxItemId });
-    expect(into.isError && /hangar outcome request/.test(into.text) && /nothing was merged/i.test(into.text), `brain_merge into the card answered ${short(into)}`);
-    const outOf = await agent.callRaw("brain_merge", { loserId: state.inboxItemId, survivorId: ordinaryId });
-    expect(outOf.isError && /hangar outcome request/.test(outOf.text), `brain_merge of the card answered ${short(outOf)}`);
-    const inbox = await trpcQuery("inbox", { statuses: ["pending"] });
-    expect(inbox.items.some((i) => i.id === state.inboxItemId) && inbox.items.some((i) => i.id === ordinaryId), "the card or the ordinary item is no longer pending on its own id");
-    return { detail: short(into.text.split(".")[0]) };
-  });
-
-  await step("the person accepts the inbox item with option accept: B's outcome is accepted", async () => {
-    const decided = await trpcMutation("inboxDecision", { id: state.inboxItemId, decision: "accept", option: "accept" });
-    expect(decided.sessionOutcome?.sessionId === sessionOf("B").id && decided.sessionOutcome.outcome === "accepted", `inboxDecision answered ${short(decided)}`);
+  await step("the driver releases B itself (brain_hangar_outcome accepted): outcome accepted by the agent's client, listed first, nothing in the inbox", async () => {
+    const set = await agent.call("brain_hangar_outcome", { sessionId: sessionOf("B").id, outcome: "accepted", note: ACCEPT_NOTE });
+    expect(set.outcome === "accepted" && set.outcomeBy === AGENT && set.changed === true, `brain_hangar_outcome answered ${short(set)}`);
     const listed = await endedSessions();
-    expect(listed[0]?.id === sessionOf("B").id && listed[0].outcome === "accepted" && listed[0].outcome_by === "human", `B reads ${short(listed[0])}`);
-    return { detail: `item ${decided.after}; B accepted, listed first` };
+    expect(listed[0]?.id === sessionOf("B").id && listed[0].outcome === "accepted" && listed[0].outcome_by === AGENT, `B reads ${short(listed[0])}`);
+    return { detail: `B accepted by ${AGENT}, listed first` };
   });
 
   await step("a reason sent with state running is ignored", async () => {

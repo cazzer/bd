@@ -17,8 +17,8 @@
 import { randomUUID } from "node:crypto";
 import { createServer, request, type IncomingHttpHeaders, type Server } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
-import { appendHangarMessage, closeIngestRun, createClientToken, openIngestRun, requestSession, setHangarSessionOutcome, upsertNodes, verifyClientToken, type IngestRunHandle } from "@breakdown/core";
-import { clientTokens, createDb, createPool, hangarCheckIns, hangarMessages, nodes, resolveDatabaseUrl, type Database } from "@breakdown/db";
+import { appendHangarMessage, closeIngestRun, createClientToken, decideHangarDecision, getOpenHangarDecisions, openIngestRun, requestSession, setHangarSessionOutcome, upsertNodes, verifyClientToken, type IngestRunHandle } from "@breakdown/core";
+import { clientTokens, createDb, createPool, hangarCheckIns, hangarDecisions, hangarMessages, nodes, resolveDatabaseUrl, type Database } from "@breakdown/db";
 import { createHTTPHandler } from "@trpc/server/adapters/standalone";
 import { and, eq, inArray, like, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -105,6 +105,7 @@ afterAll(async () => {
   const sessionClients = sessionIds.map((id) => `session-${id}`);
   await db.delete(clientTokens).where(inArray(clientTokens.client, [HANGAR_A, HANGAR_B, WORKER, PHONE, ...sessionClients]));
   if (sessionIds.length > 0) await db.delete(hangarMessages).where(inArray(hangarMessages.sessionId, sessionIds));
+  if (sessionIds.length > 0) await db.delete(hangarDecisions).where(inArray(hangarDecisions.sessionId, sessionIds));
   await db.delete(hangarCheckIns).where(inArray(hangarCheckIns.hangar, [HANGAR_A, HANGAR_B]));
   await db.delete(nodes).where(and(eq(nodes.sourceSystem, "inbox"), like(nodes.externalId, `${INBOX_KEY}%`)));
   const ids = [...sessionIds, ...fixtureNodes];
@@ -519,6 +520,50 @@ describe("GET /hangar/v1/messages", () => {
     expect(worker.status).toBe(403);
     expect(worker.json.error).toMatchObject({ code: "forbidden", message: expect.stringContaining("session token") });
     expect(errorCode(await send("/hangar/v1/messages", { token: tokens[HANGAR_A] }))).toBe("forbidden");
+  });
+});
+
+describe("POST /hangar/v1/decision", () => {
+  const card = { question: "Merge #12, which caches the board query?", options: [{ id: "a", label: "Per project" }, { id: "b", label: "Global" }], recommend: "a", key: "card" };
+
+  it("files the token's own session's result as its pending decision, not an inbox item, and the driver's answer comes back as a session_decision", async () => {
+    const a = await queued();
+    const b = await queued();
+    const { token } = await claim(a.id);
+    const sent = await send("/hangar/v1/decision", {
+      token,
+      body: { kind: "pr", title: "Cache the board query", summary: "Caches it.", pr_url: "https://github.com/cazzer/bd/pull/12", card, body: "400 ms → 20 ms.", session_id: b.id, future_field: 1 },
+    });
+    expect(sent.status, sent.body).toBe(200);
+    const decision = sent.json["decision"] as Record<string, unknown>;
+    expect(decision).toMatchObject({ session_id: a.id, kind: "pr", title: "Cache the board query", state: "pending", id: expect.stringMatching(/^[0-9a-f-]{36}$/) });
+    const open = await getOpenHangarDecisions(db, [a.id, b.id]);
+    expect([...open.keys()]).toEqual([a.id]);
+    expect(open.get(a.id)?.card).toEqual({ question: card.question, options: card.options, recommend: "a", body: "400 ms → 20 ms." });
+    expect(open.get(a.id)?.filedBy).toBe(`session-${a.id}`);
+    expect(await db.select({ id: nodes.id }).from(nodes).where(and(eq(nodes.nodeType, "inbox_item"), sql`metadata->>'session' = ${a.id}`))).toEqual([]);
+
+    await decideHangarDecision(db, { sessionId: a.id, decision: "accept", option: "a", actor: `${PREFIX}-driver` });
+    const read = await send("/hangar/v1/messages", { token });
+    expect(read.json["messages"]).toEqual([
+      { id: expect.any(Number), kind: "session_decision", body: expect.objectContaining({ item_id: decision["id"], decision: "accept", outcome: "accepted", option: "a", message: "", text: expect.any(String) }), created_at: expect.any(String) },
+    ]);
+  });
+
+  it("refuses a card over the contract, a pr without its URL, and a bad kind, with invalid_request, filing nothing", async () => {
+    const a = await queued();
+    const { token } = await claim(a.id);
+    const long = await send("/hangar/v1/decision", { token, body: { kind: "question", title: "Which?", card: { question: "x".repeat(141) } } });
+    expect(long.status).toBe(400);
+    expect(errorCode(long)).toBe("invalid_request");
+    expect(errorCode(await send("/hangar/v1/decision", { token, body: { kind: "pr", title: "No URL" } }))).toBe("invalid_request");
+    expect(errorCode(await send("/hangar/v1/decision", { token, body: { kind: "none", title: "Nothing to do" } }))).toBe("invalid_request");
+    expect((await getOpenHangarDecisions(db, [a.id])).size).toBe(0);
+  });
+
+  it("refuses an agent token not bound to a session, and the hangar token", async () => {
+    expect(errorCode(await send("/hangar/v1/decision", { token: tokens[WORKER], body: { kind: "question", title: "x" } }))).toBe("forbidden");
+    expect(errorCode(await send("/hangar/v1/decision", { token: tokens[HANGAR_A], body: { kind: "question", title: "x" } }))).toBe("forbidden");
   });
 });
 

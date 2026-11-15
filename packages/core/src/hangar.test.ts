@@ -1030,7 +1030,7 @@ describe("classifyQueuedWait", () => {
     const waiting = classifyQueuedWait(headless, ctx([h1], awaitingAB));
     expect(waiting).toEqual({
       kind: "disk_awaiting_review",
-      text: 'Waiting on disk (h1 says "need 8192 MB, free 1200 MB"). 2 ended sessions still hold disks; accept or table them to free space.',
+      text: 'Waiting on disk (h1 says "need 8192 MB, free 1200 MB"). 2 ended sessions still hold disks; their drivers release them (accepted or tabled) to free space.',
       // Trimmed on read, so the leading space hangar sent is gone.
       reasons: [{ hangar: "h1", reason: DISK }],
       sessions: [{ ...awaitingAB.sessions[0], diskAllocatedBytes: 8_000 }, awaitingAB.sessions[1]],
@@ -1045,7 +1045,7 @@ describe("classifyQueuedWait", () => {
 
   it("one awaiting session reads in the singular", () => {
     const waiting = classifyQueuedWait(headless, ctx([seen("h1", { blocked: { headless: DISK } })], { total: 1, sessions: [awaitingAB.sessions[1]!] }));
-    expect(waiting.text).toBe('Waiting on disk (h1 says "need 8192 MB, free 1200 MB"). 1 ended session still holds a disk; accept or table it to free space.');
+    expect(waiting.text).toBe('Waiting on disk (h1 says "need 8192 MB, free 1200 MB"). 1 ended session still holds a disk; its driver releases it (accepted or tabled) to free space.');
   });
 
   it("capacity when the disk is full but nothing awaits review", () => {
@@ -1205,7 +1205,7 @@ describe("explainQueuedSessions", () => {
     const q = await request("headless");
     expect(await explainOne(q.id, [hangar], [a.id, b.id, q.id])).toEqual({
       kind: "disk_awaiting_review",
-      text: `Waiting on disk (${hangar} says "need 8192 MB, free 1200 MB"). 2 ended sessions still hold disks; accept or table them to free space.`,
+      text: `Waiting on disk (${hangar} says "need 8192 MB, free 1200 MB"). 2 ended sessions still hold disks; their drivers release them (accepted or tabled) to free space.`,
       reasons: [{ hangar, reason: DISK }],
       sessions: [
         { id: a.id, claimedBy: a.hangar, workItem: { id: itemA.id, externalId: itemA.externalId, title: "A's work", project: "bd" }, diskAllocatedBytes: 8_000_000_000 },

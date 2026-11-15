@@ -71,12 +71,19 @@
 // requesting pane (review-writer.ts header): `{ ok: true, pane }` or
 // `{ ok: false, reason }` — "the decision was not fully written" when the
 // tracker failed. A failed notification never fails the request.
+//
+// A review a hangar driver escalated (core hangar-escalation.ts) also goes
+// back to the session that asked: once the decision is written here, or
+// when the relay reports a queued one done (relay-api.ts), core
+// `routeReviewDecision` matches it on the project and bead id and appends it
+// to that session's messages. Routing never fails the request.
 
 import { stat } from "node:fs/promises";
 import {
   enqueueRelayAction,
   getBoardItem,
   getRegisteredBeadsProject,
+  routeReviewDecision,
   InvalidRelayActionError,
   isRelayIssueId,
   MAX_REVIEW_DECISION_MESSAGE_LENGTH,
@@ -264,6 +271,17 @@ const reviewDecisionProcedure = humanProcedure.input(reviewDecisionInputSchema).
   if (!result.ok) {
     const uncertain = result.uncertain ? ` (uncertain: ${result.uncertain})` : "";
     console.error(`[breakdown-web] review decision on ${input.project}/${input.item} failed after [${result.written.join(", ")}]${uncertain}: ${result.error}`);
+  } else {
+    // A hangar escalation's review: the decision goes on to the session that asked (core hangar-escalation.ts).
+    // Queued decisions are routed when the relay reports them done (relay-api.ts).
+    await routeReviewDecision(ctx.db, {
+      projectKey: input.project,
+      reviewId: item.externalId,
+      decision: input.decision,
+      ...(input.option === undefined ? {} : { option: input.option }),
+      message: input.message,
+      by: ctx.client ?? "human",
+    }).catch((err: unknown) => console.error(`[breakdown-web] review decision on ${input.project}/${input.item}: routing it to its hangar session failed:`, err));
   }
 
   return {

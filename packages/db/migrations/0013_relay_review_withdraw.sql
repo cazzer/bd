@@ -1,0 +1,2 @@
+ALTER TABLE "relay_actions" DROP CONSTRAINT "relay_actions_kind_check";--> statement-breakpoint
+ALTER TABLE "relay_actions" ADD CONSTRAINT "relay_actions_kind_check" CHECK ("relay_actions"."kind" IN ('review_decision', 'herdr_prompt', 'beads_reingest', 'review_request', 'review_withdraw'));

@@ -25,6 +25,12 @@ export interface ToolContext {
    * argument; server.ts refuses `SESSION_REFUSED_TOOLS` when it is set.
    */
   hangarSessionId: string | null;
+  /**
+   * The client name of the token that opened this session (http-server.ts),
+   * or null for a tokenless loopback session. Recorded where a write names
+   * who decided, such as a hangar session's `outcome_by`.
+   */
+  tokenClient: string | null;
 }
 
 /**
@@ -43,5 +49,7 @@ export interface ToolDef<Schema extends z.ZodTypeAny = z.ZodTypeAny> {
   description: string;
   schema: Schema;
   isWrite: boolean;
+  /** Retired: never advertised, but still dispatched, so an old caller gets the handler's pointer to what replaced it. */
+  retired?: boolean;
   handler: (ctx: ToolContext, args: z.infer<Schema>) => Promise<Record<string, unknown>>;
 }

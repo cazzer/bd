@@ -66,14 +66,14 @@ Takes the oldest open action of a kind you name, for a project you name, and ret
 Request:
 
 ```json
-{ "kinds": ["review_decision", "herdr_prompt", "beads_reingest"], "projects": ["bd"], "wait_s": 25 }
+{ "kinds": ["review_decision", "herdr_prompt", "beads_reingest", "review_request", "review_withdraw"], "projects": ["bd"], "wait_s": 25 }
 ```
 
-- `kinds` (array, optional): one or more of `review_decision`, `herdr_prompt`, `beads_reingest`, each at most once. Omitted: every kind.
-- `projects` (array, optional): up to 100 project keys, each matching `[a-z0-9._-]{1,64}`. When given, an action whose payload names a `project_key` (`review_decision`, `beads_reingest`) is claimable only if that key is listed; a `herdr_prompt` has no project and is claimable by kind alone. Omitted: every project. The relay always sends its own `--project` keys.
+- `kinds` (array, optional): one or more of `review_decision`, `herdr_prompt`, `beads_reingest`, `review_request`, `review_withdraw`, each at most once. Omitted: every kind.
+- `projects` (array, optional): up to 100 project keys, each matching `[a-z0-9._-]{1,64}`. When given, an action whose payload names a `project_key` (`review_decision`, `beads_reingest`, `review_request`, `review_withdraw`) is claimable only if that key is listed; a `herdr_prompt` has no project and is claimable by kind alone. Omitted: every project. The relay always sends its own `--project` keys.
 - `wait_s` (integer 0–30, default 0).
 
-**Stale actions.** A `review_decision` or `herdr_prompt` queued more than **24 hours** ago is not handed out: the claim that would take it marks it `failed` with `stale: queued <ISO time>, older than 24 h` and moves on. A decision or a reply that old is no longer the person's present intent; they decide again on the board. A `beads_reingest` is never stale.
+**Stale actions.** A `review_decision` or `herdr_prompt` queued more than **24 hours** ago is not handed out: the claim that would take it marks it `failed` with `stale: queued <ISO time>, older than 24 h` and moves on. A decision or a reply that old is no longer the person's present intent; they decide again on the board. A `beads_reingest` is never stale, and neither is a `review_request` or `review_withdraw`: an escalation waits for the person however long the relay was away.
 
 Response `200` with an action:
 
@@ -104,7 +104,9 @@ or, when nothing arrived in time, `{ "action": null }`.
   - `review_decision`: `{ project_key, cwd, issue_id, decision: "accept" | "changes", message, option?, seen? }`. Run it with the review writer, which re-reads the issue with `bd show` first, so an accept on an issue already closed is reported `done` with `{ "note": "already applied" }`, not run twice. A request for changes on a closed issue is reported `failed` (`refused: the review is closed`): it never closes one, so it was not applied.
   - `herdr_prompt`: `{ pane, socket, text }`: `herdr agent prompt <pane> <text>` on that socket.
   - `beads_reingest`: `{ project_key }`: re-ingest that project now and [push](#post-relayv1beads-ingest--scope-relay) it.
-- `created_at`: when it was queued. The relay refuses a `review_decision` or `herdr_prompt` older than its own `--max-age` (24 h by default), and one with no readable `created_at`, before running it.
+  - `review_request`: `{ project_key, cwd, issue_id, title, description, review }`: file a review under work item `issue_id`, a hangar driver's escalation ([`docs/hangar-api.md`](hangar-api.md#decisions)). `review` is the review metadata, a decision card with a `key`. Read the work item (`bd show`), list its open reviews, and reuse the one whose `review.key` is the payload's, else `bd create` one under it; set its metadata (`bd update --metadata`), and make a new one block the work item unless it is an epic. Report `done` with `{ "review_id": "<bead id>", "reused": <bool> }`; Breakdown routes the person's later decision on that review to the session that asked. The key means a retry after a lost report finds the review it filed rather than filing another. On a failure, report `failed` naming the step, with `{ "review_id" }` once one exists; Breakdown puts the decision back in the driver's hands. Breakdown may also fail a still-queued `review_request` itself, with `error` starting `withdrawn:`, when the driver decided before it was filed or the session filed a new decision; a relay never sees those. One failed when claimed (claimed three times without a report) goes back to the driver the same way. A repeated report is followed up again, so a review id whose first follow-up was lost is still recorded.
+  - `review_withdraw`: `{ project_key, cwd, issue_id, reason }`: close review `issue_id`, which a `review_request` filed after the decision it was for had moved on (the session filed a new decision while the relay was filing it). Read it with `bd show`; refuse it unless it is that exact issue, labelled `review`. Close an open one with `bd close <id> --reason <reason>` (a closed review no longer blocks its work item) and re-ingest; report `done` with `{ "review_id", "closed": true }`, or `{ "closed": false, "note": "already closed" }` for one already closed. Breakdown queues it itself; it uses only the allowlisted `show` and `close` shapes.
+- `created_at`: when it was queued. The relay refuses a `review_decision` or `herdr_prompt` (never a `review_request`, `review_withdraw`, or `beads_reingest`) older than its own `--max-age` (24 h by default), and one with no readable `created_at`, before running it.
 - `attempts`: how many times it has been claimed without a report, this claim included.
 
 Status codes: `200`, `400`, `401`, `403`, `413`, `415`, `429 too_many_waiters`.
@@ -230,6 +232,7 @@ The relay runs nothing outside this list, checked before every spawn, with an ar
 - `bd update <id> --add-label review:changes` and `--remove-label review:changes`
 - `bd close <id> --reason <text>`
 - `bd list --status=all --limit=0 --json` and `bd comments <id> --json` (the ingest's reads)
+- for a `review_request`, the shapes `bin/review-request` runs for a card: `bd list --parent <id> --label review --status open,in_progress,blocked,deferred --limit 0 --json`; `bd create --title <title> --type task --labels review --no-inherit-labels --parent <id> -d <description> --acceptance "Accepted from the breakdown board" --json` (every literal fixed; title at most 120 characters, description at most 16,000); `bd update <id> --metadata <json>`, where the JSON is an object holding only `review`, a valid card with a key, within the review metadata cap; and `bd dep add <id> <id> --type blocks`
 - `herdr agent prompt <pane> <text>`
 
 `<id>` matches `^[a-z][a-z0-9-]*-[a-z0-9.]+$` (at most 200 characters). `bd` text is 1–4,000 characters and herdr text 1–8,000 as sent, with no NUL, never starting with `-`. Every herdr prompt the relay sends starts with this line, added by the relay itself:
@@ -291,7 +294,7 @@ The relay is `bin/relay.mjs`, run from a checkout of this repo on the Mac that h
 
    - `--name` is the client name the token was minted for; it labels the log.
    - `--project <key>=<path>` (repeatable, at least one) is a beads checkout the relay serves: the project key Breakdown registered it under and its real path on this Mac. Install refuses a path that is not its own realpath or holds no `.beads/`.
-   - `--kinds` (comma-separated; default `review_decision,herdr_prompt,beads_reingest`) is what it claims.
+   - `--kinds` (comma-separated; default `review_decision,herdr_prompt,beads_reingest,review_request,review_withdraw`) is what it claims.
    - `--herdr-socket` (repeatable; default `~/.config/herdr/herdr.sock`) names the herdr servers it may prompt through.
    - `--max-age` (`<n>s`, `m`, `h`, or `d`; default `24h`) is the oldest decision or prompt it will run.
    - `--token-file` defaults to `~/.config/breakdown/relay-token`.
@@ -307,6 +310,7 @@ Install with `--kinds` naming only what this Mac should do:
 - **No inbox replies to agents:** `--kinds review_decision,beads_reingest`. The relay stops claiming `herdr_prompt` actions; they wait on Breakdown and go stale after 24 h.
 - **No review decisions:** `--kinds herdr_prompt,beads_reingest`. Decisions wait on Breakdown, shown pending on the board, until another relay takes them or they go stale.
 - **Board sync only:** `--kinds beads_reingest`.
+- **No escalated reviews filed:** leave out `review_request`. A hangar driver's escalations wait on Breakdown, never stale, until a relay that files them runs.
 
 A review decision still prompts the review's agent pane after writing, through the same socket allowlist. To stop the relay typing into any pane, also leave out `review_decision`, or name with `--herdr-socket` a socket that no herdr server listens on.
 
@@ -343,7 +347,7 @@ The logs are `~/Library/Logs/breakdown/relay.out.log` (start, check-in, each act
 - **Claim, run, report**, one action at a time: a 30 s long-poll naming its `--kinds` and `--project` keys, then the action, then its report, retried with backoff until Breakdown takes it. A report Breakdown refuses (`409 not_claimer`, `404`) is given up and logged.
   - Before running anything, the payload is parsed with the same schema Breakdown used at enqueue. A malformed one, a kind outside `--kinds`, a decision or prompt older than `--max-age`, a project or `cwd` other than a served `--project` checkout, or a herdr socket outside `--herdr-socket` (or not a socket of yours) is reported `failed` with `refused: …` and nothing runs.
   - `review_decision` runs the review writer, which re-reads the issue with `bd show` first. An accept on an issue already closed is reported `done` with `{ "note": "already applied" }`; a request for changes on one is `failed`. The result is the writer's own: what was written, and whether the agent's pane was told.
-  - `herdr_prompt` is reported `done` with `{ "pane" }`, `beads_reingest` with `{ "project", "changed" }`.
+  - `herdr_prompt` is reported `done` with `{ "pane" }`, `beads_reingest` with `{ "project", "changed" }`, `review_request` with `{ "review_id", "reused" }` (it re-ingests the project too, so the review is on the board at once).
 - **Registry.** The `--project` checkouts, narrowed by `GET /projects` at start, before each `beads_reingest`, when a decision names a project it does not hold, and every 5 minutes. A project is kept only when the server lists it at the same path and the path is its own realpath (no symlink on the way), a directory, and holds `.beads/`; anything else is logged once and skipped. A project the server registers after the relay started is picked up within 5 minutes; one it does not name on its own command line never is.
 - **Push watcher**, only while `GET /projects` says `push: true`: the server's beads watcher, run here with the push as its sink, so a bead edit on the Mac reaches open boards within a second or two. Each push carries the whole export; review threads unchanged since the last accepted push are not fetched again. An export over 8 MiB is refused before it is sent, with its size.
 - **Stopping.** The first SIGTERM or SIGINT ends the long-poll, lets the action in hand finish and report, stops the watcher, and exits 0. A second exits 130 at once.
@@ -389,3 +393,5 @@ Branch on `code`, which is stable within v1. `message` is for people.
 ## Versioning
 
 Everything here is under `/relay/v1/`. A breaking change gets a new prefix. Within v1, Breakdown ignores request fields it does not know, and responses may gain fields; clients ignore those.
+
+`review_request` and `review_withdraw` were added within v1. A relay that predates it never claims one: it names its own kinds, and an older relay's default list lacks it. Its actions wait on Breakdown, never stale, until a relay that knows the kind runs; update the relay on the Mac to file escalations.

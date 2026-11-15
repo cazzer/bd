@@ -133,6 +133,7 @@ import {
   unsafeSetHangarSessionOutcomeInTx,
   type HangarOutcome,
 } from "./hangar.js";
+import { unsafeRouteInboxDecisionInTx } from "./hangar-decisions.js";
 import type { IngestRunHandle } from "./ingest-runs.js";
 import { asPgError, formatPgInfo, sqlArray, type Tx } from "./sql-helpers.js";
 
@@ -241,6 +242,14 @@ export const HANGAR_OUTCOME_KEY = "hangar_outcome";
 /** The external-id prefix, under source system `inbox`, that only `requestHangarOutcome` writes (module header). */
 export const HANGAR_OUTCOME_KEY_PREFIX = "hangar-outcome:";
 
+/**
+ * The external-id prefix, under source system `inbox`, of a hangar
+ * escalation's fallback item (hangar-escalation.ts), which only
+ * `unsafeRequestEscalationInboxItem` writes: its card is the driver's, for the
+ * person, and the worker it routes to must not rewrite it.
+ */
+export const HANGAR_DECISION_KEY_PREFIX = "hangar-decision:";
+
 /** An outcome request's question; part of the canonical card. */
 export const HANGAR_OUTCOME_QUESTION = "Accept or table this hangar session?";
 
@@ -279,15 +288,24 @@ export function isHangarOutcomeKey(sourceSystem: string, externalId: string): bo
   return sourceSystem.trim() === INBOX_SOURCE_SYSTEM && externalId.trim().startsWith(HANGAR_OUTCOME_KEY_PREFIX);
 }
 
+/** Whether a key is reserved for a hangar escalation's fallback item (`HANGAR_DECISION_KEY_PREFIX`), matched as the upsert stores it. */
+export function isHangarDecisionKey(sourceSystem: string, externalId: string): boolean {
+  return sourceSystem.trim() === INBOX_SOURCE_SYSTEM && externalId.trim().startsWith(HANGAR_DECISION_KEY_PREFIX);
+}
+
 /**
  * For a generic writer (brain_write, `requestInboxItem`): refuses, before
  * anything is written, any item (whatever its node type) at a key reserved
- * for outcome requests. Throws `ReservedInboxItemError` naming the first.
+ * for outcome requests or for a hangar escalation's fallback item. Throws
+ * `ReservedInboxItemError` naming the first.
  */
 export function assertNoHangarOutcomeKeys(items: readonly { sourceSystem: string; externalId: string; label?: string }[]): void {
   for (const item of items) {
+    if (isHangarDecisionKey(item.sourceSystem, item.externalId)) {
+      throw new ReservedInboxItemError(item.label ?? `(${item.sourceSystem.trim()}/${item.externalId.trim()})`, `keys starting "${HANGAR_DECISION_KEY_PREFIX}" are reserved for a hangar driver's escalation (brain_hangar_escalate), whose card no other writer changes`);
+    }
     if (isHangarOutcomeKey(item.sourceSystem, item.externalId)) {
-      throw new ReservedInboxItemError(item.label ?? `(${item.sourceSystem.trim()}/${item.externalId.trim()})`, `keys starting "${HANGAR_OUTCOME_KEY_PREFIX}" are written only by brain_hangar_outcome_request`);
+      throw new ReservedInboxItemError(item.label ?? `(${item.sourceSystem.trim()}/${item.externalId.trim()})`, `keys starting "${HANGAR_OUTCOME_KEY_PREFIX}" are reserved for outcome requests (a driver releases its session with brain_hangar_outcome)`);
     }
   }
 }
@@ -295,7 +313,7 @@ export function assertNoHangarOutcomeKeys(items: readonly { sourceSystem: string
 /** For a generic writer: refuses a stored item (normalized metadata) that carries an outcome request binding, whatever its key. */
 export function assertNotHangarOutcomeItem(label: string, stored: Record<string, unknown> | null | undefined): void {
   if (stored != null && stored[HANGAR_OUTCOME_KEY] !== undefined) {
-    throw new ReservedInboxItemError(label, "it is an outcome request, written only by brain_hangar_outcome_request");
+    throw new ReservedInboxItemError(label, "it is an outcome request, which no writer changes");
   }
 }
 
@@ -894,6 +912,14 @@ async function writeInboxFeedback(
       // An ended session reads nothing more; only the person's explicit
       // dismiss or release makes its item local (module header).
       if (endedSession !== null && (kind === "accept" || kind === "changes")) throw new InboxItemSessionEndedError(existing.id, endedSession);
+      // An escalated hangar decision that fell back to this item
+      // (hangar-escalation.ts): the decision is answered as well, matched on
+      // this item's id, and the session carries it on from its own message,
+      // so nothing is left here for an executor.
+      if (session !== null && kind !== "release") {
+        const routed = await unsafeRouteInboxDecisionInTx(tx, { itemId: existing.id, sessionId: session, decision: kind, ...(input.option === undefined ? {} : { option: input.option }), message, by: actor });
+        if (routed && kind !== "dismiss") after = "done";
+      }
       // A decision answers the agent's hand-back (`needs_you`) and its re-queue note (`revision`).
       const { needs_you: _handedBack, revision: _answered, ...rest } = current;
       if (endedSession !== null) delete rest["session"];
@@ -1217,14 +1243,24 @@ export async function requestInboxItem(db: Database, input: RequestInboxItemInpu
   return fileInboxItem(db, input, undefined);
 }
 
-/** `requestInboxItem`, binding the item to an outcome request when `binding` is given (only `requestHangarOutcome` gives one). */
-async function fileInboxItem(db: Database, input: RequestInboxItemInput, binding: { session_id: string; requested: HangarOutcome } | undefined): Promise<RequestInboxItemResult> {
+/**
+ * Files a hangar escalation's fallback item (hangar-escalation.ts) at its
+ * reserved key, which every other writer is refused. "unsafe": the caller
+ * is the escalation, writing the driver's card for the person.
+ */
+export async function unsafeRequestEscalationInboxItem(db: Database, input: RequestInboxItemInput): Promise<RequestInboxItemResult> {
+  if (!isHangarDecisionKey(INBOX_SOURCE_SYSTEM, input.externalId)) throw new ReservedInboxItemError(`(${INBOX_SOURCE_SYSTEM}/${input.externalId})`, `an escalation's item key starts "${HANGAR_DECISION_KEY_PREFIX}"`);
+  return fileInboxItem(db, input, undefined, true);
+}
+
+/** `requestInboxItem`, binding the item to an outcome request when `binding` is given (only `requestHangarOutcome` gives one), or at an escalation's reserved key when `escalation`. */
+async function fileInboxItem(db: Database, input: RequestInboxItemInput, binding: { session_id: string; requested: HangarOutcome } | undefined, escalation = false): Promise<RequestInboxItemResult> {
   const itemLabel = `(${INBOX_SOURCE_SYSTEM}/${input.externalId})`;
   // A body's `session` is ignored, valid or not: only the server names one.
   // Its `feedback` likewise: only the person's decisions write it; and its
   // `hangar_outcome`: only requestHangarOutcome binds one.
   const { session: _fromBody, feedback: _notTheAgents, [HANGAR_OUTCOME_KEY]: _notABinding, ...bodyMetadata } = input.metadata;
-  if (binding === undefined) assertNoHangarOutcomeKeys([{ sourceSystem: INBOX_SOURCE_SYSTEM, externalId: input.externalId, label: itemLabel }]);
+  if (binding === undefined && !escalation) assertNoHangarOutcomeKeys([{ sourceSystem: INBOX_SOURCE_SYSTEM, externalId: input.externalId, label: itemLabel }]);
   const incoming = normalizeInboxItemMetadata(normalizeOccurredAt(bodyMetadata, { itemLabel }), { itemLabel });
   const session = input.session?.toLowerCase();
   const pre = await readRequestTarget(db, input.externalId, false);

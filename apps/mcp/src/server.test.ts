@@ -134,13 +134,15 @@ const BOGUS_ID = "00000000-0000-0000-0000-000000000000";
 // --- Tool listing (spec: "No arbitrary SQL from the model", "Read-only mode") ---
 
 describe("tool listing", () => {
-  it("advertises all fifteen tools with object-shaped input schemas, and no SQL passthrough tool", async () => {
+  it("advertises all seventeen tools with object-shaped input schemas, and no SQL passthrough tool", async () => {
     const { client } = await connectClient();
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([
       "brain_get",
-      "brain_hangar_outcome_request",
+      "brain_hangar_decide",
+      "brain_hangar_escalate",
+      "brain_hangar_outcome",
       "brain_hangar_request",
       "brain_hangar_sessions",
       "brain_hangar_status",
@@ -703,7 +705,7 @@ describe("brain_history", () => {
 // --- Read-only mode (spec: "Read-only mode") -----------------------------------
 
 describe("read-only mode", () => {
-  it("does not advertise brain_write/brain_link/brain_merge/brain_update_work_item/brain_hangar_request/brain_hangar_outcome_request", async () => {
+  it("does not advertise brain_write/brain_link/brain_merge/brain_update_work_item or the hangar write tools", async () => {
     const { client } = await connectClient({ readOnly: true });
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();

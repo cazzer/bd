@@ -17,9 +17,25 @@ import { createServer, request, type IncomingHttpHeaders, type Server } from "no
 import type { AddressInfo, Socket } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { applyBeadsIngest, createClientToken, enqueueRelayAction, getRelayAction, verifyClientToken, type BeadsIssue } from "@breakdown/core";
-import { clientTokens, createDb, createPool, ingestRuns, nodes, relayActions, relayCheckIns, resolveDatabaseUrl, type Database } from "@breakdown/db";
-import { and, eq, inArray, like, or } from "drizzle-orm";
+import {
+  applyBeadsIngest,
+  claimSession,
+  createClientToken,
+  enqueueRelayAction,
+  fileHangarDecision,
+  getOpenHangarDecisions,
+  getRelayAction,
+  unsafeMarkEscalatedInTx,
+  openIngestRun,
+  readHangarMessages,
+  requestSession,
+  updateSession,
+  upsertNodes,
+  verifyClientToken,
+  type BeadsIssue,
+} from "@breakdown/core";
+import { clientTokens, createDb, createPool, hangarDecisions, hangarMessages, ingestRuns, nodes, relayActions, relayCheckIns, resolveDatabaseUrl, type Database } from "@breakdown/db";
+import { and, eq, inArray, like, or, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { BEADS_WATCHER_EVENT, createBeadsWatcher, type BeadsWatcher, type BeadsWatcherEvent } from "./beads-watcher.js";
 import { createRequestDispatcher } from "./dispatch.js";
@@ -46,6 +62,9 @@ let db: Database;
 let watcher: BeadsWatcher;
 const events: BeadsWatcherEvent[] = [];
 const servers: Server[] = [];
+/** Hangar sessions and work items a test made, for cleanup. */
+const escalationSessions: string[] = [];
+const fixtureNodeIds: string[] = [];
 let port: number;
 let readOnlyPort: number;
 const tokens: Record<string, string> = {};
@@ -116,7 +135,13 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await Promise.all(servers.map((s) => new Promise<void>((resolve) => s.close(() => resolve()))));
-  await db.delete(clientTokens).where(inArray(clientTokens.client, [RELAY_A, RELAY_B, WORKER, HANGAR, PHONE]));
+  await db.delete(clientTokens).where(inArray(clientTokens.client, [RELAY_A, RELAY_B, WORKER, HANGAR, PHONE, ...escalationSessions.map((id) => `session-${id}`)]));
+  if (escalationSessions.length > 0) {
+    await db.delete(hangarDecisions).where(inArray(hangarDecisions.sessionId, escalationSessions));
+    await db.delete(hangarMessages).where(inArray(hangarMessages.sessionId, escalationSessions));
+  }
+  if (fixtureNodeIds.length > 0) await db.delete(nodes).where(inArray(nodes.id, fixtureNodeIds));
+  await db.delete(ingestRuns).where(inArray(ingestRuns.actor, [PREFIX, HANGAR]));
   if (actionIds.length > 0) await db.delete(relayActions).where(inArray(relayActions.id, actionIds));
   await db.delete(relayCheckIns).where(inArray(relayCheckIns.relay, [RELAY_A, RELAY_B]));
   await db.delete(nodes).where(and(eq(nodes.sourceSystem, "beads"), or(like(nodes.externalId, `${BEAD}-%`), like(nodes.externalId, `project:${PREFIX}-%`))));
@@ -279,6 +304,58 @@ describe("POST /relay/v1/actions/:id/result", () => {
     expect(await getRelayAction(db, id)).toMatchObject({ state: "done", result: { note: "already applied" } });
     const repeated = await send(`/relay/v1/actions/${id}/result`, { token: tokens[RELAY_A], body: { state: "failed", error: "late" } });
     expect(repeated.json).toEqual({ action: { id, state: "done" }, already_finished: true });
+  });
+
+  it("a person's review decision on a hangar escalation reaches the session once the relay reports it done", async () => {
+    const run = await openIngestRun(db, `relay-api-test-${suffix}`, { actor: PREFIX });
+    runIds.push(run.id);
+    const item = (await upsertNodes(db, run, [{ nodeType: "work_item", sourceSystem: `relay-api-test-${suffix}`, externalId: randomUUID(), title: "Escalated work", metadata: { status: "open" } }])).rows[0]!.id;
+    fixtureNodeIds.push(item);
+    const { session } = await requestSession(db, { repo: "cazzer/bd", workItemId: item, flavor: "headless", actor: PREFIX, requestedAt: new Date(Date.UTC(2999, 0, 1)) });
+    fixtureNodeIds.push(session.id);
+    escalationSessions.push(session.id);
+    if ((await claimSession(db, { hangar: HANGAR, flavors: ["headless"], among: [session.id] })) === null) throw new Error("fixture claim failed");
+    await updateSession(db, { hangar: HANGAR, id: session.id, state: "running" });
+    const decision = await fileHangarDecision(db, { sessionId: session.id, kind: "question", title: "Which store?", card: { question: "Postgres or SQLite?" } });
+    await db.transaction((tx) => unsafeMarkEscalatedInTx(tx, decision.id, { via: "review", project_key: PROJECT, issue_id: `${BEAD}-w1`, review_key: "hangar-x", relay_action_id: 0, review_id: `${BEAD}-r1` }));
+
+    const { action } = await enqueueRelayAction(db, { kind: "review_decision", payload: { project_key: PROJECT, cwd: CHECKOUT, issue_id: `${BEAD}-r1`, decision: "changes", message: "Keep Postgres." }, requestedBy: PHONE });
+    actionIds.push(action.id);
+    among = [action.id];
+    const claimed = await send("/relay/v1/claim", { token: tokens[RELAY_A], body: { kinds: ["review_decision"] } });
+    among = [];
+    expect(claimed.status, claimed.body).toBe(200);
+    expect((await readHangarMessages(db, { sessionId: session.id })).messages).toEqual([]);
+    const done = await send(`/relay/v1/actions/${action.id}/result`, { token: tokens[RELAY_A], body: { state: "done", result: {} } });
+    expect(done.status, done.body).toBe(200);
+    const { messages } = await readHangarMessages(db, { sessionId: session.id });
+    expect(messages.map((m) => [m.kind, m.body["item_id"], m.body["decision"], m.body["message"], m.body["by"], m.body["via"]])).toEqual([["session_decision", decision.id, "changes", "Keep Postgres.", PHONE, "review"]]);
+  });
+
+  it("a repeated report of a hangar escalation's review runs the follow-up again, recording a review id the first one lost", async () => {
+    const run = await openIngestRun(db, `relay-api-test-${suffix}`, { actor: PREFIX });
+    runIds.push(run.id);
+    const item = (await upsertNodes(db, run, [{ nodeType: "work_item", sourceSystem: `relay-api-test-${suffix}`, externalId: randomUUID(), title: "Escalated work", metadata: { status: "open" } }])).rows[0]!.id;
+    fixtureNodeIds.push(item);
+    const { session } = await requestSession(db, { repo: "cazzer/bd", workItemId: item, flavor: "headless", actor: PREFIX, requestedAt: new Date(Date.UTC(2999, 0, 1)) });
+    fixtureNodeIds.push(session.id);
+    escalationSessions.push(session.id);
+    await claimSession(db, { hangar: HANGAR, flavors: ["headless"], among: [session.id] });
+    const decision = await fileHangarDecision(db, { sessionId: session.id, kind: "question", title: "Which store?" });
+    const review = { images: [], summary: "Move the cache?", key: "hangar-lost", question: "Move the cache?" };
+    const { action } = await enqueueRelayAction(db, { kind: "review_request", payload: { project_key: PROJECT, cwd: CHECKOUT, issue_id: `${BEAD}-w2`, title: "Review: Move the cache?", description: "Evidence.", review }, requestedBy: PHONE });
+    actionIds.push(action.id);
+    await db.transaction((tx) => unsafeMarkEscalatedInTx(tx, decision.id, { via: "review", project_key: PROJECT, issue_id: `${BEAD}-w2`, review_key: "hangar-lost", relay_action_id: action.id }));
+    among = [action.id];
+    expect((await send("/relay/v1/claim", { token: tokens[RELAY_A], body: { kinds: ["review_request"] } })).status).toBe(200);
+    among = [];
+    const body = { state: "done", result: { review_id: `${BEAD}-r2`, reused: false } };
+    expect((await send(`/relay/v1/actions/${action.id}/result`, { token: tokens[RELAY_A], body })).status).toBe(200);
+    // The first follow-up was lost (the server died after recording the report).
+    await db.execute(sql`UPDATE hangar_decisions SET escalation = escalation - 'review_id' WHERE id = ${decision.id}::uuid`);
+    const again = await send(`/relay/v1/actions/${action.id}/result`, { token: tokens[RELAY_A], body });
+    expect(again.json).toMatchObject({ already_finished: true });
+    expect((await getOpenHangarDecisions(db, [session.id])).get(session.id)?.escalation).toMatchObject({ review_id: `${BEAD}-r2` });
   });
 
   it("refuses another relay's action with 409 not_claimer, an unknown or malformed id with 404, and a failure without an error with 400", async () => {

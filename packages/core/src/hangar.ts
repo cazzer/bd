@@ -169,7 +169,15 @@ const KEY = {
   outcome: "outcome",
   outcomeAt: "outcome_at",
   outcomeBy: "outcome_by",
+  /** Who set the outcome: `driver` (an agent, brain_hangar_outcome) or `person`; absent on an outcome from before drivers set it, which was a person's. */
+  outcomeVia: "outcome_via",
+  outcomeNote: "outcome_note",
 } as const;
+
+/** The longest note stored with an outcome. */
+export const MAX_HANGAR_OUTCOME_NOTE_CHARS = 2000;
+export const HANGAR_OUTCOME_VIAS = ["driver", "person"] as const;
+export type HangarOutcomeVia = (typeof HANGAR_OUTCOME_VIAS)[number];
 
 /** Optional text fields and their caps; empty or null deletes the key. */
 const OPTIONAL_TEXT: readonly [string, number][] = [
@@ -181,6 +189,8 @@ const OPTIONAL_TEXT: readonly [string, number][] = [
   [KEY.requeueReason, MAX_HANGAR_REQUEUE_REASON_LENGTH],
   [KEY.failureReason, MAX_HANGAR_FAILURE_REASON_LENGTH],
   [KEY.outcomeBy, MAX_HANGAR_FIELD_LENGTH],
+  [KEY.outcomeVia, MAX_HANGAR_FIELD_LENGTH],
+  [KEY.outcomeNote, MAX_HANGAR_OUTCOME_NOTE_CHARS],
 ];
 
 // --- The metadata contract (pure) --------------------------------------------
@@ -317,8 +327,12 @@ export interface HangarSession {
   /** The person's decision on the ended session; null when none (or a stored value this version does not know). */
   outcome: HangarOutcome | null;
   outcomeAt: string | null;
-  /** Who set the outcome: the person's actor. */
+  /** Who set the outcome: the driver's or the person's actor. */
   outcomeBy: string | null;
+  /** Whether a driver or a person set it (a legacy outcome reads `person`); null with no outcome. */
+  outcomeVia: HangarOutcomeVia | null;
+  /** The note stored with the outcome, or null. */
+  outcomeNote: string | null;
   /** An outcome is set and hangar has cleared the disk path: it holds nothing for the session any more. */
   released: boolean;
   /** When it was requested; claims take the oldest first. */
@@ -398,6 +412,8 @@ function toSession(row: SessionRow): HangarSession {
     outcome,
     outcomeAt: text(m, KEY.outcomeAt),
     outcomeBy: text(m, KEY.outcomeBy),
+    outcomeVia: outcome === null ? null : text(m, KEY.outcomeVia) === "driver" ? "driver" : "person",
+    outcomeNote: text(m, KEY.outcomeNote),
     released: outcome !== null && diskPath === null,
     occurredAt: text(m, OCCURRED_AT_KEY),
     createdAt: new Date(row.created_at),
@@ -926,6 +942,10 @@ export interface SetHangarSessionOutcomeInput {
   outcome: string;
   /** The person who decided (the admitted client, or "human"); the run's actor and `outcome_by`. */
   actor?: string;
+  /** `driver` for a session's driver (brain_hangar_outcome), which may not overwrite a person's outcome; `person` by default. */
+  via?: HangarOutcomeVia;
+  /** Stored with the outcome (newlines flattened, control characters dropped, cut to MAX_HANGAR_OUTCOME_NOTE_CHARS); a new outcome without one clears it. */
+  note?: string;
 }
 
 export interface SetHangarSessionOutcomeResult {
@@ -934,11 +954,22 @@ export interface SetHangarSessionOutcomeResult {
   changed: boolean;
 }
 
-function outcomeArgs(input: SetHangarSessionOutcomeInput): { id: string; outcome: HangarOutcome; actor: string } {
+interface OutcomeArgs {
+  id: string;
+  outcome: HangarOutcome;
+  actor: string;
+  via: HangarOutcomeVia;
+  note: string | undefined;
+}
+
+function outcomeArgs(input: SetHangarSessionOutcomeInput): OutcomeArgs {
+  const note = input.note === undefined ? "" : fitField(input.note.replace(/\s+/g, " "), MAX_HANGAR_OUTCOME_NOTE_CHARS);
   return {
     id: assertUuid(input.id, "session id"),
     outcome: oneOf(KEY.outcome, input.outcome, HANGAR_OUTCOMES),
     actor: requesterOf(input.actor) ?? "human",
+    via: input.via === "driver" ? "driver" : "person",
+    note: note === "" ? undefined : note,
   };
 }
 
@@ -955,14 +986,22 @@ function assertTakesOutcome(id: string, current: Record<string, unknown>): void 
  * it (a no-op, checked after the state, before the release). Refuses as
  * `assertTakesOutcome` does. `outcome_at` is the database's `now()`.
  */
-function decideOutcome(row: LockedSessionRow | undefined, id: string, outcome: HangarOutcome, actor: string): { row: LockedSessionRow; metadata: Record<string, unknown> | null } {
+function decideOutcome(row: LockedSessionRow | undefined, args: OutcomeArgs): { row: LockedSessionRow; metadata: Record<string, unknown> | null } {
+  const { id, outcome, actor, via, note } = args;
   if (!row) throw new HangarSessionNotFoundError(id);
   const current = normalizeHangarSessionMetadata(row.metadata);
   const state = current[KEY.state] as HangarSessionState;
   if (!HANGAR_FINAL_STATES.includes(state)) throw new HangarOutcomeRefusedError(row.id, "state", state);
   if (current[KEY.outcome] === outcome) return { row, metadata: null };
+  // A person's outcome stands: a driver never overwrites it (an outcome with no `outcome_via` predates drivers, so a person set it).
+  const stored = current[KEY.outcome] as string | undefined;
+  if (via === "driver" && stored !== undefined && current[KEY.outcomeVia] !== "driver") throw new HangarOutcomeRefusedError(row.id, "person", stored);
   assertTakesOutcome(row.id, current);
-  return { row, metadata: normalizeHangarSessionMetadata({ ...current, [KEY.outcome]: outcome, [KEY.outcomeAt]: new Date(row.now), [KEY.outcomeBy]: actor }) };
+  const { [KEY.outcomeNote]: _previousNote, ...rest } = current;
+  return {
+    row,
+    metadata: normalizeHangarSessionMetadata({ ...rest, [KEY.outcome]: outcome, [KEY.outcomeAt]: new Date(row.now), [KEY.outcomeBy]: actor, [KEY.outcomeVia]: via, ...(note === undefined ? {} : { [KEY.outcomeNote]: note }) }),
+  };
 }
 
 /**
@@ -993,7 +1032,7 @@ export async function getSessionTakingOutcome(db: Database, id: string): Promise
  */
 export async function setHangarSessionOutcome(db: Database, input: SetHangarSessionOutcomeInput): Promise<SetHangarSessionOutcomeResult> {
   const args = outcomeArgs(input);
-  const pre = decideOutcome((await readSessionRow(db, args.id, false)).rows[0], args.id, args.outcome, args.actor);
+  const pre = decideOutcome((await readSessionRow(db, args.id, false)).rows[0], args);
   if (pre.metadata === null) return { session: await loadSession(db, pre.row.id), changed: false };
   const run = await openIngestRun(db, HANGAR_SOURCE_SYSTEM, { actor: args.actor });
   try {
@@ -1012,7 +1051,7 @@ export async function setHangarSessionOutcome(db: Database, input: SetHangarSess
  */
 export async function unsafeSetHangarSessionOutcomeInTx(tx: Tx, run: IngestRunHandle, input: SetHangarSessionOutcomeInput): Promise<SetHangarSessionOutcomeResult> {
   const args = outcomeArgs(input);
-  const { row, metadata } = decideOutcome((await readSessionRow(tx, args.id, true)).rows[0], args.id, args.outcome, args.actor);
+  const { row, metadata } = decideOutcome((await readSessionRow(tx, args.id, true)).rows[0], args);
   if (metadata !== null) await writeSessionNode(tx, run, { externalId: row.external_id, title: row.title, content: row.content, metadata }, "setHangarSessionOutcome");
   return { session: await loadSession(tx, row.id), changed: metadata !== null };
 }
@@ -1228,7 +1267,7 @@ export interface HangarWaitReason {
   reason: string;
 }
 
-/** An ended session still holding a disk with no outcome: a person's accept or table frees it. */
+/** An ended session still holding a disk with no outcome: its driver's release (or a person's accept or table) frees it. */
 export interface HangarAwaitingReviewSession {
   id: string;
   claimedBy: string | null;
@@ -1446,7 +1485,8 @@ export function classifyQueuedWait(session: { flavor: string; ahead: number }, c
       return bytes === undefined ? { ...s } : { ...s, diskAllocatedBytes: bytes };
     });
     const quoted = reasons.map((r) => quoteReason(r.hangar, r.reason.trim().slice(DISK_PREFIX.length).trim())).join("; ");
-    const held = total === 1 ? "1 ended session still holds a disk; accept or table it to free space." : `${total} ended sessions still hold disks; accept or table them to free space.`;
+    // Releasing is the driver's call (brain_hangar_outcome), not something to ask the person (hangar-driver-decisions).
+    const held = total === 1 ? "1 ended session still holds a disk; its driver releases it (accepted or tabled) to free space." : `${total} ended sessions still hold disks; their drivers release them (accepted or tabled) to free space.`;
     return { kind: "disk_awaiting_review", text: `Waiting on disk (${quoted}). ${held}`, reasons, sessions, total };
   }
   const quoted = reasons.map((r) => (r.reason === NO_FREE_SLOT ? `${r.hangar} has no free slot` : quoteReason(r.hangar, r.reason))).join("; ");

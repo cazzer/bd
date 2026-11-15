@@ -746,13 +746,15 @@ export class HangarSessionNotClaimedByError extends KnowledgeStoreError {
 export class HangarOutcomeRefusedError extends KnowledgeStoreError {
   constructor(
     readonly sessionId: string,
-    readonly kind: "state" | "released",
+    readonly kind: "state" | "released" | "person",
     readonly detail: string,
   ) {
     super(
       kind === "state"
         ? `hangar session ${sessionId} is ${detail}; only a stopped or failed session can be accepted or tabled`
-        : `hangar session ${sessionId} is already released (its outcome is ${detail} and hangar has deleted its disk), so its outcome can no longer change`,
+        : kind === "person"
+          ? `hangar session ${sessionId}'s outcome is ${detail}, set by a person; a driver does not overwrite it`
+          : `hangar session ${sessionId} is already released (its outcome is ${detail} and hangar has deleted its disk), so its outcome can no longer change`,
     );
   }
 }
@@ -776,7 +778,7 @@ export class HangarEndedSessionChangeError extends KnowledgeStoreError {
         ? `hangar session ${sessionId} has ended, so ${field} can only be cleared (null), not set`
         : kind === "released"
           ? `hangar session ${sessionId} is released (a person set its outcome and hangar holds nothing for it), so ${field} can no longer change`
-          : `hangar session ${sessionId} has no outcome yet, so its disk_path cannot be cleared: acknowledge a release only after a person has accepted or tabled the session`,
+          : `hangar session ${sessionId} has no outcome yet, so its disk_path cannot be cleared: acknowledge a release only after its driver or a person has accepted or tabled the session`,
     );
   }
 }
@@ -839,8 +841,10 @@ export class HangarOutcomeMergeError extends KnowledgeStoreError {
     readonly loserId: string,
     readonly survivorId: string,
     readonly outcomeNodeId: string,
+    /** `escalation`: the node is a hangar escalation's inbox item (key `hangar-decision:`), routed to its session on its id. */
+    readonly kind: "outcome" | "escalation" = "outcome",
   ) {
-    super(`cannot merge node ${loserId} into ${survivorId}: node ${outcomeNodeId} is a hangar outcome request, which is never merged`);
+    super(`cannot merge node ${loserId} into ${survivorId}: node ${outcomeNodeId} is ${kind === "escalation" ? "a hangar escalation's inbox item" : "a hangar outcome request"}, which is never merged`);
   }
 }
 
@@ -912,5 +916,36 @@ export class RelayActionNotClaimedByError extends KnowledgeStoreError {
         ? `relay action ${actionId} is claimed by ${JSON.stringify(claimedBy)}, not ${JSON.stringify(relay)}`
         : `relay action ${actionId} is ${state}, so ${JSON.stringify(relay)} cannot change it`,
     );
+  }
+}
+
+// --- Hangar decisions (hangar-driver-decisions) ----------------------------------------
+
+/**
+ * A hangar decision a call cannot act on (hangar-decisions.ts), `reason`
+ * saying why: the session has no open decision (`none`), the open one was
+ * escalated to the person, so only their decision answers it (`escalated`;
+ * an agent never decides a review), it was not escalated (`not_escalated`),
+ * its session has ended and reads no more messages (`session_ended`), or the
+ * session cannot file one now (`session_state`), or the decision the caller
+ * read is no longer the session's open one (`superseded`). Nothing was written.
+ */
+export class HangarDecisionRefusedError extends KnowledgeStoreError {
+  constructor(
+    readonly sessionId: string,
+    readonly reason: "none" | "superseded" | "escalated" | "not_escalated" | "session_ended" | "session_state",
+    detail: string,
+  ) {
+    super(`hangar session ${sessionId}: ${detail}`);
+  }
+}
+
+/** A hangar decision's field breaks the contract (hangar-decisions.ts), `field` naming it. Nothing was written. */
+export class InvalidHangarDecisionError extends KnowledgeStoreError {
+  constructor(
+    readonly field: string,
+    reason: string,
+  ) {
+    super(`${field}: ${reason}`);
   }
 }

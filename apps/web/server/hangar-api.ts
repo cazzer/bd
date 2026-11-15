@@ -8,7 +8,8 @@
 // The dispatcher (dispatch.ts) admits `hangar` and `agent` tokens on this
 // route and hands over what admission established; this handler narrows it
 // per endpoint: the service endpoints take `hangar` only, messages take an
-// `agent` token bound to a session. A tokenless loopback request counts as
+// `agent` token bound to a session, and so does a worker filing its result
+// for its driver (`POST /decision`, hangar-driver-decisions). A tokenless loopback request counts as
 // `human` and is refused, like any other scope. A session's messages are
 // always the admitting token's session, never one the request names.
 //
@@ -37,6 +38,10 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import {
   claimSession,
+  fileHangarDecision,
+  HangarDecisionRefusedError,
+  InvalidHangarDecisionError,
+  type HangarDecision,
   getNodes,
   HangarEndedSessionChangeError,
   HANGAR_FLAVORS,
@@ -85,6 +90,7 @@ export const HANGAR_ENDPOINTS = [
   { method: "POST", path: "/hangar/v1/sessions/:id/requeue", scope: "hangar" },
   { method: "GET", path: "/hangar/v1/sessions", scope: "hangar" },
   { method: "GET", path: "/hangar/v1/messages", scope: "agent" },
+  { method: "POST", path: "/hangar/v1/decision", scope: "agent" },
 ] as const;
 
 type Endpoint = (typeof HANGAR_ENDPOINTS)[number];
@@ -148,6 +154,23 @@ const updateSchema = z.preprocess(
 const requeueSchema = z.object({
   reason: z.string().trim().min(1).max(MAX_HANGAR_REQUEUE_REASON_LENGTH),
 });
+
+// A worker's result for its driver (hangar-driver-decisions). `card` is what
+// `hangar-card check` prints (question, options, recommend, on_accept; a
+// `key` it carries is dropped), `body` the card file's evidence. Core holds
+// the card to the contract strictly.
+const decisionSchema = z.object({
+  kind: z.enum(["pr", "question"]),
+  title: z.string(),
+  summary: z.string().optional(),
+  pr_url: z.string().nullable().optional(),
+  card: z.record(z.string(), z.unknown()).nullable().optional(),
+  body: z.string().optional(),
+});
+
+function decisionJson(d: HangarDecision): Record<string, unknown> {
+  return { id: d.id, session_id: d.sessionId, kind: d.kind, title: d.title, state: d.state, created_at: d.createdAt.toISOString() };
+}
 
 // --- Query strings -----------------------------------------------------------------
 
@@ -227,7 +250,8 @@ function mapCoreError(err: unknown): ApiError | null {
   if (err instanceof HangarEndedSessionChangeError) return new ApiError(409, "session_ended", err.message);
   if (err instanceof HangarSessionNotClaimedByError) return new ApiError(403, "not_claimer", err.message);
   if (err instanceof HangarSessionNotFoundError) return new ApiError(404, "not_found", err.message);
-  if (err instanceof InvalidHangarSessionError || err instanceof InvalidLookupIdError) return invalidRequest(err.message);
+  if (err instanceof InvalidHangarSessionError || err instanceof InvalidLookupIdError || err instanceof InvalidHangarDecisionError) return invalidRequest(err.message);
+  if (err instanceof HangarDecisionRefusedError) return new ApiError(409, "session_ended", err.message);
   return null;
 }
 
@@ -320,6 +344,22 @@ export function createHangarHandler({ db, readOnly = false, shutdownSignal, clai
         messages: page.messages.map((m) => ({ id: m.id, kind: m.kind, body: m.body, created_at: m.createdAt.toISOString() })),
         cursor: page.cursor,
       });
+    },
+
+    "POST /hangar/v1/decision": async ({ req, res, admitted }) => {
+      const body = await readJsonBody(req, decisionSchema);
+      // Always the token's own session (module header).
+      const { key: _key, ...card } = body.card ?? {};
+      const filed = await fileHangarDecision(db, {
+        sessionId: admitted.sessionId!,
+        kind: body.kind,
+        title: body.title,
+        ...(body.summary === undefined ? {} : { summary: body.summary }),
+        ...(body.pr_url === undefined ? {} : { prUrl: body.pr_url }),
+        ...(body.card === undefined || body.card === null ? {} : { card: body.body === undefined ? card : { ...card, body: body.body } }),
+        filedBy: admitted.client,
+      });
+      sendJson(res, 200, { decision: decisionJson(filed) });
     },
   };
 
