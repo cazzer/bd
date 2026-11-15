@@ -1,15 +1,16 @@
 // Pure helpers behind the board header's hangar pill (hangar-queue design
 // decision 7): what the chip says, the open counts it shows beside that,
 // whether it shows at all, and what its tooltip adds, the latest capacity's
-// free slots and blocked flavors among it (hangar-capacity). Also the two the
-// drawer's hangar sessions use for a session waiting on review: where its
-// work item opens and how its disk reads. Liveness is decided by the server
+// free slots and blocked flavors among it (hangar-capacity), and the short
+// capacity note the chip shows when an online hangar has no slot at all.
+// Also the two the drawer's hangar sessions use for a session waiting on
+// review: where its work item opens and how its disk reads. Liveness is decided by the server
 // against its own clock (`hangarStatus`); these only word it. Times read in
 // the browser's local zone: the time alone when the last check-in was today,
 // the date too when it was not. Structural types only, so nothing from the
 // server reaches the bundle.
 
-import type { Route } from "./route.js";
+import type { BoardRoute } from "./route.js";
 
 /** The slice of the `hangarStatus` answer these helpers read. */
 export interface HangarStatusView {
@@ -17,6 +18,10 @@ export interface HangarStatusView {
   hangar: string | null;
   version: string | null;
   lastSeenAt: string | null;
+  /** The check-in interval, in seconds: a capacity older than three of them is stale. */
+  intervalS: number;
+  /** The server's clock when it answered: what staleness is measured against. */
+  now: string;
   queued: number;
   claimed: number;
   running: number;
@@ -57,12 +62,22 @@ export function hangarPillLabel(status: HangarStatusView, now: Date): string {
   return `hangar offline since ${formatInstant(at, now)}`;
 }
 
-/** The capacity lines: free slots ("Slots: headless 2, display-browser 1", or "No free slots"), one line per blocked flavor, and when it was reported. */
+/**
+ * The capacity lines: free slots ("Slots: headless 2, display-browser 1",
+ * "No free slots", or "No slots reported"), one line per blocked flavor, and
+ * when it was reported; headed "Last reported capacity:" when hangar is not
+ * online, since it may no longer hold.
+ */
 function capacityLines(status: HangarStatusView, now: Date): string[] {
   const { capacity } = status;
   if (capacity === null) return status.status === "online" ? ["No capacity reported"] : [];
-  const free = Object.entries(capacity.slots ?? {}).filter(([, n]) => n > 0);
-  const lines = [free.length === 0 ? "No free slots" : `Slots: ${free.map(([flavor, n]) => `${flavor} ${n}`).join(", ")}`];
+  const lines = status.status === "online" ? [] : ["Last reported capacity:"];
+  if (capacity.slots === undefined) {
+    lines.push("No slots reported");
+  } else {
+    const free = Object.entries(capacity.slots).filter(([, n]) => n > 0);
+    lines.push(free.length === 0 ? "No free slots" : `Slots: ${free.map(([flavor, n]) => `${flavor} ${n}`).join(", ")}`);
+  }
   for (const [flavor, reason] of Object.entries(capacity.blocked ?? {})) lines.push(`${flavor} blocked: ${reason}`);
   const reported = instant(status.capacityAt);
   if (reported !== null) lines.push(`Capacity reported ${formatInstant(reported, now, true)}`);
@@ -78,6 +93,24 @@ export function hangarPillTitle(status: HangarStatusView, now: Date): string {
   lines.push(...capacityLines(status, now));
   lines.push(`${status.queued} queued · ${status.claimed} claimed · ${status.running} running`);
   return lines.join("\n");
+}
+
+/**
+ * What the chip adds when an online hangar's fresh capacity (reported within
+ * three check-in intervals of the server's clock) has no slot for any
+ * flavor: "disk full" when every blocked reason starts with `disk:`, else
+ * "no slots". Null otherwise, including a stale capacity, which says nothing
+ * about now.
+ */
+export function hangarPillCapacity(status: HangarStatusView): "disk full" | "no slots" | null {
+  const { capacity } = status;
+  if (status.status !== "online" || capacity === null) return null;
+  const reported = instant(status.capacityAt);
+  const now = instant(status.now);
+  if (reported === null || now === null || now.getTime() - reported.getTime() >= 3 * status.intervalS * 1000) return null;
+  if (Object.values(capacity.slots ?? {}).some((n) => n > 0)) return null;
+  const reasons = Object.values(capacity.blocked ?? {});
+  return reasons.length > 0 && reasons.every((r) => r.trim().startsWith("disk:")) ? "disk full" : "no slots";
 }
 
 /** The open session counts the chip shows inline, zeros left out ("1 queued, 1 running"); null when there are none. */
@@ -99,20 +132,24 @@ export function hangarPillHidden(status: HangarStatusView): boolean {
   return status.status === "never" && status.queued + status.claimed + status.running === 0;
 }
 
-/** Where an awaiting-review session's work item opens: its project's board with it in the drawer (keyed by external id, the bead id), else the graph with it selected. */
-export function awaitingWorkItemRoute(workItem: { id: string; externalId: string; project: string | null }): Route {
-  if (workItem.project !== null) return { view: "board", viewId: null, projects: [workItem.project], item: workItem.externalId };
-  return { view: "graph", q: null, types: [], node: workItem.id };
+/** Where an awaiting-review session's work item opens: its project's board with it in the drawer (keyed by external id, the bead id), where it can be accepted or tabled. */
+export function awaitingWorkItemRoute(workItem: { externalId: string; project: string }): BoardRoute {
+  return { view: "board", viewId: null, projects: [workItem.project], item: workItem.externalId };
 }
 
 const BYTE_UNITS = ["KB", "MB", "GB", "TB"];
 
-/** A disk's size in binary units with one decimal ("8.0 GB", "512.0 MB"); bytes under 1 KB as a whole number ("512 B"). */
+/**
+ * A disk's size in binary units with one decimal ("8.0 GB", "512.0 MB");
+ * bytes under 1 KB as a whole number ("512 B"). The unit is chosen after
+ * rounding, so a value just under the next unit reads "1.0 GB", never
+ * "1024.0 MB".
+ */
 export function formatDiskBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   let value = bytes / 1024;
   let unit = 0;
-  while (value >= 1024 && unit < BYTE_UNITS.length - 1) {
+  while (Number(value.toFixed(1)) >= 1024 && unit < BYTE_UNITS.length - 1) {
     value /= 1024;
     unit += 1;
   }

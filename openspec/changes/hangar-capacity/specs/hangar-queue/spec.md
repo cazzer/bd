@@ -32,7 +32,7 @@ A reason that starts with `disk:` SHALL mean the disk budget is full. Breakdown 
 Every queued session SHALL be readable with the reason it waits. The reason SHALL be computed from the latest check-ins and the session registry when read, and SHALL NOT be stored. Only hangars that are online SHALL count. The reasons, in order of precedence:
 
 1. **offline:** no hangar is online. It SHALL name the time of the last check-in, or say that hangar has never checked in.
-2. **unknown:** no online hangar reported capacity.
+2. **unknown:** no online hangar has a fresh capacity: none reported one, or its last report is older than three check-in intervals. A stale report SHALL be named by its time.
 3. **next:** some online hangar has room for the session's flavor. It SHALL say how many queued sessions of that flavor were requested before it.
 4. **not_offered:** no online hangar's capacity names the flavor.
 5. **disk_awaiting_review:** every online hangar that names the flavor blocks it on disk, and at least one ended session still holds a disk with no outcome. It SHALL quote hangar's reason. It SHALL list each such session with its work item (id, external id, title), and with the disk bytes hangar reported for it, when reported.
@@ -54,6 +54,11 @@ The reason SHALL be shown wherever a queued session is listed for a person or an
 
 - **WHEN** hangar is online and its last check-in sent `capacity: null`
 - **THEN** Q waits for an unknown reason, and the reason says hangar reported no capacity
+
+#### Scenario: Stale capacity
+
+- **WHEN** hangar is online by its claims, and its last capacity was reported ten minutes ago
+- **THEN** Q waits for an unknown reason, and the reason says when the last capacity report was
 
 #### Scenario: Next in line
 

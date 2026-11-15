@@ -54,7 +54,9 @@
 // online hangars and the session registry, and never stored. Breakdown
 // never admits by capacity: hangar decides what it claims. Of hangar's
 // blocked reasons only the `disk:` prefix is contract (the disk budget is
-// full); the rest is shown verbatim and never parsed.
+// full); the rest is shown as hangar's own quoted words, flattened to one
+// line with control and bidi characters taken out, and never parsed. A
+// capacity older than three check-in intervals counts as not reported.
 //
 // The app makes no model call: all of this is pure Postgres.
 
@@ -139,8 +141,12 @@ export const MAX_HANGAR_CAPACITY_CHARS = 10_000;
 export const MAX_HANGAR_MESSAGE_BODY_CHARS = 50_000;
 /** A blocked reason is cut to this many characters on read, for display. */
 export const MAX_HANGAR_BLOCKED_REASON_LENGTH = 500;
-/** The most per-session usage entries a parsed capacity keeps. */
-export const MAX_HANGAR_USAGE_ENTRIES = 200;
+/**
+ * The most per-session usage entries a parsed capacity keeps: as many
+ * maximal entries as fit under `MAX_HANGAR_CAPACITY_CHARS` beside the other
+ * fields at realistic lengths (a check-in over that is refused whole).
+ */
+export const MAX_HANGAR_USAGE_ENTRIES = 64;
 /** The most awaiting-review sessions a disk wait lists (oldest ended first); `total` counts them all. */
 export const MAX_HANGAR_AWAITING_REVIEW_LISTED = 20;
 /** Why a queued session waits, in order of precedence (`classifyQueuedWait`). */
@@ -1248,6 +1254,8 @@ export interface HangarCheckInSnapshot {
   intervalS: number;
   /** Parsed; null when the check-in sent none. */
   capacity: HangarCapacity | null;
+  /** When that capacity arrived (database time); null with none. A capacity older than three intervals counts as not reported. */
+  capacityAt: Date | null;
 }
 
 export interface QueuedWaitContext {
@@ -1279,6 +1287,22 @@ function own(obj: Record<string, unknown>, key: string): unknown {
   return Object.hasOwn(obj, key) ? obj[key] : undefined;
 }
 
+const BIDI_CONTROLS = /[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g;
+// eslint-disable-next-line no-control-regex
+const C0_C1_CONTROLS = /[\u0000-\u001F\u007F-\u009F]+/g;
+
+/**
+ * Hangar's blocked reason made safe to show in one line: each run of C0/C1
+ * controls (tabs and newlines included) becomes one space, bidi controls are
+ * removed, then it is trimmed and cut to `MAX_HANGAR_BLOCKED_REASON_LENGTH`.
+ */
+function sanitizeBlockedReason(reason: string): string {
+  const flat = reason.replace(C0_C1_CONTROLS, " ").replace(BIDI_CONTROLS, "").trim();
+  return (fitText(flat, MAX_HANGAR_BLOCKED_REASON_LENGTH) as string).trimEnd();
+}
+
+const isFlavor = (key: string): boolean => (HANGAR_FLAVORS as readonly string[]).includes(key);
+
 function isCount(value: unknown): value is number {
   return Number.isInteger(value) && (value as number) >= 0;
 }
@@ -1303,7 +1327,8 @@ function wholeRecord<K extends string>(raw: Record<string, unknown>, key: string
 /**
  * Reads a stored capacity field by field (design decision 1). Pure; never
  * throws. Anything but an object reads as `{}`; unknown keys are ignored;
- * `slots` and `blocked` drop their bad entries; `free`, `sessions`, and
+ * `slots` and `blocked` keep only `HANGAR_FLAVORS` keys and drop their bad
+ * entries, a blocked reason sanitized (`sanitizeBlockedReason`); `free`, `sessions`, and
  * `disk` are read whole (all their fields, or absent); `usage` keeps entries
  * whose `session` is a uuid (lowercased) and whose byte counts are
  * non-negative finite numbers, the first `MAX_HANGAR_USAGE_ENTRIES` of them.
@@ -1314,14 +1339,16 @@ export function parseHangarCapacity(raw: unknown): HangarCapacity {
   const out: HangarCapacity = {};
 
   const slots = own(raw, "slots");
-  if (isRecord(slots)) out.slots = Object.fromEntries(Object.entries(slots).filter((entry): entry is [string, number] => isCount(entry[1])));
+  if (isRecord(slots)) out.slots = Object.fromEntries(Object.entries(slots).filter((entry): entry is [string, number] => isFlavor(entry[0]) && isCount(entry[1])));
 
   const blocked = own(raw, "blocked");
   if (isRecord(blocked)) {
     out.blocked = Object.fromEntries(
-      Object.entries(blocked).flatMap(([flavor, reason]): [string, string][] =>
-        typeof reason === "string" && reason.trim() !== "" ? [[flavor, fitText(reason, MAX_HANGAR_BLOCKED_REASON_LENGTH) as string]] : [],
-      ),
+      Object.entries(blocked).flatMap(([flavor, reason]): [string, string][] => {
+        if (!isFlavor(flavor) || typeof reason !== "string") return [];
+        const clean = sanitizeBlockedReason(reason);
+        return clean === "" ? [] : [[flavor, clean]];
+      }),
     );
   }
 
@@ -1359,7 +1386,9 @@ function plural(n: number, one: string, many: string): string {
  * count, and of those only ones that reported a capacity decide the reason:
  *
  * 1. none online → `offline`, since the newest check-in (null: never);
- * 2. none of them reported a capacity → `unknown`;
+ * 2. none of them has a fresh capacity (reported within three check-in
+ *    intervals; a claim keeps liveness fresh but not capacity) → `unknown`,
+ *    naming the last report's time when there was one;
  * 3. one has a free slot for the flavor → `next`;
  * 4. none names the flavor in `slots` or `blocked` → `not_offered`;
  * 5. every naming hangar's reason starts with `disk:` and a session awaits
@@ -1367,7 +1396,9 @@ function plural(n: number, one: string, many: string): string {
  * 6. otherwise → `capacity`.
  *
  * A naming hangar's reason is its `blocked` entry, or "no free slot" for a
- * flavor at 0 slots with none. A listed awaiting-review session's disk bytes
+ * flavor at 0 slots with none. `text` quotes each of hangar's reasons as its
+ * own words (the disk kind without the `disk:` prefix). A listed
+ * awaiting-review session's disk bytes
  * come from the usage of the online hangar that claimed it, else of any
  * online hangar that lists it.
  */
@@ -1375,12 +1406,17 @@ export function classifyQueuedWait(session: { flavor: string; ahead: number }, c
   const { flavor, ahead } = session;
   const online = ctx.checkIns.filter((c) => classifyHangarStatus(c, ctx.now).state === "online");
   if (online.length === 0) {
-    if (ctx.checkIns.length === 0) return { kind: "offline", text: "Waiting: hangar has never checked in.", since: null };
+    if (ctx.checkIns.length === 0) return { kind: "offline", text: "Waiting: hangar has never checked in. Start hangar to run it.", since: null };
     const since = new Date(Math.max(...ctx.checkIns.map((c) => c.lastSeenAt.getTime()))).toISOString();
     return { kind: "offline", text: `Waiting: hangar is offline (last check-in ${since}).`, since };
   }
-  const reporting = online.filter((c): c is HangarCheckInSnapshot & { capacity: HangarCapacity } => c.capacity !== null);
-  if (reporting.length === 0) return { kind: "unknown", text: "Waiting: hangar is online but reported no capacity." };
+  const fresh = (c: HangarCheckInSnapshot): boolean => c.capacityAt !== null && ctx.now.getTime() - c.capacityAt.getTime() < 3 * c.intervalS * 1000;
+  const reporting = online.filter((c): c is HangarCheckInSnapshot & { capacity: HangarCapacity } => c.capacity !== null && fresh(c));
+  if (reporting.length === 0) {
+    const staleAt = online.flatMap((c) => (c.capacity !== null && c.capacityAt !== null ? [c.capacityAt.getTime()] : []));
+    if (staleAt.length === 0) return { kind: "unknown", text: "Waiting: hangar is online but hasn't reported capacity yet." };
+    return { kind: "unknown", text: `Waiting: hangar is online but its last capacity report is from ${new Date(Math.max(...staleAt)).toISOString()}.` };
+  }
 
   const slotsFor = (c: HangarCapacity): number | undefined => (c.slots !== undefined && Object.hasOwn(c.slots, flavor) ? c.slots[flavor] : undefined);
   const blockedFor = (c: HangarCapacity): string | undefined => (c.blocked !== undefined && Object.hasOwn(c.blocked, flavor) ? c.blocked[flavor] : undefined);
@@ -1388,36 +1424,46 @@ export function classifyQueuedWait(session: { flavor: string; ahead: number }, c
   if (reporting.some((c) => (slotsFor(c.capacity) ?? 0) > 0)) {
     const text =
       ahead === 0
-        ? `Next in line: hangar has room for a ${flavor} session.`
-        : `Waiting: ${ahead} ${flavor} ${plural(ahead, "request", "requests")} ahead; hangar has room for ${flavor}.`;
+        ? "Next in line: hangar has room and should start it at its next check-in."
+        : `Waiting: ${ahead} earlier ${flavor} ${plural(ahead, "request goes", "requests go")} first; hangar has room for ${flavor} now.`;
     return { kind: "next", text, ahead };
   }
 
   const reasons: HangarWaitReason[] = reporting.flatMap((c): HangarWaitReason[] => {
     const blocked = blockedFor(c.capacity);
     if (blocked !== undefined) return [{ hangar: c.hangar, reason: blocked }];
-    return slotsFor(c.capacity) === 0 ? [{ hangar: c.hangar, reason: "no free slot" }] : [];
+    return slotsFor(c.capacity) === 0 ? [{ hangar: c.hangar, reason: NO_FREE_SLOT }] : [];
   });
   if (reasons.length === 0) return { kind: "not_offered", text: `Waiting: no online hangar runs ${flavor}.` };
 
-  const quoted = reasons.map((r) => `${r.hangar}: ${r.reason}`).join("; ");
   const { total } = ctx.awaitingReview;
-  if (total > 0 && reasons.every((r) => r.reason.trim().startsWith("disk:"))) {
+  const onDisk = (r: HangarWaitReason): boolean => r.reason.trim().startsWith(DISK_PREFIX);
+  if (total > 0 && reasons.every(onDisk)) {
     const bytesOf = (c: HangarCapacity, id: string): number | undefined => c.usage?.find((u) => u.session === id)?.allocated_bytes;
     const sessions = ctx.awaitingReview.sessions.map((s): HangarAwaitingReviewSession => {
       const claimer = reporting.find((c) => c.hangar === s.claimedBy);
       const bytes = (claimer === undefined ? undefined : bytesOf(claimer.capacity, s.id)) ?? reporting.map((c) => bytesOf(c.capacity, s.id)).find((b) => b !== undefined);
       return bytes === undefined ? { ...s } : { ...s, diskAllocatedBytes: bytes };
     });
-    const held = `${total} ended ${plural(total, "session still holds", "sessions still hold")} a disk awaiting accept or table.`;
-    return { kind: "disk_awaiting_review", text: `Waiting on disk: ${quoted}. ${held}`, reasons, sessions, total };
+    const quoted = reasons.map((r) => quoteReason(r.hangar, r.reason.trim().slice(DISK_PREFIX.length).trim())).join("; ");
+    const held = total === 1 ? "1 ended session still holds a disk; accept or table it to free space." : `${total} ended sessions still hold disks; accept or table them to free space.`;
+    return { kind: "disk_awaiting_review", text: `Waiting on disk (${quoted}). ${held}`, reasons, sessions, total };
   }
-  return { kind: "capacity", text: `Waiting on capacity: ${quoted}.`, reasons };
+  const quoted = reasons.map((r) => (r.reason === NO_FREE_SLOT ? `${r.hangar} has no free slot` : quoteReason(r.hangar, r.reason))).join("; ");
+  return { kind: "capacity", text: `Waiting on capacity (${quoted}).`, reasons };
+}
+
+const NO_FREE_SLOT = "no free slot";
+const DISK_PREFIX = "disk:";
+
+/** `jetson says "need 8192 MB, free 1200 MB"`: hangar's words, quoted so they read as its, never as Breakdown's. */
+function quoteReason(hangar: string, reason: string): string {
+  return `${hangar} says "${reason}"`;
 }
 
 interface ExplainContextRow extends Record<string, unknown> {
   now: string | Date;
-  check_ins: { hangar: string; last_seen_ms: number; interval_s: number | null; capacity: unknown }[];
+  check_ins: { hangar: string; last_seen_ms: number; interval_s: number | null; capacity: unknown; capacity_at_ms: number | null }[];
   awaiting_total: string | number;
   awaiting: { id: string; claimed_by: string | null; work_item: { id: string; external_id: string; title: string; project: string | null } | null }[];
 }
@@ -1464,7 +1510,8 @@ export async function explainQueuedSessions(db: Database, options: ExplainQueued
                  'hangar', c.hangar,
                  'last_seen_ms', floor(extract(epoch FROM c.last_seen_at) * 1000)::float8,
                  'interval_s', c.interval_s,
-                 'capacity', c.capacity) ORDER BY c.hangar)
+                 'capacity', c.capacity,
+                 'capacity_at_ms', floor(extract(epoch FROM c.capacity_at) * 1000)::float8) ORDER BY c.hangar)
         FROM hangar_check_ins c
         ${among === undefined ? sql`` : sql`WHERE c.hangar = ANY(${sqlArray(among.hangars, "text")})`}
       ), '[]'::json) AS check_ins,
@@ -1489,6 +1536,7 @@ export async function explainQueuedSessions(db: Database, options: ExplainQueued
       lastSeenAt: new Date(c.last_seen_ms),
       intervalS: c.interval_s === null ? HANGAR_CHECK_IN_INTERVAL_S : Number(c.interval_s),
       capacity: c.capacity === null ? null : parseHangarCapacity(c.capacity),
+      capacityAt: c.capacity_at_ms === null ? null : new Date(c.capacity_at_ms),
     })),
     awaitingReview: {
       total: Number(row.awaiting_total),

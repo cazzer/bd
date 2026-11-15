@@ -103,7 +103,14 @@ Also:
 - The queued sessions are read first, so an empty queue (or an `ids` list naming none) skips the second statement.
 - A blank `blocked` reason is dropped like any other bad entry. A flavor at 0 slots then reads "no free slot".
 - `usage` keeps the first 200 *valid* entries.
-- The summary text uses the singular for one: "1 headless request ahead", "1 ended session still holds a disk".
+- The summary text uses the singular for one: "1 earlier headless request goes first", "1 ended session still holds a disk".
+
+Review round 1:
+- A capacity counts only while fresh: `capacity_at` within three check-in intervals. A claim keeps hangar online without renewing it, so a stale report reads `unknown`, naming its time.
+- `MAX_HANGAR_USAGE_ENTRIES` is 64, which fits under the 10,000-character cap beside the other fields.
+- `slots` and `blocked` keep only the known flavors. A blocked reason is flattened to one line (control characters become a space, bidi controls are removed), and `text` quotes it as hangar's words: `jetson says "…"`.
+- MCP carries the awaiting-review list once per response (`awaitingReview`), not on each queued session, to stay inside the response budget. tRPC keeps the full object.
+- On the board, an awaiting-review session without a board to link to (its work item is gone or has no project) takes Accept or Table inline, and the drawer's own item says to decide it below.
 
 ## Migration Plan
 

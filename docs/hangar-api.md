@@ -115,16 +115,16 @@ Request:
 ```
 
 - `version` (string, 1–200 characters, required): hangar's version.
-- `capacity` (object or `null`, optional): what hangar can take now. Breakdown stores it as given, up to 10,000 characters serialized, with the time it arrived by Breakdown's database clock (`capacity_at`). Omitted or `null` clears both. Breakdown reads it to explain why queued sessions wait (see [Check-ins and status](#check-ins-and-status)), never to decide what a claim gets. Every field is optional:
+- `capacity` (object or `null`, optional): what hangar can take now. Breakdown stores it as given, up to 10,000 characters serialized (a check-in whose capacity is longer is refused whole with `400 invalid_request`, and nothing from it is recorded), with the time it arrived by Breakdown's database clock (`capacity_at`). Omitted or `null` clears both. Breakdown reads it to explain why queued sessions wait (see [Check-ins and status](#check-ins-and-status)), never to decide what a claim gets. Every field is optional:
 
   | Field | Shape | Meaning |
   | --- | --- | --- |
-  | `slots` | object: flavor → non-negative integer | How many more sessions of each flavor fit now. |
-  | `blocked` | object: flavor → string (up to 500 characters; longer is cut) | Why each flavor that doesn't fit doesn't, in your words. A reason that starts with `disk:` means the disk budget is full. Only that prefix is contract; the rest is shown to people as you wrote it. |
+  | `slots` | object: flavor → non-negative integer | How many more sessions of each flavor fit now. Keys other than `headless`, `display-godot`, and `display-browser` are ignored. |
+  | `blocked` | object: flavor → string (up to 500 characters; longer is cut) | Why each flavor that doesn't fit doesn't, in your words, keyed by flavor like `slots`. A reason that starts with `disk:` means the disk budget is full. Only that prefix is contract; the rest is shown to people quoted as yours, on one line: control characters (tabs and newlines included) become a space, bidirectional-text controls are removed, and it is trimmed. |
   | `free` | object: `ram_mb`, `cpus`, `vram_mb`, `disk_mb`, all numbers | Free RAM, CPUs, VRAM, and disk. |
   | `sessions` | object: `running`, `kept`, whole numbers | How many sessions are running, and how many ended ones you still keep a disk for. |
-  | `disk` | object: `allocated_bytes`, `apparent_bytes`, whole numbers | Total disk allocated and apparent across sessions. |
-  | `usage` | array of `{ session, allocated_bytes, apparent_bytes }`, up to 200 entries read | Per-session disk usage: the session's id, and its bytes allocated and apparent (non-negative). Breakdown shows a session's allocated bytes beside it when a full disk is why requests wait. |
+  | `disk` | object: `allocated_bytes`, `apparent_bytes`, non-negative numbers | Total disk allocated and apparent across sessions. |
+  | `usage` | array of `{ session, allocated_bytes, apparent_bytes }`; the first 64 valid entries are read | Per-session disk usage, which must fit the 10,000-character limit together with the rest of the capacity (64 entries do, beside the other fields at realistic lengths): the session's id, and its bytes allocated and apparent (non-negative). Breakdown shows a session's allocated bytes beside it when a full disk is why requests wait. |
 
   A field Breakdown can't read is treated as absent: a `free` that isn't all four numbers, a `slots` entry that isn't a non-negative integer, a `usage` entry with a bad id or negative bytes, a key it doesn't know. The rest of the capacity still counts, and the check-in is still accepted and still counts for liveness.
 
@@ -386,13 +386,13 @@ stateDiagram-v2
 - Breakdown shows this status to agents (MCP) and on its web board. A request made while hangar is offline still queues. It waits for the next claim.
 - **Why a request waits.** Breakdown explains each queued session from the latest check-ins and its own session records, when someone reads it; nothing is stored. Only hangars that are online count. The first reason that holds wins:
   1. **offline**: no hangar is online. It names the last check-in's time, or says no hangar has ever checked in.
-  2. **unknown**: no online hangar sent capacity.
+  2. **unknown**: no online hangar has a fresh capacity: none sent one, or the one it sent is older than three check-in intervals (a claim keeps hangar online but doesn't renew its capacity). It says when the last capacity was reported, if one was.
   3. **next**: an online hangar has a slot for the session's flavor. It says how many queued sessions of that flavor were requested before it.
   4. **not_offered**: no online hangar names the flavor in `slots` or `blocked`.
-  5. **disk_awaiting_review**: every online hangar that names the flavor blocks it with a `disk:` reason, and at least one ended session still holds a disk with no outcome. It quotes your reason and lists those sessions (up to 20, oldest ended first, with a total), each with its work item and the allocated bytes your `usage` reported for it. A person's accept or table releases them (see [Releasing sessions](#releasing-sessions)).
+  5. **disk_awaiting_review**: every online hangar that names the flavor blocks it with a `disk:` reason, and at least one ended session still holds a disk with no outcome. It quotes your reason (without the `disk:` prefix) and lists those sessions (up to 20, oldest ended first, with a total), each with its work item and the allocated bytes your `usage` reported for it. A person's accept or table releases them (see [Releasing sessions](#releasing-sessions)).
   6. **capacity**: otherwise. It quotes each blocking hangar's reason (`no free slot` for a flavor at 0 slots with no `blocked` entry).
 
-  Agents read it as `waiting` on each queued session from `brain_hangar_sessions`, and people see it on the session's row in the board drawer, where each session awaiting review links to its work item. `brain_hangar_status` and the board's hangar chip show the latest capacity and when it was reported.
+  Agents read it as `waiting` on each queued session from `brain_hangar_sessions`, whose response carries the sessions awaiting review once, as `awaitingReview` (`{ sessions, total }`, or `null` when no listed session waits on a full disk), rather than on every queued session. People see it on the session's row in the board drawer, where each session awaiting review links to its work item, or takes Accept or Table right there when it has no board to link to. `brain_hangar_status` and the board's hangar chip show the latest capacity and when it was reported.
 
 ## Session tokens
 

@@ -3,8 +3,10 @@
 // open session counts when there are any ("· 1 queued, 1 running"), with
 // the hangar's name, version, last check-in, its latest capacity (free slots
 // per flavor, why each blocked flavor is blocked, and when that was
-// reported; hangar-capacity), and every count in its tooltip. On phones the words give way to the dot, but the counts stay:
-// they are what changes. With no hangar ever checked in and nothing open
+// reported; hangar-capacity), and every count in its tooltip. When an online
+// hangar's fresh capacity has no slot for any flavor, the chip says so
+// ("· disk full" or "· no slots"). On phones the words give way to the dot,
+// but the capacity note and the counts stay: they are what changes. With no hangar ever checked in and nothing open
 // the chip is left off. A status chip, not a control: it takes no focus and
 // has no action, so it needs no phone-sized hit target.
 //
@@ -16,7 +18,7 @@
 // board, and the board's own reads already surface a lost connection.
 
 import { useEffect, useState } from "react";
-import { hangarPillCounts, hangarPillHidden, hangarPillLabel, hangarPillTitle, type HangarStatusView } from "../lib/hangarStatus.js";
+import { hangarPillCapacity, hangarPillCounts, hangarPillHidden, hangarPillLabel, hangarPillTitle, type HangarStatusView } from "../lib/hangarStatus.js";
 import { trpc } from "../trpc.js";
 
 export const HANGAR_POLL_MS = 30_000;
@@ -78,6 +80,7 @@ export function HangarStatusPill() {
   if (polled === null || hangarPillHidden(polled.status)) return null;
   const { status, at } = polled;
   const counts = hangarPillCounts(status);
+  const full = hangarPillCapacity(status);
 
   return (
     <span
@@ -90,8 +93,9 @@ export function HangarStatusPill() {
       {/* The dot and the counts on phones, where the header is tight; the words stay readable to a screen reader there. */}
       <span className="sr-only sm:not-sr-only">
         {hangarPillLabel(status, at)}
-        {counts === null ? "" : " ·"}
+        {full === null && counts === null ? "" : " ·"}
       </span>
+      {full === null ? null : <span data-hangar-capacity={full}>{` ${full}${counts === null ? "" : " ·"}`}</span>}
       {counts === null ? null : <span data-hangar-counts="">{` ${counts}`}</span>}
     </span>
   );

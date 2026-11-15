@@ -5,11 +5,11 @@
 // built in local time, so the expectations hold in any zone.
 
 import { describe, expect, it } from "vitest";
-import { awaitingWorkItemRoute, formatDiskBytes, hangarPillCounts, hangarPillHidden, hangarPillLabel, hangarPillTitle, type HangarStatusView } from "./hangarStatus.js";
+import { awaitingWorkItemRoute, formatDiskBytes, hangarPillCapacity, hangarPillCounts, hangarPillHidden, hangarPillLabel, hangarPillTitle, type HangarStatusView } from "./hangarStatus.js";
 import { formatRoute } from "./route.js";
 
 const NOW = new Date(2026, 10, 14, 11, 0, 0);
-const base: HangarStatusView = { status: "online", hangar: "hangar-desktop", version: "0.4.1", lastSeenAt: new Date(2026, 10, 14, 10, 59, 30).toISOString(), queued: 2, claimed: 0, running: 1, capacity: null, capacityAt: null };
+const base: HangarStatusView = { status: "online", hangar: "hangar-desktop", version: "0.4.1", lastSeenAt: new Date(2026, 10, 14, 10, 59, 30).toISOString(), intervalS: 30, now: NOW.toISOString(), queued: 2, claimed: 0, running: 1, capacity: null, capacityAt: null };
 
 describe("hangarPillLabel", () => {
   it("reads online without a time", () => {
@@ -44,7 +44,14 @@ describe("hangarPillTitle", () => {
       "hangar-desktop 0.4.1\nLast check-in 10:59:30\nSlots: headless 2, display-browser 1\ndisplay-godot blocked: disk: need 8192 MB, free 1200 MB\nCapacity reported 10:59:00\n2 queued · 0 claimed · 1 running",
     );
     expect(hangarPillTitle({ ...base, capacity: { slots: { headless: 0 } }, capacityAt }, NOW)).toBe("hangar-desktop 0.4.1\nLast check-in 10:59:30\nNo free slots\nCapacity reported 10:59:00\n2 queued · 0 claimed · 1 running");
-    expect(hangarPillTitle({ ...base, capacity: {}, capacityAt: null }, NOW)).toBe("hangar-desktop 0.4.1\nLast check-in 10:59:30\nNo free slots\n2 queued · 0 claimed · 1 running");
+    expect(hangarPillTitle({ ...base, capacity: {}, capacityAt: null }, NOW)).toBe("hangar-desktop 0.4.1\nLast check-in 10:59:30\nNo slots reported\n2 queued · 0 claimed · 1 running");
+  });
+
+  it("heads an offline hangar's capacity as the last one reported", () => {
+    const lastSeenAt = new Date(2026, 10, 14, 9, 0, 0).toISOString();
+    expect(hangarPillTitle({ ...base, status: "offline", lastSeenAt, capacity: { slots: { headless: 1 } }, capacityAt: lastSeenAt }, NOW)).toBe(
+      "hangar-desktop 0.4.1\nLast check-in 09:00:00\nLast reported capacity:\nSlots: headless 1\nCapacity reported 09:00:00\n2 queued · 0 claimed · 1 running",
+    );
   });
 
   it("says no hangar has checked in when none has", () => {
@@ -70,12 +77,31 @@ describe("hangarPillHidden", () => {
   });
 });
 
+describe("hangarPillCapacity", () => {
+  const fresh = new Date(NOW.getTime() - 20_000).toISOString();
+
+  it("says disk full when an online hangar has no slot and every block is on disk, else no slots", () => {
+    expect(hangarPillCapacity({ ...base, capacity: { slots: { headless: 0 }, blocked: { headless: "disk: need 8192 MB", "display-browser": " disk: full" } }, capacityAt: fresh })).toBe("disk full");
+    expect(hangarPillCapacity({ ...base, capacity: { slots: { headless: 0 }, blocked: { headless: "disk: full", "display-browser": "ram: full" } }, capacityAt: fresh })).toBe("no slots");
+    expect(hangarPillCapacity({ ...base, capacity: { slots: { headless: 0 } }, capacityAt: fresh })).toBe("no slots");
+    expect(hangarPillCapacity({ ...base, capacity: {}, capacityAt: fresh })).toBe("no slots");
+  });
+
+  it("says nothing with a free slot, offline, without capacity, or when the capacity is stale", () => {
+    const full = { slots: { headless: 0 }, blocked: { headless: "disk: full" } };
+    expect(hangarPillCapacity({ ...base, capacity: { ...full, slots: { headless: 0, "display-browser": 1 } }, capacityAt: fresh })).toBeNull();
+    expect(hangarPillCapacity({ ...base, status: "offline", capacity: full, capacityAt: fresh })).toBeNull();
+    expect(hangarPillCapacity({ ...base, capacity: null, capacityAt: null })).toBeNull();
+    expect(hangarPillCapacity({ ...base, capacity: full, capacityAt: new Date(NOW.getTime() - 90_000).toISOString() })).toBeNull();
+    expect(hangarPillCapacity({ ...base, capacity: full, capacityAt: null })).toBeNull();
+  });
+});
+
 describe("awaitingWorkItemRoute", () => {
-  it("opens the item on its project's board by its external id, and in the graph without a project", () => {
-    const item = { id: "8b1e4c1d-2f3a-4b5c-8d9e-0a1b2c3d4e5f", externalId: "bd-d38.5", project: "bd" };
+  it("opens the item on its project's board by its external id", () => {
+    const item = { externalId: "bd-d38.5", project: "bd" };
     expect(awaitingWorkItemRoute(item)).toEqual({ view: "board", viewId: null, projects: ["bd"], item: "bd-d38.5" });
     expect(formatRoute(awaitingWorkItemRoute(item))).toContain("bd-d38.5");
-    expect(awaitingWorkItemRoute({ ...item, project: null })).toEqual({ view: "graph", q: null, types: [], node: item.id });
   });
 });
 
@@ -87,5 +113,9 @@ describe("formatDiskBytes", () => {
     expect(formatDiskBytes(2048)).toBe("2.0 KB");
     expect(formatDiskBytes(512)).toBe("512 B");
     expect(formatDiskBytes(3 * 1024 ** 4)).toBe("3.0 TB");
+    // The unit is picked after rounding.
+    expect(formatDiskBytes(1024 ** 3 - 1)).toBe("1.0 GB");
+    expect(formatDiskBytes(1024 ** 2 - 1)).toBe("1.0 MB");
+    expect(formatDiskBytes(1023.9 * 1024 ** 2)).toBe("1023.9 MB");
   });
 });

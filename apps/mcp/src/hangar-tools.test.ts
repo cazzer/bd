@@ -264,16 +264,32 @@ describe("brain_hangar_sessions says why a queued session waits", () => {
       const queuedItem = await workItem("Waiting fixture");
       const { sessionId } = await request(client, queuedItem, "display-godot");
 
-      const [queued] = (await call(client, "brain_hangar_sessions", { workItemId: queuedItem })).sessions;
+      const listing = await call(client, "brain_hangar_sessions", { workItemId: queuedItem });
+      const [queued] = listing.sessions;
       expect(queued.id).toBe(sessionId);
+      // Another online hangar naming display-godot (a live one on a shared database) could change the reason: then only the shape is ours.
+      const others = await db.execute<{ hangar: string }>(sql`
+        SELECT hangar FROM hangar_check_ins
+        WHERE hangar <> ${HANGAR} AND last_seen_at > now() - interval '90 seconds'
+          AND (capacity->'slots' ? 'display-godot' OR capacity->'blocked' ? 'display-godot')
+      `);
+      if (others.rows.length > 0) {
+        expect(HANGAR_WAIT_KINDS).toContain(queued.waiting.kind);
+        expect(queued.waiting).not.toHaveProperty("sessions");
+        return;
+      }
       expect(queued.waiting.kind).toBe("disk_awaiting_review");
       expect(queued.waiting.reasons).toContainEqual({ hangar: HANGAR, reason: "disk: need 8192 MB, free 1200 MB" });
-      expect(queued.waiting.text).toMatch(/^Waiting on disk: .*disk: need 8192 MB, free 1200 MB.*awaiting accept or table\.$/);
+      expect(queued.waiting.text).toMatch(new RegExp(`^Waiting on disk \\(.*${HANGAR} says "need 8192 MB, free 1200 MB".*\\)\\. .*accept or table (it|them) to free space\\.$`));
       expect(queued.waiting.total).toBeGreaterThanOrEqual(1);
-      expect(queued.waiting.sessions.length).toBe(Math.min(queued.waiting.total, 20));
+      // The list is carried once for the whole response, not on each queued session.
+      expect(queued.waiting).not.toHaveProperty("sessions");
+      const { awaitingReview } = listing;
+      expect(awaitingReview.total).toBe(queued.waiting.total);
+      expect(awaitingReview.sessions.length).toBe(Math.min(awaitingReview.total, 20));
       // Other suites' ended sessions may be older than ours; past 20, ours may not be listed.
-      if (queued.waiting.total <= 20) {
-        expect(queued.waiting.sessions).toContainEqual({
+      if (awaitingReview.total <= 20) {
+        expect(awaitingReview.sessions).toContainEqual({
           id: held,
           claimedBy: HANGAR,
           workItem: { id: reviewItem, externalId: reviewNode!.externalId, title: "Awaiting review fixture", project: null },
@@ -281,8 +297,10 @@ describe("brain_hangar_sessions says why a queued session waits", () => {
         });
       }
 
-      const [ended] = (await call(client, "brain_hangar_sessions", { workItemId: reviewItem })).sessions;
-      expect(ended).toMatchObject({ id: held, state: "stopped", waiting: null });
+      const endedListing = await call(client, "brain_hangar_sessions", { workItemId: reviewItem });
+      expect(endedListing.sessions[0]).toMatchObject({ id: held, state: "stopped", waiting: null });
+      // Nothing queued in this listing waits on disk, so no list is carried.
+      expect(endedListing.awaitingReview).toBeNull();
     } finally {
       await db.delete(hangarCheckIns).where(eq(hangarCheckIns.hangar, HANGAR));
     }

@@ -41,6 +41,7 @@ import {
   listSessions,
   MAX_CLAIM_CANDIDATES,
   MAX_HANGAR_AWAITING_REVIEW_LISTED,
+  MAX_HANGAR_CAPACITY_CHARS,
   MAX_HANGAR_SESSIONS_LIMIT,
   MAX_HANGAR_USAGE_ENTRIES,
   normalizeHangarSessionMetadata,
@@ -875,15 +876,35 @@ describe("parseHangarCapacity", () => {
   });
 
   it("drops negative, fractional, and non-numeric slots", () => {
-    expect(parseHangarCapacity({ slots: { headless: -1, "display-browser": 1.5, a: "2", b: null, c: 0, d: 3 } })).toEqual({ slots: { c: 0, d: 3 } });
+    expect(parseHangarCapacity({ slots: { headless: -1, "display-browser": 1.5 } })).toEqual({ slots: {} });
+    expect(parseHangarCapacity({ slots: { headless: "2", "display-browser": null } })).toEqual({ slots: {} });
+    expect(parseHangarCapacity({ slots: { headless: 0, "display-browser": 3 } })).toEqual({ slots: { headless: 0, "display-browser": 3 } });
     expect(parseHangarCapacity({ slots: [1, 2] })).toEqual({});
   });
 
+  it("keeps slots and blocked entries only for the known flavors", () => {
+    expect(parseHangarCapacity({ slots: { headless: 1, gpu: 2, Headless: 3 }, blocked: { gpu: "ram: full", "display-browser": "ram: full" } })).toEqual({
+      slots: { headless: 1 },
+      blocked: { "display-browser": "ram: full" },
+    });
+  });
+
   it("cuts a blocked reason to 500 characters and drops a blank or non-string one", () => {
-    const parsed = parseHangarCapacity({ blocked: { headless: `disk: ${"x".repeat(600)}`, a: 42, b: "  ", c: "ram: full" } });
+    const parsed = parseHangarCapacity({ blocked: { headless: `disk: ${"x".repeat(600)}`, "display-browser": 42, "display-godot": "  " } });
     expect(parsed.blocked!["headless"]).toHaveLength(500);
     expect(parsed.blocked!["headless"]!.startsWith("disk: ")).toBe(true);
-    expect(Object.keys(parsed.blocked!).sort()).toEqual(["c", "headless"]);
+    expect(Object.keys(parsed.blocked!)).toEqual(["headless"]);
+  });
+
+  it("flattens a blocked reason to one line: controls become a space, bidi controls go, then it is trimmed", () => {
+    const parsed = parseHangarCapacity({
+      blocked: {
+        headless: "\tdisk:\tneed\r\n\n8192 MB,\u0085free 1200 MB\n",
+        "display-browser": "\u202Eram: \u2066full\u2069\u200E\u200F\u202A\u202C",
+        "display-godot": "\n\t\u202E\r",
+      },
+    });
+    expect(parsed.blocked).toEqual({ headless: "disk: need 8192 MB, free 1200 MB", "display-browser": "ram: full" });
   });
 
   it("reads free, sessions, and disk whole: one bad field drops the object", () => {
@@ -897,7 +918,7 @@ describe("parseHangarCapacity", () => {
     expect(parseHangarCapacity({ disk: "full" })).toEqual({});
   });
 
-  it("keeps usage entries with a uuid and non-negative byte counts, lowercased, at most 200", () => {
+  it("keeps usage entries with a uuid and non-negative byte counts, lowercased, at most MAX_HANGAR_USAGE_ENTRIES", () => {
     const good = { session: S.toUpperCase(), allocated_bytes: 1, apparent_bytes: 2 };
     const parsed = parseHangarCapacity({
       usage: [good, { session: "not-a-uuid", allocated_bytes: 1, apparent_bytes: 2 }, { session: S, allocated_bytes: -1, apparent_bytes: 2 }, { session: S, allocated_bytes: 1 }, "junk", null],
@@ -910,15 +931,28 @@ describe("parseHangarCapacity", () => {
     expect(parseHangarCapacity({ usage: { session: S } })).toEqual({});
   });
 
+  it("fits MAX_HANGAR_USAGE_ENTRIES maximal usage entries beside realistic fields under the check-in limit", () => {
+    const entry = { session: S, allocated_bytes: Number.MAX_SAFE_INTEGER, apparent_bytes: Number.MAX_SAFE_INTEGER };
+    const capacity = {
+      slots: { headless: 2, "display-browser": 1, "display-godot": 0 },
+      blocked: { "display-godot": "disk: need 8192 MB, free 1200 MB; 3 sessions kept awaiting review" },
+      free: { ram_mb: 123456, cpus: 64, vram_mb: 24576, disk_mb: 1234567 },
+      sessions: { running: 12, kept: 34 },
+      disk: { allocated_bytes: Number.MAX_SAFE_INTEGER, apparent_bytes: Number.MAX_SAFE_INTEGER },
+      usage: Array.from({ length: MAX_HANGAR_USAGE_ENTRIES }, () => entry),
+    };
+    expect(JSON.stringify(capacity).length).toBeLessThan(MAX_HANGAR_CAPACITY_CHARS);
+  });
+
   it.each([null, undefined, [], "slots", 42, true])("reads %j as empty, never throwing", (raw) => {
     expect(parseHangarCapacity(raw)).toEqual({});
   });
 
-  it("treats a __proto__ key as an ordinary entry, never the prototype", () => {
+  it("drops a __proto__ key like any unknown flavor, never touching the prototype", () => {
     const parsed = parseHangarCapacity(JSON.parse('{"slots":{"__proto__":3,"headless":1},"blocked":{"__proto__":"disk: x"}}'));
+    expect(parsed).toEqual({ slots: { headless: 1 }, blocked: {} });
     expect(Object.getPrototypeOf(parsed.slots)).toBe(Object.prototype);
-    expect(Object.hasOwn(parsed.slots!, "__proto__")).toBe(true);
-    expect(parsed.slots!["headless"]).toBe(1);
+    expect(Object.hasOwn(parsed.slots!, "__proto__")).toBe(false);
     expect(parseHangarCapacity(JSON.parse('{"__proto__":{"slots":{"headless":9}}}'))).toEqual({});
   });
 });
@@ -927,11 +961,13 @@ describe("classifyQueuedWait", () => {
   const NOW = new Date("2026-11-14T11:00:00.000Z");
   const A = "aaaaaaaa-0000-4000-8000-000000000001";
   const B = "bbbbbbbb-0000-4000-8000-000000000002";
-  const seen = (hangar: string, capacity: unknown, agoMs = 5_000): HangarCheckInSnapshot => ({
+  /** A check-in `agoMs` before NOW; its capacity reported then too, unless `capacityAgoMs` says otherwise. */
+  const seen = (hangar: string, capacity: unknown, agoMs = 5_000, capacityAgoMs = agoMs): HangarCheckInSnapshot => ({
     hangar,
     lastSeenAt: new Date(NOW.getTime() - agoMs),
     intervalS: 30,
     capacity: capacity === null ? null : parseHangarCapacity(capacity),
+    capacityAt: capacity === null ? null : new Date(NOW.getTime() - capacityAgoMs),
   });
   const awaitingAB = {
     total: 2,
@@ -950,12 +986,25 @@ describe("classifyQueuedWait", () => {
   });
 
   it("offline, never seen, with no check-in", () => {
-    expect(classifyQueuedWait(headless, ctx([]))).toEqual({ kind: "offline", since: null, text: "Waiting: hangar has never checked in." });
+    expect(classifyQueuedWait(headless, ctx([]))).toEqual({ kind: "offline", since: null, text: "Waiting: hangar has never checked in. Start hangar to run it." });
   });
 
   it("unknown when online hangars reported no capacity; an offline one's capacity doesn't count", () => {
     const waiting = classifyQueuedWait(headless, ctx([seen("h1", null), seen("h2", { slots: { headless: 4 } }, 2 * 3600_000)]));
-    expect(waiting).toEqual({ kind: "unknown", text: "Waiting: hangar is online but reported no capacity." });
+    expect(waiting).toEqual({ kind: "unknown", text: "Waiting: hangar is online but hasn't reported capacity yet." });
+  });
+
+  it("unknown when the online hangar's capacity is stale, naming when it was last reported", () => {
+    // Online by a claim 5 s ago; its capacity is from 10 minutes before NOW.
+    const stale = seen("h1", { slots: { headless: 2 } }, 5_000, 600_000);
+    expect(classifyQueuedWait(headless, ctx([stale]))).toEqual({ kind: "unknown", text: "Waiting: hangar is online but its last capacity report is from 2026-11-14T10:50:00.000Z." });
+    // Just inside three intervals still counts.
+    expect(classifyQueuedWait(headless, ctx([seen("h1", { slots: { headless: 2 } }, 5_000, 89_000)])).kind).toBe("next");
+    // A capacity with no time counts as not reported.
+    const timeless = { ...seen("h1", { slots: { headless: 2 } }), capacityAt: null };
+    expect(classifyQueuedWait(headless, ctx([timeless]))).toEqual({ kind: "unknown", text: "Waiting: hangar is online but hasn't reported capacity yet." });
+    // A fresh capacity on another online hangar decides instead.
+    expect(classifyQueuedWait(headless, ctx([stale, seen("h2", { blocked: { headless: "ram: full" } })])).kind).toBe("capacity");
   });
 
   it("an empty capacity still counts as reported", () => {
@@ -964,9 +1013,9 @@ describe("classifyQueuedWait", () => {
 
   it("next in line, with how many are ahead", () => {
     const room = ctx([seen("h1", { slots: { headless: 1 } })]);
-    expect(classifyQueuedWait(headless, room)).toEqual({ kind: "next", ahead: 0, text: "Next in line: hangar has room for a headless session." });
-    expect(classifyQueuedWait({ flavor: "headless", ahead: 1 }, room)).toEqual({ kind: "next", ahead: 1, text: "Waiting: 1 headless request ahead; hangar has room for headless." });
-    expect(classifyQueuedWait({ flavor: "headless", ahead: 3 }, room).text).toBe("Waiting: 3 headless requests ahead; hangar has room for headless.");
+    expect(classifyQueuedWait(headless, room)).toEqual({ kind: "next", ahead: 0, text: "Next in line: hangar has room and should start it at its next check-in." });
+    expect(classifyQueuedWait({ flavor: "headless", ahead: 1 }, room)).toEqual({ kind: "next", ahead: 1, text: "Waiting: 1 earlier headless request goes first; hangar has room for headless now." });
+    expect(classifyQueuedWait({ flavor: "headless", ahead: 3 }, room).text).toBe("Waiting: 3 earlier headless requests go first; hangar has room for headless now.");
   });
 
   it("not offered when no online hangar names the flavor", () => {
@@ -981,8 +1030,9 @@ describe("classifyQueuedWait", () => {
     const waiting = classifyQueuedWait(headless, ctx([h1], awaitingAB));
     expect(waiting).toEqual({
       kind: "disk_awaiting_review",
-      text: `Waiting on disk: h1:  ${DISK}. 2 ended sessions still hold a disk awaiting accept or table.`,
-      reasons: [{ hangar: "h1", reason: ` ${DISK}` }],
+      text: 'Waiting on disk (h1 says "need 8192 MB, free 1200 MB"). 2 ended sessions still hold disks; accept or table them to free space.',
+      // Trimmed on read, so the leading space hangar sent is gone.
+      reasons: [{ hangar: "h1", reason: DISK }],
       sessions: [{ ...awaitingAB.sessions[0], diskAllocatedBytes: 8_000 }, awaitingAB.sessions[1]],
       total: 2,
     });
@@ -995,13 +1045,13 @@ describe("classifyQueuedWait", () => {
 
   it("one awaiting session reads in the singular", () => {
     const waiting = classifyQueuedWait(headless, ctx([seen("h1", { blocked: { headless: DISK } })], { total: 1, sessions: [awaitingAB.sessions[1]!] }));
-    expect(waiting.text).toBe(`Waiting on disk: h1: ${DISK}. 1 ended session still holds a disk awaiting accept or table.`);
+    expect(waiting.text).toBe('Waiting on disk (h1 says "need 8192 MB, free 1200 MB"). 1 ended session still holds a disk; accept or table it to free space.');
   });
 
   it("capacity when the disk is full but nothing awaits review", () => {
     expect(classifyQueuedWait(headless, ctx([seen("h1", { blocked: { headless: DISK } })]))).toEqual({
       kind: "capacity",
-      text: `Waiting on capacity: h1: ${DISK}.`,
+      text: `Waiting on capacity (h1 says "${DISK}").`,
       reasons: [{ hangar: "h1", reason: DISK }],
     });
   });
@@ -1009,7 +1059,7 @@ describe("classifyQueuedWait", () => {
   it("capacity when another budget is full, even with sessions awaiting review", () => {
     expect(classifyQueuedWait(headless, ctx([seen("h1", { blocked: { headless: "ram: need 4096 MB, free 1200" } })], awaitingAB))).toEqual({
       kind: "capacity",
-      text: "Waiting on capacity: h1: ram: need 4096 MB, free 1200.",
+      text: 'Waiting on capacity (h1 says "ram: need 4096 MB, free 1200").',
       reasons: [{ hangar: "h1", reason: "ram: need 4096 MB, free 1200" }],
     });
   });
@@ -1017,14 +1067,14 @@ describe("classifyQueuedWait", () => {
   it("no free slot for a flavor at 0 with no blocked entry", () => {
     expect(classifyQueuedWait(headless, ctx([seen("h1", { slots: { headless: 0 } })], awaitingAB))).toEqual({
       kind: "capacity",
-      text: "Waiting on capacity: h1: no free slot.",
+      text: "Waiting on capacity (h1 has no free slot).",
       reasons: [{ hangar: "h1", reason: "no free slot" }],
     });
   });
 
   it("capacity when one hangar blocks on disk and another on RAM", () => {
     const waiting = classifyQueuedWait(headless, ctx([seen("h1", { blocked: { headless: DISK } }), seen("h2", { blocked: { headless: "ram: full" } })], awaitingAB));
-    expect(waiting).toEqual({ kind: "capacity", text: `Waiting on capacity: h1: ${DISK}; h2: ram: full.`, reasons: [{ hangar: "h1", reason: DISK }, { hangar: "h2", reason: "ram: full" }] });
+    expect(waiting).toEqual({ kind: "capacity", text: `Waiting on capacity (h1 says "${DISK}"; h2 says "ram: full").`, reasons: [{ hangar: "h1", reason: DISK }, { hangar: "h2", reason: "ram: full" }] });
   });
 
   it("next when a second online hangar has room, and an offline hangar's room is ignored", () => {
@@ -1107,7 +1157,7 @@ describe("explainQueuedSessions", () => {
 
   it("offline, never seen, when no hangar has checked in", async () => {
     const q = await request("headless");
-    expect(await explainOne(q.id, [`${ACTOR_PREFIX}-ghost`])).toEqual({ kind: "offline", since: null, text: "Waiting: hangar has never checked in." });
+    expect(await explainOne(q.id, [`${ACTOR_PREFIX}-ghost`])).toEqual({ kind: "offline", since: null, text: "Waiting: hangar has never checked in. Start hangar to run it." });
   });
 
   it("unknown when the online hangar sent no capacity", async () => {
@@ -1116,14 +1166,24 @@ describe("explainQueuedSessions", () => {
     expect(await explainOne(q.id, [hangar])).toMatchObject({ kind: "unknown" });
   });
 
+  it("unknown when the online hangar's capacity is stale, naming when it was reported", async () => {
+    const hangar = await checkedIn("x-stale", { slots: { headless: 1 } });
+    const aged = await db.execute<{ capacity_at: Date }>(sql`
+      UPDATE hangar_check_ins SET capacity_at = date_trunc('milliseconds', now() - interval '10 minutes') WHERE hangar = ${hangar} RETURNING capacity_at
+    `);
+    const at = new Date(aged.rows[0]!.capacity_at).toISOString();
+    const q = await request("headless");
+    expect(await explainOne(q.id, [hangar])).toEqual({ kind: "unknown", text: `Waiting: hangar is online but its last capacity report is from ${at}.` });
+  });
+
   it("next in line, counting earlier same-flavor requests, also when asked about one alone", async () => {
     const hangar = await checkedIn("x-next", { slots: { headless: 1 } });
     const p = await request("headless");
     const q = await request("headless");
     const other = await request("display-browser");
     const all = await explainQueuedSessions(db, { among: { hangars: [hangar], sessions: [p.id, q.id, other.id] } });
-    expect(all.get(p.id)).toEqual({ kind: "next", ahead: 0, text: "Next in line: hangar has room for a headless session." });
-    expect(all.get(q.id)).toEqual({ kind: "next", ahead: 1, text: "Waiting: 1 headless request ahead; hangar has room for headless." });
+    expect(all.get(p.id)).toEqual({ kind: "next", ahead: 0, text: "Next in line: hangar has room and should start it at its next check-in." });
+    expect(all.get(q.id)).toEqual({ kind: "next", ahead: 1, text: "Waiting: 1 earlier headless request goes first; hangar has room for headless now." });
     expect(all.get(other.id)).toMatchObject({ kind: "not_offered" });
     const alone = await explainQueuedSessions(db, { ids: [q.id], among: { hangars: [hangar], sessions: [p.id, q.id] } });
     expect([...alone.keys()]).toEqual([q.id]);
@@ -1145,7 +1205,7 @@ describe("explainQueuedSessions", () => {
     const q = await request("headless");
     expect(await explainOne(q.id, [hangar], [a.id, b.id, q.id])).toEqual({
       kind: "disk_awaiting_review",
-      text: `Waiting on disk: ${hangar}: ${DISK}. 2 ended sessions still hold a disk awaiting accept or table.`,
+      text: `Waiting on disk (${hangar} says "need 8192 MB, free 1200 MB"). 2 ended sessions still hold disks; accept or table them to free space.`,
       reasons: [{ hangar, reason: DISK }],
       sessions: [
         { id: a.id, claimedBy: a.hangar, workItem: { id: itemA.id, externalId: itemA.externalId, title: "A's work", project: "bd" }, diskAllocatedBytes: 8_000_000_000 },
@@ -1158,7 +1218,7 @@ describe("explainQueuedSessions", () => {
   it("capacity when the disk is full and nothing awaits review", async () => {
     const hangar = await checkedIn("x-disk-none", { blocked: { headless: DISK } });
     const q = await request("headless");
-    expect(await explainOne(q.id, [hangar])).toEqual({ kind: "capacity", text: `Waiting on capacity: ${hangar}: ${DISK}.`, reasons: [{ hangar, reason: DISK }] });
+    expect(await explainOne(q.id, [hangar])).toEqual({ kind: "capacity", text: `Waiting on capacity (${hangar} says "${DISK}").`, reasons: [{ hangar, reason: DISK }] });
   });
 
   it("capacity when RAM is full, even with a session awaiting review", async () => {
