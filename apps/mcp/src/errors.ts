@@ -31,7 +31,10 @@ import {
   HangarSessionNotClaimedByError,
   HangarSessionNotFoundError,
   HangarTransitionError,
+  HangarOutcomeRefusedError,
+  HangarEndedSessionChangeError,
   HangarSessionMergeError,
+  HangarOutcomeMergeError,
   KnowledgeStoreError,
   LookupFailedError,
   MergeFailedError,
@@ -41,6 +44,7 @@ import {
   NotAWorkItemError,
   ReservedHangarEdgeError,
   ReservedHangarNodeError,
+  ReservedInboxItemError,
   RetrievalFailedError,
   SelfMergeError,
 } from "@breakdown/core";
@@ -155,6 +159,9 @@ export function mapError(toolName: string, err: unknown): CallToolResult {
   if (err instanceof HangarSessionMergeError) {
     return actionable(err, "Nothing was merged. A hangar session is not a duplicate of anything: it is bound to its token and its inbox items. Merge other nodes; leave sessions as they are.");
   }
+  if (err instanceof HangarOutcomeMergeError) {
+    return actionable(err, "Nothing was merged. An outcome request is the person's card for one hangar session; it is not a duplicate of anything, and nothing is a duplicate of it. Leave it as it is; ask for an outcome with brain_hangar_outcome_request.");
+  }
   if (err instanceof MergeFailedError) {
     return actionable(err, RETRY_HINT);
   }
@@ -216,15 +223,29 @@ export function mapError(toolName: string, err: unknown): CallToolResult {
   if (err instanceof ReservedHangarNodeError) {
     return actionable(err, "Nothing from this call was persisted. Queue a hangar session with brain_hangar_request and read sessions with brain_hangar_sessions; give any other node a different nodeType and sourceSystem, then retry.");
   }
+  if (err instanceof ReservedInboxItemError) {
+    return actionable(err, "Nothing from this call was persisted. An outcome request (an inbox key starting \"hangar-outcome:\") is written only by brain_hangar_outcome_request, which writes its card itself; give any other inbox item a different externalId, then retry.");
+  }
   if (err instanceof ReservedHangarEdgeError) {
     return actionable(err, "Nothing from this call was persisted. A session's run_by link is written when it is queued (brain_hangar_request); give other edges a sourceSystem other than \"hangar\" and a source that is not a hangar session, then retry.");
   }
   if (err instanceof InvalidHangarSessionError) {
     return actionable(err, "Fix that argument and retry; nothing was queued. flavor is one of headless, display-godot, display-browser; repo is 1-200 characters with no control characters; states are queued, claimed, running, stopped, failed.");
   }
+  if (err instanceof HangarOutcomeRefusedError) {
+    return actionable(
+      err,
+      err.kind === "state"
+        ? "Nothing was filed. Ask for an outcome only once the session has stopped or failed; check its state with brain_hangar_sessions."
+        : "Nothing was filed. Hangar has already released this session, so its outcome is final.",
+    );
+  }
+  if (err instanceof HangarSessionNotFoundError && toolName === "brain_hangar_outcome_request") {
+    return actionable(err, "Nothing was filed. Pass the id of a hangar session from brain_hangar_sessions.");
+  }
   // Only hangar's REST API claims and reports sessions; no MCP tool reaches
   // these today, but a session-state refusal is never something to retry.
-  if (err instanceof HangarSessionNotFoundError || err instanceof HangarTransitionError || err instanceof HangarSessionNotClaimedByError) {
+  if (err instanceof HangarSessionNotFoundError || err instanceof HangarTransitionError || err instanceof HangarSessionNotClaimedByError || err instanceof HangarEndedSessionChangeError) {
     return actionable(err, "Session state is reported by hangar itself, not through MCP; read the session with brain_hangar_sessions instead of retrying.");
   }
 

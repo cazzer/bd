@@ -20,6 +20,7 @@ import {
   ReservedHangarNodeError,
   ReservedHangarEdgeError,
   HangarSessionMergeError,
+  HangarOutcomeMergeError,
   InvalidLookupIdError,
   InvalidLookupOptionError,
   NotAWorkItemError,
@@ -299,6 +300,14 @@ describe("mapError: hangar", () => {
     const text = textOf(mapError("brain_merge", new HangarSessionMergeError("a", "b", "a")));
     expect(text).toContain("node a is a hangar session");
     expect(text).toMatch(/nothing was merged/i);
+    expect(text).not.toMatch(STACK_LINE);
+  });
+
+  it("maps HangarOutcomeMergeError to the outcome request and says nothing was merged", () => {
+    const text = textOf(mapError("brain_merge", new HangarOutcomeMergeError("a", "b", "b")));
+    expect(text).toContain("node b is a hangar outcome request");
+    expect(text).toMatch(/nothing was merged/i);
+    expect(text).not.toMatch(/HangarOutcomeMergeError:/);
     expect(text).not.toMatch(STACK_LINE);
   });
 

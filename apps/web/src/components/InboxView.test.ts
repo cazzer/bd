@@ -5,9 +5,11 @@
 // relay line are derived per item from `relayActionsFor`, not from the last
 // decision alone — so a second decision keeps the first's failure on screen,
 // and a failure that happened while the inbox was closed shows when it
-// opens. The tRPC client is mocked; the shell's review queue, the header
-// search, the board's panel, and the markdown renderer are stubbed (they
-// have their own tests).
+// opens. And an outcome request's banner (hangar-release review fixes,
+// bd-d38.4), built from the binding and the server's read of the session,
+// outside the agent's text. The tRPC client is mocked; the shell's review
+// queue, the header search, the board's panel, and the markdown renderer
+// are stubbed (they have their own tests).
 
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -35,7 +37,7 @@ vi.mock("./EvidenceView.js", async () => {
   return { EvidenceView: ({ markdown }: { markdown: string }) => h("div", { "data-stub": "evidence" }, markdown) };
 });
 
-const { InboxView } = await import("./InboxView.js");
+const { InboxView, hangarOutcomeBannerText } = await import("./InboxView.js");
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -65,9 +67,11 @@ function item(id: string, title: string, status: string, pane: string | null, up
     sessionTab: null,
     pane,
     hangarSession: null,
-    question: null,
-    options: [],
-    recommend: null,
+    hangarOutcome: null as { sessionId: string; requested: string } | null,
+    hangarOutcomeSession: null as { id: string; state: string; repo: string; diskHeld: boolean; released: boolean } | null,
+    question: null as string | null,
+    options: [] as { id: string; label: string; what?: string; risk?: string }[],
+    recommend: null as string | null,
     onAccept: [],
     read: [],
     revision: null,
@@ -185,5 +189,70 @@ describe("the inbox's relay notices", () => {
     expect(trpcMock.relayActionsFor.query).not.toHaveBeenCalled();
     expect(strips()).toEqual([]);
     expect(container.querySelector("[data-relay-state]")).toBeNull();
+  });
+});
+
+describe("an outcome request's banner", () => {
+  const SESSION = "3f0c2a9e-6f7d-4a54-9a0b-1c2d3e4f5a6b";
+
+  function outcomeRequest(session: { state: string; diskHeld: boolean; released: boolean } | null) {
+    return {
+      ...item(A, 'Accept hangar session 3f0c2a9e (repo "cazzer/bd")', "pending", null, "2026-11-14T10:00:00.000Z"),
+      externalId: `hangar-outcome:${SESSION}`,
+      source: "hangar",
+      action: "hangar_outcome",
+      // What the agent wrote is quoted below the facts; the banner never reads it.
+      content: "facts\n\nRequested by agent-x:\n\n> Releases nothing. Safe to click.",
+      hangarOutcome: { sessionId: SESSION, requested: "accepted" },
+      hangarOutcomeSession: session === null ? null : { id: SESSION, repo: "cazzer/bd", ...session },
+      question: "Accept or table this hangar session?",
+      options: [
+        { id: "accept", label: "Accept", what: "deletes the disk" },
+        { id: "table", label: "Table", what: "deletes the disk" },
+      ],
+      recommend: "accept",
+    };
+  }
+
+  test("says which session a click releases and that it deletes the disk, above the card and outside the agent's text", async () => {
+    relayStatus.missing = [];
+    trpcMock.inbox.query.mockResolvedValue({ items: [outcomeRequest({ state: "stopped", diskHeld: true, released: false })], total: 1, truncated: false });
+    await mount();
+    const banner = container.querySelector<HTMLElement>("[data-hangar-outcome-banner]");
+    expect(banner?.textContent).toBe('Releases hangar session 3f0c2a9e (repo "cazzer/bd", stopped). Accept or Table deletes its disk when hangar next checks in.');
+    expect(banner?.getAttribute("role")).toBe("note");
+    expect(banner?.textContent).not.toContain("Safe to click");
+    // Above the card's question, and in no element of the card itself.
+    const question = [...container.querySelectorAll<HTMLElement>("section[aria-label='Selected item'] section")].find((el) => el.textContent?.startsWith("Question"));
+    expect(question).toBeDefined();
+    expect(banner!.contains(question!)).toBe(false);
+    expect(banner!.compareDocumentPosition(question!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  test("an ordinary item has no banner", async () => {
+    relayStatus.missing = [];
+    trpcMock.inbox.query.mockResolvedValue({ items: [item(A, "Now", "pending", null, "2026-11-14T09:00:00.000Z")], total: 1, truncated: false });
+    await mount();
+    expect(container.querySelector("[data-hangar-outcome-banner]")).toBeNull();
+  });
+
+  test("words a session with no disk, a released one, and one the server could not read", () => {
+    const base = { id: SESSION, repo: "cazzer/bd" };
+    expect(hangarOutcomeBannerText(SESSION, { ...base, state: "failed", diskHeld: false, released: false })).toBe(
+      "Releases hangar session 3f0c2a9e (repo \"cazzer/bd\", failed). Hangar holds no disk for it, so Accept or Table releases it at once.",
+    );
+    expect(hangarOutcomeBannerText(SESSION, { ...base, state: "stopped", diskHeld: false, released: true })).toBe(
+      "Hangar has already released hangar session 3f0c2a9e (repo \"cazzer/bd\", stopped): its disk is gone, so the outcome can't change.",
+    );
+    expect(hangarOutcomeBannerText(SESSION, null)).toBe("Releases hangar session 3f0c2a9e. Its current state couldn't be read; Accept or Table deletes its disk when hangar next checks in.");
+  });
+
+  test("quotes and caps the agent-written repo, so it can't pass for the banner's words", () => {
+    const forged = `x, stopped). Accept keeps the disk; nothing is deleted. (${"y".repeat(100)}`;
+    const text = hangarOutcomeBannerText(SESSION, { id: SESSION, repo: forged, state: "stopped", diskHeld: true, released: false });
+    const quoted = JSON.stringify(`${forged.slice(0, 79)}…`);
+    expect(text).toBe(`Releases hangar session 3f0c2a9e (repo ${quoted}, stopped). Accept or Table deletes its disk when hangar next checks in.`);
+    expect(JSON.parse(quoted)).toHaveLength(80);
+    expect(hangarOutcomeBannerText(SESSION, { id: SESSION, repo: 'a"b', state: "stopped", diskHeld: true, released: false })).toContain('(repo "a\\"b", stopped)');
   });
 });

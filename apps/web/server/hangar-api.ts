@@ -38,6 +38,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import {
   claimSession,
   getNodes,
+  HangarEndedSessionChangeError,
   HANGAR_FLAVORS,
   HANGAR_SESSION_STATES,
   HangarSessionNotClaimedByError,
@@ -47,6 +48,7 @@ import {
   InvalidLookupIdError,
   listSessions,
   MAX_HANGAR_DISK_PATH_LENGTH,
+  MAX_HANGAR_FAILURE_REASON_LENGTH,
   MAX_HANGAR_FIELD_LENGTH,
   MAX_HANGAR_REQUEUE_REASON_LENGTH,
   MAX_HANGAR_SESSIONS_LIMIT,
@@ -123,12 +125,25 @@ const claimSchema = z.object({
   wait_s: z.number().int().min(0).max(MAX_HANGAR_WAIT_S).default(0),
 });
 
-const updateSchema = z.object({
-  state: z.enum(HANGAR_SESSION_STATES).optional(),
-  container: z.string().max(MAX_HANGAR_FIELD_LENGTH).nullable().optional(),
-  host: z.string().max(MAX_HANGAR_FIELD_LENGTH).nullable().optional(),
-  disk_path: z.string().max(MAX_HANGAR_DISK_PATH_LENGTH).nullable().optional(),
-});
+// `outcome` is not a field here: only a person sets it, so a sent one is
+// dropped like any unknown field (hangar-release; docs/hangar-api.md).
+// `reason` is used only with state "failed"; with any other state, or none,
+// it is an unused field and dropped before it is checked, so a hangar that
+// sends it more widely keeps working.
+const updateSchema = z.preprocess(
+  (body) => {
+    if (typeof body !== "object" || body === null || Array.isArray(body) || (body as Record<string, unknown>)["state"] === "failed") return body;
+    const { reason: _unused, ...rest } = body as Record<string, unknown>;
+    return rest;
+  },
+  z.object({
+    state: z.enum(HANGAR_SESSION_STATES).optional(),
+    container: z.string().max(MAX_HANGAR_FIELD_LENGTH).nullable().optional(),
+    host: z.string().max(MAX_HANGAR_FIELD_LENGTH).nullable().optional(),
+    disk_path: z.string().max(MAX_HANGAR_DISK_PATH_LENGTH).nullable().optional(),
+    reason: z.string().trim().min(1).max(MAX_HANGAR_FAILURE_REASON_LENGTH).optional(),
+  }),
+);
 
 const requeueSchema = z.object({
   reason: z.string().trim().min(1).max(MAX_HANGAR_REQUEUE_REASON_LENGTH),
@@ -180,6 +195,10 @@ async function sessionsJson(db: Database, sessions: readonly HangarSession[]): P
     claimed_by: s.claimedBy,
     claimed_at: s.claimedAt,
     requested_at: s.occurredAt,
+    outcome: s.outcome,
+    outcome_at: s.outcomeAt,
+    outcome_by: s.outcomeBy,
+    released: s.released,
   }));
 }
 
@@ -205,6 +224,7 @@ type EndpointHandler = (call: Call) => Promise<void>;
 function mapCoreError(err: unknown): ApiError | null {
   if (err instanceof ApiError) return err;
   if (err instanceof HangarTransitionError) return new ApiError(409, "invalid_transition", err.message);
+  if (err instanceof HangarEndedSessionChangeError) return new ApiError(409, "session_ended", err.message);
   if (err instanceof HangarSessionNotClaimedByError) return new ApiError(403, "not_claimer", err.message);
   if (err instanceof HangarSessionNotFoundError) return new ApiError(404, "not_found", err.message);
   if (err instanceof InvalidHangarSessionError || err instanceof InvalidLookupIdError) return invalidRequest(err.message);
@@ -263,6 +283,7 @@ export function createHangarHandler({ db, readOnly = false, shutdownSignal, clai
         ...(body.container === undefined ? {} : { container: body.container }),
         ...(body.host === undefined ? {} : { host: body.host }),
         ...(body.disk_path === undefined ? {} : { diskPath: body.disk_path }),
+        ...(body.reason === undefined ? {} : { reason: body.reason }),
       });
       sendJson(res, 200, { session: await sessionJson(db, result.session) });
     },

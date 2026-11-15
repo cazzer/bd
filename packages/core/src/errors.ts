@@ -601,11 +601,15 @@ export class InboxCardChangedError extends KnowledgeStoreError {
   constructor(
     readonly nodeId: string,
     readonly option: string | null,
+    /** Set when `nodeId` was merged away: the canonical node the decision would otherwise have landed on. */
+    readonly mergedInto: string | null = null,
   ) {
     super(
-      option === null
-        ? `inbox item ${nodeId} changed since it was opened and now asks to choose an option`
-        : `inbox item ${nodeId} does not offer option ${JSON.stringify(option)}; its card was rewritten after it was opened`,
+      mergedInto !== null
+        ? `inbox item ${nodeId} was merged into ${mergedInto}; reload and decide the item you mean`
+        : option === null
+          ? `inbox item ${nodeId} changed since it was opened and now asks to choose an option`
+          : `inbox item ${nodeId} does not offer option ${JSON.stringify(option)}; its card was rewritten after it was opened`,
     );
   }
 }
@@ -732,6 +736,68 @@ export class HangarSessionNotClaimedByError extends KnowledgeStoreError {
 }
 
 /**
+ * A person's outcome (hangar.ts `setHangarSessionOutcome`) that the session
+ * cannot take: it has not ended (`state`), or hangar has already released it
+ * (`released`: an outcome is set and its disk is gone, so the decision was
+ * acted on). Nothing was written.
+ */
+export class HangarOutcomeRefusedError extends KnowledgeStoreError {
+  constructor(
+    readonly sessionId: string,
+    readonly kind: "state" | "released",
+    readonly detail: string,
+  ) {
+    super(
+      kind === "state"
+        ? `hangar session ${sessionId} is ${detail}; only a stopped or failed session can be accepted or tabled`
+        : `hangar session ${sessionId} is already released (its outcome is ${detail} and hangar has deleted its disk), so its outcome can no longer change`,
+    );
+  }
+}
+
+/**
+ * A hangar `PATCH` (hangar.ts `updateSession`) an ended session cannot take
+ * (`kind`): a non-null `container`, `host`, or `disk_path` on an ended
+ * session (`value`: an ended session's placement only clears, so a released
+ * one is never un-released); a change to a released one other than clearing
+ * (`released`); or clearing `disk_path`, the release acknowledgement,
+ * before a person has set an outcome (`no_outcome`). Nothing was written.
+ */
+export class HangarEndedSessionChangeError extends KnowledgeStoreError {
+  constructor(
+    readonly sessionId: string,
+    readonly kind: "value" | "released" | "no_outcome",
+    readonly field: string,
+  ) {
+    super(
+      kind === "value"
+        ? `hangar session ${sessionId} has ended, so ${field} can only be cleared (null), not set`
+        : kind === "released"
+          ? `hangar session ${sessionId} is released (a person set its outcome and hangar holds nothing for it), so ${field} can no longer change`
+          : `hangar session ${sessionId} has no outcome yet, so its disk_path cannot be cleared: acknowledge a release only after a person has accepted or tabled the session`,
+    );
+  }
+}
+
+/**
+ * A generic inbox writer (brain_write, `requestInboxItem`) was given an
+ * item only `requestHangarOutcome` writes: a key under source system
+ * `inbox` starting `hangar-outcome:`, or one whose stored item carries an
+ * outcome request binding; or `requestHangarOutcome` found its key held by
+ * an item not bound to the same session. A click on an outcome request
+ * deletes a session's disk, so its card is the server's alone. Nothing was
+ * written.
+ */
+export class ReservedInboxItemError extends KnowledgeStoreError {
+  constructor(
+    readonly itemLabel: string,
+    reason: string,
+  ) {
+    super(`inbox item ${itemLabel} is reserved: ${reason}`);
+  }
+}
+
+/**
  * A generic writer (brain_write) was given a node only the hangar paths
  * write: node_type `hangar_session`, or anything under source system
  * `hangar`. Nothing was written.
@@ -756,6 +822,23 @@ export class HangarSessionMergeError extends KnowledgeStoreError {
     readonly sessionNodeId: string,
   ) {
     super(`cannot merge node ${loserId} into ${survivorId}: node ${sessionNodeId} is a hangar session, which is never merged`);
+  }
+}
+
+/**
+ * A merge (brain_merge) would move a hangar outcome request: an `inbox_item`
+ * carrying a `hangar_outcome` binding, or any node at an `inbox` key starting
+ * `hangar-outcome:`. Folding one into another, or another into it, would let
+ * the person's decision on one card land on the other — and an outcome
+ * request's accept deletes a session's disk. Nothing was merged.
+ */
+export class HangarOutcomeMergeError extends KnowledgeStoreError {
+  constructor(
+    readonly loserId: string,
+    readonly survivorId: string,
+    readonly outcomeNodeId: string,
+  ) {
+    super(`cannot merge node ${loserId} into ${survivorId}: node ${outcomeNodeId} is a hangar outcome request, which is never merged`);
   }
 }
 

@@ -20,6 +20,18 @@
 // state but stopped. Only a claim sets claimed, only a requeue (from claimed)
 // sets queued again; `checkHangarTransition` decides the rest.
 //
+// Releasing (hangar-release change; cazzer/hangar docs/release-contract.md):
+// an ended session carries an `outcome`, `accepted` or `tabled`, that only a
+// person sets (`setHangarSessionOutcome`: the board's human procedure, or a
+// person accepting an inbox request an agent filed). Hangar reads it from its
+// listing, deletes the session's disk and container, and acknowledges with a
+// PATCH that clears `container` and `disk_path`. An outcome with no disk path
+// is released: hangar holds nothing more, and the outcome is final. No
+// hangar or agent path writes `outcome`; `updateSession` carries it forward.
+// On an ended session a PATCH only clears placement fields, never sets them
+// (so nothing un-releases a session), and clears a held disk path only once
+// an outcome is set (`HangarEndedSessionChangeError`).
+//
 // Claiming is one transaction: `FOR UPDATE SKIP LOCKED` on the oldest queued
 // session of an admitted flavor, the state change, and the session token
 // (client-tokens.ts `createSessionToken`), so racing claims take different
@@ -49,6 +61,8 @@ import {
   ClientTokenExistsError,
   ContentTooLargeError,
   EdgeUpsertFailedError,
+  HangarEndedSessionChangeError,
+  HangarOutcomeRefusedError,
   HangarSessionNotClaimedByError,
   HangarSessionNotFoundError,
   HangarTransitionError,
@@ -87,6 +101,11 @@ export const HANGAR_FLAVORS = ["headless", "display-godot", "display-browser"] a
 export type HangarFlavor = (typeof HANGAR_FLAVORS)[number];
 export const HANGAR_SESSION_STATES = ["queued", "claimed", "running", "stopped", "failed"] as const;
 export type HangarSessionState = (typeof HANGAR_SESSION_STATES)[number];
+/** A person's decision on an ended session (module header); absent means none yet. */
+export const HANGAR_OUTCOMES = ["accepted", "tabled"] as const;
+export type HangarOutcome = (typeof HANGAR_OUTCOMES)[number];
+/** The states a session takes an outcome in. */
+export const HANGAR_FINAL_STATES: readonly HangarSessionState[] = ["stopped", "failed"];
 /** The check-in interval hangar is told to use; the offline threshold is three of these. */
 export const HANGAR_CHECK_IN_INTERVAL_S = 30;
 /** The longest a claim or a message read may long-poll (enforced by the HTTP handler). */
@@ -122,6 +141,9 @@ const KEY = {
   diskPath: "disk_path",
   requeueReason: "requeue_reason",
   failureReason: "failure_reason",
+  outcome: "outcome",
+  outcomeAt: "outcome_at",
+  outcomeBy: "outcome_by",
 } as const;
 
 /** Optional text fields and their caps; empty or null deletes the key. */
@@ -133,6 +155,7 @@ const OPTIONAL_TEXT: readonly [string, number][] = [
   [KEY.diskPath, MAX_HANGAR_DISK_PATH_LENGTH],
   [KEY.requeueReason, MAX_HANGAR_REQUEUE_REASON_LENGTH],
   [KEY.failureReason, MAX_HANGAR_FAILURE_REASON_LENGTH],
+  [KEY.outcomeBy, MAX_HANGAR_FIELD_LENGTH],
 ];
 
 // --- The metadata contract (pure) --------------------------------------------
@@ -170,6 +193,12 @@ function oneOf<T extends string>(field: string, value: unknown, allowed: readonl
   return value as T;
 }
 
+/** `outcome` as one of `HANGAR_OUTCOMES`, or undefined (absent, null, or empty) to delete it. */
+function optionalOutcome(value: unknown, itemLabel?: string): HangarOutcome | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  return oneOf(KEY.outcome, value, HANGAR_OUTCOMES, itemLabel);
+}
+
 /** `claimed_at` under the event-time rules (event-time.ts), or undefined to delete it. */
 function optionalInstant(field: string, value: unknown, itemLabel?: string): string | undefined {
   if (value === "") return undefined;
@@ -190,8 +219,9 @@ export interface NormalizeHangarSessionOptions {
  * Applies the hangar session contract to a session's metadata. Pure;
  * returns a copy. `state` and `flavor` must be known values and `repo` a
  * non-empty string; the other text fields are trimmed, capped, and free of
- * control characters, and an empty or null one deletes its key; `claimed_at`
- * and `occurred_at` follow the event-time rules. Unknown keys pass through.
+ * control characters, and an empty or null one deletes its key; `outcome`,
+ * when present, is one of `HANGAR_OUTCOMES`; `claimed_at`, `outcome_at`, and
+ * `occurred_at` follow the event-time rules. Unknown keys pass through.
  * Throws `InvalidHangarSessionError` (or `InvalidEventTimeError` for
  * `occurred_at`).
  */
@@ -209,9 +239,14 @@ export function normalizeHangarSessionMetadata(raw: unknown, options: NormalizeH
     if (text === undefined) delete out[key];
     else out[key] = text;
   }
-  const claimedAt = optionalInstant(KEY.claimedAt, out[KEY.claimedAt], itemLabel);
-  if (claimedAt === undefined) delete out[KEY.claimedAt];
-  else out[KEY.claimedAt] = claimedAt;
+  const outcome = optionalOutcome(out[KEY.outcome], itemLabel);
+  if (outcome === undefined) delete out[KEY.outcome];
+  else out[KEY.outcome] = outcome;
+  for (const key of [KEY.claimedAt, KEY.outcomeAt]) {
+    const instant = optionalInstant(key, out[key], itemLabel);
+    if (instant === undefined) delete out[key];
+    else out[key] = instant;
+  }
   return out;
 }
 
@@ -252,8 +287,15 @@ export interface HangarSession {
   host: string | null;
   diskPath: string | null;
   requeueReason: string | null;
-  /** Why a claim could not take it and marked it failed (its stored metadata broke the contract, or its token name was held). */
+  /** Why it failed: a claim could not take it (its stored metadata broke the contract, or its token name was held), or hangar's reason when it reported it failed. */
   failureReason: string | null;
+  /** The person's decision on the ended session; null when none (or a stored value this version does not know). */
+  outcome: HangarOutcome | null;
+  outcomeAt: string | null;
+  /** Who set the outcome: the person's actor. */
+  outcomeBy: string | null;
+  /** An outcome is set and hangar has cleared the disk path: it holds nothing for the session any more. */
+  released: boolean;
   /** When it was requested; claims take the oldest first. */
   occurredAt: string | null;
   createdAt: Date;
@@ -308,6 +350,9 @@ function text(metadata: Record<string, unknown>, key: string): string | null {
 
 function toSession(row: SessionRow): HangarSession {
   const m = row.metadata;
+  const stored = text(m, KEY.outcome);
+  const outcome = (HANGAR_OUTCOMES as readonly string[]).includes(stored ?? "") ? (stored as HangarOutcome) : null;
+  const diskPath = text(m, KEY.diskPath);
   return {
     id: row.id,
     externalId: row.external_id,
@@ -322,16 +367,20 @@ function toSession(row: SessionRow): HangarSession {
     claimedAt: text(m, KEY.claimedAt),
     container: text(m, KEY.container),
     host: text(m, KEY.host),
-    diskPath: text(m, KEY.diskPath),
+    diskPath,
     requeueReason: text(m, KEY.requeueReason),
     failureReason: text(m, KEY.failureReason),
+    outcome,
+    outcomeAt: text(m, KEY.outcomeAt),
+    outcomeBy: text(m, KEY.outcomeBy),
+    released: outcome !== null && diskPath === null,
     occurredAt: text(m, OCCURRED_AT_KEY),
     createdAt: new Date(row.created_at),
     updatedAt: new Date(row.updated_at),
   };
 }
 
-async function loadSession(tx: Tx, id: string): Promise<HangarSession> {
+async function loadSession(tx: Database | Tx, id: string): Promise<HangarSession> {
   const result = await tx.execute<SessionRow>(selectSessions(sql`s.id = ${id}::uuid`));
   const row = result.rows[0];
   if (!row) throw new HangarSessionNotFoundError(id);
@@ -347,6 +396,16 @@ interface LockedSessionRow extends Record<string, unknown> {
   content: string;
   metadata: Record<string, unknown>;
   now: string | Date;
+}
+
+/** Session `id` (folded through merges), with the database's `now()`; locked `FOR UPDATE` when `lock`. Empty when it is not a session. */
+function readSessionRow(tx: Database | Tx, id: string, lock: boolean): Promise<{ rows: LockedSessionRow[] }> {
+  return tx.execute<LockedSessionRow>(sql`
+    SELECT s.id, s.node_type, s.source_system, s.external_id, s.title, s.content, s.metadata, now() AS now
+    FROM nodes s
+    WHERE s.id = (SELECT COALESCE(merged_into, id) FROM nodes WHERE id = ${id}::uuid) AND ${IS_SESSION}
+    ${lock ? sql`FOR UPDATE` : sql``}
+  `);
 }
 
 /** Writes one session node's new metadata through the upsert path, in `tx`, under `run`. */
@@ -618,7 +677,8 @@ function contractField(key: string, value: unknown): unknown {
   if (key === KEY.repo) return requiredText(key, value, MAX_HANGAR_REPO_LENGTH);
   const optional = OPTIONAL_TEXT.find(([k]) => k === key);
   if (optional !== undefined) return optionalText(key, value, optional[1]);
-  if (key === KEY.claimedAt) return optionalInstant(key, value);
+  if (key === KEY.outcome) return optionalOutcome(value);
+  if (key === KEY.claimedAt || key === KEY.outcomeAt) return optionalInstant(key, value);
   if (key === OCCURRED_AT_KEY) return normalizeOccurredAt({ [OCCURRED_AT_KEY]: value })[OCCURRED_AT_KEY];
   return UNKNOWN_FIELD;
 }
@@ -690,6 +750,8 @@ export interface UpdateSessionInput {
   container?: string | null;
   host?: string | null;
   diskPath?: string | null;
+  /** Why hangar failed it (1–`MAX_HANGAR_FAILURE_REASON_LENGTH` characters); taken only with `state` "failed", stored as `failure_reason`. */
+  reason?: string;
 }
 
 export interface SessionWriteResult {
@@ -714,13 +776,7 @@ async function changeClaimedSession(
   what: string,
   change: (current: Record<string, unknown>) => { metadata: Record<string, unknown>; revoke: boolean },
 ): Promise<SessionWriteResult> {
-  const read = (tx: Database | Tx, lock: boolean) =>
-    tx.execute<LockedSessionRow>(sql`
-      SELECT s.id, s.node_type, s.source_system, s.external_id, s.title, s.content, s.metadata, now() AS now
-      FROM nodes s
-      WHERE s.id = (SELECT COALESCE(merged_into, id) FROM nodes WHERE id = ${id}::uuid) AND ${IS_SESSION}
-      ${lock ? sql`FOR UPDATE` : sql``}
-    `);
+  const read = (tx: Database | Tx, lock: boolean) => readSessionRow(tx, id, lock);
   const decide = (row: LockedSessionRow | undefined): { row: LockedSessionRow; metadata: Record<string, unknown>; revoke: boolean } => {
     if (!row) throw new HangarSessionNotFoundError(id);
     const current = normalizeHangarSessionMetadata(row.metadata);
@@ -748,7 +804,13 @@ async function changeClaimedSession(
  * The claiming hangar reports a session's state and where it runs. The
  * transition must pass `checkHangarTransition`; `stopped` and `failed`
  * revoke the session token in the same transaction. Each change is a
- * revision of the session node.
+ * revision of the session node. `reason` comes only with `failed` and is
+ * stored as `failure_reason` on the move into failed; a repeated failed
+ * report keeps the reason already stored. A field update on an ended session
+ * (no state, or the same one) is allowed within `assertEndedSessionChange`:
+ * clearing `container` and `disk_path` once a person has set an outcome is
+ * how hangar acknowledges a release (module header). The outcome is carried
+ * forward untouched; hangar never sets it.
  */
 export async function updateSession(db: Database, input: UpdateSessionInput): Promise<SessionWriteResult> {
   const hangar = hangarName(input.hangar);
@@ -759,23 +821,50 @@ export async function updateSession(db: Database, input: UpdateSessionInput): Pr
     [KEY.host, input.host, MAX_HANGAR_FIELD_LENGTH],
     [KEY.diskPath, input.diskPath, MAX_HANGAR_DISK_PATH_LENGTH],
   ];
+  if (input.reason !== undefined && state !== "failed") {
+    throw new InvalidHangarSessionError("reason", input.reason, 'is taken only with state "failed"');
+  }
+  const reason = input.reason === undefined ? undefined : requiredText("reason", input.reason, MAX_HANGAR_FAILURE_REASON_LENGTH);
   if (state === undefined && fields.every(([, value]) => value === undefined)) {
     throw new InvalidHangarSessionError("update", {}, "names nothing to change: give a state, container, host, or disk_path");
   }
-  for (const [key, value, max] of fields) optionalText(key, value, max);
+  // Each given field as the contract stores it: a string, or null to clear (null, "", or blank).
+  const given: [string, string | null][] = fields.flatMap(([key, value, max]): [string, string | null][] => (value === undefined ? [] : [[key, optionalText(key, value, max) ?? null]]));
 
   return changeClaimedSession(db, hangar, id, "updateSession", (current) => {
     const from = current[KEY.state] as HangarSessionState;
     const to = state ?? from;
     checkHangarTransition(from, to);
+    if (HANGAR_FINAL_STATES.includes(from)) assertEndedSessionChange(id, current, given);
     const metadata: Record<string, unknown> = { ...current, [KEY.state]: to };
-    for (const [key, value] of fields) {
-      if (value === undefined) continue;
+    for (const [key, value] of given) {
       if (value === null) delete metadata[key];
       else metadata[key] = value;
     }
+    // Only the move into failed records why: a repeated failed report keeps the first reason.
+    if (reason !== undefined && from !== "failed") metadata[KEY.failureReason] = reason;
     return { metadata, revoke: to === "stopped" || to === "failed" };
   });
+}
+
+/**
+ * The rules for a `PATCH` on an ended session (`HangarEndedSessionChangeError`
+ * otherwise): its placement fields only clear, never set, so a released
+ * session is never un-released; on a released one, nothing but a clear (an
+ * acknowledgement hangar repeats after a lost answer stays a no-op); and
+ * clearing a held `disk_path`, the release acknowledgement, only once a
+ * person has set an outcome. `fields` are already normalized (null clears).
+ */
+function assertEndedSessionChange(id: string, current: Record<string, unknown>, given: readonly [string, string | null][]): void {
+  const hasOutcome = current[KEY.outcome] !== undefined;
+  const released = hasOutcome && current[KEY.diskPath] === undefined;
+  for (const [key, value] of given) {
+    if (value === null || value === current[key]) continue;
+    if (released) throw new HangarEndedSessionChangeError(id, "released", key);
+    if (key === KEY.container || key === KEY.diskPath) throw new HangarEndedSessionChangeError(id, "value", key);
+  }
+  const clearsDisk = given.some(([key, value]) => key === KEY.diskPath && value === null);
+  if (clearsDisk && current[KEY.diskPath] !== undefined && !hasOutcome) throw new HangarEndedSessionChangeError(id, "no_outcome", KEY.diskPath);
 }
 
 export interface RequeueSessionInput {
@@ -804,6 +893,105 @@ export async function requeueSession(db: Database, input: RequeueSessionInput): 
   });
 }
 
+// --- A person's outcome -------------------------------------------------------------------
+
+export interface SetHangarSessionOutcomeInput {
+  id: string;
+  /** One of `HANGAR_OUTCOMES`. */
+  outcome: string;
+  /** The person who decided (the admitted client, or "human"); the run's actor and `outcome_by`. */
+  actor?: string;
+}
+
+export interface SetHangarSessionOutcomeResult {
+  session: HangarSession;
+  /** False when the session already had this outcome: nothing was written. */
+  changed: boolean;
+}
+
+function outcomeArgs(input: SetHangarSessionOutcomeInput): { id: string; outcome: HangarOutcome; actor: string } {
+  return {
+    id: assertUuid(input.id, "session id"),
+    outcome: oneOf(KEY.outcome, input.outcome, HANGAR_OUTCOMES),
+    actor: requesterOf(input.actor) ?? "human",
+  };
+}
+
+/** Throws `HangarOutcomeRefusedError` unless a session with this (normalized) metadata can take a new outcome: ended, and not yet released. */
+function assertTakesOutcome(id: string, current: Record<string, unknown>): void {
+  const state = current[KEY.state] as HangarSessionState;
+  if (!HANGAR_FINAL_STATES.includes(state)) throw new HangarOutcomeRefusedError(id, "state", state);
+  const stored = current[KEY.outcome] as string | undefined;
+  if (stored !== undefined && current[KEY.diskPath] === undefined) throw new HangarOutcomeRefusedError(id, "released", stored);
+}
+
+/**
+ * The session's new metadata with `outcome`, or null when it already has
+ * it (a no-op, checked after the state, before the release). Refuses as
+ * `assertTakesOutcome` does. `outcome_at` is the database's `now()`.
+ */
+function decideOutcome(row: LockedSessionRow | undefined, id: string, outcome: HangarOutcome, actor: string): { row: LockedSessionRow; metadata: Record<string, unknown> | null } {
+  if (!row) throw new HangarSessionNotFoundError(id);
+  const current = normalizeHangarSessionMetadata(row.metadata);
+  const state = current[KEY.state] as HangarSessionState;
+  if (!HANGAR_FINAL_STATES.includes(state)) throw new HangarOutcomeRefusedError(row.id, "state", state);
+  if (current[KEY.outcome] === outcome) return { row, metadata: null };
+  assertTakesOutcome(row.id, current);
+  return { row, metadata: normalizeHangarSessionMetadata({ ...current, [KEY.outcome]: outcome, [KEY.outcomeAt]: new Date(row.now), [KEY.outcomeBy]: actor }) };
+}
+
+/**
+ * Reads session `id` (folded through merges) and refuses, as
+ * `setHangarSessionOutcome` would, one that cannot take an outcome: not a
+ * session, not ended, or already released. For a path that asks a person
+ * (inbox.ts `requestHangarOutcome`), before it files anything.
+ */
+export async function getSessionTakingOutcome(db: Database, id: string): Promise<HangarSession> {
+  const sessionId = assertUuid(id, "session id");
+  const row = (await readSessionRow(db, sessionId, false)).rows[0];
+  if (!row) throw new HangarSessionNotFoundError(sessionId);
+  assertTakesOutcome(row.id, normalizeHangarSessionMetadata(row.metadata));
+  return loadSession(db, row.id);
+}
+
+/**
+ * A person accepts or tables an ended session (module header). Only a
+ * `stopped` or `failed` session takes one, and only until hangar has
+ * released it (`HangarOutcomeRefusedError` otherwise); setting the outcome
+ * it already has is a no-op that writes nothing. Otherwise the outcome,
+ * `outcome_at` (the database's clock), and `outcome_by` are written through
+ * the upsert path under a `hangar` run whose actor is the person, so the
+ * revision names them and `updated_at` moves: the session leads hangar's
+ * newest-changed listing. The checks run first on an unlocked read, so a
+ * refusal opens no run, and again under the row lock, which decides. Only
+ * the people paths call this; no token scope but `human` reaches it.
+ */
+export async function setHangarSessionOutcome(db: Database, input: SetHangarSessionOutcomeInput): Promise<SetHangarSessionOutcomeResult> {
+  const args = outcomeArgs(input);
+  const pre = decideOutcome((await readSessionRow(db, args.id, false)).rows[0], args.id, args.outcome, args.actor);
+  if (pre.metadata === null) return { session: await loadSession(db, pre.row.id), changed: false };
+  const run = await openIngestRun(db, HANGAR_SOURCE_SYSTEM, { actor: args.actor });
+  try {
+    return await db.transaction((tx) => unsafeSetHangarSessionOutcomeInTx(tx, run, args));
+  } finally {
+    await closeIngestRun(db, run);
+  }
+}
+
+/**
+ * `setHangarSessionOutcome`'s locked half, inside the caller's transaction
+ * and under its `run` (which must be a `hangar` run naming the person): an
+ * inbox decision sets the outcome in the transaction that records it, so a
+ * refusal rolls the decision back too. "unsafe": the caller vouches that
+ * a person decided.
+ */
+export async function unsafeSetHangarSessionOutcomeInTx(tx: Tx, run: IngestRunHandle, input: SetHangarSessionOutcomeInput): Promise<SetHangarSessionOutcomeResult> {
+  const args = outcomeArgs(input);
+  const { row, metadata } = decideOutcome((await readSessionRow(tx, args.id, true)).rows[0], args.id, args.outcome, args.actor);
+  if (metadata !== null) await writeSessionNode(tx, run, { externalId: row.external_id, title: row.title, content: row.content, metadata }, "setHangarSessionOutcome");
+  return { session: await loadSession(tx, row.id), changed: metadata !== null };
+}
+
 // --- Listing ---------------------------------------------------------------------------
 
 export interface ListSessionsOptions {
@@ -812,6 +1000,8 @@ export interface ListSessionsOptions {
   states?: readonly string[];
   /** Only sessions run for this work item (folded through merges). */
   workItemId?: string;
+  /** Only sessions hangar has yet to release: an outcome set, and a disk path still held. */
+  releasable?: boolean;
   /** Default `DEFAULT_HANGAR_SESSIONS_LIMIT`, at most `MAX_HANGAR_SESSIONS_LIMIT`. */
   limit?: number;
 }
@@ -820,6 +1010,14 @@ export interface ListSessionsResult {
   sessions: HangarSession[];
   /** More sessions matched than `limit`. */
   truncated: boolean;
+}
+
+/** The sessions these ids name, in one statement; an id that names no session is left out. The caller bounds the ids (an inbox page's outcome requests). */
+export async function getSessionsByIds(db: Database, ids: readonly string[]): Promise<HangarSession[]> {
+  const wanted = [...new Set(ids.map((id) => assertUuid(id, "session id")))];
+  if (wanted.length === 0) return [];
+  const result = await db.execute<SessionRow>(selectSessions(sql`s.id = ANY(${sqlArray(wanted, "uuid")})`));
+  return result.rows.map(toSession);
 }
 
 /** Sessions newest-changed first, filtered and bounded. One statement. */
@@ -839,6 +1037,9 @@ export async function listSessions(db: Database, options: ListSessionsOptions = 
   if (options.workItemId !== undefined) {
     const workItemId = assertUuid(options.workItemId, "work item id");
     filters.push(sql`r.work_item_id = (SELECT COALESCE(merged_into, id) FROM nodes WHERE id = ${workItemId}::uuid)`);
+  }
+  if (options.releasable === true) {
+    filters.push(sql`s.metadata ? ${KEY.outcome} AND s.metadata ? ${KEY.diskPath}`);
   }
   const result = await db.execute<SessionRow>(
     selectSessions(sql.join(filters, sql` AND `), sql`ORDER BY s.updated_at DESC, s.id DESC LIMIT ${limit + 1}`),

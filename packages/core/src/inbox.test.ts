@@ -3,8 +3,10 @@ import { sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Database } from "@breakdown/db";
 import { upsertEdges } from "./edges.js";
-import { InboxCardChangedError, InboxDecisionConflictError, InboxItemNotThisSessionError, InboxItemSessionEndedError, InvalidInboxItemError, NotAnInboxItemError } from "./errors.js";
+import { HangarOutcomeRefusedError, ReservedInboxItemError, InboxCardChangedError, InboxDecisionConflictError, InboxItemNotThisSessionError, InboxItemSessionEndedError, InvalidInboxItemError, NotAnInboxItemError } from "./errors.js";
 import {
+  assertNoHangarOutcomeKeys,
+  HANGAR_OUTCOME_OPTIONS,
   assertSessionCreatedAbsentKeys,
   assertSessionMayWriteInboxItems,
   carryForwardInboxDecisions,
@@ -14,13 +16,18 @@ import {
   inboxItemDigested,
   inboxNotifyText,
   releaseInboxItem,
+  requestHangarOutcome,
   requestInboxItem,
   INBOX_ITEM_NODE_TYPE,
   listInbox,
   loadStoredInboxMetadata,
+  MAX_SHOWN_HANGAR_REPO,
   normalizeInboxItemMetadata,
+  quoteHangarRepo,
   unlinkInboxWorkContext,
 } from "./inbox.js";
+import { listSessions } from "./hangar.js";
+import { getNodeHistory } from "./history.js";
 import { mergeNodes } from "./merge.js";
 import { normalizeWorkItemMetadata, WORK_ITEM_NODE_TYPE } from "./work-items.js";
 import { closeIngestRun, openIngestRun, type IngestRunHandle } from "./ingest-runs.js";
@@ -188,6 +195,21 @@ describe("session requests and completion", () => {
     const done = (await listInbox(db, { statuses: ["done"] })).items.find((i) => i.id === first.id)!;
     expect(done.content.startsWith("**Done:** sent in #retail-ops")).toBe(true);
     await expect(completeInboxItem(db, first.id, "again")).rejects.toThrow(InboxDecisionConflictError);
+  });
+
+  it("refuses to complete through a merged-away id, leaving the canonical item accepted", async () => {
+    const canonical = await write("merge-complete-canonical", { source: "agent", status: "accepted" });
+    const merged = await write("merge-complete-merged", { source: "agent", status: "accepted" });
+    await db.execute(sql`UPDATE nodes SET merged_into = ${canonical}::uuid WHERE id = ${merged}::uuid`);
+    try {
+      const refused = await completeInboxItem(db, merged, "sent").catch((e: unknown) => e);
+      expect(refused).toBeInstanceOf(InboxCardChangedError);
+      expect((refused as InboxCardChangedError).mergedInto).toBe(canonical);
+      expect((await mine()).find((i) => i.id === canonical)?.status).toBe("accepted");
+      await completeInboxItem(db, canonical, "sent");
+    } finally {
+      await db.execute(sql`UPDATE nodes SET merged_into = NULL WHERE id = ${merged}::uuid`);
+    }
   });
 });
 
@@ -706,5 +728,272 @@ describe("no agent write approves its own item", () => {
   it("requestInboxItem ignores a malformed body feedback rather than refusing it", async () => {
     const filed = await requestInboxItem(db, { externalId: `${key}-junk`, title: "Junk", content: "x", metadata: { source: "session", feedback: "not an array" } });
     expect(filed.status).toBe("pending");
+  });
+});
+
+// hangar-release: an agent asks for a session's outcome through an inbox
+// item; only the person's decision sets it, in the decision's transaction.
+describe("hangar outcome requests", () => {
+  const AGENT = `${SRC}-agent`;
+  const PERSON = `${SRC}-person`;
+  const sessionNodes: string[] = [];
+  /** A hangar session node written straight to the store (never queued, so no real hangar claims it). */
+  async function sessionNode(state: string, extra: Record<string, unknown> = { disk_path: "/disks/test.img" }): Promise<string> {
+    const result = await upsertNodes(db, run, [
+      { nodeType: "hangar_session", sourceSystem: "hangar", externalId: randomUUID(), title: "Hangar headless session: test", metadata: { state, flavor: "headless", repo: "test/repo", claimed_by: `test-${SRC}`, ...extra } },
+    ]);
+    const id = result.rows[0]!.id;
+    sessionNodes.push(id);
+    return id;
+  }
+  const sessionMetadata = async (id: string): Promise<Record<string, unknown>> => (await db.execute<{ metadata: Record<string, unknown> }>(sql`SELECT metadata FROM nodes WHERE id = ${id}::uuid`)).rows[0]!.metadata;
+  const itemOf = async (id: string) => (await listInbox(db, { ids: [id], statuses: ["pending", "accepted", "dismissed", "done"] })).items[0];
+  const ask = (sessionId: string, outcome = "tabled") => requestHangarOutcome(db, { sessionId, outcome, note: "The PR merged; nothing left on the disk.", actor: AGENT });
+
+  afterAll(async () => {
+    if (sessionNodes.length > 0) {
+      await db.execute(sql`DELETE FROM nodes WHERE source_system = 'inbox' AND external_id = ANY(${`{${sessionNodes.map((id) => `hangar-outcome:${id}`).join(",")}}`}::text[])`);
+      await db.execute(sql`DELETE FROM nodes WHERE id = ANY(${`{${sessionNodes.join(",")}}`}::uuid[])`);
+    }
+    await db.execute(sql`DELETE FROM ingest_runs WHERE actor LIKE ${`${SRC}-%`}`);
+  });
+
+  it("files a pending item bound to the session with Accept and Table, setting no outcome", async () => {
+    const id = await sessionNode("stopped");
+    const filed = await ask(id);
+    expect(filed).toMatchObject({ status: "pending", action: "created", sessionId: id, requested: "tabled", session: null });
+    const item = await itemOf(filed.id);
+    expect(item).toMatchObject({ status: "pending", source: "hangar", action: "hangar_outcome", recommend: "table", hangarOutcome: { sessionId: id, requested: "tabled" } });
+    expect(item!.options.map((o) => o.id)).toEqual(["accept", "table"]);
+    expect(item!.content).toContain("The PR merged");
+    expect((await sessionMetadata(id))["outcome"]).toBeUndefined();
+    expect((await listSessions(db, { releasable: true, limit: 200 })).sessions.map((s) => s.id)).not.toContain(id);
+
+    // A repeat request while it waits updates the same item.
+    const again = await ask(id, "accepted");
+    expect(again).toMatchObject({ id: filed.id, status: "pending", requested: "accepted" });
+    expect(await itemOf(filed.id)).toMatchObject({ recommend: "accept", hangarOutcome: { sessionId: id, requested: "accepted" } });
+  });
+
+  it("the person's Table sets the outcome, attributed to them, and closes the item done", async () => {
+    const id = await sessionNode("failed");
+    const filed = await ask(id, "accepted");
+    const decided = await decideInboxItem(db, filed.id, { decision: "accept", option: "table" }, { actor: PERSON });
+    expect(decided).toMatchObject({ after: "done", sessionOutcome: { sessionId: id, outcome: "tabled", changed: true } });
+    expect(await sessionMetadata(id)).toMatchObject({ state: "failed", outcome: "tabled", outcome_by: PERSON });
+    const [latest] = (await getNodeHistory(db, id)).revisions;
+    expect(latest!.ingestRun).toMatchObject({ actor: PERSON, sourceSystem: "hangar" });
+    expect((await itemOf(filed.id))!.feedback.at(-1)).toMatchObject({ decision: "accept", option: "table" });
+    expect((await listSessions(db, { releasable: true, limit: 200 })).sessions.map((s) => s.id)).toContain(id);
+  });
+
+  it("a dismiss leaves the outcome unset", async () => {
+    const id = await sessionNode("stopped");
+    const filed = await ask(id);
+    expect((await decideInboxItem(db, filed.id, { decision: "dismiss" }, { actor: PERSON })).sessionOutcome).toBeNull();
+    expect((await sessionMetadata(id))["outcome"]).toBeUndefined();
+  });
+
+  it("refuses to file for a session that has not ended, or that hangar has released", async () => {
+    for (const [state, extra] of [["running", {}], ["stopped", { outcome: "accepted" }]] as const) {
+      const id = await sessionNode(state, extra);
+      await expect(ask(id)).rejects.toBeInstanceOf(HangarOutcomeRefusedError);
+      expect((await db.execute(sql`SELECT 1 FROM nodes WHERE source_system = 'inbox' AND external_id = ${`hangar-outcome:${id}`}`)).rows).toEqual([]);
+    }
+    await expect(requestHangarOutcome(db, { sessionId: await sessionNode("stopped"), outcome: "shelved", note: "x", actor: AGENT })).rejects.toBeInstanceOf(InvalidInboxItemError);
+    await expect(requestHangarOutcome(db, { sessionId: await sessionNode("stopped"), outcome: "tabled", note: " ", actor: AGENT })).rejects.toBeInstanceOf(InvalidInboxItemError);
+  });
+
+  it("fails the decision, writing nothing, when the session can no longer take the outcome", async () => {
+    const id = await sessionNode("stopped");
+    const filed = await ask(id);
+    // Hangar released it after another path tabled it: an outcome and no disk.
+    await upsertNodes(db, run, [{ nodeType: "hangar_session", sourceSystem: "hangar", externalId: (await db.execute<{ external_id: string }>(sql`SELECT external_id FROM nodes WHERE id = ${id}::uuid`)).rows[0]!.external_id, title: "Hangar headless session: test", metadata: { state: "stopped", flavor: "headless", repo: "test/repo", claimed_by: `test-${SRC}`, outcome: "tabled" } }]);
+    const refused = await decideInboxItem(db, filed.id, { decision: "accept", option: "accept" }, { actor: PERSON }).catch((e: unknown) => e);
+    expect(refused).toBeInstanceOf(HangarOutcomeRefusedError);
+    expect((refused as Error).message).toContain("already released");
+    expect(await itemOf(filed.id)).toMatchObject({ status: "pending", feedback: [] });
+    expect((await sessionMetadata(id))["outcome"]).toBe("tabled");
+  });
+
+  it("no other writer binds or rebinds an item: an incoming hangar_outcome is dropped and the stored one kept", async () => {
+    const id = await sessionNode("stopped");
+    const binding = { session_id: id, requested: "tabled" };
+    expect(carryForwardInboxDecisions(normalizeInboxItemMetadata({ source: "agent", hangar_outcome: binding }), null)["hangar_outcome"]).toBeUndefined();
+    expect(() => normalizeInboxItemMetadata({ source: "agent", hangar_outcome: { session_id: "S", requested: "tabled" } })).toThrow(/hangar_outcome/);
+
+    const key = `session:outcome-${SRC}`;
+    const forged = await requestInboxItem(db, { externalId: key, title: "Table it", content: "", metadata: { source: "agent", hangar_outcome: binding }, actor: AGENT });
+    expect((await itemOf(forged.id))!.hangarOutcome).toBeNull();
+    await db.execute(sql`DELETE FROM nodes WHERE source_system = 'inbox' AND external_id = ${key}`);
+
+    const filed = await ask(id);
+    const other = await sessionNode("stopped");
+    const rewrite = requestInboxItem(db, { externalId: `hangar-outcome:${id}`, title: "Rewritten", content: "", metadata: { source: "agent", hangar_outcome: { session_id: other, requested: "accepted" } }, actor: AGENT });
+    await expect(rewrite).rejects.toBeInstanceOf(ReservedInboxItemError);
+    expect(await itemOf(filed.id)).toMatchObject({ title: `Table hangar session ${id.slice(0, 8)} (repo "test/repo")`, hangarOutcome: { sessionId: id, requested: "tabled" } });
+  });
+
+  /** An item written straight to the store under `inbox`, as no generic writer can any more (a stand-in for a bypass or a legacy row). */
+  async function rawInboxItem(externalId: string, metadata: Record<string, unknown>, title = "Raw"): Promise<string> {
+    const written = await upsertNodes(db, run, [{ nodeType: INBOX_ITEM_NODE_TYPE, sourceSystem: "inbox", externalId, title, content: "raw", metadata: normalizeInboxItemMetadata(metadata) }]);
+    return written.rows[0]!.id;
+  }
+  const rowCount = async (externalId: string) => (await db.execute(sql`SELECT 1 FROM nodes WHERE source_system = 'inbox' AND external_id = ${externalId}`)).rows.length;
+
+  it("requestInboxItem refuses any hangar-outcome: key, session-bound or not, writing nothing", async () => {
+    const id = await sessionNode("stopped");
+    const key = `hangar-outcome:${id}`;
+    const card = { source: "agent", question: "Accept or table this hangar session?", options: HANGAR_OUTCOME_OPTIONS, recommend: "accept" };
+    await expect(requestInboxItem(db, { externalId: key, title: "Accept", content: "Safe to click.", metadata: card, actor: AGENT })).rejects.toBeInstanceOf(ReservedInboxItemError);
+    // A session token pre-creating its own session's key, to be bound later, is refused the same way.
+    await expect(requestInboxItem(db, { externalId: key, title: "Accept", content: "Safe", metadata: card, actor: `session-${id}`, session: id })).rejects.toBeInstanceOf(ReservedInboxItemError);
+    await expect(requestInboxItem(db, { externalId: ` ${key} `, title: "Accept", content: "x", metadata: card, actor: AGENT })).rejects.toBeInstanceOf(ReservedInboxItemError);
+    expect(await rowCount(key)).toBe(0);
+    expect(() => assertNoHangarOutcomeKeys([{ sourceSystem: "inbox", externalId: "hangar-outcome:anything" }])).toThrow(ReservedInboxItemError);
+    expect(() => assertNoHangarOutcomeKeys([{ sourceSystem: "agent", externalId: "hangar-outcome:anything" }, { sourceSystem: "inbox", externalId: "session:x" }])).not.toThrow();
+
+    // And the agent's own request then files a clean one.
+    const filed = await ask(id, "accepted");
+    expect(filed).toMatchObject({ action: "created", session: null });
+  });
+
+  it("a generic writer is refused on a stored item carrying a binding, whatever its key", async () => {
+    const id = await sessionNode("stopped");
+    const key = `session:bound-${SRC}-${id.slice(0, 8)}`;
+    await rawInboxItem(key, { source: "hangar", hangar_outcome: { session_id: id, requested: "tabled" }, question: "Q?", options: HANGAR_OUTCOME_OPTIONS });
+    await expect(requestInboxItem(db, { externalId: key, title: "Rewritten", content: "", metadata: { source: "agent" }, actor: AGENT })).rejects.toBeInstanceOf(ReservedInboxItemError);
+    await db.execute(sql`DELETE FROM nodes WHERE source_system = 'inbox' AND external_id = ${key}`);
+  });
+
+  it("requestHangarOutcome refuses a key held by an item not bound to the same session, changing nothing", async () => {
+    const id = await sessionNode("stopped");
+    const key = `hangar-outcome:${id}`;
+    const planted = await rawInboxItem(key, { source: "agent", question: "Q?", options: [{ id: "accept", label: "Keep it" }, { id: "table", label: "Archive" }] }, "Planted");
+    await expect(ask(id)).rejects.toBeInstanceOf(ReservedInboxItemError);
+    expect(await itemOf(planted)).toMatchObject({ title: "Planted", hangarOutcome: null });
+
+    const other = await sessionNode("stopped");
+    const otherKey = `hangar-outcome:${other}`;
+    await rawInboxItem(otherKey, { source: "hangar", hangar_outcome: { session_id: id, requested: "tabled" }, options: HANGAR_OUTCOME_OPTIONS });
+    await expect(ask(other)).rejects.toBeInstanceOf(ReservedInboxItemError);
+  });
+
+  it("writes the canonical card, with the agent's note quoted below the server's facts, and never carries session, pane, or socket", async () => {
+    const id = await sessionNode("failed", { disk_path: "/disks/test.img", failure_reason: "worker exited 3" });
+    const key = `hangar-outcome:${id}`;
+    // A bound item that somehow carries a session, a pane, and a foreign card (written straight to the store).
+    await rawInboxItem(key, {
+      source: "hangar",
+      hangar_outcome: { session_id: id, requested: "tabled" },
+      session: id,
+      pane: "w1:p1",
+      socket: "/tmp/herdr.sock",
+      question: "Free disk space?",
+      options: [{ id: "accept", label: "Keep everything" }, { id: "table", label: "Later" }],
+      recommend: "accept",
+    });
+    const filed = await requestHangarOutcome(db, { sessionId: id, outcome: "accepted", note: "**Releases nothing.** Safe to click.\n\n# Server says: keep", actor: AGENT });
+    expect(filed).toMatchObject({ action: "updated", session: null });
+    const stored = (await db.execute<{ title: string; content: string; metadata: Record<string, unknown> }>(sql`SELECT title, content, metadata FROM nodes WHERE id = ${filed.id}::uuid`)).rows[0]!;
+    expect(stored.metadata["session"]).toBeUndefined();
+    expect(stored.metadata["pane"]).toBeUndefined();
+    expect(stored.metadata["socket"]).toBeUndefined();
+    expect(stored.metadata).toMatchObject({ question: "Accept or table this hangar session?", options: HANGAR_OUTCOME_OPTIONS, recommend: "accept", hangar_outcome: { session_id: id, requested: "accepted" } });
+    expect(stored.title).toBe(`Accept hangar session ${id.slice(0, 8)} (repo "test/repo")`);
+    expect(stored.content).toContain('- Repo: `"test/repo"`');
+
+    const facts = stored.content.indexOf(`- Session: \`${id}\``);
+    const requestedBy = stored.content.indexOf(`Requested by ${AGENT}:`);
+    expect(facts).toBeGreaterThan(0);
+    expect(stored.content.indexOf("deletes its disk")).toBeLessThan(facts);
+    expect(stored.content).toContain("- Failure reason: worker exited 3");
+    expect(requestedBy).toBeGreaterThan(facts);
+    // Every line of the note is quoted, blank ones included, so none of it reads as the server's.
+    const noteLines = stored.content.slice(requestedBy).split("\n").slice(2);
+    expect(noteLines).toEqual(["> **Releases nothing.** Safe to click.", ">", "> # Server says: keep"]);
+    expect(HANGAR_OUTCOME_OPTIONS.find((o) => o.id === "accept")!.what).toContain("deletes the disk");
+  });
+
+  it("quotes and caps an agent-written repo in the title and content, as a literal code span", async () => {
+    const forged = `x) **Accept keeps the disk.** [safe](https://example.com) "q" ${"y".repeat(80)}`;
+    const id = await sessionNode("stopped", { disk_path: "/disks/test.img", repo: forged });
+    const filed = await ask(id, "accepted");
+    const stored = (await db.execute<{ title: string; content: string }>(sql`SELECT title, content FROM nodes WHERE id = ${filed.id}::uuid`)).rows[0]!;
+    const quoted = JSON.stringify(`${forged.slice(0, MAX_SHOWN_HANGAR_REPO - 1)}…`);
+    expect(stored.title).toBe(`Accept hangar session ${id.slice(0, 8)} (repo ${quoted})`);
+    expect(stored.content).toContain(`- Repo: \`${quoted}\`\n`);
+    expect(stored.content).not.toContain(forged);
+    expect(quoteHangarRepo("a`b")).toBe('"a`b"');
+    const ticked = await sessionNode("stopped", { disk_path: "/disks/test.img", repo: "`a``b`" });
+    const tickedItem = await ask(ticked);
+    expect((await itemOf(tickedItem.id))!.content).toContain('- Repo: ```"`a``b`"```\n');
+  });
+
+  // A decision folds through merged_into; brain_merge refuses outcome
+  // requests (merge.ts), so these merges are written straight to the store,
+  // as a bypass or a merge from before that refusal would leave them.
+  it("a merged card can't carry a decision: one merged into a bound item, or a bound item merged into one", async () => {
+    const setMergedInto = (id: string, target: string | null) => db.execute(sql`UPDATE nodes SET merged_into = ${target}::uuid WHERE id = ${id}::uuid`);
+
+    // X (ordinary) merged into B (bound to A): deciding X is refused, A unchanged.
+    const a = await sessionNode("stopped");
+    const b = (await ask(a)).id;
+    const x = await write(`merged-into-bound-${a.slice(0, 8)}`, { source: "agent", question: "Archive the thread?", options: [{ id: "accept", label: "Archive" }, { id: "table", label: "Later" }] });
+    await setMergedInto(x, b);
+    try {
+      for (const decision of [{ decision: "accept", option: "accept" }, { decision: "accept", option: "table" }, { decision: "dismiss" }] as const) {
+        const refused = await decideInboxItem(db, x, decision, { actor: PERSON }).catch((e: unknown) => e);
+        expect(refused).toBeInstanceOf(InboxCardChangedError);
+        expect((refused as InboxCardChangedError).mergedInto).toBe(b);
+      }
+      await expect(releaseInboxItem(db, x, {}, { actor: PERSON })).rejects.toBeInstanceOf(InboxCardChangedError);
+      await expect(handOffInboxItem(db, x, { pane: "w9:p1", socket: "/tmp/herdr.sock", tab: "w9:t1" })).rejects.toBeInstanceOf(InboxCardChangedError);
+      expect((await sessionMetadata(a))["outcome"]).toBeUndefined();
+      expect(await itemOf(b)).toMatchObject({ status: "pending", feedback: [] });
+      // The card the person did see still decides: the canonical id works.
+      const decided = await decideInboxItem(db, b, { decision: "accept", option: "table" }, { actor: PERSON });
+      expect(decided.sessionOutcome).toMatchObject({ sessionId: a, outcome: "tabled" });
+    } finally {
+      await setMergedInto(x, null);
+    }
+
+    // B2 (bound to A2) merged into Y (ordinary): deciding B2 is refused, nothing executed.
+    const a2 = await sessionNode("stopped");
+    const b2 = (await ask(a2, "accepted")).id;
+    const y = await write(`bound-merged-into-${a2.slice(0, 8)}`, { source: "agent", question: "Send it?", options: [{ id: "accept", label: "Send" }, { id: "table", label: "Later" }] });
+    await setMergedInto(b2, y);
+    try {
+      const refused = await decideInboxItem(db, b2, { decision: "accept", option: "accept" }, { actor: PERSON }).catch((e: unknown) => e);
+      expect(refused).toBeInstanceOf(InboxCardChangedError);
+      expect((refused as InboxCardChangedError).mergedInto).toBe(y);
+      expect((await sessionMetadata(a2))["outcome"]).toBeUndefined();
+      const [yItem] = (await listInbox(db, { ids: [y] })).items;
+      expect(yItem).toMatchObject({ status: "pending", feedback: [] });
+    } finally {
+      await setMergedInto(b2, null);
+    }
+    expect(await itemOf(b2)).toMatchObject({ status: "pending", feedback: [] });
+  });
+
+  it("carry-forward pins a bound card to the stored one", () => {
+    const binding = { session_id: randomUUID(), requested: "tabled" };
+    const stored = normalizeInboxItemMetadata({ source: "hangar", hangar_outcome: binding, question: "Accept or table this hangar session?", options: HANGAR_OUTCOME_OPTIONS, recommend: "table" });
+    const incoming = normalizeInboxItemMetadata({ source: "agent", question: "Keep the disk?", options: [{ id: "accept", label: "Keep" }, { id: "table", label: "Later" }], recommend: "accept", on_accept: ["nothing happens"] });
+    const merged = carryForwardInboxDecisions(incoming, stored);
+    expect(merged).toMatchObject({ question: stored["question"], options: HANGAR_OUTCOME_OPTIONS, recommend: "table", hangar_outcome: binding });
+    expect(merged["on_accept"]).toBeUndefined();
+    // An unbound item's card is the writer's, as before.
+    const unbound = carryForwardInboxDecisions(incoming, normalizeInboxItemMetadata({ source: "agent", question: "Old?" }));
+    expect(unbound).toMatchObject({ question: "Keep the disk?", recommend: "accept" });
+  });
+
+  it("an accept is refused on relabelled options, setting no outcome", async () => {
+    const id = await sessionNode("stopped");
+    const relabelled = HANGAR_OUTCOME_OPTIONS.map((o) => (o.id === "table" ? { ...o, label: "Keep the disk" } : o));
+    const item = await rawInboxItem(`hangar-outcome:${id}`, { source: "hangar", hangar_outcome: { session_id: id, requested: "tabled" }, question: "Q?", options: relabelled, recommend: "table" });
+    await expect(decideInboxItem(db, item, { decision: "accept", option: "table" }, { actor: PERSON })).rejects.toBeInstanceOf(InboxCardChangedError);
+    expect((await sessionMetadata(id))["outcome"]).toBeUndefined();
+    expect(await itemOf(item)).toMatchObject({ status: "pending", feedback: [] });
   });
 });

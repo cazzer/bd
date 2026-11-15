@@ -32,6 +32,8 @@ const trpcMock = vi.hoisted(() => ({
   reviewDecision: { mutate: vi.fn() },
   relayAction: { query: vi.fn() },
   relayActionsFor: { query: vi.fn() },
+  // The hangar sessions section (HangarSessions.tsx) has its own tests; here no item has any.
+  hangarSessions: { query: vi.fn(async () => ({ sessions: [], truncated: false })) },
 }));
 vi.mock("../trpc.js", () => ({ trpc: trpcMock, HttpStatusError: class HttpStatusError extends Error {} }));
 vi.mock("./EvidenceView.js", async () => {

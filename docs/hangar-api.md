@@ -66,7 +66,11 @@ Every endpoint that returns a session uses this shape. Times are UTC ISO-8601 wi
   "failure_reason": null,
   "claimed_by": "hangar-desktop",
   "claimed_at": "2026-11-14T09:00:01.250Z",
-  "requested_at": "2026-11-14T08:59:40.000Z"
+  "requested_at": "2026-11-14T08:59:40.000Z",
+  "outcome": null,
+  "outcome_at": null,
+  "outcome_by": null,
+  "released": false
 }
 ```
 
@@ -79,10 +83,14 @@ Every endpoint that returns a session uses this shape. Times are UTC ISO-8601 wi
 | `work_item` | object or null | The work item the session runs for. `id` is Breakdown's node id. `external_id` and `source_system` say where it came from (for a beads issue, `source_system` is `beads`). `null` only if the link was removed. |
 | `container`, `host`, `disk_path` | string or null | Where it runs, as hangar last reported it. |
 | `requeue_reason` | string or null | Why it was last given back to the queue: the reason hangar sent, or `claimer disconnected before receiving the claim` when Breakdown gave it back itself (see [Long-poll](#long-poll)). Cleared when it is claimed again. |
-| `failure_reason` | string or null | Why a claim could not take it and set it `failed` (see [the claim](#post-hangarv1claim--scope-hangar)). `null` for every other session, including one hangar reported `failed`. |
+| `failure_reason` | string or null | Why it failed: the `reason` hangar sent with `state: "failed"` (see [`PATCH`](#patch-hangarv1sessionsid--scope-hangar)), or why a claim could not take it and set it `failed` (see [the claim](#post-hangarv1claim--scope-hangar)). `null` otherwise, including a session hangar reported `failed` without a reason. |
 | `claimed_by` | string or null | The name of the hangar that holds it: the client name of that hangar's token. `null` while queued. |
 | `claimed_at` | time or null | When it was last claimed. |
 | `requested_at` | time | When it was requested. Claims take the oldest first, and a requeued session keeps its place. |
+| `outcome` | string or null | A person's decision on an ended session: `accepted`, `tabled`, or `null` for none yet. Only a person sets it (see [Releasing sessions](#releasing-sessions)). Treat a value you don't know as `null`. |
+| `outcome_at` | time or null | When the outcome was last set. |
+| `outcome_by` | string or null | Who set it: the person's client name, or `human` for the local person. |
+| `released` | boolean | Outcome set and no disk held (hangar acknowledged the release, or the session never had a disk): `outcome` is set and `disk_path` is `null`, so hangar holds nothing for the session. Computed; never sent by a client. |
 
 ### `POST /hangar/v1/check-in` — scope `hangar`
 
@@ -147,14 +155,16 @@ Status codes: `200`, `400 invalid_json` / `invalid_request`, `401`, `403 forbidd
 
 Reports a session's state and where it runs. Only the hangar that claimed the session may change it. Every change is recorded in the session's history, attributed to your hangar.
 
-Request (every field optional, at least one required):
+Request (every field optional, at least one of `state`, `container`, `host`, `disk_path` required):
 
 ```json
 { "state": "running", "container": "c-12", "host": "hangar-linux", "disk_path": "/var/lib/hangar/disks/3f0c2a9e.img" }
 ```
 
-- `state`: the state to move to. The [state machine](#session-state-machine) decides which moves are allowed. Sending the current state is allowed, and leaves the state as it is while you update the other fields.
-- `container`, `host` (string, at most 200 characters), `disk_path` (string, at most 1,024 characters): a string sets the field, `null` or `""` clears it, and an omitted field is left as it is. Values are trimmed and must not contain control characters.
+- `state`: the state to move to. The [state machine](#session-state-machine) decides which moves are allowed. Sending the current state is allowed, and leaves the state as it is while you update the other fields. Omitting it updates only the other fields, and that is allowed on an ended (`stopped` or `failed`) session too, within the rules below.
+- `container`, `host` (string, at most 200 characters), `disk_path` (string, at most 1,024 characters): a string sets the field, `null` or `""` clears it, and an omitted field is left as it is. Values are trimmed and must not contain control characters. Clearing `container` and `disk_path` on an ended session is how you acknowledge a release (see [Releasing sessions](#releasing-sessions)).
+- `reason` (string, 1–500 characters): why you failed the session, for example `git clone exited 128` or `repo "x/y" is not on this hangar's allowlist`. Used only with `state: "failed"`, and stored as the session's `failure_reason` on the move into `failed`; there it must be 1–500 characters, or the request is a `400 invalid_request`. A repeated `failed` report on a session that is already `failed` keeps the reason stored first. Sent with any other `state`, or without one, it is ignored like any unused field (see [Versioning](#versioning)).
+- `outcome` is not a field of this request. Only a person sets it, so a sent `outcome` is ignored like any unknown field.
 
 Response `200`:
 
@@ -164,13 +174,20 @@ Response `200`:
 
 Moving to `stopped` or `failed` revokes the session token in the same transaction. The worker's next request with it gets `401`.
 
+On an ended (`stopped` or `failed`) session, a `PATCH` is refused with `409 session_ended`, and nothing changes, when it would:
+
+- set `container` or `disk_path` to a value: on an ended session they only clear (`null`), so a released session is never un-released. Re-sending the value a field already holds is no change, and is answered `200`;
+- change anything but a clear on a released session (`released: true`), `host` included. Clearing is still taken, so the acknowledgement, and the same acknowledgement repeated after a lost answer, both answer `200`;
+- clear a `disk_path` the session still holds before a person has set its `outcome`. That is the release acknowledgement, and there is nothing to acknowledge until a person has decided. Clearing `container` alone is allowed.
+
 Status codes:
 - `200`
-- `400 invalid_json` / `invalid_request`: for example, an empty body `{}`
+- `400 invalid_json` / `invalid_request`: for example, an empty body `{}` (or one with only an ignored `reason`), or an empty `reason` with `state: "failed"`
 - `401`
 - `403 forbidden` / `read_only` / `not_claimer`: another hangar holds the session, or nobody does, as with a queued one
 - `404 not_found`: no session has that id
 - `409 invalid_transition`: the move is not allowed, and the message names both states
+- `409 session_ended`: the change breaks the rules for an ended session (above)
 - `413`, `415`
 
 ### `POST /hangar/v1/sessions/:id/requeue` — scope `hangar`
@@ -269,6 +286,31 @@ After a `session` message the item belongs to a local session. Later decisions o
 
 Decisions reach a session only while it is open. Once it is `stopped` or `failed`, nobody reads its messages. An accept or a send-back (`changes`) on an item it filed is then refused with `CONFLICT` and nothing is written: "The hangar session that filed this has ended. Hand it off to a local session or dismiss it." A remote worker's proposal never quietly turns into an execution on Breakdown's host with the person's credentials. The person can still dismiss the item, release it if it is held, or hand it off to a local session. None of these sends a message, and each one unbinds the item from the session. From then on the item is local. That is the person's explicit choice, so a later accept of a released item is an ordinary local accept.
 
+## Releasing sessions
+
+Hangar keeps an ended session's disk, and its stopped container, until a person says they are done with the session. That decision is the session's `outcome`.
+
+- **Values.** `null` (no decision yet), `accepted` (the work is done or kept), or `tabled` (set aside). Hangar treats both the same way: either one releases the session. The difference matters to people and to Breakdown. Treat any other value as `null` and keep the session, since a later v1 may add one.
+- **Who sets it.** Only a person, and only on a `stopped` or `failed` session: on Breakdown's board (a `human` token, or the local person), or by accepting an inbox request an agent filed (`brain_hangar_outcome_request`). Breakdown writes that request's card itself, the session's facts first and the agent's note quoted below them, and no other writer can create or change one, so what the person clicks always says which session it releases. An `agent` token can only ask. A session token can't even ask, and the `hangar` token never sets it: an `outcome` in a `PATCH` is ignored. The person can change it until hangar has released the session.
+- **Ordering.** Setting it counts as a change of the session, so the session moves to the front of the newest-changed order. A just-decided session is inside your `limit=200` listing however many old sessions exist.
+
+On every check-in interval:
+
+1. `GET /hangar/v1/sessions?state=stopped&state=failed&limit=200`.
+2. For each session with `outcome` `accepted` or `tabled` that you still have a record or a disk for:
+   1. remove its stopped worker container;
+   2. delete its disk (if the disk is busy, try again next interval);
+   3. acknowledge with `PATCH /hangar/v1/sessions/:id` `{"container": null, "disk_path": null}`: a `PATCH` with no `state` is allowed on an ended session, and clearing its `disk_path` is taken once the session has an `outcome` (before that it is `409 session_ended`). Repeating it after a lost answer answers `200` again;
+   4. forget the session locally.
+3. Keep a session whose `outcome` is `null` or a value you don't know.
+
+What each side can rely on:
+
+- `outcome != null` and `disk_path == null` means **released**. Hangar holds nothing for the session any more, and the session object says `released: true`. The outcome is final from then on. Breakdown may later delete the session's messages or archive it.
+- `outcome != null` and `disk_path != null` means hangar hasn't released it yet, for example because it is offline. It releases at its next check-in.
+- A session that ended before hangar gave it a disk has `disk_path: null` already, so it counts as released as soon as a person sets its outcome.
+- Report why you failed a session with `reason` on the `PATCH` that sets `failed`. People see it as the session's `failure_reason`.
+
 ## Long-poll
 
 `POST /claim` (`wait_s` in the body) and `GET /messages` (`wait_s` in the query) long-poll:
@@ -310,7 +352,7 @@ stateDiagram-v2
 - **Forward only.** A `PATCH` may move a session forward along `claimed → running → stopped`, may skip `running` (`claimed → stopped`), and may set `failed` from any state except `stopped`. It cannot set `queued` or `claimed`. Any other move is `409 invalid_transition`, and the session is unchanged. `stopped` and `failed` are final.
 - **Requeue** only from `claimed`.
 - **Token revocation.** The session token is revoked in the same transaction that moves the session to `stopped` or `failed`, or requeues it. A requeued session claimed again gets a new token. The old one stays dead.
-- Every state change is a revision of the session in Breakdown's history, attributed to the hangar that made it.
+- Every state change is a revision of the session in Breakdown's history, attributed to the hangar that made it. A person's outcome is a revision too, attributed to that person.
 
 ## Check-ins and status
 
@@ -328,7 +370,7 @@ stateDiagram-v2
   - file and complete inbox requests with the inbox scripts (`BREAKDOWN_API=<web base URL> BREAKDOWN_TOKEN=<token> bin/inbox request …`). An item filed this way is bound to the session, and the person's decision on it arrives as an `inbox_decision` message. The token can re-send and complete only items its own session filed. A key that names another session's item, or a local or ingested one, is refused, and nothing is written.
 
   It cannot decide anything a person decides: no agent write, with any token, can set an inbox item to `accepted`, `changes`, or `dismissed`, or write its feedback. A new item is always `pending`. It cannot use the hangar endpoints.
-- **What it can reach.** A session token is a full `agent` credential on MCP, minus two tools. It can read the whole store, including every inbox item, not only its session's, and it can write nodes and edges anywhere outside the reserved hangar ones. It cannot call `brain_merge` or `brain_hangar_request`. Those tools are neither listed nor run for it, so it cannot merge nodes or queue more sessions. Treat it as a credential that can read and write your knowledge store, and hand it only to the worker it was minted for.
+- **What it can reach.** A session token is a full `agent` credential on MCP, minus three tools. It can read the whole store, including every inbox item, not only its session's, and it can write nodes and edges anywhere outside the reserved hangar ones. It cannot call `brain_merge`, `brain_hangar_request`, or `brain_hangar_outcome_request`. Those tools are neither listed nor run for it, so it cannot merge nodes, queue more sessions, or ask the person to release a session. Treat it as a credential that can read and write your knowledge store, and hand it only to the worker it was minted for.
 - **A leaked hangar token mints these.** Anyone holding the `hangar` token can claim queued sessions and receive their session tokens. To stop that, revoke the hangar token (`pnpm -s client-token revoke <hangar name>`). Its sessions' tokens die as those sessions end. Revoke a session token on its own with `pnpm -s client-token revoke session-<id>`.
 - **Lifetime.** The token dies when the session reaches `stopped` or `failed`, or is requeued. After that, every request with it gets `401`.
 - **Lost a token?** Breakdown cannot show it again. On startup, and whenever you are unsure, call `GET /hangar/v1/sessions?state=claimed`. Requeue any `claimed` session you hold no token for, with a reason such as `"hangar restarted before starting it"`, and a later claim gets a fresh token. For a `running` session whose worker lost its token, report `failed`.
@@ -366,6 +408,7 @@ Branch on `code`, which is stable within v1. `message` is for people, and its wo
 | 404 | `not_found` | No such endpoint, or no session with that id (a malformed id included). |
 | 405 | `method_not_allowed` | A known path with the wrong method. The `Allow` header lists the right ones. |
 | 409 | `invalid_transition` | The state change breaks the [state machine](#session-state-machine). |
+| 409 | `session_ended` | A `PATCH` on an ended session sets a placement field, changes a released session, or acknowledges a release before a person set an outcome (see [`PATCH`](#patch-hangarv1sessionsid--scope-hangar)). |
 | 413 | `too_large` | The body is over 64 KiB, declared or sent. The connection is closed. |
 | 415 | `unsupported_media_type` | A `POST` or `PATCH` without `Content-Type: application/json`. |
 | 429 | `too_many_waiters` | This client already holds 4 long-polls open (see [Long-poll](#long-poll)). Sent with `Retry-After: 1`. |

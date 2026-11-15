@@ -17,7 +17,7 @@
 import { randomUUID } from "node:crypto";
 import { createServer, request, type IncomingHttpHeaders, type Server } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
-import { appendHangarMessage, closeIngestRun, createClientToken, openIngestRun, requestSession, upsertNodes, verifyClientToken, type IngestRunHandle } from "@breakdown/core";
+import { appendHangarMessage, closeIngestRun, createClientToken, openIngestRun, requestSession, setHangarSessionOutcome, upsertNodes, verifyClientToken, type IngestRunHandle } from "@breakdown/core";
 import { clientTokens, createDb, createPool, hangarCheckIns, hangarMessages, nodes, resolveDatabaseUrl, type Database } from "@breakdown/db";
 import { createHTTPHandler } from "@trpc/server/adapters/standalone";
 import { and, eq, inArray, like, sql } from "drizzle-orm";
@@ -351,6 +351,124 @@ describe("PATCH /hangar/v1/sessions/:id and GET /hangar/v1/sessions", () => {
     expect(badState.status).toBe(400);
     const twice = await send("/hangar/v1/sessions?limit=1&limit=2", { token: tokens[HANGAR_A] });
     expect(twice.status).toBe(400);
+  });
+});
+
+// hangar-release (cazzer/hangar docs/release-contract.md): a person's
+// outcome on an ended session, hangar's failure reason, and its release ack.
+describe("releasing sessions", () => {
+  const PERSON = `${PREFIX}-person`;
+
+  async function ended(state: "stopped" | "failed"): Promise<string> {
+    const { id } = await queued();
+    await claim(id);
+    expect((await patch(id, { state: "running", container: `hangar-${id}`, disk_path: `/disks/${id}.img` })).status).toBe(200);
+    expect((await patch(id, { state })).status).toBe(200);
+    return id;
+  }
+
+  it("serves the outcome fields on every session, null until a person decides", async () => {
+    const id = await ended("stopped");
+    const listed = await send("/hangar/v1/sessions?state=stopped&state=failed&limit=200", { token: tokens[HANGAR_A] });
+    const session = (listed.json["sessions"] as Record<string, unknown>[]).find((s) => s["id"] === id);
+    expect(session).toMatchObject({ outcome: null, outcome_at: null, outcome_by: null, released: false, disk_path: `/disks/${id}.img` });
+  });
+
+  it("lists a session a person just tabled first, and the ack PATCH releases it", async () => {
+    const older = await ended("failed");
+    const id = await ended("stopped");
+    await setHangarSessionOutcome(db, { id: older, outcome: "tabled", actor: PERSON });
+    const listedIds = async (): Promise<string[]> => ((await send("/hangar/v1/sessions?state=stopped&state=failed&limit=200", { token: tokens[HANGAR_A] })).json["sessions"] as { id: string }[]).map((s) => s.id);
+    expect((await listedIds())[0]).toBe(older);
+
+    await setHangarSessionOutcome(db, { id, outcome: "tabled", actor: PERSON });
+    expect((await listedIds())[0]).toBe(id);
+    const listed = await send("/hangar/v1/sessions?state=stopped&state=failed&limit=200", { token: tokens[HANGAR_A] });
+    expect((listed.json["sessions"] as Record<string, unknown>[])[0]).toMatchObject({ id, outcome: "tabled", outcome_by: PERSON, outcome_at: expect.stringMatching(/Z$/), released: false });
+
+    const acked = await patch(id, { container: null, disk_path: null });
+    expect(acked.status, acked.body).toBe(200);
+    expect(acked.json["session"]).toMatchObject({ state: "stopped", container: null, disk_path: null, outcome: "tabled", released: true });
+  });
+
+  it("refuses the ack (clearing a held disk_path) before a person has set an outcome, 409 session_ended, changing nothing", async () => {
+    const id = await ended("failed");
+    const refused = await patch(id, { container: null, disk_path: null });
+    expect(refused.status, refused.body).toBe(409);
+    expect(refused.json.error).toMatchObject({ code: "session_ended", message: expect.stringContaining("no outcome") });
+    expect(await metadataOf(id)).toMatchObject({ container: `hangar-${id}`, disk_path: `/disks/${id}.img` });
+    // Clearing the container alone is still allowed.
+    const container = await patch(id, { container: null });
+    expect(container.status, container.body).toBe(200);
+    expect(container.json["session"]).toMatchObject({ state: "failed", container: null, disk_path: `/disks/${id}.img`, released: false });
+  });
+
+  it("an ended session's container and disk_path only clear: a value is refused, 409 session_ended", async () => {
+    const id = await ended("stopped");
+    for (const body of [{ disk_path: "/disks/other.img" }, { container: "c-new" }, { state: "stopped", disk_path: "/disks/other.img" }]) {
+      const refused = await patch(id, body);
+      expect(refused.status, JSON.stringify(body)).toBe(409);
+      expect(refused.json.error).toMatchObject({ code: "session_ended" });
+    }
+    expect(await metadataOf(id)).toMatchObject({ container: `hangar-${id}`, disk_path: `/disks/${id}.img` });
+    // Re-sending the value it already holds is no change, so a retried report still answers 200.
+    expect((await patch(id, { state: "stopped", container: `hangar-${id}` })).status).toBe(200);
+  });
+
+  it("a released session is never un-released: only clears are taken, and a repeated ack is a no-op", async () => {
+    const id = await ended("stopped");
+    await setHangarSessionOutcome(db, { id, outcome: "tabled", actor: PERSON });
+    expect((await patch(id, { disk_path: null })).status).toBe(200);
+    for (const body of [{ disk_path: `/disks/${id}.img` }, { container: "c-new" }, { host: "elsewhere" }]) {
+      const refused = await patch(id, body);
+      expect(refused.status, JSON.stringify(body)).toBe(409);
+      expect(refused.json.error).toMatchObject({ code: "session_ended" });
+    }
+    // Hangar's ack clears the container it still reported, then repeats after a lost answer.
+    for (let i = 0; i < 2; i += 1) {
+      const acked = await patch(id, { container: null, disk_path: null });
+      expect(acked.status, acked.body).toBe(200);
+      expect(acked.json["session"]).toMatchObject({ container: null, disk_path: null, outcome: "tabled", released: true });
+    }
+  });
+
+  it("a repeated failed report keeps the first reason", async () => {
+    const { id } = await queued();
+    await claim(id);
+    expect((await patch(id, { state: "failed", reason: "worker exited 3" })).status).toBe(200);
+    const again = await patch(id, { state: "failed", reason: "hangar lost the worker while it was down" });
+    expect(again.status, again.body).toBe(200);
+    expect(again.json["session"]).toMatchObject({ state: "failed", failure_reason: "worker exited 3" });
+  });
+
+  it("ignores an outcome hangar sends", async () => {
+    const id = await ended("stopped");
+    const sent = await patch(id, { outcome: "tabled", host: "hangar-linux" });
+    expect(sent.status, sent.body).toBe(200);
+    expect(sent.json["session"]).toMatchObject({ outcome: null, host: "hangar-linux" });
+    expect((await metadataOf(id))["outcome"]).toBeUndefined();
+  });
+
+  it("stores reason with failed as failure_reason, checks its length there, and ignores it with any other state", async () => {
+    const { id } = await queued();
+    await claim(id);
+    for (const body of [{ state: "failed", reason: "" }, { state: "failed", reason: "x".repeat(501) }, { state: "failed", reason: 42 }]) {
+      const refused = await patch(id, body);
+      expect(refused.status, JSON.stringify(body)).toBe(400);
+      expect(refused.json.error).toMatchObject({ code: "invalid_request", message: expect.stringContaining("reason") });
+    }
+    expect((await metadataOf(id))["state"]).toBe("claimed");
+    // Alone, an ignored reason leaves nothing to change.
+    const nothing = await patch(id, { reason: "worker exited 3" });
+    expect(nothing.status, nothing.body).toBe(400);
+    expect(nothing.json.error).toMatchObject({ code: "invalid_request" });
+    const running = await patch(id, { state: "running", reason: "x".repeat(501) });
+    expect(running.status, running.body).toBe(200);
+    expect(running.json["session"]).toMatchObject({ state: "running", failure_reason: null });
+    expect((await metadataOf(id))["failure_reason"]).toBeUndefined();
+    const failed = await patch(id, { state: "failed", reason: "git clone exited 128" });
+    expect(failed.status, failed.body).toBe(200);
+    expect(failed.json["session"]).toMatchObject({ state: "failed", failure_reason: "git clone exited 128" });
   });
 });
 

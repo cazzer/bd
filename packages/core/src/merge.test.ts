@@ -1,8 +1,8 @@
-import { eq, inArray } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Database } from "@breakdown/db";
 import { ingestRuns, nodes, resolvedNodes } from "@breakdown/db";
-import { HangarSessionMergeError, MergeFailedError, NodeNotFoundError, SelfMergeError } from "./errors.js";
+import { HangarOutcomeMergeError, HangarSessionMergeError, MergeFailedError, NodeNotFoundError, SelfMergeError } from "./errors.js";
 import { openIngestRun, type IngestRunHandle } from "./ingest-runs.js";
 import { mergeNodes } from "./merge.js";
 import { upsertNodes } from "./nodes.js";
@@ -273,6 +273,48 @@ describe("mergeNodes refuses hangar sessions", () => {
       expect((await mergeNodes(db, other!, plain!, run)).mergedNodeIds).toEqual([other]);
     } finally {
       await db.delete(nodes).where(eq(nodes.id, underHangar));
+    }
+  });
+});
+
+// hangar-release security review: a decision folds through merged_into, so a
+// merge into or out of an outcome request would let the person's click on one
+// card land on another; an outcome request's accept deletes a session's disk.
+describe("mergeNodes refuses hangar outcome requests", () => {
+  async function mergedIntoOf(ids: string[]) {
+    return db.select({ id: nodes.id, mergedInto: nodes.mergedInto }).from(nodes).where(inArray(nodes.id, ids));
+  }
+  const setMergedInto = (id: string, target: string | null) => db.execute(sql`UPDATE nodes SET merged_into = ${target}::uuid WHERE id = ${id}::uuid`);
+
+  it("refuses one as loser, requested survivor, resolved survivor, or chain member, writing nothing", async () => {
+    const run = await newRun();
+    const [plain, other, viaSurvivor, chainHead] = await makeNodes(run, 4);
+    const suffix = uniqueSuffix();
+    // Bound by metadata, under the run's own source system.
+    const bound = (await upsertNodes(db, run, [{ nodeType: "inbox_item", sourceSystem: run.sourceSystem, externalId: `bound-${suffix}`, metadata: { hangar_outcome: { session_id: "s", requested: "tabled" } } }])).rows[0]!.id;
+    // At the reserved key, under inbox, whatever its node type or metadata.
+    const keyed = (await upsertNodes(db, run, [{ nodeType: "note", sourceSystem: "inbox", externalId: `hangar-outcome:merge-test-${suffix}` }])).rows[0]!.id;
+    try {
+      for (const outcome of [bound, keyed]) {
+        await expect(mergeNodes(db, outcome, plain!, run)).rejects.toBeInstanceOf(HangarOutcomeMergeError);
+        await expect(mergeNodes(db, plain!, outcome, run)).rejects.toBeInstanceOf(HangarOutcomeMergeError);
+      }
+      // Resolved survivor: viaSurvivor already folds onto the bound item.
+      await setMergedInto(viaSurvivor!, bound);
+      await expect(mergeNodes(db, plain!, viaSurvivor!, run)).rejects.toBeInstanceOf(HangarOutcomeMergeError);
+      await setMergedInto(viaSurvivor!, null);
+      // Chain member: the keyed item already folds onto chainHead, which would be repointed.
+      await setMergedInto(keyed, chainHead!);
+      await expect(mergeNodes(db, chainHead!, plain!, run)).rejects.toBeInstanceOf(HangarOutcomeMergeError);
+      await setMergedInto(keyed, null);
+      expect((await mergedIntoOf([plain!, other!, viaSurvivor!, chainHead!, bound, keyed])).every((r) => r.mergedInto === null)).toBe(true);
+      // An ordinary inbox item, and an ordinary merge, still merge.
+      const ordinary = (await upsertNodes(db, run, [{ nodeType: "inbox_item", sourceSystem: run.sourceSystem, externalId: `ordinary-${suffix}`, metadata: { status: "pending" } }])).rows[0]!.id;
+      expect((await mergeNodes(db, ordinary, plain!, run)).mergedNodeIds).toEqual([ordinary]);
+      expect((await mergeNodes(db, other!, plain!, run)).mergedNodeIds).toEqual([other]);
+    } finally {
+      await setMergedInto(keyed, null);
+      await db.delete(nodes).where(eq(nodes.id, keyed));
     }
   });
 });
