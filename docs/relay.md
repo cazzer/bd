@@ -242,6 +242,8 @@ so a `herdr_prompt` payload's `text` is at most 8,000 less that line and its new
 
 ## What the relay trusts
 
+**Not covered by the relay's controls: `bin/inbox-watch`.** With `BREAKDOWN_API` pointed at a remote Breakdown, inbox-watch runs a headless `claude -p` with bypassed permissions on accepted inbox items the server reports, so a compromised Breakdown can drive it without a relay token and outside `--project`, `--herdr-socket`, `--kinds` and `--max-age`. Keep inbox-watch on a loopback `BREAKDOWN_API` until bd-d38.16 guards it; that bead blocks cutover (bd-d38.10).
+
 The relay treats Breakdown as possibly compromised. Its own command line is the trust anchor:
 
 - **Checkouts.** `bd` runs only in a `--project key=/abs/path` checkout, only at exactly that path, and only while the path is its own realpath (no symlink anywhere along it) holding a real `.beads/` directory, checked again immediately before every `bd` spawn. A payload's `cwd` must equal it. Breakdown's project list can narrow these, never add one or move one ([`GET /projects`](#get-relayv1projects--scope-relay)).
@@ -250,7 +252,7 @@ The relay treats Breakdown as possibly compromised. Its own command line is the 
 - **Age.** The relay refuses a decision or prompt older than its `--max-age`.
 - **Transport.** `--url` must be `https`, or `http` only to loopback, a tailnet address (100.64.0.0/10), or a `*.ts.net` name. Redirects are never followed, so the token goes only to that origin.
 
-**What a compromised Breakdown can still do.** Within the configured projects and sockets it can choose the wording of the decisions and prompts the relay relays (a comment, a close reason, a prompt typed into an agent's pane), queue a well-formed decision the person never made, and delay or drop actions. The provenance line (`[Breakdown relay] … — ` before every relayed prompt, on the prompt's own line so herdr never submits it alone) tells the agent the prompt is untrusted, and every decision is a `bd` comment that stays visible on the board. This is accepted for now: the relay exists to carry the board's decisions, and a cryptographic tie from a decision to the person (a signature checked on the Mac) is a separate change. Narrow what it can reach with `--project`, `--kinds`, and `--herdr-socket`.
+**What a compromised Breakdown can still do.** Within the configured projects and sockets it can choose the wording of the decisions and prompts the relay relays (a comment, a close reason, a prompt typed into an agent's pane), queue a well-formed decision the person never made, and delay or drop actions. The provenance line (`[Breakdown relay] … — ` before every relayed prompt, on the same line as the prompt, so herdr never submits it alone) tells the agent the prompt is untrusted, and every decision is a `bd` comment that stays visible on the board. This is accepted for now: the relay exists to carry the board's decisions, and a cryptographic tie from a decision to the person (a signature checked on the Mac) is a separate change. Narrow what it can reach with `--project`, `--kinds`, and `--herdr-socket`.
 
 ## Minting the relay token
 
