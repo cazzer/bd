@@ -11,7 +11,7 @@ The server SHALL check the raw path, never decoded: every segment SHALL start wi
 
 The run directory SHALL be refused with 403 when a symlink lies anywhere on its path inside the root, and with 409 when a file sits where a directory belongs. The request that creates a run SHALL record its client as the run's owner; a tokenless loopback request counts as human. A PUT into an existing run, or a DELETE of one, SHALL be admitted only for its owner or a `human` token, and refused with 403 otherwise. With `BRAIN_READ_ONLY`, every PUT and DELETE SHALL be refused with 403 `read_only`.
 
-A PUT SHALL write to a temporary file in the run directory, fsync it, link it to the target without replacing an existing file (an existing name is 409), fsync the directory, and answer 204. A failed PUT SHALL leave no temporary file and none of the empty directories it created. A DELETE of a missing run SHALL answer 204. A DELETE of anything but a real directory SHALL answer 409 and remove nothing. The route SHALL log no header and no body.
+A PUT SHALL write to a temporary file in the run directory, fsync it, link it to the target without replacing an existing file (an existing name is 409), fsync the directory, and answer 204. A failed PUT SHALL leave no temporary file and no file at the target; an empty run it created may remain, still owned. A DELETE of a missing run SHALL answer 204. A DELETE of anything but a real directory SHALL answer 409 and remove nothing. The route SHALL log no header and no body.
 
 #### Scenario: A climbing path is refused
 

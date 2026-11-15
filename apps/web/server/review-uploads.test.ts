@@ -123,11 +123,11 @@ describe("createReviewUploadHandler: PUT", () => {
     await expect(lstat(path.join(root, "p2"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("refuses a chunked body past the cap with 413, keeping no file, no tmp, and none of the directories it made", async () => {
+  it("refuses a chunked body past the cap with 413, keeping no file and no tmp; the empty run stays owned", async () => {
     const port = await serve({ maxBytes: 10 });
     const chunk = Buffer.alloc(8, 1);
     expect(await send(port, "PUT", "/review-uploads/p3/i/r/01-a.png", png, [chunk, chunk, chunk])).toMatchObject({ status: 413 });
-    await expect(lstat(path.join(root, "p3"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readdir(path.join(root, "p3", "i", "r"))).toEqual([".owner"]);
   });
 
   it("keeps a run that already held files when a later PUT into it fails", async () => {

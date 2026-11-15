@@ -37,7 +37,7 @@ Files go to `<project>/<item-id>/<run>/<NN-name>`. `<run>` is `randomBytes(6)` h
 - a closed review keeps its media, so runs are never reused;
 - a refresh writes a new run, and the old one is deleted only after `bd update` lands, so the board never points at a half-replaced directory.
 
-Each run has an owner. The request that creates a run writes the admitted client's name to `<run>/.owner`; a tokenless loopback request writes `(loopback)`, which no client name can be. A leading dot fails the segment rule, so no request can name the file. A PUT into an existing run, or a DELETE of one, is admitted for the same client or any `human`. Anyone else gets 403, and only a human may touch a run without an owner file. A PUT never replaces a file: a name that already exists is 409. The client never needs to replace one, and without both rules any `agent` token, a hangar worker's included, could swap the evidence in someone else's open review or delete it.
+Each run has an owner. The request that creates a run writes the admitted client's name to `<run>/.owner`; a tokenless loopback request writes `(loopback)`, which no client name can be. A leading dot fails the segment rule, so no request can name the file. A PUT into an existing run, or a DELETE of one, is admitted for the same client or any `human`. Anyone else gets 403, and only a human may touch a run without an owner file. A PUT never replaces a file: a name that already exists is 409. The client never needs to replace one, and without both rules any `agent` token, a hangar worker's included, could swap the evidence in someone else's open review or delete it. An agent admitted tokenless over loopback on the server host counts as human (the existing trust model), so the owner rule protects against remote agents: containers and other hosts.
 
 Only `<project>/<item-id>/<run>` shapes can be written or deleted. Legacy media sits at `<project>/<bead-id>/<NN-name>`, files one level shallower than a run's. A PUT through one of those files, or a DELETE that names one as a run, finds a file where a directory should be and is refused with 409. So legacy media can't be overwritten or removed.
 
@@ -63,7 +63,7 @@ Checks run in order on the raw path, which is never decoded:
 
 The byte reserve is shared: the media volume sits on the same disk as Postgres and the OS, so the 1 GiB floor protects them too, not just the uploads. A filesystem that reports no inode count (btrfs) skips the inode floor.
 
-The body streams into `.<name>.<random>.tmp`, which is created exclusive with mode 0644, and every write's length is checked. The server fsyncs the file, links it to the target (no-clobber: EEXIST is 409), unlinks the tmp name, fsyncs the run directory, and answers 204. Each directory the request creates has its parent fsynced too. Any failure unlinks the tmp file and removes the directories this request created, while they hold nothing but their `.owner`.
+The body streams into `.<name>.<random>.tmp`, which is created exclusive with mode 0644, and every write's length is checked. The server fsyncs the file, links it to the target (no-clobber: EEXIST is 409), unlinks the tmp name, fsyncs the run directory, and answers 204. Each directory the request creates has its parent fsynced too. Any failure unlinks the tmp file and nothing else. Removing a run's `.owner` or directories here could race a retry from the same client that had already passed the owner check, leaving the run unowned or failing it with a 500. A run left empty is the client's to DELETE (it does) or bd-d38.15's to collect.
 
 DELETE runs the same segment, realpath, and owner checks. A missing run answers 204. Anything that isn't a real directory answers 409, and nothing is removed. Otherwise the run is removed recursively and the answer is 204.
 
@@ -91,7 +91,7 @@ A PUT sends:
 - `redirect: "error"`;
 - a 300 s timeout per attempt.
 
-A PUT is retried up to 3 times on a 503 (after its `Retry-After`, capped at 5 s) or a reset connection (EPIPE, ECONNRESET). A failed PUT DELETEs its run with the 5 s timeout. It then refuses with `could not upload the attachments to <api>: <NN-name>: <HTTP 413: first line | no answer within 300 s | socket error code>. Nothing was filed.` The server's text is cut to its first line, with control characters removed.
+A PUT is retried up to 3 times on a 503 (after its `Retry-After` when that is a non-empty finite number, capped at 5 s, else 1 s) or a reset connection (EPIPE, ECONNRESET). On a retry, a 409 counts as stored: the run is fresh and this token's, so the earlier attempt landed and only its 204 was lost. A failed PUT DELETEs its run with the 5 s timeout. It then refuses with `could not upload the attachments to <api>: <NN-name>: <HTTP 413: first line | no answer within 300 s | socket error code>. Nothing was filed.` The server's text is cut to its first line, with C0 and C1 controls and bidi overrides and isolates removed.
 
 A run is committed as soon as `bd update` is attempted: if the update wrote the metadata and then exited non-zero, the review would point at deleted media, and a stray run is cheap. If the update landed and the review was reused, `previousRuns` (this item's relative runs other than the new one) is DELETEd. On the way out, every uncommitted run is DELETEd. Every DELETE is best-effort: a failure warns and leaves the exit code alone. The token is never printed.
 
@@ -105,6 +105,7 @@ A run is committed as soon as `bd update` is attempted: if the update wrote the 
 - **Any agent can create runs in any project.** Tokens aren't bound to projects. It can't add to, replace, or delete another client's run (decision 2), and the writable shapes are limited to `<project>/<item>/<run>`, so legacy files and other paths are safe.
 - **The Mac's local board can't show remote reviews.** Their media lives on the Jetson. README says so.
 - **Orphans.** A failed best-effort DELETE leaves a run behind (see Deferred).
+- **A refresh under a different agent client** can't DELETE the earlier runs (403, which warns), so they are left for bd-d38.15.
 - **Check-then-act race.** Between the realpath check and the write, a directory could be swapped for a symlink. Only the host operator can create one under the root, as for the image route.
 - **Slow links vs 300 s.** A near-200 MB upload over a slow tailnet path can time out. This is checked live at bd-d38.10.
 - **An early refusal can look like EPIPE.** When the server refuses before reading the body (413 on Content-Length, 503, 507, 409, 403), it closes the connection, and the client may see the close mid-write instead of the status. The CLI caps only videos before uploading; images aren't size-checked on the client, so an image over 200 MB reaches the server's 413. A reset is retried, and after the retries the refusal names the socket error rather than the status.

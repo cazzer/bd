@@ -82,6 +82,9 @@ const UPLOAD_RETRIES = 3;
 /** Cap on the wait a 503's Retry-After asks for. */
 const MAX_RETRY_WAIT_MS = 5_000;
 const RETRY_CODES = new Set(["EPIPE", "ECONNRESET"]);
+// Removed from the server's text before it is printed: C0 and C1 controls, and bidi overrides and isolates.
+// eslint-disable-next-line no-control-regex
+const UNPRINTABLE = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g;
 // The first character is never `-`, so an id cannot be read by bd as an option.
 const ITEM_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
 const PORT = /^\d{1,5}$/;
@@ -1191,8 +1194,8 @@ async function removeRun(deps, owner, run, which) {
 /**
  * One PUT, retried up to UPLOAD_RETRIES times on a 503 (after its
  * Retry-After, at most MAX_RETRY_WAIT_MS) or a reset connection: null once
- * stored, else why not. The server's text is cut to one line, control
- * characters removed, before it is ever printed.
+ * stored, else why not. A 409 on a retry counts as stored. The server's
+ * text is cut to one line, UNPRINTABLE removed, before it is ever printed.
  */
 async function putFile(deps, url, name, file) {
   const sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -1208,10 +1211,13 @@ async function putFile(deps, url, name, file) {
         signal: AbortSignal.timeout(UPLOAD_TIMEOUT_MS),
       });
       if (response.ok) return null;
-      const detail = (await response.text().catch(() => "")).trim().split("\n")[0].replace(new RegExp(CONTROL_CHAR.source, "g"), "").slice(0, 200);
+      // The run is fresh and this token's: a 409 on a retry is the earlier attempt's file, whose 204 was lost.
+      if (attempt > 0 && response.status === 409) return null;
+      const detail = (await response.text().catch(() => "")).trim().split("\n")[0].replace(UNPRINTABLE, "").slice(0, 200);
       why = `HTTP ${response.status}${detail ? `: ${detail}` : ""}`;
       if (response.status !== 503) return why;
-      const seconds = Number(response.headers?.get?.("retry-after"));
+      const header = response.headers?.get?.("retry-after");
+      const seconds = header ? Number(header) : NaN;
       if (Number.isFinite(seconds) && seconds >= 0) retryAfterMs = seconds * 1000;
     } catch (err) {
       why = fetchFailure(err, UPLOAD_TIMEOUT_MS);

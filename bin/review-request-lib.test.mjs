@@ -1739,11 +1739,31 @@ describe("remote media (bd-d38.6)", () => {
 
   it("gives up after three retries, and prints the server's text without control characters", async () => {
     const fx = await fixture();
-    const host = remoteHost(fx, { put: () => ({ status: 503, text: "Too many\u001b[31m uploads\u0007\nsecond line" }) });
+    const host = remoteHost(fx, { put: () => ({ status: 503, text: "Too many\u001b[31m up\u0085lo\u202eads\u2067\u0007\nsecond line" }) });
     const h = await harness(fx, { env: remoteEnv, fetch: host.fetch, handlers: host.handlers, sleep: async () => {} });
     await assertNothingFiled(fx, h);
     assert.deepEqual(h.warn, [`review-request: could not upload the attachments to ${REMOTE}: 01-a.png: HTTP 503: Too many[31m uploads. Nothing was filed.`]);
     assert.deepEqual(host.sent.map((r) => r.method), ["PUT", "PUT", "PUT", "PUT", "DELETE"]);
+  });
+
+  it("takes a 409 on a retried PUT as the earlier attempt's file, and waits 1 s for a blank or bad Retry-After", async () => {
+    const fx = await fixture();
+    const reset = Object.assign(new TypeError("fetch failed"), { cause: { code: "EPIPE" } });
+    const answers = [{ status: 503, headers: { "retry-after": "" } }, { status: 503, headers: { "retry-after": "soon" } }, { throws: reset }, { status: 409 }];
+    const host = remoteHost(fx, { put: (_at, n) => answers[n - 1] });
+    const slept = [];
+    const h = await harness(fx, { env: remoteEnv, fetch: host.fetch, handlers: host.handlers, sleep: async (ms) => void slept.push(ms) });
+    assert.equal(h.result.exitCode, 0, h.warn.join("\n"));
+    assert.deepEqual(slept, [1000, 1000, 1000]);
+    assert.deepEqual(host.sent.map((r) => `${r.method} ${r.url.split("/").pop()}`), ["PUT 01-a.png", "PUT 01-a.png", "PUT 01-a.png", "PUT 01-a.png", "PUT 02-b.png"]);
+  });
+
+  it("refuses a 409 on a first attempt", async () => {
+    const fx = await fixture();
+    const host = remoteHost(fx, { put: () => ({ status: 409, text: "Something else is in the way" }) });
+    const h = await harness(fx, { env: remoteEnv, fetch: host.fetch, handlers: host.handlers, sleep: async () => {} });
+    await assertNothingFiled(fx, h);
+    assert.match(h.warn[0], /01-a\.png: HTTP 409: Something else is in the way\. Nothing was filed\.$/);
   });
 
   it("never removes a run once bd update has been attempted, even when it fails", async () => {

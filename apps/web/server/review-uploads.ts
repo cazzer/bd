@@ -42,8 +42,10 @@
 //      mode 0644), counting bytes and checking every write's length, and a
 //      body past the cap is 413 even when chunked; then fsync, link to the
 //      target (no-clobber: an existing name → 409), unlink the tmp, fsync
-//      the run directory, 204. Any failure unlinks the tmp file and removes
-//      the directories this request created while they are still empty.
+//      the run directory, 204. Any failure unlinks the tmp file and nothing
+//      else: removing a run's `.owner` or directories here could race a
+//      retry of the same client that already passed the owner check. A run
+//      left empty is the client's to DELETE (or bd-d38.15's to collect).
 //      DELETE: a missing run is 204; anything but a real directory is 409,
 //      nothing removed; else it is removed recursively, 204.
 // Each directory this request creates has its parent fsynced, so a power cut
@@ -57,7 +59,7 @@
 // host's own operator can make one under the root.
 
 import { randomBytes } from "node:crypto";
-import { link, lstat, mkdir, open, readdir, readFile, realpath, rm, rmdir, statfs, unlink } from "node:fs/promises";
+import { link, lstat, mkdir, open, readFile, realpath, rm, statfs, unlink } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import path from "node:path";
 import { REVIEW_IMAGE_ROOT } from "@breakdown/core";
@@ -161,20 +163,6 @@ async function checkOwner(dir: string, who: Requester): Promise<void> {
   if (!who.human && (await ownerOf(dir)) !== who.client) throw new Refusal(403, "This run belongs to another client");
 }
 
-/** Removes `created` (directories this request made), deepest first, while each holds nothing but its `.owner`. */
-async function removeIfEmpty(created: readonly string[]): Promise<void> {
-  for (const dir of [...created].reverse()) {
-    try {
-      const entries = await readdir(dir);
-      if (entries.some((e) => e !== OWNER_FILE)) return;
-      if (entries.length > 0) await unlink(path.join(dir, OWNER_FILE));
-      await rmdir(dir);
-    } catch {
-      return;
-    }
-  }
-}
-
 export interface ReviewUploadHandlerOptions {
   root?: string;
   maxBytes?: number;
@@ -208,29 +196,27 @@ export function createReviewUploadHandler(options: ReviewUploadHandlerOptions = 
     const inodesLow = files > 0 && ffree < Math.max(MIN_FREE_INODES, files / 100);
     if (inodesLow || bavail * bsize - (length ?? 0) < minFreeBytes) throw new Refusal(507, "Not enough free space");
 
-    const created: string[] = [];
+    // One level at a time, so a symlink on the way is refused before anything is made through it.
+    let level = root;
+    let madeRun = false;
+    for (const segment of segments.slice(0, 3)) {
+      const parent = level;
+      level = path.join(level, segment);
+      let made = true;
+      await mkdir(level, { mode: 0o755 }).catch((err: NodeJS.ErrnoException) => {
+        if (err.code !== "EEXIST") throw err;
+        made = false;
+      });
+      if (made) await fsyncDir(parent);
+      madeRun = made;
+      const info = await lstat(level);
+      if (info.isSymbolicLink()) throw new Refusal(403, "Outside the review media root");
+      if (!info.isDirectory()) throw new Refusal(409, "Something else is in the way");
+    }
     let tmp: string | null = null;
     try {
-      // One level at a time, so a symlink on the way is refused before anything is made through it.
-      let level = root;
-      for (const segment of segments.slice(0, 3)) {
-        const parent = level;
-        level = path.join(level, segment);
-        let made = true;
-        await mkdir(level, { mode: 0o755 }).catch((err: NodeJS.ErrnoException) => {
-          if (err.code !== "EEXIST") throw err;
-          made = false;
-        });
-        if (made) {
-          created.push(level);
-          await fsyncDir(parent);
-        }
-        const info = await lstat(level);
-        if (info.isSymbolicLink()) throw new Refusal(403, "Outside the review media root");
-        if (!info.isDirectory()) throw new Refusal(409, "Something else is in the way");
-      }
       const dir = await checkedRunDir(segments);
-      if (created.includes(level)) {
+      if (madeRun) {
         const owner = await open(path.join(dir, OWNER_FILE), "wx", 0o644);
         try {
           await owner.writeFile(who.client);
@@ -264,7 +250,6 @@ export function createReviewUploadHandler(options: ReviewUploadHandlerOptions = 
       await fsyncDir(dir);
     } catch (err) {
       if (tmp !== null) await unlink(tmp).catch(() => {});
-      await removeIfEmpty(created);
       throw err;
     }
   }
