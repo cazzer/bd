@@ -11,6 +11,7 @@ The person accepted these items in breakdown's inbox. Your job is to do exactly 
 
 1. `brain_list` with `nodeTypes: ["inbox_item"]` and `where: [{ key: "status", op: "equals", value: "accepted" }]`. If none, say so in one line and stop.
    Skip any item with a `pane` or a `session` in metadata: a live session owns it (it queued the draft, or the person opened it there; a `session` is a remote hangar session, which got the decision as a message) and the server already told that session. Executing it here would do it twice.
+   When you're given item ids (as `bin/inbox-watch` gives them), `brain_get` exactly those instead of this list, and act on none other. Skip an id that comes back as anything but an `inbox_item` with status `accepted` and neither `pane` nor `session` under that same id: a merged-away id resolves to its survivor.
 2. For each item, `brain_get` it. Read `content` (the `### Draft` section is what gets sent or created) and the latest `feedback` entry. An accept note there ("send it but drop the last line") is part of the instruction. Apply it.
    **A card item** (it has `options`): the latest accept entry's `option` is the person's choice. Carry out that option and its `on_accept` steps, not the recommendation. If they chose a different option than the draft was written for, act on their choice. For example, `track` on a Fathom batch means creating the candidates' tasks, while `ignore` means just closing it. An accept with no `option` on a card item came from before cards existed: do what the draft says.
 3. **Do the action through the matching connector**, using the item's `url`/`links` to find the target:
@@ -25,11 +26,13 @@ The person accepted these items in breakdown's inbox. Your job is to do exactly 
 
 Never execute an item whose status isn't `accepted` when you read it.
 
-`bin/inbox-watch` runs this skill headless whenever you accept an item no session owns, so Accept acts within about 30 seconds.
+`bin/inbox-watch` runs this skill headless whenever you accept an item no session owns, so Accept acts within about 30 seconds. It names the item ids it selected, and it runs only on a loopback Breakdown unless given `--allow-remote`. Its runs have no built-in tools but Skill and ToolSearch, so everything here goes through MCP tools.
 
 ## Triage: items sent back with a note
 
-When the person types a note, the inbox's button becomes **Send to agent** and the item moves to `changes`. The note is direction, not a request for another card. For each `changes` item with no `pane` or `session`, `brain_get` it, read the latest `feedback` message, and pick exactly one outcome:
+When the person types a note, the inbox's button becomes **Send to agent** and the item moves to `changes`. The note is direction, not a request for another card. When you're given item ids (as `bin/inbox-watch` gives them), `brain_get` exactly those instead of listing `changes` items, and act on none other. Skip an id that comes back as anything but an `inbox_item` with status `changes` and neither `pane` nor `session` under that same id: a merged-away id resolves to its survivor.
+
+For each `changes` item with no `pane` or `session`, `brain_get` it, read the latest `feedback` message, and pick exactly one outcome:
 
 | Outcome | When | Write |
 |---|---|---|
