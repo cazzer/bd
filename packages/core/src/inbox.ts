@@ -77,7 +77,11 @@
 // the canonical card with the agent's note quoted below the server-written
 // facts, a stored binding pins the card through any re-write, and an accept
 // is refused unless the stored options are still the canonical pair
-// (`InboxCardChangedError`). The person's accept with an option sets the
+// (`InboxCardChangedError`). No decision, release, hand-off, or completion
+// lands on a merged-away id: each refuses one whose id folds to another node
+// (`InboxCardChangedError`, with `mergedInto`), so a merge can never carry a
+// click on one card onto another — and brain_merge refuses outcome requests
+// outright (merge.ts). The person's accept with an option sets the
 // session's outcome in the decision's own transaction, attributed to them (hangar.ts
 // `unsafeSetHangarSessionOutcomeInTx`), and closes the item `done`: there is
 // nothing left for an executor. A refusal (the session cannot take an
@@ -247,6 +251,26 @@ export const HANGAR_OUTCOME_OPTIONS: readonly ReviewOption[] = [
   { id: "accept", label: "Accept", what: "The work is done or kept. Hangar releases the session: it removes the container and deletes the disk at its next check-in.", risk: DISK_DELETED },
   { id: "table", label: "Table", what: "Set the work aside. Hangar releases the session: it removes the container and deletes the disk at its next check-in.", risk: DISK_DELETED },
 ];
+
+/** How much of an agent-written repo an outcome request's title, content, and banner show. */
+export const MAX_SHOWN_HANGAR_REPO = 80;
+
+/**
+ * An agent-written repo as an outcome request shows it: capped at
+ * `MAX_SHOWN_HANGAR_REPO` (an ellipsis marks the cut) and JSON-quoted, so
+ * where it ends is unmistakable and nothing in it reads as the server's.
+ */
+export function quoteHangarRepo(repo: string): string {
+  return JSON.stringify(repo.length > MAX_SHOWN_HANGAR_REPO ? `${fitText(repo, MAX_SHOWN_HANGAR_REPO - 1)}…` : repo);
+}
+
+/** `text` as a markdown code span, fenced past any backtick run inside it, so it renders literally. */
+function markdownCodeSpan(text: string): string {
+  const longest = Math.max(0, ...(text.match(/`+/g) ?? []).map((run) => run.length));
+  const fence = "`".repeat(longest + 1);
+  const pad = text.startsWith("`") || text.endsWith("`") ? " " : "";
+  return `${fence}${pad}${text}${pad}${fence}`;
+}
 
 const OUTCOME_OF_OPTION: Readonly<Record<string, HangarOutcome>> = { accept: "accepted", table: "tabled" };
 
@@ -832,6 +856,9 @@ async function writeInboxFeedback(
       }
       const existing = locked.rows[0];
       if (!existing) throw new NodeNotFoundError(requestedId);
+      // The person decided the card they read; a merge since may have folded
+      // it onto another they never saw (module header).
+      if (existing.id !== requestedId.toLowerCase()) throw new InboxCardChangedError(requestedId, input.option ?? null, existing.id);
       if (existing.node_type !== INBOX_ITEM_NODE_TYPE) throw new NotAnInboxItemError(existing.id, existing.node_type);
 
       const current = normalizeInboxItemMetadata(normalizeOccurredAt(existing.metadata));
@@ -1297,7 +1324,7 @@ export async function requestHangarOutcome(db: Database, input: RequestHangarOut
     `**Accept or Table releases this hangar session: hangar removes its container and deletes its disk at its next check-in.** You can change your choice until then.`,
     "",
     `- Session: \`${session.id}\` (${session.state}, ${session.flavor})`,
-    `- Repo: ${session.repo}`,
+    `- Repo: ${markdownCodeSpan(quoteHangarRepo(session.repo))}`,
     ...(session.failureReason === null ? [] : [`- Failure reason: ${session.failureReason}`]),
     ...(session.outcome === null ? [] : [`- Current outcome: ${session.outcome}`]),
     `- Asked for: ${option}`,
@@ -1312,7 +1339,7 @@ export async function requestHangarOutcome(db: Database, input: RequestHangarOut
     db,
     {
       externalId: `${HANGAR_OUTCOME_KEY_PREFIX}${session.id}`,
-      title: fitText(`${option === "accept" ? "Accept" : "Table"} hangar session ${shortId} (${session.repo})`, DEFAULT_MAX_TITLE_LENGTH) as string,
+      title: fitText(`${option === "accept" ? "Accept" : "Table"} hangar session ${shortId} (repo ${quoteHangarRepo(session.repo)})`, DEFAULT_MAX_TITLE_LENGTH) as string,
       content: fitText(lines.join("\n"), DEFAULT_MAX_CONTENT_LENGTH) as string,
       metadata: {
         source: HANGAR_SOURCE_SYSTEM,
@@ -1353,6 +1380,7 @@ export async function completeInboxItem(db: Database, id: string, note: string, 
       `);
       const existing = locked.rows[0];
       if (!existing) throw new NodeNotFoundError(requestedId);
+      if (existing.id !== requestedId.toLowerCase()) throw new InboxCardChangedError(requestedId, null, existing.id);
       if (existing.node_type !== INBOX_ITEM_NODE_TYPE) throw new NotAnInboxItemError(existing.id, existing.node_type);
       const current = normalizeInboxItemMetadata(normalizeOccurredAt(existing.metadata));
       if (options.session !== undefined && current["session"] !== options.session.toLowerCase()) throw new InboxItemNotThisSessionError(existing.id, options.session);
@@ -1440,6 +1468,7 @@ export async function handOffInboxItem(
       }
       const existing = locked.rows[0];
       if (!existing) throw new NodeNotFoundError(requestedId);
+      if (existing.id !== requestedId.toLowerCase()) throw new InboxCardChangedError(requestedId, null, existing.id);
       if (existing.node_type !== INBOX_ITEM_NODE_TYPE) throw new NotAnInboxItemError(existing.id, existing.node_type);
       const current = normalizeInboxItemMetadata(normalizeOccurredAt(existing.metadata));
       const before = current["status"] as InboxStatus;

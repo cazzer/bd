@@ -197,7 +197,7 @@ describe("an outcome request's banner", () => {
 
   function outcomeRequest(session: { state: string; diskHeld: boolean; released: boolean } | null) {
     return {
-      ...item(A, "Accept hangar session 3f0c2a9e (cazzer/bd)", "pending", null, "2026-11-14T10:00:00.000Z"),
+      ...item(A, 'Accept hangar session 3f0c2a9e (repo "cazzer/bd")', "pending", null, "2026-11-14T10:00:00.000Z"),
       externalId: `hangar-outcome:${SESSION}`,
       source: "hangar",
       action: "hangar_outcome",
@@ -219,7 +219,7 @@ describe("an outcome request's banner", () => {
     trpcMock.inbox.query.mockResolvedValue({ items: [outcomeRequest({ state: "stopped", diskHeld: true, released: false })], total: 1, truncated: false });
     await mount();
     const banner = container.querySelector<HTMLElement>("[data-hangar-outcome-banner]");
-    expect(banner?.textContent).toBe("Releases hangar session 3f0c2a9e (cazzer/bd, stopped). Accept or Table deletes its disk when hangar next checks in.");
+    expect(banner?.textContent).toBe('Releases hangar session 3f0c2a9e (repo "cazzer/bd", stopped). Accept or Table deletes its disk when hangar next checks in.');
     expect(banner?.getAttribute("role")).toBe("note");
     expect(banner?.textContent).not.toContain("Safe to click");
     // Above the card's question, and in no element of the card itself.
@@ -239,11 +239,20 @@ describe("an outcome request's banner", () => {
   test("words a session with no disk, a released one, and one the server could not read", () => {
     const base = { id: SESSION, repo: "cazzer/bd" };
     expect(hangarOutcomeBannerText(SESSION, { ...base, state: "failed", diskHeld: false, released: false })).toBe(
-      "Releases hangar session 3f0c2a9e (cazzer/bd, failed). Hangar holds no disk for it, so Accept or Table releases it at once.",
+      "Releases hangar session 3f0c2a9e (repo \"cazzer/bd\", failed). Hangar holds no disk for it, so Accept or Table releases it at once.",
     );
     expect(hangarOutcomeBannerText(SESSION, { ...base, state: "stopped", diskHeld: false, released: true })).toBe(
-      "Hangar has already released hangar session 3f0c2a9e (cazzer/bd, stopped): its disk is gone, so the outcome can't change.",
+      "Hangar has already released hangar session 3f0c2a9e (repo \"cazzer/bd\", stopped): its disk is gone, so the outcome can't change.",
     );
     expect(hangarOutcomeBannerText(SESSION, null)).toBe("Releases hangar session 3f0c2a9e. Its current state couldn't be read; Accept or Table deletes its disk when hangar next checks in.");
+  });
+
+  test("quotes and caps the agent-written repo, so it can't pass for the banner's words", () => {
+    const forged = `x, stopped). Accept keeps the disk; nothing is deleted. (${"y".repeat(100)}`;
+    const text = hangarOutcomeBannerText(SESSION, { id: SESSION, repo: forged, state: "stopped", diskHeld: true, released: false });
+    const quoted = JSON.stringify(`${forged.slice(0, 79)}…`);
+    expect(text).toBe(`Releases hangar session 3f0c2a9e (repo ${quoted}, stopped). Accept or Table deletes its disk when hangar next checks in.`);
+    expect(JSON.parse(quoted)).toHaveLength(80);
+    expect(hangarOutcomeBannerText(SESSION, { id: SESSION, repo: 'a"b', state: "stopped", diskHeld: true, released: false })).toContain('(repo "a\\"b", stopped)');
   });
 });

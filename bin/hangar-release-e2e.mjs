@@ -31,8 +31,9 @@
 //      the agent cannot write its outcome request's key with brain_write →
 //      the agent asks for `accepted` → an inbox item, pending, with the
 //      server's card and the session's facts for its banner, and the outcome
-//      still null → the person accepts it with option `accept` → outcome
-//      accepted
+//      still null → the agent's brain_merge of an ordinary inbox item into
+//      it, or of it into that item, is refused → the person accepts it with
+//      option `accept` → outcome accepted
 //   C  a `reason` sent with state running is ignored → failed with a reason
 //      → failure_reason shown on the board's listing
 // Not part of `pnpm check`: it spawns servers and needs a database.
@@ -504,6 +505,21 @@ async function run(dbName) {
     const b = (await endedSessions()).find((s) => s.id === sessionOf("B").id);
     expect(b.outcome === null, `B's outcome is ${b.outcome} before the person decided`);
     return { value: filed.inboxItemId, detail: `inbox item ${filed.inboxItemId} pending; B outcome null` };
+  });
+
+  await step("the agent's brain_merge of an ordinary inbox item into B's outcome request is refused, either way: nothing merged, the card still pending", async () => {
+    const written = await agent.call("brain_write", {
+      items: { nodeType: "inbox_item", sourceSystem: "inbox", externalId: `e2e-release-ordinary-${RUN}`, title: `e2e-release ${RUN}: archive a thread?`, content: "Written by bin/hangar-release-e2e.mjs.", metadata: { source: "agent", question: "Archive it?", options: [{ id: "accept", label: "Archive" }, { id: "table", label: "Later" }] } },
+    });
+    const ordinaryId = written.items?.[0]?.id;
+    expect(ordinaryId, `brain_write returned no id: ${short(written)}`);
+    const into = await agent.callRaw("brain_merge", { loserId: ordinaryId, survivorId: state.inboxItemId });
+    expect(into.isError && /hangar outcome request/.test(into.text) && /nothing was merged/i.test(into.text), `brain_merge into the card answered ${short(into)}`);
+    const outOf = await agent.callRaw("brain_merge", { loserId: state.inboxItemId, survivorId: ordinaryId });
+    expect(outOf.isError && /hangar outcome request/.test(outOf.text), `brain_merge of the card answered ${short(outOf)}`);
+    const inbox = await trpcQuery("inbox", { statuses: ["pending"] });
+    expect(inbox.items.some((i) => i.id === state.inboxItemId) && inbox.items.some((i) => i.id === ordinaryId), "the card or the ordinary item is no longer pending on its own id");
+    return { detail: short(into.text.split(".")[0]) };
   });
 
   await step("the person accepts the inbox item with option accept: B's outcome is accepted", async () => {

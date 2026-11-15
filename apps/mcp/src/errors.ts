@@ -34,6 +34,7 @@ import {
   HangarOutcomeRefusedError,
   HangarEndedSessionChangeError,
   HangarSessionMergeError,
+  HangarOutcomeMergeError,
   KnowledgeStoreError,
   LookupFailedError,
   MergeFailedError,
@@ -157,6 +158,9 @@ export function mapError(toolName: string, err: unknown): CallToolResult {
   }
   if (err instanceof HangarSessionMergeError) {
     return actionable(err, "Nothing was merged. A hangar session is not a duplicate of anything: it is bound to its token and its inbox items. Merge other nodes; leave sessions as they are.");
+  }
+  if (err instanceof HangarOutcomeMergeError) {
+    return actionable(err, "Nothing was merged. An outcome request is the person's card for one hangar session; it is not a duplicate of anything, and nothing is a duplicate of it. Leave it as it is; ask for an outcome with brain_hangar_outcome_request.");
   }
   if (err instanceof MergeFailedError) {
     return actionable(err, RETRY_HINT);

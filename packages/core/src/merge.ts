@@ -1,7 +1,8 @@
 import { sql } from "drizzle-orm";
 import type { Database } from "@breakdown/db";
-import { HangarSessionMergeError, MergeFailedError, NodeNotFoundError, SelfMergeError } from "./errors.js";
+import { HangarOutcomeMergeError, HangarSessionMergeError, MergeFailedError, NodeNotFoundError, SelfMergeError } from "./errors.js";
 import { HANGAR_SESSION_NODE_TYPE, HANGAR_SOURCE_SYSTEM } from "./hangar.js";
+import { HANGAR_OUTCOME_KEY, HANGAR_OUTCOME_KEY_PREFIX, INBOX_ITEM_NODE_TYPE, INBOX_SOURCE_SYSTEM } from "./inbox.js";
 import type { IngestRunHandle } from "./ingest-runs.js";
 import { asPgError, formatPgInfo } from "./sql-helpers.js";
 
@@ -21,6 +22,7 @@ type NodeMergeRow = {
   id: string;
   merged_into: string | null;
   hangar: boolean;
+  outcome: boolean;
 }
 
 /** Postgres SQLSTATE for a detected deadlock. */
@@ -68,6 +70,14 @@ const MAX_DEADLOCK_RETRIES = 3;
  * only statement in the codebase that sets `merged_into`, so the refusal
  * alone keeps every session canonical — and with it, its session token's
  * binding and its inbox items' `session` (hangar-queue, security review).
+ * A hangar outcome request (an `inbox_item` carrying `hangar_outcome`, or
+ * any node at an `inbox` key starting `hangar-outcome:`) is refused the same
+ * way, at the same four places (`HangarOutcomeMergeError`): a decision
+ * folds through `merged_into`, so a merge either way would let the person's
+ * click on one card land on another, and an outcome request's accept
+ * deletes a session's disk (hangar-release, security review). Inbox
+ * decisions also refuse a merged-away id (inbox.ts), so this is the second
+ * of two locks, not the only one.
  *
  * Every step above runs inside one transaction, so a failure at any point
  * leaves no partial redirect. A genuine database failure (not one of the
@@ -99,7 +109,7 @@ export async function mergeNodes(db: Database, loserId: string, survivorId: stri
     try {
       return await runMergeTransaction(db, loserId, survivorId, run);
     } catch (err) {
-      if (err instanceof NodeNotFoundError || err instanceof SelfMergeError || err instanceof HangarSessionMergeError) {
+      if (err instanceof NodeNotFoundError || err instanceof SelfMergeError || err instanceof HangarSessionMergeError || err instanceof HangarOutcomeMergeError) {
         throw err;
       }
       const pg = asPgError(err);
@@ -118,14 +128,22 @@ export async function mergeNodes(db: Database, loserId: string, survivorId: stri
 
 const IS_HANGAR = sql`(node_type = ${HANGAR_SESSION_NODE_TYPE} OR source_system = ${HANGAR_SOURCE_SYSTEM})`;
 
+const IS_HANGAR_OUTCOME = sql`((node_type = ${INBOX_ITEM_NODE_TYPE} AND metadata ? ${HANGAR_OUTCOME_KEY}) OR (source_system = ${INBOX_SOURCE_SYSTEM} AND starts_with(external_id, ${HANGAR_OUTCOME_KEY_PREFIX})))`;
+
+/** Throws for the first row that is a hangar session or an outcome request. */
+function refuseReserved(rows: readonly { id: string; hangar: boolean; outcome: boolean }[], loserId: string, survivorId: string): void {
+  const session = rows.find((r) => r.hangar);
+  if (session) throw new HangarSessionMergeError(loserId, survivorId, session.id);
+  const outcome = rows.find((r) => r.outcome);
+  if (outcome) throw new HangarOutcomeMergeError(loserId, survivorId, outcome.id);
+}
+
 async function runMergeTransaction(db: Database, loserId: string, survivorId: string, run: IngestRunHandle): Promise<MergeResult> {
   return db.transaction(async (tx) => {
     const lookup = await tx.execute<NodeMergeRow>(sql`
-      SELECT id, merged_into, ${IS_HANGAR} AS hangar FROM nodes WHERE id = ${loserId} OR id = ${survivorId} FOR UPDATE
+      SELECT id, merged_into, ${IS_HANGAR} AS hangar, ${IS_HANGAR_OUTCOME} AS outcome FROM nodes WHERE id = ${loserId} OR id = ${survivorId} FOR UPDATE
     `);
-    for (const id of [loserId, survivorId]) {
-      if (lookup.rows.some((r) => r.id === id && r.hangar)) throw new HangarSessionMergeError(loserId, survivorId, id);
-    }
+    refuseReserved([loserId, survivorId].flatMap((id) => lookup.rows.filter((r) => r.id === id)), loserId, survivorId);
 
     const byId = new Map(lookup.rows.map((r) => [r.id, r.merged_into]));
     if (!byId.has(loserId)) {
@@ -162,12 +180,12 @@ async function runMergeTransaction(db: Database, loserId: string, survivorId: st
     // foreign key on merged_into (that FK protects referential integrity,
     // not this operation's atomicity, and would silently stop providing
     // it if the FK were ever relaxed). The resolved survivor is locked and
-    // checked with them: none of these rows may be a hangar session.
-    const affected = await tx.execute<{ id: string; hangar: boolean }>(sql`
-      SELECT id, ${IS_HANGAR} AS hangar FROM nodes WHERE id = ${loserId} OR merged_into = ${loserId} OR id = ${canonicalId} FOR UPDATE
+    // checked with them: none of these rows may be a hangar session or an
+    // outcome request.
+    const affected = await tx.execute<{ id: string; hangar: boolean; outcome: boolean }>(sql`
+      SELECT id, ${IS_HANGAR} AS hangar, ${IS_HANGAR_OUTCOME} AS outcome FROM nodes WHERE id = ${loserId} OR merged_into = ${loserId} OR id = ${canonicalId} FOR UPDATE
     `);
-    const session = affected.rows.find((r) => r.hangar);
-    if (session) throw new HangarSessionMergeError(loserId, survivorId, session.id);
+    refuseReserved(affected.rows, loserId, survivorId);
 
     // ingest_run_id is stamped in the same statement as merged_into so the
     // history trigger's revision names this run — see the doc comment on

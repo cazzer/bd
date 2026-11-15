@@ -83,6 +83,9 @@ function isForeignKeyViolation(err: EdgeUpsertFailedError): boolean {
  * `.message` (already safe — see the module header) plus a plain-language
  * hint. Deliberately never reads or forwards `err.cause`.
  */
+/** For a decision on a merged-away inbox id: the person's words (the core message's ids are for logs). */
+export const INBOX_ITEM_MERGED_MESSAGE = "This item was merged into another; reload and decide the item you mean.";
+
 /** What the person sees when an accept or send-back is refused on an item whose hangar session has ended. */
 export const INBOX_SESSION_ENDED_MESSAGE = "The hangar session that filed this has ended. Hand it off to a local session or dismiss it.";
 
@@ -159,6 +162,7 @@ export function mapCoreError(procedureName: string, err: unknown): TRPCError {
     return actionable("BAD_REQUEST", err, "Fix that field and retry.");
   }
   if (err instanceof InboxCardChangedError) {
+    if (err.mergedInto !== null) return new TRPCError({ code: "CONFLICT", message: INBOX_ITEM_MERGED_MESSAGE });
     return actionable("CONFLICT", err, "Read the current card and decide again.");
   }
   if (err instanceof InboxDecisionConflictError) {

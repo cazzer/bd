@@ -55,6 +55,7 @@ export {
   ReservedHangarNodeError,
   ReservedHangarEdgeError,
   HangarSessionMergeError,
+  HangarOutcomeMergeError,
   InvalidRelayActionError,
   RelayActionPendingError,
   RelayActionNotFoundError,

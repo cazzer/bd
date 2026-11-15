@@ -917,11 +917,21 @@ function InboxDetail({ item, parent, candidates, now, messageRef, keyed, onDecid
   );
 }
 
+/** How much of the agent-written repo the banner shows (core's MAX_SHOWN_HANGAR_REPO). */
+const MAX_SHOWN_REPO = 80;
+
+/** The agent-written repo, capped and quoted as core's quoteHangarRepo does, so nothing in it reads as the banner's own words. */
+function quoteRepo(repo: string): string {
+  if (repo.length <= MAX_SHOWN_REPO) return JSON.stringify(repo);
+  const last = repo.charCodeAt(MAX_SHOWN_REPO - 2);
+  return JSON.stringify(`${repo.slice(0, last >= 0xd800 && last <= 0xdbff ? MAX_SHOWN_REPO - 2 : MAX_SHOWN_REPO - 1)}…`);
+}
+
 /** The banner text for an outcome request, from the binding's session id and the server's read of that session (null when it is gone). */
 export function hangarOutcomeBannerText(sessionId: string, session: Item["hangarOutcomeSession"]): string {
   const short = sessionId.slice(0, 8);
   if (session === null) return `Releases hangar session ${short}. Its current state couldn't be read; Accept or Table deletes its disk when hangar next checks in.`;
-  const which = `hangar session ${short} (${session.repo}, ${session.state})`;
+  const which = `hangar session ${short} (repo ${quoteRepo(session.repo)}, ${session.state})`;
   if (session.released) return `Hangar has already released ${which}: its disk is gone, so the outcome can't change.`;
   if (!session.diskHeld) return `Releases ${which}. Hangar holds no disk for it, so Accept or Table releases it at once.`;
   return `Releases ${which}. Accept or Table deletes its disk when hangar next checks in.`;

@@ -601,11 +601,15 @@ export class InboxCardChangedError extends KnowledgeStoreError {
   constructor(
     readonly nodeId: string,
     readonly option: string | null,
+    /** Set when `nodeId` was merged away: the canonical node the decision would otherwise have landed on. */
+    readonly mergedInto: string | null = null,
   ) {
     super(
-      option === null
-        ? `inbox item ${nodeId} changed since it was opened and now asks to choose an option`
-        : `inbox item ${nodeId} does not offer option ${JSON.stringify(option)}; its card was rewritten after it was opened`,
+      mergedInto !== null
+        ? `inbox item ${nodeId} was merged into ${mergedInto}; reload and decide the item you mean`
+        : option === null
+          ? `inbox item ${nodeId} changed since it was opened and now asks to choose an option`
+          : `inbox item ${nodeId} does not offer option ${JSON.stringify(option)}; its card was rewritten after it was opened`,
     );
   }
 }
@@ -818,6 +822,23 @@ export class HangarSessionMergeError extends KnowledgeStoreError {
     readonly sessionNodeId: string,
   ) {
     super(`cannot merge node ${loserId} into ${survivorId}: node ${sessionNodeId} is a hangar session, which is never merged`);
+  }
+}
+
+/**
+ * A merge (brain_merge) would move a hangar outcome request: an `inbox_item`
+ * carrying a `hangar_outcome` binding, or any node at an `inbox` key starting
+ * `hangar-outcome:`. Folding one into another, or another into it, would let
+ * the person's decision on one card land on the other — and an outcome
+ * request's accept deletes a session's disk. Nothing was merged.
+ */
+export class HangarOutcomeMergeError extends KnowledgeStoreError {
+  constructor(
+    readonly loserId: string,
+    readonly survivorId: string,
+    readonly outcomeNodeId: string,
+  ) {
+    super(`cannot merge node ${loserId} into ${survivorId}: node ${outcomeNodeId} is a hangar outcome request, which is never merged`);
   }
 }
 

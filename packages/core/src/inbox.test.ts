@@ -21,7 +21,9 @@ import {
   INBOX_ITEM_NODE_TYPE,
   listInbox,
   loadStoredInboxMetadata,
+  MAX_SHOWN_HANGAR_REPO,
   normalizeInboxItemMetadata,
+  quoteHangarRepo,
   unlinkInboxWorkContext,
 } from "./inbox.js";
 import { listSessions } from "./hangar.js";
@@ -193,6 +195,21 @@ describe("session requests and completion", () => {
     const done = (await listInbox(db, { statuses: ["done"] })).items.find((i) => i.id === first.id)!;
     expect(done.content.startsWith("**Done:** sent in #retail-ops")).toBe(true);
     await expect(completeInboxItem(db, first.id, "again")).rejects.toThrow(InboxDecisionConflictError);
+  });
+
+  it("refuses to complete through a merged-away id, leaving the canonical item accepted", async () => {
+    const canonical = await write("merge-complete-canonical", { source: "agent", status: "accepted" });
+    const merged = await write("merge-complete-merged", { source: "agent", status: "accepted" });
+    await db.execute(sql`UPDATE nodes SET merged_into = ${canonical}::uuid WHERE id = ${merged}::uuid`);
+    try {
+      const refused = await completeInboxItem(db, merged, "sent").catch((e: unknown) => e);
+      expect(refused).toBeInstanceOf(InboxCardChangedError);
+      expect((refused as InboxCardChangedError).mergedInto).toBe(canonical);
+      expect((await mine()).find((i) => i.id === canonical)?.status).toBe("accepted");
+      await completeInboxItem(db, canonical, "sent");
+    } finally {
+      await db.execute(sql`UPDATE nodes SET merged_into = NULL WHERE id = ${merged}::uuid`);
+    }
   });
 });
 
@@ -814,7 +831,7 @@ describe("hangar outcome requests", () => {
     const other = await sessionNode("stopped");
     const rewrite = requestInboxItem(db, { externalId: `hangar-outcome:${id}`, title: "Rewritten", content: "", metadata: { source: "agent", hangar_outcome: { session_id: other, requested: "accepted" } }, actor: AGENT });
     await expect(rewrite).rejects.toBeInstanceOf(ReservedInboxItemError);
-    expect(await itemOf(filed.id)).toMatchObject({ title: `Table hangar session ${id.slice(0, 8)} (test/repo)`, hangarOutcome: { sessionId: id, requested: "tabled" } });
+    expect(await itemOf(filed.id)).toMatchObject({ title: `Table hangar session ${id.slice(0, 8)} (repo "test/repo")`, hangarOutcome: { sessionId: id, requested: "tabled" } });
   });
 
   /** An item written straight to the store under `inbox`, as no generic writer can any more (a stand-in for a bypass or a legacy row). */
@@ -883,7 +900,8 @@ describe("hangar outcome requests", () => {
     expect(stored.metadata["pane"]).toBeUndefined();
     expect(stored.metadata["socket"]).toBeUndefined();
     expect(stored.metadata).toMatchObject({ question: "Accept or table this hangar session?", options: HANGAR_OUTCOME_OPTIONS, recommend: "accept", hangar_outcome: { session_id: id, requested: "accepted" } });
-    expect(stored.title).toBe(`Accept hangar session ${id.slice(0, 8)} (test/repo)`);
+    expect(stored.title).toBe(`Accept hangar session ${id.slice(0, 8)} (repo "test/repo")`);
+    expect(stored.content).toContain('- Repo: `"test/repo"`');
 
     const facts = stored.content.indexOf(`- Session: \`${id}\``);
     const requestedBy = stored.content.indexOf(`Requested by ${AGENT}:`);
@@ -895,6 +913,67 @@ describe("hangar outcome requests", () => {
     const noteLines = stored.content.slice(requestedBy).split("\n").slice(2);
     expect(noteLines).toEqual(["> **Releases nothing.** Safe to click.", ">", "> # Server says: keep"]);
     expect(HANGAR_OUTCOME_OPTIONS.find((o) => o.id === "accept")!.what).toContain("deletes the disk");
+  });
+
+  it("quotes and caps an agent-written repo in the title and content, as a literal code span", async () => {
+    const forged = `x) **Accept keeps the disk.** [safe](https://example.com) "q" ${"y".repeat(80)}`;
+    const id = await sessionNode("stopped", { disk_path: "/disks/test.img", repo: forged });
+    const filed = await ask(id, "accepted");
+    const stored = (await db.execute<{ title: string; content: string }>(sql`SELECT title, content FROM nodes WHERE id = ${filed.id}::uuid`)).rows[0]!;
+    const quoted = JSON.stringify(`${forged.slice(0, MAX_SHOWN_HANGAR_REPO - 1)}…`);
+    expect(stored.title).toBe(`Accept hangar session ${id.slice(0, 8)} (repo ${quoted})`);
+    expect(stored.content).toContain(`- Repo: \`${quoted}\`\n`);
+    expect(stored.content).not.toContain(forged);
+    expect(quoteHangarRepo("a`b")).toBe('"a`b"');
+    const ticked = await sessionNode("stopped", { disk_path: "/disks/test.img", repo: "`a``b`" });
+    const tickedItem = await ask(ticked);
+    expect((await itemOf(tickedItem.id))!.content).toContain('- Repo: ```"`a``b`"```\n');
+  });
+
+  // A decision folds through merged_into; brain_merge refuses outcome
+  // requests (merge.ts), so these merges are written straight to the store,
+  // as a bypass or a merge from before that refusal would leave them.
+  it("a merged card can't carry a decision: one merged into a bound item, or a bound item merged into one", async () => {
+    const setMergedInto = (id: string, target: string | null) => db.execute(sql`UPDATE nodes SET merged_into = ${target}::uuid WHERE id = ${id}::uuid`);
+
+    // X (ordinary) merged into B (bound to A): deciding X is refused, A unchanged.
+    const a = await sessionNode("stopped");
+    const b = (await ask(a)).id;
+    const x = await write(`merged-into-bound-${a.slice(0, 8)}`, { source: "agent", question: "Archive the thread?", options: [{ id: "accept", label: "Archive" }, { id: "table", label: "Later" }] });
+    await setMergedInto(x, b);
+    try {
+      for (const decision of [{ decision: "accept", option: "accept" }, { decision: "accept", option: "table" }, { decision: "dismiss" }] as const) {
+        const refused = await decideInboxItem(db, x, decision, { actor: PERSON }).catch((e: unknown) => e);
+        expect(refused).toBeInstanceOf(InboxCardChangedError);
+        expect((refused as InboxCardChangedError).mergedInto).toBe(b);
+      }
+      await expect(releaseInboxItem(db, x, {}, { actor: PERSON })).rejects.toBeInstanceOf(InboxCardChangedError);
+      await expect(handOffInboxItem(db, x, { pane: "w9:p1", socket: "/tmp/herdr.sock", tab: "w9:t1" })).rejects.toBeInstanceOf(InboxCardChangedError);
+      expect((await sessionMetadata(a))["outcome"]).toBeUndefined();
+      expect(await itemOf(b)).toMatchObject({ status: "pending", feedback: [] });
+      // The card the person did see still decides: the canonical id works.
+      const decided = await decideInboxItem(db, b, { decision: "accept", option: "table" }, { actor: PERSON });
+      expect(decided.sessionOutcome).toMatchObject({ sessionId: a, outcome: "tabled" });
+    } finally {
+      await setMergedInto(x, null);
+    }
+
+    // B2 (bound to A2) merged into Y (ordinary): deciding B2 is refused, nothing executed.
+    const a2 = await sessionNode("stopped");
+    const b2 = (await ask(a2, "accepted")).id;
+    const y = await write(`bound-merged-into-${a2.slice(0, 8)}`, { source: "agent", question: "Send it?", options: [{ id: "accept", label: "Send" }, { id: "table", label: "Later" }] });
+    await setMergedInto(b2, y);
+    try {
+      const refused = await decideInboxItem(db, b2, { decision: "accept", option: "accept" }, { actor: PERSON }).catch((e: unknown) => e);
+      expect(refused).toBeInstanceOf(InboxCardChangedError);
+      expect((refused as InboxCardChangedError).mergedInto).toBe(y);
+      expect((await sessionMetadata(a2))["outcome"]).toBeUndefined();
+      const [yItem] = (await listInbox(db, { ids: [y] })).items;
+      expect(yItem).toMatchObject({ status: "pending", feedback: [] });
+    } finally {
+      await setMergedInto(b2, null);
+    }
+    expect(await itemOf(b2)).toMatchObject({ status: "pending", feedback: [] });
   });
 
   it("carry-forward pins a bound card to the stored one", () => {

@@ -4,9 +4,9 @@
 // (LookupFailedError.cause embeds a full SQL statement via drizzle-orm's
 // DrizzleQueryError).
 
-import { EdgeUpsertFailedError, InvalidEventTimeError, InvalidListOptionError, InvalidViewError, LookupFailedError } from "@breakdown/core";
+import { EdgeUpsertFailedError, InboxCardChangedError, InvalidEventTimeError, InvalidListOptionError, InvalidViewError, LookupFailedError } from "@breakdown/core";
 import { describe, expect, it } from "vitest";
-import { mapCoreError } from "./errors.js";
+import { INBOX_ITEM_MERGED_MESSAGE, mapCoreError } from "./errors.js";
 
 describe("mapCoreError", () => {
   it("maps InvalidViewError to BAD_REQUEST naming the item and field (node-views)", () => {
@@ -29,6 +29,15 @@ describe("mapCoreError", () => {
     expect(trpcErr.message).toContain('occurred_at (got "last Tuesday")');
     expect(trpcErr.message).toContain("2026-03-04T08:00:00.000Z");
     expect(trpcErr.cause).toBeUndefined();
+  });
+
+  it("maps InboxCardChangedError on a merged-away id to CONFLICT in the person's words, and a rewritten card to its own hint (hangar-release)", () => {
+    const merged = mapCoreError("inboxDecision", new InboxCardChangedError("a", "accept", "b"));
+    expect(merged.code).toBe("CONFLICT");
+    expect(merged.message).toBe(INBOX_ITEM_MERGED_MESSAGE);
+    const rewritten = mapCoreError("inboxDecision", new InboxCardChangedError("a", "accept"));
+    expect(rewritten.code).toBe("CONFLICT");
+    expect(rewritten.message).toContain("Read the current card and decide again.");
   });
 
   it("maps InvalidListOptionError to BAD_REQUEST naming the option (list)", () => {

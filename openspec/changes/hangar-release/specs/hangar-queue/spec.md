@@ -23,7 +23,7 @@ Every hangar session SHALL carry an outcome: none, `accepted`, or `tabled`. Only
 
 An agent SHALL be able to ask for a session's outcome by filing an inbox item bound to that session, offering Accept and Table. The item's decision by a person SHALL set the outcome; a dismissal SHALL leave it unset. Session tokens and the hangar token SHALL NOT be able to file such a request.
 
-The request's card SHALL be the server's: its title, its content's facts about the session, its question, its two options with fixed labels and text, and its recommendation (the requested outcome) SHALL be written by the server. The agent's note SHALL appear only below those facts, quoted and attributed to the agent. No other writer SHALL create, overwrite, or change an outcome request: an inbox key reserved for outcome requests SHALL be refused to every generic inbox writer, and an accept SHALL be refused unless the stored options are still the server's. The card SHALL show, outside the agent's text, a banner built from the bound session's current state: which session a click releases and that it deletes the disk.
+The request's card SHALL be the server's: its title, its content's facts about the session, its question, its two options with fixed labels and text, and its recommendation (the requested outcome) SHALL be written by the server. The agent's note SHALL appear only below those facts, quoted and attributed to the agent. No other writer SHALL create, overwrite, or change an outcome request: an inbox key reserved for outcome requests SHALL be refused to every generic inbox writer, and an accept SHALL be refused unless the stored options are still the server's. No merge SHALL move an outcome request, as either side or as a member of a chain the merge would repoint, and a person's decision on any inbox item SHALL be refused when the item's id has been merged into another, so that a click lands only on the card the person read. The card SHALL show, outside the agent's text, a banner built from the bound session's current state: which session a click releases and that it deletes the disk. Agent-written session facts the card or banner shows, such as the repo, SHALL be quoted and capped.
 
 #### Scenario: Driver asks to table
 
@@ -39,6 +39,11 @@ The request's card SHALL be the server's: its title, its content's facts about t
 
 - **WHEN** an outcome request's stored options differ from the server's, and the person accepts an option
 - **THEN** the decision is refused as a changed card, and S's outcome is unchanged
+
+#### Scenario: A merged card can't carry a decision
+
+- **WHEN** an agent merges an ordinary inbox item into S's outcome request, or the outcome request into an ordinary item
+- **THEN** the merge is refused and nothing is merged; and if such a merge is already stored, the person's decision on the merged-away id is refused as a changed card, S's outcome is unchanged, and the item it folds onto is not decided
 
 ### Requirement: Hangar reports why it failed a session and acknowledges release
 
