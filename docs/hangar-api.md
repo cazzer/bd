@@ -94,16 +94,39 @@ Every endpoint that returns a session uses this shape. Times are UTC ISO-8601 wi
 
 ### `POST /hangar/v1/check-in` — scope `hangar`
 
-Tells Breakdown hangar is alive, which version it runs, and its capacity. Call it on the interval the response gives (see [Check-ins and status](#check-ins-and-status)). Each claim attempt also counts as a check-in, but a claim records no version or capacity.
+Tells Breakdown hangar is alive, which version it runs, and its capacity. Call it on the interval the response gives (see [Check-ins and status](#check-ins-and-status)). Each claim attempt also counts as a check-in, but a claim records no version or capacity, and leaves the stored capacity and its time as they were.
 
 Request:
 
 ```json
-{ "version": "0.4.1", "capacity": { "disk_free_gb": 120, "slots": { "headless": 2, "display-browser": 1 } } }
+{
+  "version": "0.4.1",
+  "capacity": {
+    "slots": { "headless": 2, "display-browser": 1, "display-godot": 0 },
+    "blocked": { "display-godot": "disk: need 8192 MB, free 1200 MB" },
+    "free": { "ram_mb": 12000, "cpus": 4, "vram_mb": 6000, "disk_mb": 1200 },
+    "sessions": { "running": 1, "kept": 2 },
+    "disk": { "allocated_bytes": 17179869184, "apparent_bytes": 32212254720 },
+    "usage": [
+      { "session": "3f0c2a9e-6f7d-4a54-9a0b-1c2d3e4f5a6b", "allocated_bytes": 8589934592, "apparent_bytes": 16106127360 }
+    ]
+  }
+}
 ```
 
 - `version` (string, 1–200 characters, required): hangar's version.
-- `capacity` (object or `null`, optional): opaque to Breakdown for now. It is stored as given, up to 10,000 characters serialized. Omitted or `null` clears the stored capacity.
+- `capacity` (object or `null`, optional): what hangar can take now. Breakdown stores it as given, up to 10,000 characters serialized (a check-in whose capacity is longer is refused whole with `400 invalid_request`, and nothing from it is recorded), with the time it arrived by Breakdown's database clock (`capacity_at`). Omitted or `null` clears both. Breakdown reads it to explain why queued sessions wait (see [Check-ins and status](#check-ins-and-status)), never to decide what a claim gets. Every field is optional:
+
+  | Field | Shape | Meaning |
+  | --- | --- | --- |
+  | `slots` | object: flavor → non-negative integer | How many more sessions of each flavor fit now. Keys other than `headless`, `display-godot`, and `display-browser` are ignored. |
+  | `blocked` | object: flavor → string (up to 500 characters; longer is cut) | Why each flavor that doesn't fit doesn't, in your words, keyed by flavor like `slots`. A reason that starts with `disk:` means the disk budget is full. Only that prefix is contract; the rest is shown to people quoted as yours, on one line: control characters (tabs and newlines included) become a space, bidirectional-text controls are removed, and it is trimmed. |
+  | `free` | object: `ram_mb`, `cpus`, `vram_mb`, `disk_mb`, all numbers | Free RAM, CPUs, VRAM, and disk. |
+  | `sessions` | object: `running`, `kept`, whole numbers | How many sessions are running, and how many ended ones you still keep a disk for. |
+  | `disk` | object: `allocated_bytes`, `apparent_bytes`, non-negative numbers | Total disk allocated and apparent across sessions. |
+  | `usage` | array of `{ session, allocated_bytes, apparent_bytes }`; the first 64 valid entries are read | Per-session disk usage, which must fit the 10,000-character limit together with the rest of the capacity (64 entries do, beside the other fields at realistic lengths): the session's id, and its bytes allocated and apparent (non-negative). Breakdown shows a session's allocated bytes beside it when a full disk is why requests wait. |
+
+  A field Breakdown can't read is treated as absent: a `free` that isn't all four numbers, a `slots` entry that isn't a non-negative integer, a `usage` entry with a bad id or negative bytes, a key it doesn't know. The rest of the capacity still counts, and the check-in is still accepted and still counts for liveness.
 
 Response `200`:
 
@@ -126,7 +149,7 @@ Request:
 { "flavors": ["headless", "display-browser"], "wait_s": 25 }
 ```
 
-- `flavors` (array, required): 1 to 3 distinct values from `headless`, `display-godot`, `display-browser`. Name only flavors you can start now. Breakdown does not track capacity, so the choice is yours.
+- `flavors` (array, required): 1 to 3 distinct values from `headless`, `display-godot`, `display-browser`. Name only flavors you can start now. Breakdown reads the capacity you check in with only to explain to people why requests wait; it never decides what a claim may take, so the choice is yours.
 - `wait_s` (integer, 0–30, default 0): how long to wait for a match. `0` answers at once. Send `25`: a long-poll answers within about a second of a request arriving and costs one connection while it waits. If you send `0`, sleep at least 1 s between claims (see [Long-poll](#long-poll)).
 
 Response `200`, claimed:
@@ -359,7 +382,17 @@ stateDiagram-v2
 - **Interval.** Check in every `interval_s` seconds, taken from the latest check-in response. It is 30 today. The server's value always wins over your own setting.
 - **Claims count.** Every claim attempt, including each one-second retry inside a long-poll, counts as a check-in. It updates the time only, not version or capacity.
 - **Offline rule.** Breakdown reports hangar `online` while its last check-in is less than three intervals old (90 s today), `offline since <last check-in>` after that, and `never` before the first one. Every time is the clock of Breakdown's database. Hangar's clock is never used, so skew between the machines does not matter.
+- **Capacity.** The capacity of the latest check-in is the one Breakdown holds, with the time it arrived. A claim changes neither. A check-in without capacity clears both.
 - Breakdown shows this status to agents (MCP) and on its web board. A request made while hangar is offline still queues. It waits for the next claim.
+- **Why a request waits.** Breakdown explains each queued session from the latest check-ins and its own session records, when someone reads it; nothing is stored. Only hangars that are online count. The first reason that holds wins:
+  1. **offline**: no hangar is online. It names the last check-in's time, or says no hangar has ever checked in.
+  2. **unknown**: no online hangar has a fresh capacity: none sent one, or the one it sent is older than three check-in intervals (a claim keeps hangar online but doesn't renew its capacity). It says when the last capacity was reported, if one was.
+  3. **next**: an online hangar has a slot for the session's flavor. It says how many queued sessions of that flavor were requested before it.
+  4. **not_offered**: no online hangar names the flavor in `slots` or `blocked`.
+  5. **disk_awaiting_review**: every online hangar that names the flavor blocks it with a `disk:` reason, and at least one ended session still holds a disk with no outcome. It quotes your reason (without the `disk:` prefix) and lists those sessions (up to 20, oldest ended first, with a total), each with its work item and the allocated bytes your `usage` reported for it. A person's accept or table releases them (see [Releasing sessions](#releasing-sessions)).
+  6. **capacity**: otherwise. It quotes each blocking hangar's reason (`no free slot` for a flavor at 0 slots with no `blocked` entry).
+
+  Agents read it as `waiting` on each queued session from `brain_hangar_sessions`, whose response carries the sessions awaiting review once, as `awaitingReview` (`{ sessions, total }`, or `null` when no listed session waits on a full disk), rather than on every queued session. People see it on the session's row in the board drawer, where each session awaiting review links to its work item, or takes Accept or Table right there when it has no board to link to. `brain_hangar_status` and the board's hangar chip show the latest capacity and when it was reported.
 
 ## Session tokens
 

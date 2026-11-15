@@ -78,6 +78,13 @@
       "when": 1794702910991,
       "tag": "0010_relay_origin_idx",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1794708750248,
+      "tag": "0011_hangar_capacity_at",
+      "breakpoints": true
     }
   ]
 }

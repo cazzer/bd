@@ -82,7 +82,7 @@ export function createServer(db: Database, options: CreateServerOptions = {}): S
         "(no embeddings, no model calls in this server). Call brain_map first to see what's in the store, brain_search " +
         "to find relevant nodes, brain_get/brain_neighbors to read a specific node and what touches it, brain_history " +
         "to see how a node changed over time and who changed it, brain_list to select nodes by type/source/metadata with no search text, brain_ready for the work-item readiness report, " +
-        "brain_hangar_status for whether hangar (the service that runs remote Claude sessions) is online and how many sessions are queued or running, and brain_hangar_sessions to list those sessions (releasable: true for ones a person accepted or tabled whose disk hangar still holds)" +
+        "brain_hangar_status for whether hangar (the service that runs remote Claude sessions) is online, its latest capacity, and how many sessions are queued or running, and brain_hangar_sessions to list those sessions, each queued one with why it waits (releasable: true for ones a person accepted or tabled whose disk hangar still holds)" +
         (readOnly
           ? ". This server is running in read-only mode: brain_write, brain_link, brain_merge, brain_update_work_item, brain_hangar_request, and brain_hangar_outcome_request are disabled."
           : ", and brain_write/brain_link to load new content in (attributed to an ingest run with source_system=\"agent\"), brain_merge to fix a duplicate you notice, brain_update_work_item to change a work item's status, priority, or assignee, " +

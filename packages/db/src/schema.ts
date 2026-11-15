@@ -423,9 +423,13 @@ export const hangarCheckIns = pgTable("hangar_check_ins", {
   hangar: text("hangar").primaryKey(),
   lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
   version: text("version"),
-  // Opaque to this app until bd-d38.5 stores and explains capacity.
+  // Stored as hangar sent it; parsed leniently on read (core hangar.ts
+  // `parseHangarCapacity`), so a field this app can't read is ignored.
   capacity: jsonb("capacity"),
   intervalS: integer("interval_s").notNull().default(30),
+  // The database's time the stored capacity arrived; null with no capacity.
+  // A claim moves `last_seen_at` only, never this or `capacity`.
+  capacityAt: timestamp("capacity_at", { withTimezone: true }),
 });
 
 /**

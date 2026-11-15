@@ -20,7 +20,7 @@ let container: HTMLDivElement;
 let root: Root;
 let hidden = false;
 
-const ONLINE: HangarStatusView = { status: "online", hangar: "hangar-desktop", version: "0.4.1", lastSeenAt: new Date().toISOString(), queued: 2, claimed: 1, running: 0 };
+const ONLINE: HangarStatusView = { status: "online", hangar: "hangar-desktop", version: "0.4.1", lastSeenAt: new Date().toISOString(), intervalS: 30, now: new Date().toISOString(), queued: 2, claimed: 1, running: 0, capacity: null, capacityAt: null };
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -69,6 +69,28 @@ describe("HangarStatusPill", () => {
     expect(chip()?.title).toContain("hangar-desktop 0.4.1");
     expect(chip()?.title).toContain("2 queued · 1 claimed · 0 running");
     expect(container.querySelector("button")).toBeNull();
+  });
+
+  test("adds hangar's free slots and blocked flavors to the title", async () => {
+    trpcMock.hangarStatus.query.mockResolvedValue({ ...ONLINE, capacity: { slots: { headless: 2 }, blocked: { "display-godot": "vram: need 6000 MB, free 0 MB" } }, capacityAt: new Date().toISOString() });
+    act(() => root.render(createElement(HangarStatusPill)));
+    await settle();
+    expect(chip()?.title).toContain("Slots: headless 2");
+    expect(chip()?.title).toContain("display-godot blocked: vram: need 6000 MB, free 0 MB");
+    expect(chip()?.title).toContain("Capacity reported ");
+    // A free headless slot: nothing to add on the chip itself.
+    expect(container.querySelector("[data-hangar-capacity]")).toBeNull();
+  });
+
+  test("says disk full on the chip, visible on phones too, when an online hangar has no slot and its disk blocks", async () => {
+    const now = new Date().toISOString();
+    trpcMock.hangarStatus.query.mockResolvedValue({ ...ONLINE, now, capacity: { slots: { headless: 0 }, blocked: { headless: "disk: need 8192 MB, free 1200 MB" } }, capacityAt: now });
+    act(() => root.render(createElement(HangarStatusPill)));
+    await settle();
+    expect(chip()?.textContent).toBe("hangar online · disk full · 2 queued, 1 claimed");
+    const note = container.querySelector("[data-hangar-capacity]");
+    expect(note?.getAttribute("data-hangar-capacity")).toBe("disk full");
+    expect(note?.className ?? "").not.toContain("sr-only");
   });
 
   test("words offline and never as the server answers them", async () => {

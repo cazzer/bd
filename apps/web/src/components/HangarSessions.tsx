@@ -20,11 +20,26 @@
 // written for the person (server/errors.ts), and the list is read again.
 // Every control is at least 44 px tall below `sm`.
 //
+// A queued session says why it waits (hangar-capacity), in the server's one
+// line (`waiting.text`, worded in core so MCP says the same), except that
+// offline reads its time in the browser's zone like the header chip. A
+// session next in line reads muted; one that is blocked reads amber. When
+// hangar's disk is full of ended sessions nobody has decided on, those are
+// listed under "Decide these to free disk:", each with the disk hangar
+// reported for it, and none is a dead end: one with a board project links to
+// its work item's drawer (a plain click navigates in place; a modified click
+// is left to the browser); this drawer's own item says to decide it below;
+// one whose work item is gone or has no project takes Accept or Table right
+// there, asking first exactly as a row does.
+//
 // It reads on mount and whenever the host's source re-reads (`version`),
 // keeping the previous answer on screen meanwhile; a failed read is said on
 // the section when there is one to say it on, and leaves it off otherwise.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type MouseEvent, type ReactNode } from "react";
+import { awaitingWorkItemRoute, formatDiskBytes, formatInstant } from "../lib/hangarStatus.js";
+import { navigate } from "../lib/navigate.js";
+import { formatRoute, type Route } from "../lib/route.js";
 import { trpc } from "../trpc.js";
 import { SectionTitle } from "./ReviewAttachments.js";
 
@@ -32,6 +47,8 @@ type SessionsAnswer = Awaited<ReturnType<typeof trpc.hangarSessions.query>>;
 type Session = SessionsAnswer["sessions"][number];
 type Outcome = "accepted" | "tabled";
 type OutcomeSet = Awaited<ReturnType<typeof trpc.hangarSessionOutcome.mutate>>;
+type Waiting = NonNullable<Session["waiting"]>;
+type AwaitingSession = Extract<Waiting, { kind: "disk_awaiting_review" }>["sessions"][number];
 
 export const ACCEPT_WARNING = "Accepting releases this session: hangar removes its container and deletes its disk at its next check-in.";
 export const TABLE_WARNING = "Tabling releases this session: hangar removes its container and deletes its disk at its next check-in.";
@@ -106,7 +123,7 @@ export function HangarSessions({ workItemId, version }: HangarSessionsProps) {
       )}
       <ul className="space-y-2.5">
         {sessions.map((s) => (
-          <SessionRow key={s.id} session={s} onWritten={written} onSettled={() => void read({ cancelled: false })} />
+          <SessionRow key={s.id} session={s} workItemId={workItemId} onWritten={written} onSettled={() => void read({ cancelled: false })} />
         ))}
       </ul>
       {answer?.truncated && <p className="mt-2 text-xs text-fg-muted">Showing the {sessions.length} most recently changed.</p>}
@@ -134,15 +151,71 @@ const BUTTON = "min-h-11 rounded-lg px-3 text-sm font-medium focus:outline-none 
 
 interface SessionRowProps {
   session: Session;
+  /** The drawer's work item: an awaiting-review session of its own is decided on its row, not linked. */
+  workItemId: string;
   /** The outcome was set; the answer's fields. */
   onWritten: (set: OutcomeSet) => void;
   /** A write answered, either way: read the list again. */
   onSettled: () => void;
 }
 
+function SessionRow({ session: shown, workItemId, onWritten, onSettled }: SessionRowProps) {
+  const ended = ENDED.includes(shown.state);
+  const outcome = shown.outcome;
+  const where = [shown.flavor, shown.host === null ? null : `on ${shown.host}`, shown.container === null ? null : `container ${shown.container}`].filter((p) => p !== null).join(" · ");
+
+  return (
+    <li data-hangar-session={shown.id} className="rounded-lg border border-hairline bg-surface-strong px-3 py-2 text-sm">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <span data-session-state={shown.state} className={`rounded-full border px-2 py-0.5 text-[11px] ${stateTone(shown.state)}`}>
+          {shown.state}
+        </span>
+        <span className="min-w-0 break-words text-fg">{where}</span>
+        <span className="ml-auto text-[11px] text-fg-muted">
+          <time dateTime={shown.updatedAt}>{formatTime(shown.updatedAt)}</time>
+        </span>
+      </div>
+      {shown.state === "failed" && shown.failureReason !== null && (
+        <p data-failure-reason="" className="mt-1 break-words text-red-300">
+          Failed: {shown.failureReason}
+        </p>
+      )}
+      {shown.state === "queued" && shown.requeueReason !== null && <p className="mt-1 break-words text-fg-muted">Requeued: {shown.requeueReason}</p>}
+      {shown.state === "queued" && shown.waiting !== null && <WaitingNote waiting={shown.waiting} workItemId={workItemId} onSettled={onSettled} />}
+      {outcome !== null ? (
+        <p data-session-outcome={outcome} className="mt-1 text-fg">
+          {OUTCOME_WORD[outcome]}
+          {shown.outcomeAt !== null && (
+            <>
+              {" "}
+              <time dateTime={shown.outcomeAt}>{formatTime(shown.outcomeAt)}</time>
+            </>
+          )}
+          {shown.outcomeBy !== null && <span className="text-fg-muted"> by {shown.outcomeBy}</span>}
+          <span className="text-fg-muted"> · </span>
+          {shown.released ? <span data-session-release="released">released</span> : <span data-session-release="held">disk held</span>}
+        </p>
+      ) : (
+        ended && <p className="mt-1 text-fg-muted">{shown.diskHeld ? "Ended · disk held, waiting for your decision" : "Ended · waiting for your decision"}</p>
+      )}
+      <OutcomeDecision sessionId={shown.id} outcome={outcome} decidable={ended && !shown.released} onWritten={onWritten} onSettled={onSettled} />
+    </li>
+  );
+}
+
 type Opener = "accept" | "table" | "change";
 
-function SessionRow({ session: shown, onWritten, onSettled }: SessionRowProps) {
+interface OutcomeDecisionProps {
+  sessionId: string;
+  outcome: Outcome | null;
+  /** Ended and not released: an outcome can be set or changed. */
+  decidable: boolean;
+  onWritten: (set: OutcomeSet) => void;
+  onSettled: () => void;
+}
+
+/** Accept and Table (or "Change to …" once decided), each asking first inline; a refusal in the server's words. */
+function OutcomeDecision({ sessionId, outcome, decidable, onWritten, onSettled }: OutcomeDecisionProps) {
   const [confirming, setConfirming] = useState<Outcome | null>(null);
   const [pending, setPending] = useState(false);
   const [refusal, setRefusal] = useState<string | null>(null);
@@ -151,10 +224,6 @@ function SessionRow({ session: shown, onWritten, onSettled }: SessionRowProps) {
   /** The button that opened the confirmation, focused again on Cancel. */
   const opener = useRef<Opener | null>(null);
   const restoreFocus = useRef(false);
-
-  const ended = ENDED.includes(shown.state);
-  const outcome = shown.outcome;
-  const decidable = ended && !shown.released;
 
   useEffect(() => {
     if (confirming !== null) {
@@ -181,7 +250,7 @@ function SessionRow({ session: shown, onWritten, onSettled }: SessionRowProps) {
     setPending(true);
     setRefusal(null);
     try {
-      onWritten(await trpc.hangarSessionOutcome.mutate({ id: shown.id, outcome: next }));
+      onWritten(await trpc.hangarSessionOutcome.mutate({ id: sessionId, outcome: next }));
       setConfirming(null);
     } catch (err) {
       setRefusal(messageOf(err, "Could not set the session's outcome."));
@@ -192,42 +261,8 @@ function SessionRow({ session: shown, onWritten, onSettled }: SessionRowProps) {
     onSettled();
   }
 
-  const where = [shown.flavor, shown.host === null ? null : `on ${shown.host}`, shown.container === null ? null : `container ${shown.container}`].filter((p) => p !== null).join(" · ");
-
   return (
-    <li data-hangar-session={shown.id} className="rounded-lg border border-hairline bg-surface-strong px-3 py-2 text-sm">
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        <span data-session-state={shown.state} className={`rounded-full border px-2 py-0.5 text-[11px] ${stateTone(shown.state)}`}>
-          {shown.state}
-        </span>
-        <span className="min-w-0 break-words text-fg">{where}</span>
-        <span className="ml-auto text-[11px] text-fg-muted">
-          <time dateTime={shown.updatedAt}>{formatTime(shown.updatedAt)}</time>
-        </span>
-      </div>
-      {shown.state === "failed" && shown.failureReason !== null && (
-        <p data-failure-reason="" className="mt-1 break-words text-red-300">
-          Failed: {shown.failureReason}
-        </p>
-      )}
-      {shown.state === "queued" && shown.requeueReason !== null && <p className="mt-1 break-words text-fg-muted">Requeued: {shown.requeueReason}</p>}
-      {outcome !== null ? (
-        <p data-session-outcome={outcome} className="mt-1 text-fg">
-          {OUTCOME_WORD[outcome]}
-          {shown.outcomeAt !== null && (
-            <>
-              {" "}
-              <time dateTime={shown.outcomeAt}>{formatTime(shown.outcomeAt)}</time>
-            </>
-          )}
-          {shown.outcomeBy !== null && <span className="text-fg-muted"> by {shown.outcomeBy}</span>}
-          <span className="text-fg-muted"> · </span>
-          {shown.released ? <span data-session-release="released">released</span> : <span data-session-release="held">disk held</span>}
-        </p>
-      ) : (
-        ended && <p className="mt-1 text-fg-muted">{shown.diskHeld ? "Ended · disk held, waiting for your decision" : "Ended · waiting for your decision"}</p>
-      )}
-
+    <>
       {decidable && confirming === null && outcome === null && (
         <div className="mt-2 flex flex-wrap gap-2">
           <button ref={openers.accept} type="button" disabled={pending} onClick={() => ask("accepted", "accept")} className={`${BUTTON} bg-accent text-ground hover:bg-accent/90`}>
@@ -267,6 +302,113 @@ function SessionRow({ session: shown, onWritten, onSettled }: SessionRowProps) {
           {refusal}
         </p>
       )}
+    </>
+  );
+}
+
+/** The one line a queued session waits on: the server's text, with an offline time read in the browser's zone. */
+function waitingLine(waiting: Waiting, now: Date): string {
+  if (waiting.kind === "offline" && waiting.since !== null) {
+    const since = new Date(waiting.since);
+    if (!Number.isNaN(since.getTime())) return `Waiting: hangar is offline since ${formatInstant(since, now)}.`;
+  }
+  return waiting.text;
+}
+
+interface WaitingNoteProps {
+  waiting: Waiting;
+  workItemId: string;
+  onSettled: () => void;
+}
+
+/** Why a queued session waits; on a disk full of undecided sessions, those sessions, none a dead end. */
+function WaitingNote({ waiting, workItemId, onSettled }: WaitingNoteProps) {
+  const leadId = useId();
+  const tone = waiting.kind === "next" ? "text-fg-muted" : "text-amber-200";
+  return (
+    <div className="mt-1">
+      <p data-session-waiting={waiting.kind} className={`break-words ${tone}`}>
+        {waitingLine(waiting, new Date())}
+      </p>
+      {waiting.kind === "disk_awaiting_review" && (
+        <>
+          <p id={leadId} className="mt-1 text-fg">
+            Decide these to free disk:
+          </p>
+          <ul aria-labelledby={leadId} className="mt-0.5 space-y-1">
+            {waiting.sessions.map((s) => (
+              <AwaitingItem key={s.id} session={s} workItemId={workItemId} onSettled={onSettled} />
+            ))}
+          </ul>
+          {waiting.total > waiting.sessions.length && (
+            <p className="mt-0.5 text-fg-muted">and {waiting.total - waiting.sessions.length} more; they're listed here as you decide these.</p>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+interface AwaitingItemProps {
+  session: AwaitingSession;
+  workItemId: string;
+  onSettled: () => void;
+}
+
+function AwaitingItem({ session, workItemId, onSettled }: AwaitingItemProps) {
+  /** The outcome set here, shown until the re-read drops the session from the list. */
+  const [decided, setDecided] = useState<OutcomeSet | null>(null);
+  const held = session.diskAllocatedBytes === undefined ? null : <span className="text-fg-muted"> · {formatDiskBytes(session.diskAllocatedBytes)} held</span>;
+  const { workItem } = session;
+
+  if (workItem !== null && workItem.id === workItemId) {
+    return (
+      <li data-awaiting-session={session.id} className="break-words text-fg">
+        <span className="font-mono text-[12px]">{workItem.externalId}</span> {workItem.title} <span className="text-fg-muted">(this item; decide it below)</span>
+        {held}
+      </li>
+    );
+  }
+  if (workItem !== null && workItem.project !== null) {
+    return (
+      <li data-awaiting-session={session.id} className="break-words">
+        <RouteLink route={awaitingWorkItemRoute({ externalId: workItem.externalId, project: workItem.project })}>
+          <span className="font-mono text-[12px]">{workItem.externalId}</span> {workItem.title}
+        </RouteLink>
+        {held}
+      </li>
+    );
+  }
+  const name =
+    workItem === null ? (
+      <>
+        Session <span className="font-mono text-[12px]">{session.id.slice(0, 8)}</span>
+        {session.claimedBy === null ? "" : ` on ${session.claimedBy}`} <span className="text-fg-muted">(its work item is gone)</span>
+      </>
+    ) : (
+      <>
+        <span className="font-mono text-[12px]">{workItem.externalId}</span> {workItem.title} <span className="text-fg-muted">(no board project)</span>
+      </>
+    );
+  return (
+    <li data-awaiting-session={session.id} className="break-words text-fg">
+      {name}
+      {held}
+      <OutcomeDecision sessionId={session.id} outcome={decided?.outcome ?? null} decidable={!(decided?.released ?? false)} onWritten={setDecided} onSettled={onSettled} />
     </li>
+  );
+}
+
+/** An in-app link: a plain left click navigates in place; a modified click (new tab, new window) is the browser's. */
+function RouteLink({ route, children }: { route: Route; children: ReactNode }) {
+  function open(e: MouseEvent<HTMLAnchorElement>) {
+    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    e.preventDefault();
+    navigate(route, "push");
+  }
+  return (
+    <a href={formatRoute(route)} onClick={open} className="inline-flex min-h-11 items-center gap-1 rounded text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-accent sm:min-h-0">
+      {children}
+    </a>
   );
 }

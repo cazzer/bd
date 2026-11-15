@@ -940,7 +940,7 @@ describe("hangar_check_ins", () => {
     const hangar = `test-schema-hangar-${randomUUID()}`;
     try {
       const [first] = await db.insert(hangarCheckIns).values({ hangar, version: "1.0.0" }).returning();
-      expect(first).toMatchObject({ hangar, version: "1.0.0", capacity: null, intervalS: 30 });
+      expect(first).toMatchObject({ hangar, version: "1.0.0", capacity: null, capacityAt: null, intervalS: 30 });
       expect(first?.lastSeenAt).toBeInstanceOf(Date);
 
       const duplicate = await db.insert(hangarCheckIns).values({ hangar }).catch((err: unknown) => ((err as { cause?: unknown }).cause ?? err) as { code?: string });

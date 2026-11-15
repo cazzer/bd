@@ -1,7 +1,11 @@
 // The four hangar tools (hangar-queue change, design decision 7; brain-mcp
 // spec, "Hangar tools"; hangar-release): brain_hangar_request queues a
-// session for a work item, brain_hangar_status reports hangar's liveness and
-// the open session counts, brain_hangar_sessions lists sessions, and
+// session for a work item, brain_hangar_status reports hangar's liveness, its
+// latest capacity and when it was reported, and the open session counts,
+// brain_hangar_sessions lists sessions, each queued one with why it waits
+// (hangar-capacity: `explainQueuedSessions`, computed on read; the sessions
+// awaiting review behind a full disk are listed once, at the top level, not
+// on every queued session, to keep the response inside its budget), and
 // brain_hangar_outcome_request asks the person to accept or table an ended
 // session through an inbox item. Hangar itself claims and reports over the
 // web server's REST API (docs/hangar-api.md); nothing here claims, changes a
@@ -11,17 +15,21 @@
 // (server.ts SESSION_REFUSED_TOOLS).
 
 import {
+  explainQueuedSessions,
   getHangarStatus,
   HANGAR_FLAVORS,
   HANGAR_OUTCOMES,
   HANGAR_SESSION_STATES,
+  HANGAR_WAIT_KINDS,
   listSessions,
   MAX_HANGAR_OUTCOME_NOTE_LENGTH,
   MAX_HANGAR_REPO_LENGTH,
   requestHangarOutcome,
   requestSession,
+  type HangarCapacity,
   type HangarSession,
   type HangarStatus,
+  type HangarWaiting,
 } from "@breakdown/core";
 import { z } from "zod";
 import { boundResponse } from "../budget.js";
@@ -40,11 +48,41 @@ export function hangarStatusText(status: HangarStatus): string {
   return "hangar has never checked in";
 }
 
+const plural = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`;
+
+/**
+ * The capacity summary brain_hangar_status shows: "headless: 2 slots;
+ * display-godot blocked (vram: …); free 12000 MB RAM, 4 CPUs, 0 MB VRAM,
+ * 50000 MB disk; reported <ISO>", leaving out what hangar did not send, or
+ * "no capacity reported".
+ */
+export function hangarCapacityText(capacity: HangarCapacity | null, capacityAt: Date | null): string {
+  if (capacity === null) return "no capacity reported";
+  const parts: string[] = [];
+  for (const [flavor, n] of Object.entries(capacity.slots ?? {})) parts.push(`${flavor}: ${plural(n, "slot", "slots")}`);
+  for (const [flavor, reason] of Object.entries(capacity.blocked ?? {})) parts.push(`${flavor} blocked (${reason})`);
+  const free = capacity.free;
+  if (free !== undefined) parts.push(`free ${free.ram_mb} MB RAM, ${plural(free.cpus, "CPU", "CPUs")}, ${free.vram_mb} MB VRAM, ${free.disk_mb} MB disk`);
+  if (parts.length === 0) parts.push("no slots, blocked flavors, or free figures");
+  if (capacityAt !== null) parts.push(`reported ${capacityAt.toISOString()}`);
+  return parts.join("; ");
+}
+
 function liveness(status: HangarStatus): { status: HangarStatus["state"]; lastSeenAt: string | null; text: string } {
   return { status: status.state, lastSeenAt: status.lastSeenAt?.toISOString() ?? null, text: hangarStatusText(status) };
 }
 
-function sessionJson(s: HangarSession): Record<string, unknown> {
+type WaitingJson = Exclude<HangarWaiting, { kind: "disk_awaiting_review" }> | Omit<Extract<HangarWaiting, { kind: "disk_awaiting_review" }>, "sessions">;
+
+/** A session's `waiting` without the awaiting-review list, which the response carries once as `awaitingReview`. */
+function waitingJson(waiting: HangarWaiting): WaitingJson {
+  if (waiting.kind !== "disk_awaiting_review") return waiting;
+  const { sessions: _listedOnce, ...rest } = waiting;
+  return rest;
+}
+
+/** `waiting` is why a queued session waits (null for every other state). */
+function sessionJson(s: HangarSession, waiting: WaitingJson | null): Record<string, unknown> {
   return {
     id: s.id,
     title: s.title,
@@ -65,6 +103,7 @@ function sessionJson(s: HangarSession): Record<string, unknown> {
     outcomeAt: s.outcomeAt,
     outcomeBy: s.outcomeBy,
     released: s.released,
+    waiting,
     updatedAt: s.updatedAt.toISOString(),
   };
 }
@@ -102,13 +141,26 @@ export const hangarStatusTool: ToolDef<typeof statusSchema> = {
   name: "brain_hangar_status",
   description:
     "Hangar's status: online (checked in within the last three check-in intervals), offline since its last check-in, or never checked in; the name and version " +
-    "of the hangar that last checked in; and how many sessions are queued, claimed, and running across every hangar. text is a one-line summary to show the person.",
+    "of the hangar that last checked in; that hangar's latest capacity as it reported it (capacity: slots per flavor, why other flavors are blocked, free RAM/CPU/VRAM/disk, " +
+    "session and disk totals, per-session disk usage; null when it sent none) and when it was reported (capacityAt); and how many sessions are queued, claimed, and running " +
+    "across every hangar. text is a one-line liveness summary and capacityText a one-line capacity summary, both to show the person.",
   schema: statusSchema,
   isWrite: false,
   async handler(ctx: ToolContext) {
     const status = await getHangarStatus(ctx.db);
     const { text, ...rest } = liveness(status);
-    return { ...rest, hangar: status.hangar, version: status.version, queued: status.counts.queued, claimed: status.counts.claimed, running: status.counts.running, text };
+    return {
+      ...rest,
+      hangar: status.hangar,
+      version: status.version,
+      queued: status.counts.queued,
+      claimed: status.counts.claimed,
+      running: status.counts.running,
+      capacity: status.capacity,
+      capacityAt: status.capacityAt?.toISOString() ?? null,
+      capacityText: hangarCapacityText(status.capacity, status.capacityAt),
+      text,
+    };
   },
 };
 
@@ -128,7 +180,11 @@ export const hangarSessionsTool: ToolDef<typeof sessionsSchema> = {
     "and with releasable: true to only those a person has accepted or tabled whose disk hangar still holds. " +
     `limit is 1-${MAX_SESSIONS_LIMIT}, default ${DEFAULT_SESSIONS_LIMIT}; hasMore says more sessions matched. Each session carries its state, flavor, repo, work item, ` +
     "who requested it, which hangar claimed it and when, where it runs (container, host, diskPath), why it was last requeued, why it failed (failureReason), " +
-    "the person's outcome (accepted, tabled, or null) with when and by whom, and released (hangar has deleted its disk). Read-only.",
+    "the person's outcome (accepted, tabled, or null) with when and by whom, released (hangar has deleted its disk), and waiting: on a queued session, why it waits " +
+    `(kind ${HANGAR_WAIT_KINDS.join(", ")}; text is a one-line summary to show the person; since, ahead, reasons, and total as the kind has them), null on any other state. ` +
+    "When a queued session waits on a full disk (disk_awaiting_review), the response carries awaitingReview once: { sessions, each with id, claimedBy, workItem " +
+    "({id, externalId, title, project} or null), and diskAllocatedBytes when hangar reported it, at most 20, oldest ended first; total }. The person frees the disk by " +
+    "accepting or tabling those sessions (brain_hangar_outcome_request asks them to). awaitingReview is null otherwise. Read-only.",
   schema: sessionsSchema,
   isWrite: false,
   async handler(ctx: ToolContext, args) {
@@ -138,8 +194,16 @@ export const hangarSessionsTool: ToolDef<typeof sessionsSchema> = {
       ...(args.releasable === undefined ? {} : { releasable: args.releasable }),
       limit: args.limit ?? DEFAULT_SESSIONS_LIMIT,
     });
+    const queued = listed.sessions.filter((s) => s.state === "queued").map((s) => s.id);
+    const waiting = queued.length === 0 ? new Map<string, HangarWaiting>() : await explainQueuedSessions(ctx.db, { ids: queued });
+    // Every disk wait from one call reads the same awaiting-review list, so the first stands for all.
+    const onDisk = [...waiting.values()].find((w) => w.kind === "disk_awaiting_review");
+    const awaitingReview = onDisk === undefined ? null : { sessions: onDisk.sessions, total: onDisk.total };
     return boundResponse(
-      listed.sessions.map(sessionJson),
+      listed.sessions.map((s) => {
+        const w = waiting.get(s.id);
+        return sessionJson(s, w === undefined ? null : waitingJson(w));
+      }),
       (s) => s["id"] as string,
       (kept, meta) => {
         const notes: string[] = [];
@@ -153,6 +217,7 @@ export const hangarSessionsTool: ToolDef<typeof sessionsSchema> = {
           ...(notes.length > 0 ? { truncationNote: notes.join(" ") } : {}),
           droppedSessionIds: meta.droppedIds,
           shrunkSessionIds: meta.shrunkIds,
+          awaitingReview,
         };
       },
       ctx.responseCharBudget,
