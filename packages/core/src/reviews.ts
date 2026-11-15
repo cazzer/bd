@@ -6,10 +6,12 @@
 // A review is a beads issue labelled exactly `review` (REVIEW_LABEL);
 // `review:changes` is a separate label marking a review sent back, and does
 // not by itself make an item a review. Its beads metadata key `review`
-// holds `{ images, pane, socket?, summary }`: absolute screenshot paths (at
-// most MAX_REVIEW_IMAGES, each under MAX_REVIEW_IMAGE_PATH_LENGTH, no
-// control characters), the requester's herdr pane id or null (a letter or
-// digit, then letters, digits, `:`, `_`, `.`, `-`; never a flag), the herdr
+// holds `{ images, pane, socket?, summary }`: screenshot paths (at most
+// MAX_REVIEW_IMAGES, each under MAX_REVIEW_IMAGE_PATH_LENGTH, no control
+// characters; absolute, or relative to the server's media root as
+// REVIEW_RELATIVE_PATH_PATTERN spells it), the requester's herdr pane id
+// or null (a letter or digit, then letters, digits, `:`, `_`, `.`, `-`;
+// never a flag), the herdr
 // server socket that pane id belongs to (pane ids are scoped to one herdr
 // server; absolute, at most MAX_REVIEW_SOCKET_PATH_LENGTH, no control
 // characters; the key is present only when recorded), and a summary fitted
@@ -17,9 +19,17 @@
 // value that breaks the contract becomes `{ invalid: true }`, so one bad
 // review cannot fail a tracker's load. It is idempotent — a stored
 // `{ invalid: true }` normalizes to itself — so readers can re-apply it to
-// whatever the store holds. Images are only checked for being absolute here;
-// whether one is under REVIEW_IMAGE_ROOT is the image route's question
+// whatever the store holds. Images are only checked for shape here; whether
+// an absolute one is under REVIEW_IMAGE_ROOT is the image route's question
 // (`isInsideReviewRoot`, lexical; the route also realpaths).
+//
+// Relative paths (remote-review-media, design.md decision 4). A review filed
+// against a remote host stores `<project>/<item-id>/<run>/<NN-name>`, which
+// the server resolves against its media root. A relative path is `/`-joined
+// segments that each start with a letter or digit and hold only letters,
+// digits, `.`, `_`, `-`, so `..`, `.`, empty segments, and backslashes never
+// pass. Absolute paths keep their old meaning, so reviews filed before stay
+// valid.
 //
 // Size budget. A node's metadata is capped at 50,000 characters of JSON by
 // the write path (DEFAULT_MAX_METADATA_LENGTH), and JSON escaping can grow
@@ -91,6 +101,8 @@ export const REVIEW_IMAGE_ROOT = path.join(os.homedir(), ".local", "share", "bre
 
 export const MAX_REVIEW_IMAGES = 20;
 export const MAX_REVIEW_IMAGE_PATH_LENGTH = 512;
+/** A stored path relative to the server's media root (module header). */
+const REVIEW_RELATIVE_PATH_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*$/;
 export const REVIEW_PANE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9:_.-]{0,63}$/;
 export const MAX_REVIEW_SOCKET_PATH_LENGTH = 512;
 export const MAX_REVIEW_SUMMARY_LENGTH = 2000;
@@ -143,7 +155,7 @@ export interface ReviewOption {
 
 export interface ReviewImageAttachment {
   kind: "image";
-  /** Absolute; the same rule as `ReviewMetadata.images`. */
+  /** Absolute, or relative to the media root; the same rule as `ReviewMetadata.images`. */
   path: string;
   caption?: string;
   pair?: ReviewAttachmentPair;
@@ -151,9 +163,9 @@ export interface ReviewImageAttachment {
 
 export interface ReviewVideoAttachment {
   kind: "video";
-  /** Absolute; the same rule as an image attachment's path. */
+  /** The same rule as an image attachment's path. */
   path: string;
-  /** An image shown before the video plays; absolute, the same rule as `path`. */
+  /** An image shown before the video plays; the same rule as `path`. */
   poster?: string;
   caption?: string;
   pair?: ReviewAttachmentPair;
@@ -286,9 +298,15 @@ export function normalizeReviewMetadata(raw: unknown): ReviewMetadata | InvalidR
   return JSON.stringify(review).length > MAX_REVIEW_METADATA_CHARS ? { ...INVALID } : review;
 }
 
-/** An image path as the review contract accepts it: absolute, bounded, no control characters. */
+/** An image path as the review contract accepts it: bounded, no control characters, and absolute or a relative path of safe segments (module header). */
 function isReviewImagePath(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0 && value.length <= MAX_REVIEW_IMAGE_PATH_LENGTH && !CONTROL_CHAR.test(value) && path.isAbsolute(value);
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= MAX_REVIEW_IMAGE_PATH_LENGTH &&
+    !CONTROL_CHAR.test(value) &&
+    (path.isAbsolute(value) || REVIEW_RELATIVE_PATH_PATTERN.test(value))
+  );
 }
 
 const ABSENT = Symbol("absent");

@@ -43,7 +43,9 @@
 // contains the segments `.local/share/breakdown/reviews/` is first rebased
 // onto the root: the part after the last occurrence is taken relative to
 // it, then checked exactly as before. A `..` segment after the marker makes
-// the URL null rather than being resolved.
+// the URL null rather than being resolved. A relative path (one a remote
+// `review-request` uploaded; remote-review-media, design.md decision 4) is
+// taken relative to the root and checked the same way, never rebased.
 
 import { createReadStream } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
@@ -54,7 +56,7 @@ import { isInsideReviewRoot, REVIEW_IMAGE_ROOT } from "@breakdown/core";
 
 export const REVIEW_IMAGES_PREFIX = "/review-images/";
 
-const CONTENT_TYPES: Readonly<Record<string, string>> = {
+export const CONTENT_TYPES: Readonly<Record<string, string>> = {
   ".png": "image/png",
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
@@ -110,9 +112,14 @@ function rebaseHostReviewPath(absolutePath: string, root: string): string | null
   return null;
 }
 
-/** The URL `createReviewImageHandler` serves `absolutePath` at, or null when it is not inside `root` (after rebasing a host path; module header). */
-export function reviewImageUrl(absolutePath: string, root: string = REVIEW_IMAGE_ROOT): string | null {
-  if (!isInsideReviewRoot(absolutePath, root)) {
+/** The URL `createReviewImageHandler` serves `storedPath` at, or null when it is not inside `root` (a relative path joined onto it; an absolute one after rebasing a host path; module header). */
+export function reviewImageUrl(storedPath: string, root: string = REVIEW_IMAGE_ROOT): string | null {
+  let absolutePath = storedPath;
+  if (!path.isAbsolute(storedPath)) {
+    // isInsideReviewRoot resolves against the cwd, so join onto the root first.
+    absolutePath = path.join(root, storedPath);
+    if (!isInsideReviewRoot(absolutePath, root)) return null;
+  } else if (!isInsideReviewRoot(absolutePath, root)) {
     const rebased = rebaseHostReviewPath(absolutePath, root);
     if (rebased === null || !isInsideReviewRoot(rebased, root)) return null;
     absolutePath = rebased;
@@ -194,6 +201,8 @@ const COMMON_HEADERS = {
   "Cache-Control": "no-store",
   "X-Content-Type-Options": "nosniff",
   "Cross-Origin-Resource-Policy": "same-origin",
+  // A stored file never runs as a page, even opened directly.
+  "Content-Security-Policy": "default-src 'none'; sandbox",
 } as const;
 
 function refuse(res: ServerResponse, status: number, text: string, extraHeaders: Record<string, string> = {}): void {

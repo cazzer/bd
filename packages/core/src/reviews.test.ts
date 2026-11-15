@@ -76,7 +76,10 @@ describe("normalizeReviewMetadata", () => {
     ["null", null],
     ["images not an array", { images: img(1) }],
     ["too many images", { images: Array.from({ length: MAX_REVIEW_IMAGES + 1 }, (_, i) => img(i)) }],
-    ["a relative image path", { images: ["shots/a.png"] }],
+    ["a parent-relative image path", { images: ["../a.png"] }],
+    ["a relative image path with a `..` segment", { images: ["a/../b.png"] }],
+    ["a relative image path with a backslash", { images: ["shots\\a.png"] }],
+    ["a relative image path with an empty segment", { images: ["a//b.png"] }],
     ["an over-long image path", { images: [`/${"a".repeat(MAX_REVIEW_IMAGE_PATH_LENGTH)}`] }],
     ["a NUL in an image path", { images: ["/tmp/a\u0000.png"] }],
     ["a non-string image", { images: [42] }],
@@ -124,6 +127,9 @@ describe("normalizeReviewMetadata", () => {
   it("is idempotent, including on a stored invalid marker", () => {
     const valid = normalizeReviewMetadata({ images: [img(1)], pane: "p1", summary: "s" });
     expect(normalizeReviewMetadata(valid)).toEqual(valid);
+    const remote = normalizeReviewMetadata({ images: ["scratch/scr-1/0a1b2c3d4e5f/01-a.png"], pane: null, summary: "s" });
+    expect(remote).toEqual({ images: ["scratch/scr-1/0a1b2c3d4e5f/01-a.png"], pane: null, summary: "s" });
+    expect(normalizeReviewMetadata(remote)).toEqual(remote);
     expect(normalizeReviewMetadata({ invalid: true })).toEqual({ invalid: true });
   });
 });
@@ -240,7 +246,7 @@ describe("normalizeReviewMetadata decision cards", () => {
     ["an unknown attachment kind", { attachments: [{ kind: "pdf", path: img(1) }] }],
     ["an attachment without a kind", { attachments: [{ path: img(1) }] }],
     ["an image attachment without a path", { attachments: [{ kind: "image" }] }],
-    ["a relative image attachment path", { attachments: [{ kind: "image", path: "shots/a.png" }] }],
+    ["a dot-relative image attachment path", { attachments: [{ kind: "image", path: "./a.png" }] }],
     ["an over-long image attachment path", { attachments: [{ kind: "image", path: `/${"a".repeat(MAX_REVIEW_IMAGE_PATH_LENGTH)}` }] }],
     ["a control character in an image attachment path", { attachments: [{ kind: "image", path: "/tmp/a\nb.png" }] }],
     ["a mermaid attachment without a source", { attachments: [{ kind: "mermaid" }] }],
@@ -248,8 +254,8 @@ describe("normalizeReviewMetadata decision cards", () => {
     ["an unknown pair", { attachments: [{ kind: "image", path: img(1), pair: "during" }] }],
     ["a non-string caption", { attachments: [{ kind: "image", path: img(1), caption: 3 }] }],
     ["a video without a path", { attachments: [{ kind: "video" }] }],
-    ["a relative video path", { attachments: [{ kind: "video", path: "reel.mp4" }] }],
-    ["a relative poster", { attachments: [{ kind: "video", path: vid(1), poster: "reel.jpg" }] }],
+    ["a dot-relative video path", { attachments: [{ kind: "video", path: "./reel.mp4" }] }],
+    ["a parent-relative poster", { attachments: [{ kind: "video", path: vid(1), poster: "../reel.jpg" }] }],
     ["a non-string poster", { attachments: [{ kind: "video", path: vid(1), poster: 1 }] }],
     ["a video option on a card without options", { attachments: [{ kind: "video", path: vid(1), option: "A" }] }],
     ["a video option naming no option", { options: [optionA, optionB], attachments: [{ kind: "video", path: vid(1), option: "C" }] }],
