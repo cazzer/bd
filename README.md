@@ -293,6 +293,21 @@ docker buildx build --builder breakdown-multi --platform linux/arm64,linux/amd64
 
 `pnpm smoke:app` (not part of `pnpm check`; it needs Docker) builds the image and starts the stack as project `breakdown-smoke` with a random password and ports 14310/15320. It mints a `human` and an `agent` token in the container and checks, from the host: `/healthz` on both servers is 401 with `WWW-Authenticate: Bearer` without a token, the human and agent tokens each get 200 on the web (`/healthz` admits any scope), and the agent token gets 200 on MCP. It also checks that the board's HTML and hashed assets are public, that the HTML is sent with `X-Frame-Options: DENY` and a `Content-Security-Policy` with `frame-ancestors 'none'` and no inline script (and has none), a tRPC read without a token is 401, and an MCP session initializes, calls `brain_map`, and closes. After some load it inspects both containers (memory limit set, swap equal to it, cpus set, not OOM-killed, never restarted, peak under the cap, total under 1 GB), checks that `breakdown` runs hardened (read-only root it cannot write, all capabilities dropped, `no-new-privileges`, init), and prints the limits-and-peaks table. It always removes its project and volumes at the end, on Ctrl-C or SIGTERM too (exiting 130 or 143). `--keep` leaves them up. It refuses to run against the projects `bd` and `breakdown`.
 
+## Board and roadmap
+
+Register a beads checkout once with `pnpm ingest:beads <path> --project <key>`; from then the server watches it and both views stay current as `bd` changes it. With `pnpm dev` running, `http://localhost:5310/board` shows its work items as columns crossed with epic lanes, and `http://localhost:5310/roadmap` shows its plan over time. Both headers carry the same project switcher, one project at a time or "All projects", and a Board / Roadmap toggle that keeps the chosen project. The project and the open item live in the address (`/roadmap?project=<key>&item=<bead-id>`), so a reload or a shared link shows the same thing.
+
+Plan with milestones, which are ordinary beads of type `milestone` with a due date, and put epics under them:
+
+```bash
+bd create "Beta launch" -t milestone --due 2026-12-15
+bd create "Billing" -t epic --parent <milestone-id>    # a new epic under it
+bd update <epic-id> --parent <milestone-id>             # or move an existing one
+bd update <epic-id> --due 2026-12-01                    # an epic's own target (else its milestone's)
+```
+
+The roadmap lists each project's milestones by due date, each above its epics, then the epics with no milestone, on one week-scaled timeline with a line at today. An epic's bar runs from when it or its first item was claimed to when it closed (or to today), and an open epic or milestone past its target is marked overdue. Progress rolls up from items: an epic counts every item under it, nested epics' too, a milestone counts every item under it through an epic or directly, and the share is closed ÷ (all − deferred), with in-progress and deferred counts shown beside it. A row opens the same drawer as a board card. On the board, a lane names its epic's milestone, and milestones are never cards.
+
 ## Inbox
 
 A review queue for everything that needs a decision: email, Asana, Slack, Notion, Google Docs comments, GitHub reviews, Fathom action items, drafts from live Claude sessions, and the board's open reviews from every registered project. Open `http://localhost:5310/inbox` (with `pnpm dev` running). Keys: `j`/`k` move, `a` accept (the recommended option on a card), `c` message, `d` dismiss, `o` open session; `Ctrl/⌘+Enter` accepts and `+Shift` requests changes.

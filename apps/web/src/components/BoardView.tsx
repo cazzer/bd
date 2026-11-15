@@ -13,8 +13,9 @@
 // projects are the view filter's `project` predicate, or every registered
 // project when it names none or there is no view (lib/boardRow.ts); the
 // header's switcher (ProjectSwitcher.tsx, roadmap-milestones design.md
-// decision 5) picks one of them or all, and the choice lives in the
-// address, so a switch is a history push and a reload reproduces the board.
+// decision 5) picks one of them or all — live as soon as the offered
+// projects are known, even when the board read fails — and the choice lives
+// in the address, so a switch is a history push and a reload reproduces the board.
 // An old link naming several projects still shows them all; a switch drops
 // the open item. The Board / Roadmap toggle beside it (WorkViewToggle.tsx)
 // carries the projects to `/roadmap` and drops the open item. Only a saved
@@ -132,6 +133,9 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
   const [reading, setReading] = useState(false);
   const [announcement, setAnnouncement] = useState("");
   const [boardVersion, setBoardVersion] = useState(0);
+  /** The registry's keys as last read, kept apart from `data` so the switcher works while the board read fails. */
+  const [registryKeys, setRegistryKeys] = useState<string[] | null>(null);
+  const [registryFailed, setRegistryFailed] = useState(false);
   const boardRegionRef = useRef<HTMLDivElement>(null);
   /** The project each opened item resolved to (see openProject). */
   const pinnedProjects = useRef(new Map<string, string>());
@@ -199,17 +203,31 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
     async function readOnce() {
       const ids = [...pending];
       const address = projectsRef.current;
+      // The registry lands on its own, so the switcher is live even when the board read then fails.
+      const registryRead = trpc.beadsProjects.query().then(
+        (reg) => {
+          if (!disposed) {
+            setRegistryKeys(reg.projects.map((p) => p.key));
+            setRegistryFailed(false);
+          }
+          return reg.projects;
+        },
+        (err: unknown) => {
+          if (!disposed) setRegistryFailed(true);
+          throw err;
+        },
+      );
       try {
         let registry: BeadsProjectsAnswer;
         let board: BoardData["board"];
         if (viewProjects !== null) {
           // The offered projects are known without the registry, so both reads go out together.
           const readable = readableProjects(chosenProjects(offeredProjects(viewProjects, []), address));
-          const [reg, b] = await Promise.all([trpc.beadsProjects.query(), readable.length > 0 ? trpc.board.query({ projects: readable }) : Promise.resolve(EMPTY_BOARD)]);
-          registry = reg.projects;
+          const [reg, b] = await Promise.all([registryRead, readable.length > 0 ? trpc.board.query({ projects: readable }) : Promise.resolve(EMPTY_BOARD)]);
+          registry = reg;
           board = b;
         } else {
-          registry = (await trpc.beadsProjects.query()).projects;
+          registry = await registryRead;
           const readable = readableProjects(chosenProjects(offeredProjects(null, registry.map((p) => p.key)), address));
           board = readable.length > 0 ? await trpc.board.query({ projects: readable }) : EMPTY_BOARD;
         }
@@ -325,8 +343,17 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
 
   const route: BoardRoute = { view: "board", viewId, projects, item };
 
+  // The switcher is live as soon as the offered projects are known — the
+  // view's own, or the registry's — whether or not the board read succeeds,
+  // so a reader can always switch away from a project that fails to read.
+  // With the registry unreadable too, it offers the address's projects and
+  // "All projects" (ProjectSwitcher's `fallback`).
+  const knownOffered = view === null ? null : view.viewProjects !== null ? offeredProjects(view.viewProjects, []) : registryKeys !== null ? offeredProjects(null, registryKeys) : null;
+  const switcherFallback = view !== null && knownOffered === null && registryFailed;
+  const switcherOffered = switcherFallback ? [...projects] : knownOffered;
+
   function chooseFromSwitcher(choice: string) {
-    navigate(chooseProject(route, offered, choice), "push");
+    navigate(chooseProject(route, switcherOffered ?? [], choice), "push");
   }
   const drawerOpen = view !== null && item !== null;
 
@@ -379,15 +406,14 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
   // The switcher keeps its place while the projects load (disabled, reading
   // the address), and is left off only once none is offered or the address
   // names no board view.
-  const switcherOffered = view && data ? offered : null;
-  const switcherShown = (viewState.kind === "loading" || viewState.kind === "ready") && switcherOffered?.length !== 0;
+  const switcherShown = (viewState.kind === "loading" || viewState.kind === "ready") && (switcherFallback || switcherOffered?.length !== 0);
 
   return (
     <main className={`flex h-dvh w-screen flex-col overflow-hidden ${drawerOpen || shellDrawerOpen ? "sm:pr-[492px]" : ""}`}>
       <div aria-hidden="true" className="ambience pointer-events-none fixed inset-0 -z-10" />
       <header inert={drawerOpen && !wide} className="glass m-3 mb-0 flex flex-wrap items-center gap-x-4 gap-y-2 p-3">
         {heading === null ? <h1 className="sr-only">Board</h1> : <h1 className="min-w-0 truncate text-base font-semibold text-fg">{heading}</h1>}
-        {switcherShown && <ProjectSwitcher offered={switcherOffered} address={projects} onChoose={chooseFromSwitcher} />}
+        {switcherShown && <ProjectSwitcher offered={switcherOffered} address={projects} onChoose={chooseFromSwitcher} fallback={switcherFallback} />}
         <WorkViewToggle current="board" board={route} roadmap={boardToRoadmap(route, viewCarriedProjects(view?.viewProjects ?? null, projects))} />
         <div className="ml-auto flex flex-wrap items-center justify-end gap-3 text-xs text-fg-muted">
           <HeaderSearch />

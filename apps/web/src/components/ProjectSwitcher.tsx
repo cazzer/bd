@@ -14,6 +14,11 @@
 // when the projects load: while they load (`offered` null) it is a disabled
 // select reading the address alone, and with only one project offered there
 // is nothing to choose, so that key is shown as text in the same box.
+//
+// When the project registry could not be read (`fallback`), `offered` is the
+// address's own projects: the switcher is still a live menu, reading the
+// address as while loading and offering "All projects" beside them, so a
+// reader can always switch away from a project that fails to read.
 
 import { useId } from "react";
 import { ALL_PROJECTS_CHOICE, SEVERAL_PROJECTS_VALUE, switcherState } from "../lib/workViewNav.js";
@@ -25,15 +30,17 @@ export interface ProjectSwitcherProps {
   address: readonly string[];
   /** Called with `ALL_PROJECTS_CHOICE` or a key; never with the current value. */
   onChoose: (choice: string) => void;
+  /** True when the registry could not be read and `offered` is the address's projects. */
+  fallback?: boolean;
 }
 
 const BOX = "min-h-11 w-44 rounded-lg border py-1 pl-2.5 text-base sm:min-h-0 sm:text-xs";
 
-export function ProjectSwitcher({ offered, address, onChoose }: ProjectSwitcherProps) {
-  const state = switcherState(offered, address);
+export function ProjectSwitcher({ offered, address, onChoose, fallback = false }: ProjectSwitcherProps) {
+  const state = switcherState(fallback ? null : offered, address);
   const id = useId();
 
-  if (offered !== null && offered.length === 1) {
+  if (!fallback && offered !== null && offered.length === 1) {
     return (
       <span className={`${BOX} inline-flex items-center truncate border-transparent pr-2.5 text-fg`}>
         <span className="sr-only">Project: </span>
