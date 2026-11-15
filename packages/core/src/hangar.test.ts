@@ -11,7 +11,7 @@
 
 import { randomUUID } from "node:crypto";
 import { inArray, sql } from "drizzle-orm";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { clientTokens, hangarCheckIns, hangarMessages, nodes, type Database } from "@breakdown/db";
 import { sessionTokenClient, verifyClientToken } from "./client-tokens.js";
 import { upsertEdges } from "./edges.js";
@@ -23,6 +23,7 @@ import {
   HangarTransitionError,
   InvalidEventTimeError,
   InvalidHangarSessionError,
+  InvalidLookupIdError,
   NodeNotFoundError,
   NotAWorkItemError,
   ReservedHangarEdgeError,
@@ -33,21 +34,30 @@ import {
   checkHangarTransition,
   claimSession,
   classifyHangarStatus,
+  classifyQueuedWait,
+  explainQueuedSessions,
   getHangarStatus,
   HANGAR_SESSION_STATES,
   listSessions,
   MAX_CLAIM_CANDIDATES,
+  MAX_HANGAR_AWAITING_REVIEW_LISTED,
+  MAX_HANGAR_SESSIONS_LIMIT,
+  MAX_HANGAR_USAGE_ENTRIES,
   normalizeHangarSessionMetadata,
+  parseHangarCapacity,
   readHangarMessages,
   recordCheckIn,
   requestSession,
   requeueSession,
   setHangarSessionOutcome,
   updateSession,
+  type HangarCheckInSnapshot,
   type HangarSessionState,
+  type QueuedWaitContext,
 } from "./hangar.js";
 import { getNodeHistory } from "./history.js";
 import { closeIngestRun, openIngestRun, type IngestRunHandle } from "./ingest-runs.js";
+import { mergeNodes } from "./merge.js";
 import { DEFAULT_MAX_METADATA_LENGTH, upsertNodes } from "./nodes.js";
 import { connectTestDb, uniqueSuffix, type TestPool } from "./test-helpers.js";
 
@@ -108,6 +118,16 @@ async function request(flavor: string, workItemId?: string) {
 async function stateOf(id: string): Promise<Record<string, unknown>> {
   const result = await db.execute<{ metadata: Record<string, unknown> }>(sql`SELECT metadata FROM nodes WHERE id = ${id}::uuid`);
   return result.rows[0]!.metadata;
+}
+
+/** A session claimed by a fresh hangar, moved to `state` with a disk (unless `state` is claimed). */
+async function ended(label: string, state: HangarSessionState, workItemId?: string) {
+  const session = await request("headless", workItemId);
+  const hangar = hangarNamed(label);
+  if ((await claimSession(db, { hangar, flavors: ["headless"], among: [session.id] })) === null) throw new Error("fixture claim failed");
+  await updateSession(db, { hangar, id: session.id, state: "running", container: `hangar-${session.id}`, diskPath: `/disks/${session.id}.img` });
+  if (state !== "running") await updateSession(db, { hangar, id: session.id, state });
+  return { id: session.id, hangar };
 }
 
 describe("normalizeHangarSessionMetadata", () => {
@@ -471,7 +491,7 @@ describe("check-ins and status", () => {
     expect(second.intervalS).toBe(30);
     const rows = await db.select().from(hangarCheckIns).where(inArray(hangarCheckIns.hangar, [hangar]));
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ version: "0.3.1", capacity: null });
+    expect(rows[0]).toMatchObject({ version: "0.3.1", capacity: null, capacityAt: null });
     // `now` is the database's own: the time it recorded the check-in at.
     expect(second.now.getTime()).toBe(new Date(rows[0]!.lastSeenAt).getTime());
 
@@ -692,16 +712,6 @@ describe("a person's outcome and hangar's release", () => {
   const PERSON = `${ACTOR_PREFIX}-person`;
   const runsBy = async (actor: string): Promise<number> => (await db.execute(sql`SELECT 1 FROM ingest_runs WHERE actor = ${actor}`)).rows.length;
 
-  /** A session claimed by a fresh hangar, moved to `state` with a disk (unless `state` is claimed). */
-  async function ended(label: string, state: HangarSessionState, workItemId?: string) {
-    const session = await request("headless", workItemId);
-    const hangar = hangarNamed(label);
-    if ((await claimSession(db, { hangar, flavors: ["headless"], among: [session.id] })) === null) throw new Error("fixture claim failed");
-    await updateSession(db, { hangar, id: session.id, state: "running", container: `hangar-${session.id}`, diskPath: `/disks/${session.id}.img` });
-    if (state !== "running") await updateSession(db, { hangar, id: session.id, state });
-    return { id: session.id, hangar };
-  }
-
   it("sets an outcome on a stopped session, attributed to the person, as a revision that moves it to the front of hangar's listing", async () => {
     const first = await ended("front", "stopped");
     const second = await request("headless");
@@ -836,5 +846,381 @@ describe("a person's outcome and hangar's release", () => {
     await updateSession(db, { hangar: released.hangar, id: released.id, container: null, diskPath: null });
     expect((await listSessions(db, { workItemId, releasable: true })).sessions.map((s) => s.id)).toEqual([decided.id]);
     expect((await listSessions(db, { workItemId })).sessions.map((s) => s.id).sort()).toEqual([decided.id, released.id, undecided.id].sort());
+  });
+});
+
+// hangar-capacity spec: "Hangar reports capacity and per-session usage", "A
+// queued request says why it waits". Slots here name only headless and
+// display-browser, never display-godot: other suites on this database (the
+// MCP tools) rely on no test hangar having room for display-godot.
+describe("parseHangarCapacity", () => {
+  const S = "0b5f4c3e-1d2a-4b6c-8e9f-0a1b2c3d4e5f";
+
+  it("reads the documented shape", () => {
+    const raw = {
+      slots: { headless: 2, "display-browser": 0 },
+      blocked: { "display-browser": "ram: need 4096 MB, free 1200 MB" },
+      free: { ram_mb: 12000, cpus: 4, vram_mb: 0, disk_mb: 50000 },
+      sessions: { running: 1, kept: 3 },
+      disk: { allocated_bytes: 8_000_000_000, apparent_bytes: 20_000_000_000 },
+      usage: [{ session: S, allocated_bytes: 1024, apparent_bytes: 4096 }],
+      future_field: { anything: true },
+    };
+    const { future_field: _ignored, ...expected } = raw;
+    expect(parseHangarCapacity(raw)).toEqual(expected);
+  });
+
+  it("drops a field it can't read and keeps the rest", () => {
+    expect(parseHangarCapacity({ free: "lots", slots: { headless: 1 } })).toEqual({ slots: { headless: 1 } });
+  });
+
+  it("drops negative, fractional, and non-numeric slots", () => {
+    expect(parseHangarCapacity({ slots: { headless: -1, "display-browser": 1.5, a: "2", b: null, c: 0, d: 3 } })).toEqual({ slots: { c: 0, d: 3 } });
+    expect(parseHangarCapacity({ slots: [1, 2] })).toEqual({});
+  });
+
+  it("cuts a blocked reason to 500 characters and drops a blank or non-string one", () => {
+    const parsed = parseHangarCapacity({ blocked: { headless: `disk: ${"x".repeat(600)}`, a: 42, b: "  ", c: "ram: full" } });
+    expect(parsed.blocked!["headless"]).toHaveLength(500);
+    expect(parsed.blocked!["headless"]!.startsWith("disk: ")).toBe(true);
+    expect(Object.keys(parsed.blocked!).sort()).toEqual(["c", "headless"]);
+  });
+
+  it("reads free, sessions, and disk whole: one bad field drops the object", () => {
+    expect(parseHangarCapacity({ free: { ram_mb: 1, cpus: 2, vram_mb: 3 } })).toEqual({});
+    expect(parseHangarCapacity({ free: { ram_mb: 1, cpus: 2, vram_mb: 3, disk_mb: Number.NaN } })).toEqual({});
+    expect(parseHangarCapacity({ free: { ram_mb: -1, cpus: 0.5, vram_mb: 0, disk_mb: 9 } })).toEqual({ free: { ram_mb: -1, cpus: 0.5, vram_mb: 0, disk_mb: 9 } });
+    expect(parseHangarCapacity({ sessions: { running: 1 } })).toEqual({});
+    expect(parseHangarCapacity({ sessions: { running: 1, kept: 1.5 } })).toEqual({});
+    expect(parseHangarCapacity({ sessions: { running: 1, kept: 0, extra: 9 } })).toEqual({ sessions: { running: 1, kept: 0 } });
+    expect(parseHangarCapacity({ disk: { allocated_bytes: -5, apparent_bytes: 1 } })).toEqual({});
+    expect(parseHangarCapacity({ disk: "full" })).toEqual({});
+  });
+
+  it("keeps usage entries with a uuid and non-negative byte counts, lowercased, at most 200", () => {
+    const good = { session: S.toUpperCase(), allocated_bytes: 1, apparent_bytes: 2 };
+    const parsed = parseHangarCapacity({
+      usage: [good, { session: "not-a-uuid", allocated_bytes: 1, apparent_bytes: 2 }, { session: S, allocated_bytes: -1, apparent_bytes: 2 }, { session: S, allocated_bytes: 1 }, "junk", null],
+    });
+    expect(parsed.usage).toEqual([{ session: S, allocated_bytes: 1, apparent_bytes: 2 }]);
+    const many = Array.from({ length: MAX_HANGAR_USAGE_ENTRIES + 5 }, (_, i) => ({ session: S, allocated_bytes: i, apparent_bytes: i }));
+    const capped = parseHangarCapacity({ usage: many }).usage!;
+    expect(capped).toHaveLength(MAX_HANGAR_USAGE_ENTRIES);
+    expect(capped[0]!.allocated_bytes).toBe(0);
+    expect(parseHangarCapacity({ usage: { session: S } })).toEqual({});
+  });
+
+  it.each([null, undefined, [], "slots", 42, true])("reads %j as empty, never throwing", (raw) => {
+    expect(parseHangarCapacity(raw)).toEqual({});
+  });
+
+  it("treats a __proto__ key as an ordinary entry, never the prototype", () => {
+    const parsed = parseHangarCapacity(JSON.parse('{"slots":{"__proto__":3,"headless":1},"blocked":{"__proto__":"disk: x"}}'));
+    expect(Object.getPrototypeOf(parsed.slots)).toBe(Object.prototype);
+    expect(Object.hasOwn(parsed.slots!, "__proto__")).toBe(true);
+    expect(parsed.slots!["headless"]).toBe(1);
+    expect(parseHangarCapacity(JSON.parse('{"__proto__":{"slots":{"headless":9}}}'))).toEqual({});
+  });
+});
+
+describe("classifyQueuedWait", () => {
+  const NOW = new Date("2026-11-14T11:00:00.000Z");
+  const A = "aaaaaaaa-0000-4000-8000-000000000001";
+  const B = "bbbbbbbb-0000-4000-8000-000000000002";
+  const seen = (hangar: string, capacity: unknown, agoMs = 5_000): HangarCheckInSnapshot => ({
+    hangar,
+    lastSeenAt: new Date(NOW.getTime() - agoMs),
+    intervalS: 30,
+    capacity: capacity === null ? null : parseHangarCapacity(capacity),
+  });
+  const awaitingAB = {
+    total: 2,
+    sessions: [
+      { id: A, claimedBy: "h1", workItem: { id: "w-a", externalId: "bd-1", title: "A's work", project: "bd" } },
+      { id: B, claimedBy: "h2", workItem: null },
+    ],
+  };
+  const ctx = (checkIns: HangarCheckInSnapshot[], awaitingReview: QueuedWaitContext["awaitingReview"] = { sessions: [], total: 0 }): QueuedWaitContext => ({ now: NOW, checkIns, awaitingReview });
+  const headless = { flavor: "headless", ahead: 0 };
+  const DISK = "disk: need 8192 MB, free 1200 MB";
+
+  it("offline since the newest check-in when none is online", () => {
+    const ctxOffline = ctx([seen("h1", { slots: { headless: 1 } }, 2 * 3600_000), seen("h2", null, 3 * 3600_000)]);
+    expect(classifyQueuedWait(headless, ctxOffline)).toEqual({ kind: "offline", since: "2026-11-14T09:00:00.000Z", text: "Waiting: hangar is offline (last check-in 2026-11-14T09:00:00.000Z)." });
+  });
+
+  it("offline, never seen, with no check-in", () => {
+    expect(classifyQueuedWait(headless, ctx([]))).toEqual({ kind: "offline", since: null, text: "Waiting: hangar has never checked in." });
+  });
+
+  it("unknown when online hangars reported no capacity; an offline one's capacity doesn't count", () => {
+    const waiting = classifyQueuedWait(headless, ctx([seen("h1", null), seen("h2", { slots: { headless: 4 } }, 2 * 3600_000)]));
+    expect(waiting).toEqual({ kind: "unknown", text: "Waiting: hangar is online but reported no capacity." });
+  });
+
+  it("an empty capacity still counts as reported", () => {
+    expect(classifyQueuedWait(headless, ctx([seen("h1", {})])).kind).toBe("not_offered");
+  });
+
+  it("next in line, with how many are ahead", () => {
+    const room = ctx([seen("h1", { slots: { headless: 1 } })]);
+    expect(classifyQueuedWait(headless, room)).toEqual({ kind: "next", ahead: 0, text: "Next in line: hangar has room for a headless session." });
+    expect(classifyQueuedWait({ flavor: "headless", ahead: 1 }, room)).toEqual({ kind: "next", ahead: 1, text: "Waiting: 1 headless request ahead; hangar has room for headless." });
+    expect(classifyQueuedWait({ flavor: "headless", ahead: 3 }, room).text).toBe("Waiting: 3 headless requests ahead; hangar has room for headless.");
+  });
+
+  it("not offered when no online hangar names the flavor", () => {
+    expect(classifyQueuedWait({ flavor: "display-godot", ahead: 0 }, ctx([seen("h1", { slots: { headless: 2 }, blocked: { "display-browser": "ram: full" } })]))).toEqual({
+      kind: "not_offered",
+      text: "Waiting: no online hangar runs display-godot.",
+    });
+  });
+
+  it("disk awaiting review, quoting the reason, with bytes from the claimer's usage, else any online hangar's", () => {
+    const h1 = seen("h1", { slots: { headless: 0 }, blocked: { headless: ` ${DISK}` }, usage: [{ session: A, allocated_bytes: 8_000, apparent_bytes: 9_000 }] });
+    const waiting = classifyQueuedWait(headless, ctx([h1], awaitingAB));
+    expect(waiting).toEqual({
+      kind: "disk_awaiting_review",
+      text: `Waiting on disk: h1:  ${DISK}. 2 ended sessions still hold a disk awaiting accept or table.`,
+      reasons: [{ hangar: "h1", reason: ` ${DISK}` }],
+      sessions: [{ ...awaitingAB.sessions[0], diskAllocatedBytes: 8_000 }, awaitingAB.sessions[1]],
+      total: 2,
+    });
+    // B's claimer h2 lists it, and h1 lists it too: the claimer's figure wins.
+    const h2 = seen("h2", { blocked: { headless: DISK }, usage: [{ session: B, allocated_bytes: 5, apparent_bytes: 5 }] });
+    const h1b = seen("h1", { blocked: { headless: DISK }, usage: [{ session: B, allocated_bytes: 7, apparent_bytes: 7 }] });
+    const both = classifyQueuedWait(headless, ctx([h1b, h2], awaitingAB));
+    expect(both.kind === "disk_awaiting_review" && both.sessions.map((s) => s.diskAllocatedBytes)).toEqual([undefined, 5]);
+  });
+
+  it("one awaiting session reads in the singular", () => {
+    const waiting = classifyQueuedWait(headless, ctx([seen("h1", { blocked: { headless: DISK } })], { total: 1, sessions: [awaitingAB.sessions[1]!] }));
+    expect(waiting.text).toBe(`Waiting on disk: h1: ${DISK}. 1 ended session still holds a disk awaiting accept or table.`);
+  });
+
+  it("capacity when the disk is full but nothing awaits review", () => {
+    expect(classifyQueuedWait(headless, ctx([seen("h1", { blocked: { headless: DISK } })]))).toEqual({
+      kind: "capacity",
+      text: `Waiting on capacity: h1: ${DISK}.`,
+      reasons: [{ hangar: "h1", reason: DISK }],
+    });
+  });
+
+  it("capacity when another budget is full, even with sessions awaiting review", () => {
+    expect(classifyQueuedWait(headless, ctx([seen("h1", { blocked: { headless: "ram: need 4096 MB, free 1200" } })], awaitingAB))).toEqual({
+      kind: "capacity",
+      text: "Waiting on capacity: h1: ram: need 4096 MB, free 1200.",
+      reasons: [{ hangar: "h1", reason: "ram: need 4096 MB, free 1200" }],
+    });
+  });
+
+  it("no free slot for a flavor at 0 with no blocked entry", () => {
+    expect(classifyQueuedWait(headless, ctx([seen("h1", { slots: { headless: 0 } })], awaitingAB))).toEqual({
+      kind: "capacity",
+      text: "Waiting on capacity: h1: no free slot.",
+      reasons: [{ hangar: "h1", reason: "no free slot" }],
+    });
+  });
+
+  it("capacity when one hangar blocks on disk and another on RAM", () => {
+    const waiting = classifyQueuedWait(headless, ctx([seen("h1", { blocked: { headless: DISK } }), seen("h2", { blocked: { headless: "ram: full" } })], awaitingAB));
+    expect(waiting).toEqual({ kind: "capacity", text: `Waiting on capacity: h1: ${DISK}; h2: ram: full.`, reasons: [{ hangar: "h1", reason: DISK }, { hangar: "h2", reason: "ram: full" }] });
+  });
+
+  it("next when a second online hangar has room, and an offline hangar's room is ignored", () => {
+    expect(classifyQueuedWait(headless, ctx([seen("h1", { blocked: { headless: "ram: full" } }), seen("h2", { slots: { headless: 1 } })])).kind).toBe("next");
+    expect(classifyQueuedWait(headless, ctx([seen("h1", { blocked: { headless: "ram: full" } }), seen("h2", { slots: { headless: 1 } }, 2 * 3600_000)])).kind).toBe("capacity");
+  });
+});
+
+describe("capacity on check-ins and status", () => {
+  const S = randomUUID();
+
+  it("keeps the latest capacity and its time when a claim later touches the check-in", async () => {
+    const hangar = hangarNamed("cap-latest");
+    const capacity = { slots: { headless: 2 }, usage: [{ session: S, allocated_bytes: 100, apparent_bytes: 200 }] };
+    const { now: t1 } = await recordCheckIn(db, { hangar, version: "0.4.0", capacity });
+    await db.execute(sql`UPDATE hangar_check_ins SET last_seen_at = last_seen_at - interval '1 minute', capacity_at = capacity_at - interval '1 minute' WHERE hangar = ${hangar}`);
+    expect(await claimSession(db, { hangar, flavors: ["headless"], among: [randomUUID()] })).toBeNull();
+
+    const status = await getHangarStatus(db, { hangar });
+    expect(status).toMatchObject({ state: "online", hangar, capacity });
+    expect(status.capacityAt!.getTime()).toBe(t1.getTime() - 60_000);
+    expect(status.lastSeenAt!.getTime()).toBeGreaterThan(status.capacityAt!.getTime());
+  });
+
+  it("clears the capacity and its time on a check-in with none", async () => {
+    const hangar = hangarNamed("cap-cleared");
+    await recordCheckIn(db, { hangar, capacity: { slots: { headless: 1 } } });
+    expect((await getHangarStatus(db, { hangar })).capacityAt).toBeInstanceOf(Date);
+    await recordCheckIn(db, { hangar, capacity: null });
+    expect(await getHangarStatus(db, { hangar })).toMatchObject({ capacity: null, capacityAt: null });
+    const [row] = await db.select().from(hangarCheckIns).where(inArray(hangarCheckIns.hangar, [hangar]));
+    expect(row).toMatchObject({ capacity: null, capacityAt: null });
+  });
+
+  it("accepts a malformed field: online, and reads the rest", async () => {
+    const hangar = hangarNamed("cap-malformed");
+    await recordCheckIn(db, { hangar, capacity: { free: "lots", slots: { headless: 1 } } });
+    expect(await getHangarStatus(db, { hangar })).toMatchObject({ state: "online", capacity: { slots: { headless: 1 } } });
+  });
+});
+
+describe("explainQueuedSessions", () => {
+  const DISK = "disk: need 8192 MB, free 1200 MB";
+  let blockHangars: string[] = [];
+
+  afterEach(async () => {
+    if (blockHangars.length > 0) await db.delete(hangarCheckIns).where(inArray(hangarCheckIns.hangar, blockHangars));
+    blockHangars = [];
+  });
+
+  async function checkedIn(label: string, capacity: Record<string, unknown> | null): Promise<string> {
+    const hangar = hangarNamed(label);
+    blockHangars.push(hangar);
+    await recordCheckIn(db, { hangar, capacity });
+    return hangar;
+  }
+
+  async function workItem(title: string, metadata: Record<string, unknown> = { status: "open" }): Promise<{ id: string; externalId: string }> {
+    const externalId = randomUUID();
+    const result = await upsertNodes(db, fixtureRun, [{ nodeType: "work_item", sourceSystem: FIXTURE_SOURCE, externalId, title, metadata }]);
+    const id = result.rows[0]!.id;
+    fixtureNodes.push(id);
+    return { id, externalId };
+  }
+
+  async function explainOne(id: string, hangars: string[], sessions: string[] = [id]) {
+    const waiting = await explainQueuedSessions(db, { ids: [id], among: { hangars, sessions } });
+    return waiting.get(id);
+  }
+
+  it("offline since the last check-in", async () => {
+    const hangar = await checkedIn("x-offline", { slots: { headless: 1 } });
+    const aged = await db.execute<{ last_seen_at: Date }>(sql`
+      UPDATE hangar_check_ins SET last_seen_at = date_trunc('milliseconds', now() - interval '2 hours') WHERE hangar = ${hangar} RETURNING last_seen_at
+    `);
+    const since = new Date(aged.rows[0]!.last_seen_at).toISOString();
+    const q = await request("headless");
+    expect(await explainOne(q.id, [hangar])).toEqual({ kind: "offline", since, text: `Waiting: hangar is offline (last check-in ${since}).` });
+  });
+
+  it("offline, never seen, when no hangar has checked in", async () => {
+    const q = await request("headless");
+    expect(await explainOne(q.id, [`${ACTOR_PREFIX}-ghost`])).toEqual({ kind: "offline", since: null, text: "Waiting: hangar has never checked in." });
+  });
+
+  it("unknown when the online hangar sent no capacity", async () => {
+    const hangar = await checkedIn("x-unknown", null);
+    const q = await request("headless");
+    expect(await explainOne(q.id, [hangar])).toMatchObject({ kind: "unknown" });
+  });
+
+  it("next in line, counting earlier same-flavor requests, also when asked about one alone", async () => {
+    const hangar = await checkedIn("x-next", { slots: { headless: 1 } });
+    const p = await request("headless");
+    const q = await request("headless");
+    const other = await request("display-browser");
+    const all = await explainQueuedSessions(db, { among: { hangars: [hangar], sessions: [p.id, q.id, other.id] } });
+    expect(all.get(p.id)).toEqual({ kind: "next", ahead: 0, text: "Next in line: hangar has room for a headless session." });
+    expect(all.get(q.id)).toEqual({ kind: "next", ahead: 1, text: "Waiting: 1 headless request ahead; hangar has room for headless." });
+    expect(all.get(other.id)).toMatchObject({ kind: "not_offered" });
+    const alone = await explainQueuedSessions(db, { ids: [q.id], among: { hangars: [hangar], sessions: [p.id, q.id] } });
+    expect([...alone.keys()]).toEqual([q.id]);
+    expect(alone.get(q.id)).toMatchObject({ kind: "next", ahead: 1 });
+  });
+
+  it("not offered when no online hangar runs the flavor", async () => {
+    const hangar = await checkedIn("x-not-offered", { slots: { headless: 2 } });
+    const q = await request("display-godot");
+    expect(await explainOne(q.id, [hangar])).toEqual({ kind: "not_offered", text: "Waiting: no online hangar runs display-godot." });
+  });
+
+  it("disk awaiting review: quotes hangar's reason and lists A and B with their work items, A with its bytes", async () => {
+    const itemA = await workItem("A's work", { status: "open", project: "bd" });
+    const itemB = await workItem("B's work");
+    const a = await ended("x-disk-a", "stopped", itemA.id);
+    const b = await ended("x-disk-b", "stopped", itemB.id);
+    const hangar = await checkedIn("x-disk", { slots: { headless: 0 }, blocked: { headless: DISK }, usage: [{ session: a.id, allocated_bytes: 8_000_000_000, apparent_bytes: 9_000_000_000 }] });
+    const q = await request("headless");
+    expect(await explainOne(q.id, [hangar], [a.id, b.id, q.id])).toEqual({
+      kind: "disk_awaiting_review",
+      text: `Waiting on disk: ${hangar}: ${DISK}. 2 ended sessions still hold a disk awaiting accept or table.`,
+      reasons: [{ hangar, reason: DISK }],
+      sessions: [
+        { id: a.id, claimedBy: a.hangar, workItem: { id: itemA.id, externalId: itemA.externalId, title: "A's work", project: "bd" }, diskAllocatedBytes: 8_000_000_000 },
+        { id: b.id, claimedBy: b.hangar, workItem: { id: itemB.id, externalId: itemB.externalId, title: "B's work", project: null } },
+      ],
+      total: 2,
+    });
+  });
+
+  it("capacity when the disk is full and nothing awaits review", async () => {
+    const hangar = await checkedIn("x-disk-none", { blocked: { headless: DISK } });
+    const q = await request("headless");
+    expect(await explainOne(q.id, [hangar])).toEqual({ kind: "capacity", text: `Waiting on capacity: ${hangar}: ${DISK}.`, reasons: [{ hangar, reason: DISK }] });
+  });
+
+  it("capacity when RAM is full, even with a session awaiting review", async () => {
+    const a = await ended("x-ram-a", "stopped");
+    const hangar = await checkedIn("x-ram", { blocked: { headless: "ram: need 4096 MB, free 1200" } });
+    const q = await request("headless");
+    expect(await explainOne(q.id, [hangar], [a.id, q.id])).toMatchObject({ kind: "capacity", reasons: [{ hangar, reason: "ram: need 4096 MB, free 1200" }] });
+  });
+
+  it("next when a second online hangar has room", async () => {
+    const ram = await checkedIn("x-room-ram", { blocked: { headless: "ram: full" } });
+    const room = await checkedIn("x-room", { slots: { headless: 1 } });
+    const q = await request("headless");
+    expect(await explainOne(q.id, [ram, room])).toMatchObject({ kind: "next", ahead: 0 });
+  });
+
+  it("lists at most 20 awaiting sessions, oldest ended first, with the total", async () => {
+    const result = await upsertNodes(
+      db,
+      fixtureRun,
+      Array.from({ length: MAX_HANGAR_AWAITING_REVIEW_LISTED + 1 }, () => ({
+        nodeType: "hangar_session",
+        sourceSystem: "hangar",
+        externalId: randomUUID(),
+        title: "Hangar headless session: awaiting",
+        metadata: { state: "stopped", flavor: "headless", repo: "cazzer/bd", claimed_by: `${ACTOR_PREFIX}-x-many`, disk_path: "/disks/x.img" },
+      })),
+    );
+    const awaiting = result.rows.map((r) => r.id);
+    sessionIds.push(...awaiting);
+    const hangar = await checkedIn("x-many-disk", { blocked: { headless: DISK } });
+    const q = await request("headless");
+    const waiting = await explainOne(q.id, [hangar], [...awaiting, q.id]);
+    expect(waiting?.kind).toBe("disk_awaiting_review");
+    if (waiting?.kind !== "disk_awaiting_review") return;
+    expect(waiting.total).toBe(MAX_HANGAR_AWAITING_REVIEW_LISTED + 1);
+    // One batch shares an updated_at, so id breaks the tie.
+    expect(waiting.sessions.map((s) => s.id)).toEqual([...awaiting].sort().slice(0, MAX_HANGAR_AWAITING_REVIEW_LISTED));
+    expect(waiting.sessions.every((s) => s.workItem === null && s.diskAllocatedBytes === undefined)).toBe(true);
+  });
+
+  it("names a merged work item's survivor", async () => {
+    const loser = await workItem("Merged away");
+    const survivor = await workItem("Survivor");
+    const a = await ended("x-merge-a", "stopped", loser.id);
+    await mergeNodes(db, loser.id, survivor.id, fixtureRun);
+    const hangar = await checkedIn("x-merge", { blocked: { headless: DISK } });
+    const q = await request("headless");
+    const waiting = await explainOne(q.id, [hangar], [a.id, q.id]);
+    expect(waiting?.kind === "disk_awaiting_review" && waiting.sessions).toEqual([{ id: a.id, claimedBy: a.hangar, workItem: { id: survivor.id, externalId: survivor.externalId, title: "Survivor", project: null } }]);
+  });
+
+  it("leaves out a session that is not queued, and reads nothing for an empty id list", async () => {
+    const hangar = await checkedIn("x-not-queued", { slots: { headless: 1 } });
+    const a = await ended("x-not-queued-a", "stopped");
+    expect((await explainQueuedSessions(db, { ids: [a.id], among: { hangars: [hangar], sessions: [a.id] } })).size).toBe(0);
+    expect((await explainQueuedSessions(db, { ids: [] })).size).toBe(0);
+  });
+
+  it("refuses a bad id and more than the session limit", async () => {
+    await expect(explainQueuedSessions(db, { ids: ["nope"] })).rejects.toBeInstanceOf(InvalidLookupIdError);
+    const tooMany = Array.from({ length: MAX_HANGAR_SESSIONS_LIMIT + 1 }, () => randomUUID());
+    await expect(explainQueuedSessions(db, { ids: tooMany })).rejects.toBeInstanceOf(InvalidHangarSessionError);
   });
 });

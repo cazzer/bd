@@ -45,6 +45,17 @@
 // append takes a per-session advisory lock, so ids commit in order within a
 // session and a reader's `id > after` cursor never skips one.
 //
+// Capacity (hangar-capacity change): a check-in's `capacity` is stored as
+// hangar sent it, with `capacity_at`, the database's time it arrived; a claim
+// moves neither. Reads parse it leniently (`parseHangarCapacity`), field by
+// field, so one field this version can't read never hides the rest. Why a
+// queued session waits (`explainQueuedSessions`, classified by the pure
+// `classifyQueuedWait`) is computed on read from the latest check-ins of
+// online hangars and the session registry, and never stored. Breakdown
+// never admits by capacity: hangar decides what it claims. Of hangar's
+// blocked reasons only the `disk:` prefix is contract (the disk budget is
+// full); the rest is shown verbatim and never parsed.
+//
 // The app makes no model call: all of this is pure Postgres.
 
 import { randomUUID } from "node:crypto";
@@ -123,9 +134,17 @@ export const MAX_HANGAR_FAILURE_REASON_LENGTH = 500;
 /** How many unclaimable queued sessions one claim attempt marks failed and passes over before it gives up until the next attempt. */
 export const MAX_CLAIM_CANDIDATES = 3;
 export const MAX_HANGAR_MESSAGE_KIND_LENGTH = 64;
-/** Serialized size caps for the opaque JSON hangar and the inbox send. */
+/** Serialized size caps for the capacity JSON hangar sends and the inbox body. */
 export const MAX_HANGAR_CAPACITY_CHARS = 10_000;
 export const MAX_HANGAR_MESSAGE_BODY_CHARS = 50_000;
+/** A blocked reason is cut to this many characters on read, for display. */
+export const MAX_HANGAR_BLOCKED_REASON_LENGTH = 500;
+/** The most per-session usage entries a parsed capacity keeps. */
+export const MAX_HANGAR_USAGE_ENTRIES = 200;
+/** The most awaiting-review sessions a disk wait lists (oldest ended first); `total` counts them all. */
+export const MAX_HANGAR_AWAITING_REVIEW_LISTED = 20;
+/** Why a queued session waits, in order of precedence (`classifyQueuedWait`). */
+export const HANGAR_WAIT_KINDS = ["offline", "unknown", "next", "not_offered", "disk_awaiting_review", "capacity"] as const;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -1061,11 +1080,19 @@ async function touchCheckIn(db: Database, hangar: string): Promise<void> {
 export interface RecordCheckInInput {
   hangar: string;
   version?: string | null;
-  /** Opaque until bd-d38.5; stored as given. */
+  /**
+   * Stored as given (an object of at most `MAX_HANGAR_CAPACITY_CHARS`
+   * serialized), parsed leniently on read (`parseHangarCapacity`). Null or
+   * absent clears the stored capacity and its time.
+   */
   capacity?: Record<string, unknown> | null;
 }
 
-/** Records a check-in at the database's `now()`; returns the interval hangar should check in on, and that `now()`. */
+/**
+ * Records a check-in at the database's `now()`, with its capacity and
+ * `capacity_at` (that `now()`, or null with no capacity); returns the
+ * interval hangar should check in on, and that `now()`.
+ */
 export async function recordCheckIn(db: Database, input: RecordCheckInInput): Promise<{ intervalS: number; now: Date }> {
   const hangar = hangarName(input.hangar);
   const version = optionalText("version", input.version, MAX_HANGAR_FIELD_LENGTH) ?? null;
@@ -1080,9 +1107,9 @@ export async function recordCheckIn(db: Database, input: RecordCheckInInput): Pr
     }
   }
   const result = await db.execute<{ interval_s: number; last_seen_at: string | Date }>(sql`
-    INSERT INTO hangar_check_ins (hangar, last_seen_at, version, capacity)
-    VALUES (${hangar}, now(), ${version}, ${capacity}::jsonb)
-    ON CONFLICT (hangar) DO UPDATE SET last_seen_at = now(), version = excluded.version, capacity = excluded.capacity
+    INSERT INTO hangar_check_ins (hangar, last_seen_at, version, capacity, capacity_at)
+    VALUES (${hangar}, now(), ${version}, ${capacity}::jsonb, ${capacity === null ? sql`NULL` : sql`now()`})
+    ON CONFLICT (hangar) DO UPDATE SET last_seen_at = now(), version = excluded.version, capacity = excluded.capacity, capacity_at = excluded.capacity_at
     RETURNING interval_s, last_seen_at
   `);
   const row = result.rows[0];
@@ -1115,9 +1142,13 @@ export type HangarStatus = HangarLiveness & {
   now: Date;
   /** Open sessions across every hangar. */
   counts: { queued: number; claimed: number; running: number };
+  /** That hangar's latest capacity, parsed (`parseHangarCapacity`); null when it sent none. */
+  capacity: HangarCapacity | null;
+  /** The database's time that capacity arrived; null with no capacity. */
+  capacityAt: Date | null;
 };
 
-/** Hangar's status (the named hangar, or the most recent check-in) and the open session counts. One statement. */
+/** Hangar's status (the named hangar, or the most recent check-in), its capacity, and the open session counts. One statement. */
 export async function getHangarStatus(db: Database, options: { hangar?: string } = {}): Promise<HangarStatus> {
   const hangar = options.hangar === undefined ? undefined : hangarName(options.hangar);
   const result = await db.execute<{
@@ -1126,14 +1157,16 @@ export async function getHangarStatus(db: Database, options: { hangar?: string }
     last_seen_at: string | Date | null;
     version: string | null;
     interval_s: number | null;
+    capacity: unknown;
+    capacity_at: string | Date | null;
     queued: string | number;
     claimed: string | number;
     running: string | number;
   }>(sql`
-    SELECT now() AS now, c.hangar, c.last_seen_at, c.version, c.interval_s, k.queued, k.claimed, k.running
+    SELECT now() AS now, c.hangar, c.last_seen_at, c.version, c.interval_s, c.capacity, c.capacity_at, k.queued, k.claimed, k.running
     FROM (SELECT 1) one
     LEFT JOIN LATERAL (
-      SELECT hangar, last_seen_at, version, interval_s FROM hangar_check_ins
+      SELECT hangar, last_seen_at, version, interval_s, capacity, capacity_at FROM hangar_check_ins
       ${hangar === undefined ? sql`` : sql`WHERE hangar = ${hangar}`}
       ORDER BY last_seen_at DESC, hangar
       LIMIT 1
@@ -1157,7 +1190,317 @@ export async function getHangarStatus(db: Database, options: { hangar?: string }
     intervalS,
     now,
     counts: { queued: Number(row.queued), claimed: Number(row.claimed), running: Number(row.running) },
+    capacity: row.capacity === null || row.capacity === undefined ? null : parseHangarCapacity(row.capacity),
+    capacityAt: row.capacity_at === null ? null : new Date(row.capacity_at),
   };
+}
+
+// --- Capacity and why a queued session waits ----------------------------------------
+
+/**
+ * A check-in's capacity as this version reads it, under hangar's wire names
+ * (docs/hangar-api.md). Every field is optional: one hangar didn't send, or
+ * sent in a shape this version can't read, is absent.
+ */
+export interface HangarCapacity {
+  /** How many more sessions of each flavor fit now: non-negative integers. */
+  slots?: Record<string, number>;
+  /** Why each flavor that doesn't fit doesn't, cut to `MAX_HANGAR_BLOCKED_REASON_LENGTH`. A `disk:` prefix means the disk budget is full. */
+  blocked?: Record<string, string>;
+  free?: { ram_mb: number; cpus: number; vram_mb: number; disk_mb: number };
+  sessions?: { running: number; kept: number };
+  disk?: { allocated_bytes: number; apparent_bytes: number };
+  /** Per-session disk usage, session ids lowercased, at most `MAX_HANGAR_USAGE_ENTRIES`. */
+  usage?: { session: string; allocated_bytes: number; apparent_bytes: number }[];
+}
+
+export type HangarWaitKind = (typeof HANGAR_WAIT_KINDS)[number];
+
+/** One online hangar's reason it can't take a flavor. */
+export interface HangarWaitReason {
+  hangar: string;
+  reason: string;
+}
+
+/** An ended session still holding a disk with no outcome: a person's accept or table frees it. */
+export interface HangarAwaitingReviewSession {
+  id: string;
+  claimedBy: string | null;
+  /** The work item it ran for (folded through merges), with its `project` metadata; null if the edge or the node is gone. */
+  workItem: { id: string; externalId: string; title: string; project: string | null } | null;
+  /** The allocated bytes hangar reported for its disk; absent when no online hangar's usage lists it. */
+  diskAllocatedBytes?: number;
+}
+
+/** Why a queued session waits. `text` is the one-line summary every surface shows. */
+export type HangarWaiting =
+  | { kind: "offline"; text: string; since: string | null }
+  | { kind: "unknown"; text: string }
+  | { kind: "next"; text: string; ahead: number }
+  | { kind: "not_offered"; text: string }
+  | { kind: "disk_awaiting_review"; text: string; reasons: HangarWaitReason[]; sessions: HangarAwaitingReviewSession[]; total: number }
+  | { kind: "capacity"; text: string; reasons: HangarWaitReason[] };
+
+/** One hangar's latest check-in, as `classifyQueuedWait` reads it. */
+export interface HangarCheckInSnapshot {
+  hangar: string;
+  lastSeenAt: Date;
+  intervalS: number;
+  /** Parsed; null when the check-in sent none. */
+  capacity: HangarCapacity | null;
+}
+
+export interface QueuedWaitContext {
+  /** The database's clock. */
+  now: Date;
+  checkIns: readonly HangarCheckInSnapshot[];
+  /** The listed awaiting-review sessions (at most `MAX_HANGAR_AWAITING_REVIEW_LISTED`) and how many there are in all. */
+  awaitingReview: { sessions: readonly Omit<HangarAwaitingReviewSession, "diskAllocatedBytes">[]; total: number };
+}
+
+export interface ExplainQueuedSessionsOptions {
+  /** Only these sessions (at most `MAX_HANGAR_SESSIONS_LIMIT`); every queued session when absent. */
+  ids?: readonly string[];
+  /**
+   * Restricts the read to these hangars' check-ins and these sessions (the
+   * queue and the awaiting-review list alike). A test seam, like
+   * `claimSession`'s `among`: a suite sharing a database with live data
+   * explains only its own fixtures this way. Never set in production.
+   */
+  among?: { hangars: readonly string[]; sessions: readonly string[] };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/** `obj[key]` when it is `obj`'s own property, so a key like `constructor` never reads the prototype. */
+function own(obj: Record<string, unknown>, key: string): unknown {
+  return Object.hasOwn(obj, key) ? obj[key] : undefined;
+}
+
+function isCount(value: unknown): value is number {
+  return Number.isInteger(value) && (value as number) >= 0;
+}
+
+function isAmount(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+/** The object at `raw[key]` with exactly `fields`, each passing `valid`; undefined if any is missing or bad. */
+function wholeRecord<K extends string>(raw: Record<string, unknown>, key: string, fields: readonly K[], valid: (v: unknown) => v is number): Record<K, number> | undefined {
+  const value = own(raw, key);
+  if (!isRecord(value)) return undefined;
+  const out = {} as Record<K, number>;
+  for (const field of fields) {
+    const v = own(value, field);
+    if (!valid(v)) return undefined;
+    out[field] = v;
+  }
+  return out;
+}
+
+/**
+ * Reads a stored capacity field by field (design decision 1). Pure; never
+ * throws. Anything but an object reads as `{}`; unknown keys are ignored;
+ * `slots` and `blocked` drop their bad entries; `free`, `sessions`, and
+ * `disk` are read whole (all their fields, or absent); `usage` keeps entries
+ * whose `session` is a uuid (lowercased) and whose byte counts are
+ * non-negative finite numbers, the first `MAX_HANGAR_USAGE_ENTRIES` of them.
+ * Maps are built with `Object.fromEntries`, so a `__proto__` key is inert.
+ */
+export function parseHangarCapacity(raw: unknown): HangarCapacity {
+  if (!isRecord(raw)) return {};
+  const out: HangarCapacity = {};
+
+  const slots = own(raw, "slots");
+  if (isRecord(slots)) out.slots = Object.fromEntries(Object.entries(slots).filter((entry): entry is [string, number] => isCount(entry[1])));
+
+  const blocked = own(raw, "blocked");
+  if (isRecord(blocked)) {
+    out.blocked = Object.fromEntries(
+      Object.entries(blocked).flatMap(([flavor, reason]): [string, string][] =>
+        typeof reason === "string" && reason.trim() !== "" ? [[flavor, fitText(reason, MAX_HANGAR_BLOCKED_REASON_LENGTH) as string]] : [],
+      ),
+    );
+  }
+
+  const free = wholeRecord(raw, "free", ["ram_mb", "cpus", "vram_mb", "disk_mb"], (v): v is number => typeof v === "number" && Number.isFinite(v));
+  if (free !== undefined) out.free = free;
+  const sessions = wholeRecord(raw, "sessions", ["running", "kept"], isCount);
+  if (sessions !== undefined) out.sessions = sessions;
+  const disk = wholeRecord(raw, "disk", ["allocated_bytes", "apparent_bytes"], isAmount);
+  if (disk !== undefined) out.disk = disk;
+
+  const usage = own(raw, "usage");
+  if (Array.isArray(usage)) {
+    const kept: NonNullable<HangarCapacity["usage"]> = [];
+    for (const entry of usage) {
+      if (kept.length >= MAX_HANGAR_USAGE_ENTRIES) break;
+      if (!isRecord(entry)) continue;
+      const session = own(entry, "session");
+      const allocated = own(entry, "allocated_bytes");
+      const apparent = own(entry, "apparent_bytes");
+      if (typeof session !== "string" || !UUID_RE.test(session.trim()) || !isAmount(allocated) || !isAmount(apparent)) continue;
+      kept.push({ session: session.trim().toLowerCase(), allocated_bytes: allocated, apparent_bytes: apparent });
+    }
+    out.usage = kept;
+  }
+  return out;
+}
+
+function plural(n: number, one: string, many: string): string {
+  return n === 1 ? one : many;
+}
+
+/**
+ * Why a queued session of `flavor`, with `ahead` same-flavor sessions before
+ * it in claim order, waits (design decision 2). Pure. Only online hangars
+ * count, and of those only ones that reported a capacity decide the reason:
+ *
+ * 1. none online → `offline`, since the newest check-in (null: never);
+ * 2. none of them reported a capacity → `unknown`;
+ * 3. one has a free slot for the flavor → `next`;
+ * 4. none names the flavor in `slots` or `blocked` → `not_offered`;
+ * 5. every naming hangar's reason starts with `disk:` and a session awaits
+ *    review → `disk_awaiting_review`;
+ * 6. otherwise → `capacity`.
+ *
+ * A naming hangar's reason is its `blocked` entry, or "no free slot" for a
+ * flavor at 0 slots with none. A listed awaiting-review session's disk bytes
+ * come from the usage of the online hangar that claimed it, else of any
+ * online hangar that lists it.
+ */
+export function classifyQueuedWait(session: { flavor: string; ahead: number }, ctx: QueuedWaitContext): HangarWaiting {
+  const { flavor, ahead } = session;
+  const online = ctx.checkIns.filter((c) => classifyHangarStatus(c, ctx.now).state === "online");
+  if (online.length === 0) {
+    if (ctx.checkIns.length === 0) return { kind: "offline", text: "Waiting: hangar has never checked in.", since: null };
+    const since = new Date(Math.max(...ctx.checkIns.map((c) => c.lastSeenAt.getTime()))).toISOString();
+    return { kind: "offline", text: `Waiting: hangar is offline (last check-in ${since}).`, since };
+  }
+  const reporting = online.filter((c): c is HangarCheckInSnapshot & { capacity: HangarCapacity } => c.capacity !== null);
+  if (reporting.length === 0) return { kind: "unknown", text: "Waiting: hangar is online but reported no capacity." };
+
+  const slotsFor = (c: HangarCapacity): number | undefined => (c.slots !== undefined && Object.hasOwn(c.slots, flavor) ? c.slots[flavor] : undefined);
+  const blockedFor = (c: HangarCapacity): string | undefined => (c.blocked !== undefined && Object.hasOwn(c.blocked, flavor) ? c.blocked[flavor] : undefined);
+
+  if (reporting.some((c) => (slotsFor(c.capacity) ?? 0) > 0)) {
+    const text =
+      ahead === 0
+        ? `Next in line: hangar has room for a ${flavor} session.`
+        : `Waiting: ${ahead} ${flavor} ${plural(ahead, "request", "requests")} ahead; hangar has room for ${flavor}.`;
+    return { kind: "next", text, ahead };
+  }
+
+  const reasons: HangarWaitReason[] = reporting.flatMap((c): HangarWaitReason[] => {
+    const blocked = blockedFor(c.capacity);
+    if (blocked !== undefined) return [{ hangar: c.hangar, reason: blocked }];
+    return slotsFor(c.capacity) === 0 ? [{ hangar: c.hangar, reason: "no free slot" }] : [];
+  });
+  if (reasons.length === 0) return { kind: "not_offered", text: `Waiting: no online hangar runs ${flavor}.` };
+
+  const quoted = reasons.map((r) => `${r.hangar}: ${r.reason}`).join("; ");
+  const { total } = ctx.awaitingReview;
+  if (total > 0 && reasons.every((r) => r.reason.trim().startsWith("disk:"))) {
+    const bytesOf = (c: HangarCapacity, id: string): number | undefined => c.usage?.find((u) => u.session === id)?.allocated_bytes;
+    const sessions = ctx.awaitingReview.sessions.map((s): HangarAwaitingReviewSession => {
+      const claimer = reporting.find((c) => c.hangar === s.claimedBy);
+      const bytes = (claimer === undefined ? undefined : bytesOf(claimer.capacity, s.id)) ?? reporting.map((c) => bytesOf(c.capacity, s.id)).find((b) => b !== undefined);
+      return bytes === undefined ? { ...s } : { ...s, diskAllocatedBytes: bytes };
+    });
+    const held = `${total} ended ${plural(total, "session still holds", "sessions still hold")} a disk awaiting accept or table.`;
+    return { kind: "disk_awaiting_review", text: `Waiting on disk: ${quoted}. ${held}`, reasons, sessions, total };
+  }
+  return { kind: "capacity", text: `Waiting on capacity: ${quoted}.`, reasons };
+}
+
+interface ExplainContextRow extends Record<string, unknown> {
+  now: string | Date;
+  check_ins: { hangar: string; last_seen_ms: number; interval_s: number | null; capacity: unknown }[];
+  awaiting_total: string | number;
+  awaiting: { id: string; claimed_by: string | null; work_item: { id: string; external_id: string; title: string; project: string | null } | null }[];
+}
+
+/**
+ * Why each queued session waits (all of them, or `ids`), keyed by session
+ * id; a session that is not queued is left out. Two statements however long
+ * the queue (design decision 3): the queued sessions, with `ahead` counted by
+ * a window over every queued session before `ids` filters, in claim order
+ * (`occurred_at`, then id, as `claimSession` takes them); then the database's
+ * `now()`, every check-in, and the awaiting-review sessions (ended, a disk
+ * held, no outcome; oldest ended first, by `updated_at` then id) with their
+ * work items. The second is skipped when nothing is queued. The two are not
+ * one snapshot, so a reason can be a poll stale.
+ */
+export async function explainQueuedSessions(db: Database, options: ExplainQueuedSessionsOptions = {}): Promise<Map<string, HangarWaiting>> {
+  const ids = options.ids === undefined ? undefined : [...new Set(options.ids.map((id) => assertUuid(id, "session id")))];
+  if (ids !== undefined && ids.length > MAX_HANGAR_SESSIONS_LIMIT) {
+    throw new InvalidHangarSessionError("ids", `${ids.length} ids`, `must list at most ${MAX_HANGAR_SESSIONS_LIMIT} sessions`);
+  }
+  const among = options.among === undefined ? undefined : { hangars: options.among.hangars.map(hangarName), sessions: options.among.sessions.map((id) => assertUuid(id, "session id")) };
+  const waiting = new Map<string, HangarWaiting>();
+  if (ids !== undefined && ids.length === 0) return waiting;
+  const amongSessions = among === undefined ? sql`` : sql`AND s.id = ANY(${sqlArray(among.sessions, "uuid")})`;
+
+  const queued = await db.execute<{ id: string; flavor: string | null; ahead: string | number }>(sql`
+    SELECT q.id, q.flavor, q.ahead FROM (
+      SELECT s.id, s.metadata->>${KEY.flavor} AS flavor,
+             row_number() OVER (PARTITION BY s.metadata->>${KEY.flavor} ORDER BY s.metadata->>${OCCURRED_AT_KEY}, s.id) - 1 AS ahead
+      FROM nodes s
+      WHERE ${IS_SESSION} AND s.metadata @> ${JSON.stringify({ [KEY.state]: "queued" })}::jsonb ${amongSessions}
+    ) q
+    ${ids === undefined ? sql`` : sql`WHERE q.id = ANY(${sqlArray(ids, "uuid")})`}
+  `);
+  if (queued.rows.length === 0) return waiting;
+
+  const awaitingWhere = sql`s.metadata->>${KEY.state} = ANY(${sqlArray(HANGAR_FINAL_STATES, "text")})
+    AND s.metadata ? ${KEY.diskPath} AND NOT (s.metadata ? ${KEY.outcome}) ${amongSessions}`;
+  const result = await db.execute<ExplainContextRow>(sql`
+    WITH awaiting AS (${selectSessions(awaitingWhere)})
+    SELECT now() AS now,
+      COALESCE((
+        SELECT json_agg(json_build_object(
+                 'hangar', c.hangar,
+                 'last_seen_ms', floor(extract(epoch FROM c.last_seen_at) * 1000)::float8,
+                 'interval_s', c.interval_s,
+                 'capacity', c.capacity) ORDER BY c.hangar)
+        FROM hangar_check_ins c
+        ${among === undefined ? sql`` : sql`WHERE c.hangar = ANY(${sqlArray(among.hangars, "text")})`}
+      ), '[]'::json) AS check_ins,
+      (SELECT count(*) FROM awaiting) AS awaiting_total,
+      COALESCE((
+        SELECT json_agg(json_build_object(
+                 'id', a.id,
+                 'claimed_by', a.metadata->>${KEY.claimedBy},
+                 'work_item', CASE WHEN w.id IS NULL THEN NULL ELSE json_build_object(
+                   'id', w.id, 'external_id', w.external_id, 'title', w.title, 'project', w.metadata->>'project') END)
+               ORDER BY a.updated_at, a.id)
+        FROM (SELECT * FROM awaiting ORDER BY updated_at, id LIMIT ${MAX_HANGAR_AWAITING_REVIEW_LISTED}) a
+        LEFT JOIN nodes w ON w.id = a.work_item_id
+      ), '[]'::json) AS awaiting
+  `);
+  const row = result.rows[0];
+  if (!row) throw new Error("explainQueuedSessions: the context query returned no row");
+  const ctx: QueuedWaitContext = {
+    now: new Date(row.now),
+    checkIns: row.check_ins.map((c) => ({
+      hangar: c.hangar,
+      lastSeenAt: new Date(c.last_seen_ms),
+      intervalS: c.interval_s === null ? HANGAR_CHECK_IN_INTERVAL_S : Number(c.interval_s),
+      capacity: c.capacity === null ? null : parseHangarCapacity(c.capacity),
+    })),
+    awaitingReview: {
+      total: Number(row.awaiting_total),
+      sessions: row.awaiting.map((a) => ({
+        id: a.id,
+        claimedBy: a.claimed_by,
+        workItem: a.work_item === null ? null : { id: a.work_item.id, externalId: a.work_item.external_id, title: a.work_item.title, project: a.work_item.project },
+      })),
+    },
+  };
+  for (const q of queued.rows) waiting.set(q.id, classifyQueuedWait({ flavor: q.flavor ?? "", ahead: Number(q.ahead) }, ctx));
+  return waiting;
 }
 
 // --- Messages --------------------------------------------------------------------------------

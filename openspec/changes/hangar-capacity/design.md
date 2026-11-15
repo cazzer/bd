@@ -90,6 +90,21 @@ The DTO shape `waiting` is one object everywhere:
 - **[The awaiting-review list includes sessions on a hangar whose disk isn't the blocked one]** → Each entry carries `claimed_by`, and with one hangar the case doesn't arise.
 - **[Explain cost on a long queue]** → Two statements regardless of queue length. The window runs over queued sessions only, filtered by the existing session predicate.
 
+## Implementation Notes
+
+Adjustments made while implementing, recorded against the decisions above:
+
+1. **DTO casing.** `waiting` uses camelCase like every other MCP and tRPC output: `claimedBy`, `workItem`, `diskAllocatedBytes`. `HangarCapacity` keeps hangar's snake_case wire names (`ram_mb`, `allocated_bytes`), since it is hangar's report read back.
+2. **`workItem.project`.** Each awaiting-review session's work item also carries `project` (its `metadata.project`, or null), so the board can link to the item on its project's board, and fall back to the graph without one.
+3. **Test seam.** `explainQueuedSessions` takes `among: { hangars, sessions }`, like `claimSession`'s `among`. It restricts the check-ins, the queue window, and the awaiting-review list, so a suite sharing a database with live data explains only its own fixtures.
+4. **"Oldest ended first"** orders by `updated_at, id`. There is no ended-at key, and an ended session's last write is normally the one that ended it.
+
+Also:
+- The queued sessions are read first, so an empty queue (or an `ids` list naming none) skips the second statement.
+- A blank `blocked` reason is dropped like any other bad entry. A flavor at 0 slots then reads "no free slot".
+- `usage` keeps the first 200 *valid* entries.
+- The summary text uses the singular for one: "1 headless request ahead", "1 ended session still holds a disk".
+
 ## Migration Plan
 
 Additive: a new nullable column, new optional fields in responses, and doc changes. Hangar on main already sends the documented shape minus `usage`, so nothing on its side needs to change first. To roll back, revert the code. The column can stay.

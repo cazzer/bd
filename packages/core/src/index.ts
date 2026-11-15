@@ -695,7 +695,8 @@ export {
 
 // The hangar queue (hangar-queue change): hangar_session nodes, their
 // contract and state machine, claiming with session tokens, check-ins and
-// status, and per-session messages. See hangar.ts's module header.
+// status, capacity and why a queued session waits (hangar-capacity), and
+// per-session messages. See hangar.ts's module header.
 export {
   HANGAR_SESSION_NODE_TYPE,
   HANGAR_SOURCE_SYSTEM,
@@ -719,6 +720,10 @@ export {
   MAX_HANGAR_MESSAGE_KIND_LENGTH,
   MAX_HANGAR_CAPACITY_CHARS,
   MAX_HANGAR_MESSAGE_BODY_CHARS,
+  MAX_HANGAR_BLOCKED_REASON_LENGTH,
+  MAX_HANGAR_USAGE_ENTRIES,
+  MAX_HANGAR_AWAITING_REVIEW_LISTED,
+  HANGAR_WAIT_KINDS,
   normalizeHangarSessionMetadata,
   checkHangarTransition,
   requestSession,
@@ -732,6 +737,9 @@ export {
   recordCheckIn,
   getHangarStatus,
   classifyHangarStatus,
+  parseHangarCapacity,
+  classifyQueuedWait,
+  explainQueuedSessions,
   appendHangarMessage,
   readHangarMessages,
   assertNoReservedHangarEdges,
@@ -754,6 +762,14 @@ export {
   type RecordCheckInInput,
   type HangarLiveness,
   type HangarStatus,
+  type HangarCapacity,
+  type HangarWaitKind,
+  type HangarWaitReason,
+  type HangarAwaitingReviewSession,
+  type HangarWaiting,
+  type HangarCheckInSnapshot,
+  type QueuedWaitContext,
+  type ExplainQueuedSessionsOptions,
   type HangarMessage,
   type AppendHangarMessageInput,
   type ReadHangarMessagesInput,
