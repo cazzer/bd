@@ -20,11 +20,22 @@
 // written for the person (server/errors.ts), and the list is read again.
 // Every control is at least 44 px tall below `sm`.
 //
+// A queued session says why it waits (hangar-capacity), in the server's one
+// line (`waiting.text`, worded in core so MCP says the same). When hangar's
+// disk is full of ended sessions nobody has decided on, each of those is
+// listed with a link to its work item (its project's board drawer, or the
+// graph without a project) and the disk hangar reported for it, so the
+// person can go accept or table them. A plain click navigates in place; a
+// modified click is left to the browser.
+//
 // It reads on mount and whenever the host's source re-reads (`version`),
 // keeping the previous answer on screen meanwhile; a failed read is said on
 // the section when there is one to say it on, and leaves it off otherwise.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
+import { awaitingWorkItemRoute, formatDiskBytes } from "../lib/hangarStatus.js";
+import { navigate } from "../lib/navigate.js";
+import { formatRoute, type Route } from "../lib/route.js";
 import { trpc } from "../trpc.js";
 import { SectionTitle } from "./ReviewAttachments.js";
 
@@ -32,6 +43,8 @@ type SessionsAnswer = Awaited<ReturnType<typeof trpc.hangarSessions.query>>;
 type Session = SessionsAnswer["sessions"][number];
 type Outcome = "accepted" | "tabled";
 type OutcomeSet = Awaited<ReturnType<typeof trpc.hangarSessionOutcome.mutate>>;
+type Waiting = NonNullable<Session["waiting"]>;
+type AwaitingSession = Extract<Waiting, { kind: "disk_awaiting_review" }>["sessions"][number];
 
 export const ACCEPT_WARNING = "Accepting releases this session: hangar removes its container and deletes its disk at its next check-in.";
 export const TABLE_WARNING = "Tabling releases this session: hangar removes its container and deletes its disk at its next check-in.";
@@ -211,6 +224,7 @@ function SessionRow({ session: shown, onWritten, onSettled }: SessionRowProps) {
         </p>
       )}
       {shown.state === "queued" && shown.requeueReason !== null && <p className="mt-1 break-words text-fg-muted">Requeued: {shown.requeueReason}</p>}
+      {shown.state === "queued" && shown.waiting !== null && <WaitingNote waiting={shown.waiting} />}
       {outcome !== null ? (
         <p data-session-outcome={outcome} className="mt-1 text-fg">
           {OUTCOME_WORD[outcome]}
@@ -268,5 +282,60 @@ function SessionRow({ session: shown, onWritten, onSettled }: SessionRowProps) {
         </p>
       )}
     </li>
+  );
+}
+
+/** Why a queued session waits; on a disk full of undecided sessions, those sessions, each linked to its work item. */
+function WaitingNote({ waiting }: { waiting: Waiting }) {
+  return (
+    <div className="mt-1">
+      <p data-session-waiting={waiting.kind} className="break-words text-amber-200">
+        {waiting.text}
+      </p>
+      {waiting.kind === "disk_awaiting_review" && (
+        <>
+          <ul aria-label="Sessions awaiting your decision" className="mt-1 space-y-0.5">
+            {waiting.sessions.map((s) => (
+              <AwaitingItem key={s.id} session={s} />
+            ))}
+          </ul>
+          {waiting.total > waiting.sessions.length && <p className="mt-0.5 text-fg-muted">and {waiting.total - waiting.sessions.length} more</p>}
+        </>
+      )}
+    </div>
+  );
+}
+
+function AwaitingItem({ session }: { session: AwaitingSession }) {
+  const bytes = session.diskAllocatedBytes === undefined ? null : <span className="text-fg-muted"> · {formatDiskBytes(session.diskAllocatedBytes)}</span>;
+  if (session.workItem === null) {
+    return (
+      <li data-awaiting-session={session.id} className="text-fg-muted">
+        (work item gone){bytes}
+      </li>
+    );
+  }
+  const { externalId, title } = session.workItem;
+  return (
+    <li data-awaiting-session={session.id} className="break-words">
+      <RouteLink route={awaitingWorkItemRoute(session.workItem)}>
+        <span className="font-mono text-[12px]">{externalId}</span> {title}
+      </RouteLink>
+      {bytes}
+    </li>
+  );
+}
+
+/** An in-app link: a plain left click navigates in place; a modified click (new tab, new window) is the browser's. */
+function RouteLink({ route, children }: { route: Route; children: ReactNode }) {
+  function open(e: MouseEvent<HTMLAnchorElement>) {
+    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    e.preventDefault();
+    navigate(route, "push");
+  }
+  return (
+    <a href={formatRoute(route)} onClick={open} className="inline-flex min-h-11 items-center gap-1 rounded text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-accent sm:min-h-0">
+      {children}
+    </a>
   );
 }

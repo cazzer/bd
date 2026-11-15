@@ -1,5 +1,6 @@
-// `hangarStatus` (hangar-queue design decision 7): hangar's liveness and the
-// open session counts, for the board header's pill. No input; one core read
+// `hangarStatus` (hangar-queue design decision 7): hangar's liveness, its
+// latest capacity and when it was reported (hangar-capacity), and the open
+// session counts, for the board header's pill. No input; one core read
 // (`getHangarStatus`, one statement against the database's clock), so a
 // read-only server serves it. `agent` scope, like the other reads a script
 // or a worker may want. Dates go out as ISO strings, the database's own
@@ -15,9 +16,23 @@
 // `hangarSessions` (hangar-release): one work item's sessions, newest-changed
 // first, for the board drawer's "Hangar sessions" section. `human` only, a
 // read, so a read-only server serves it. The disk path itself stays off the
-// wire: the drawer needs only whether one is still held.
+// wire: the drawer needs only whether one is still held. Each queued session
+// carries `waiting`, why it waits (hangar-capacity: `explainQueuedSessions`,
+// one batch for the listed queued sessions, computed on read, never stored);
+// every other state carries null.
 
-import { getHangarStatus, HANGAR_OUTCOMES, listSessions, setHangarSessionOutcome, type HangarFlavor, type HangarOutcome, type HangarSessionState } from "@breakdown/core";
+import {
+  explainQueuedSessions,
+  getHangarStatus,
+  HANGAR_OUTCOMES,
+  listSessions,
+  setHangarSessionOutcome,
+  type HangarCapacity,
+  type HangarFlavor,
+  type HangarOutcome,
+  type HangarSessionState,
+  type HangarWaiting,
+} from "@breakdown/core";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { mapCoreError } from "../errors.js";
@@ -34,6 +49,10 @@ export interface HangarStatusDto {
   queued: number;
   claimed: number;
   running: number;
+  /** That hangar's latest capacity, parsed leniently; null when it sent none. */
+  capacity: HangarCapacity | null;
+  /** When that capacity arrived, by the server's clock; null with no capacity. */
+  capacityAt: string | null;
 }
 
 const hangarStatusProcedure = agentProcedure.query(async ({ ctx }): Promise<HangarStatusDto> => {
@@ -49,6 +68,8 @@ const hangarStatusProcedure = agentProcedure.query(async ({ ctx }): Promise<Hang
       queued: status.counts.queued,
       claimed: status.counts.claimed,
       running: status.counts.running,
+      capacity: status.capacity,
+      capacityAt: status.capacityAt?.toISOString() ?? null,
     };
   } catch (err) {
     throw mapCoreError("hangarStatus", err);
@@ -95,6 +116,8 @@ export interface HangarSessionDto {
   requeueReason: string | null;
   /** When it was requested. */
   requestedAt: string | null;
+  /** Why a queued session waits; null for every other state. */
+  waiting: HangarWaiting | null;
   updatedAt: string;
 }
 
@@ -109,6 +132,8 @@ export const hangarSessionsInputSchema = z.object({ workItemId: z.string().uuid(
 const hangarSessionsProcedure = humanProcedure.input(hangarSessionsInputSchema).query(async ({ ctx, input }): Promise<HangarSessionsDto> => {
   try {
     const listed = await listSessions(ctx.db, { workItemId: input.workItemId });
+    const queued = listed.sessions.filter((s) => s.state === "queued").map((s) => s.id);
+    const waiting = queued.length === 0 ? new Map<string, HangarWaiting>() : await explainQueuedSessions(ctx.db, { ids: queued });
     return {
       sessions: listed.sessions.map((s) => ({
         id: s.id,
@@ -125,6 +150,7 @@ const hangarSessionsProcedure = humanProcedure.input(hangarSessionsInputSchema).
         failureReason: s.failureReason,
         requeueReason: s.requeueReason,
         requestedAt: s.occurredAt,
+        waiting: waiting.get(s.id) ?? null,
         updatedAt: s.updatedAt.toISOString(),
       })),
       truncated: listed.truncated,

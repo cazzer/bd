@@ -20,7 +20,7 @@ let container: HTMLDivElement;
 let root: Root;
 let hidden = false;
 
-const ONLINE: HangarStatusView = { status: "online", hangar: "hangar-desktop", version: "0.4.1", lastSeenAt: new Date().toISOString(), queued: 2, claimed: 1, running: 0 };
+const ONLINE: HangarStatusView = { status: "online", hangar: "hangar-desktop", version: "0.4.1", lastSeenAt: new Date().toISOString(), queued: 2, claimed: 1, running: 0, capacity: null, capacityAt: null };
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -69,6 +69,15 @@ describe("HangarStatusPill", () => {
     expect(chip()?.title).toContain("hangar-desktop 0.4.1");
     expect(chip()?.title).toContain("2 queued · 1 claimed · 0 running");
     expect(container.querySelector("button")).toBeNull();
+  });
+
+  test("adds hangar's free slots and blocked flavors to the title", async () => {
+    trpcMock.hangarStatus.query.mockResolvedValue({ ...ONLINE, capacity: { slots: { headless: 2 }, blocked: { "display-godot": "vram: need 6000 MB, free 0 MB" } }, capacityAt: new Date().toISOString() });
+    act(() => root.render(createElement(HangarStatusPill)));
+    await settle();
+    expect(chip()?.title).toContain("Slots: headless 2");
+    expect(chip()?.title).toContain("display-godot blocked: vram: need 6000 MB, free 0 MB");
+    expect(chip()?.title).toContain("Capacity reported ");
   });
 
   test("words offline and never as the server answers them", async () => {

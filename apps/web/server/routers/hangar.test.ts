@@ -9,7 +9,7 @@
 // queued far in the future so an oldest-first claim reaches them last.
 
 import { randomUUID } from "node:crypto";
-import { closeIngestRun, openIngestRun, recordCheckIn, requestHangarOutcome, requestSession, upsertNodes, type IngestRunHandle } from "@breakdown/core";
+import { closeIngestRun, HANGAR_WAIT_KINDS, openIngestRun, recordCheckIn, requestHangarOutcome, requestSession, upsertNodes, type IngestRunHandle } from "@breakdown/core";
 import { createDb, createPool, hangarCheckIns, ingestRuns, nodes, resolveDatabaseUrl, type Database } from "@breakdown/db";
 import { TRPCError } from "@trpc/server";
 import { and, eq, inArray, like, sql } from "drizzle-orm";
@@ -69,7 +69,7 @@ describe("hangarStatus", () => {
   it("answers liveness, the last hangar, and the open counts with ISO times from the server's clock", async () => {
     await recordCheckIn(db, { hangar: HANGAR, version: "9.9.9" });
     const status = await caller("agent").hangarStatus();
-    expect(Object.keys(status).sort()).toEqual(["claimed", "hangar", "intervalS", "lastSeenAt", "now", "queued", "running", "status", "version"]);
+    expect(Object.keys(status).sort()).toEqual(["capacity", "capacityAt", "claimed", "hangar", "intervalS", "lastSeenAt", "now", "queued", "running", "status", "version"]);
     // A check-in just landed, so some hangar has checked in recently.
     expect(status.status).toBe("online");
     expect(status.hangar).toEqual(expect.any(String));
@@ -78,6 +78,19 @@ describe("hangarStatus", () => {
     expect(Date.parse(status.now)).toBeGreaterThanOrEqual(Date.parse(status.lastSeenAt!));
     expect(status.intervalS).toBe(30);
     for (const n of [status.queued, status.claimed, status.running]) expect(Number.isInteger(n) && n >= 0).toBe(true);
+    // Whichever hangar checked in last, a capacity comes with its time and none without.
+    expect(status.capacity === null).toBe(status.capacityAt === null);
+    if (status.capacityAt !== null) expect(status.capacityAt).toMatch(ISO);
+  });
+
+  it("answers the capacity hangar reported, with its time, when ours checked in last", async () => {
+    await recordCheckIn(db, { hangar: HANGAR, version: "9.9.9", capacity: { slots: { headless: 1 }, blocked: { "display-browser": "ram: need 4096 MB, free 1200 MB" } } });
+    const status = await caller("agent").hangarStatus();
+    if (status.hangar === HANGAR) {
+      expect(status.capacity).toEqual({ slots: { headless: 1 }, blocked: { "display-browser": "ram: need 4096 MB, free 1200 MB" } });
+      expect(status.capacityAt).toMatch(ISO);
+    }
+    await recordCheckIn(db, { hangar: HANGAR, version: "9.9.9", capacity: null });
   });
 
   it("serves the local person too, and refuses a hangar token", async () => {
@@ -147,6 +160,12 @@ describe("hangarSessions", () => {
     expect(listed.sessions[0]!.updatedAt).toMatch(ISO);
     expect(listed.sessions[1]).toMatchObject({ state: "queued", flavor: "display-browser", outcome: null, outcomeAt: null, released: false, diskHeld: false, container: null, requestedAt: later.toISOString() });
     expect(Object.keys(listed.sessions[0]!)).not.toContain("diskPath");
+    // Why the queued one waits depends on every hangar checked in, so only its shape is ours to assert.
+    expect(listed.sessions[0]!.waiting).toBeNull();
+    const waiting = listed.sessions[1]!.waiting;
+    expect(waiting).not.toBeNull();
+    expect(HANGAR_WAIT_KINDS).toContain(waiting!.kind);
+    expect(waiting!.text).toEqual(expect.any(String));
   });
 
   it("refuses an agent token and a malformed id", async () => {

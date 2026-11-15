@@ -1,8 +1,13 @@
 // The hangar tools through the real MCP protocol (brain-mcp spec, "Hangar
 // tools"; hangar-queue design decision 7): brain_hangar_request queues a
-// session and answers hangar's status, brain_hangar_status counts,
-// brain_hangar_sessions lists bounded, read-only mode refuses the request
-// tool, and brain_write refuses hangar sessions outright.
+// session and answers hangar's status, brain_hangar_status counts and shows
+// capacity (hangar-capacity), brain_hangar_sessions lists bounded with why
+// each queued session waits, read-only mode refuses the request tool, and
+// brain_write refuses hangar sessions outright.
+//
+// This file's own hangar checks in only to block display-godot on disk:
+// other suites give display-godot no slot or blocked entry, so the reason a
+// queued display-godot session waits is this file's to decide.
 //
 // The database is shared with live data and with suites that check hangar
 // in and queue sessions in parallel, so nothing here asserts on a global
@@ -15,17 +20,19 @@
 import { randomUUID } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { closeIngestRun, listInbox, listSessions, openIngestRun, setHangarSessionOutcome, upsertNodes, type HangarStatus, type IngestRunHandle } from "@breakdown/core";
-import { createDb, createPool, ingestRuns, nodes, resolveDatabaseUrl, type Database } from "@breakdown/db";
+import { closeIngestRun, HANGAR_WAIT_KINDS, listInbox, listSessions, openIngestRun, recordCheckIn, setHangarSessionOutcome, upsertNodes, type HangarStatus, type IngestRunHandle } from "@breakdown/core";
+import { createDb, createPool, hangarCheckIns, ingestRuns, nodes, resolveDatabaseUrl, type Database } from "@breakdown/db";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createServer, type CreateServerOptions } from "./server.js";
-import { hangarStatusText } from "./tools/hangar.js";
+import { hangarCapacityText, hangarStatusText } from "./tools/hangar.js";
 
 const SUFFIX = randomUUID().replace(/-/g, "");
 const FIXTURE_SOURCE = `mcp-hangar-test-${SUFFIX}`;
 const CLIENT = { name: "hangar-tools-test", version: `0.0.0+${SUFFIX}` };
 const ACTOR = `${CLIENT.name} ${CLIENT.version}`;
+const HANGAR = `test-${SUFFIX}`;
+const ISO = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/;
 const STATUS_TEXT = /^hangar (online|offline since \d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z|has never checked in)$/;
 
 let pool: ReturnType<typeof createPool>;
@@ -40,6 +47,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await db.delete(hangarCheckIns).where(eq(hangarCheckIns.hangar, HANGAR));
   if (sessionIds.length > 0) await db.delete(nodes).where(and(eq(nodes.sourceSystem, "inbox"), inArray(nodes.externalId, sessionIds.map((id) => `hangar-outcome:${id}`))));
   if (sessionIds.length > 0) await db.delete(nodes).where(inArray(nodes.id, sessionIds));
   await db.delete(nodes).where(eq(nodes.sourceSystem, FIXTURE_SOURCE));
@@ -141,7 +149,7 @@ describe("brain_hangar_status", () => {
     const client = await connect();
     await request(client, await workItem("Status fixture"));
     const status = await call(client, "brain_hangar_status", {});
-    expect(Object.keys(status).sort()).toEqual(["claimed", "hangar", "lastSeenAt", "queued", "running", "status", "text", "version"]);
+    expect(Object.keys(status).sort()).toEqual(["capacity", "capacityAt", "capacityText", "claimed", "hangar", "lastSeenAt", "queued", "running", "status", "text", "version"]);
     expect(["online", "offline", "never"]).toContain(status.status);
     expect(status.text).toMatch(STATUS_TEXT);
     for (const key of ["queued", "claimed", "running"]) expect(Number.isInteger(status[key])).toBe(true);
@@ -149,8 +157,41 @@ describe("brain_hangar_status", () => {
     expect(status.queued).toBeGreaterThanOrEqual(1);
   });
 
+  it("shows the latest hangar's capacity and when it was reported", async () => {
+    const client = await connect();
+    try {
+      await recordCheckIn(db, { hangar: HANGAR, version: "9.9.9", capacity: { slots: { headless: 2 }, free: "lots" } });
+      const status = await call(client, "brain_hangar_status", {});
+      if (status.hangar === HANGAR) {
+        expect(status).toMatchObject({ status: "online", capacity: { slots: { headless: 2 } } });
+        expect(status.capacity).not.toHaveProperty("free");
+        expect(status.capacityAt).toMatch(ISO);
+        expect(status.capacityText).toBe(`headless: 2 slots; reported ${status.capacityAt}`);
+      } else {
+        // Another suite's hangar checked in after ours: only the shape holds.
+        expect(status.capacity === null).toBe(status.capacityAt === null);
+        expect(status.capacityText).toEqual(expect.any(String));
+      }
+    } finally {
+      await db.delete(hangarCheckIns).where(eq(hangarCheckIns.hangar, HANGAR));
+    }
+  });
+
+  it("words the capacity summary, leaving out what hangar did not send", () => {
+    const at = new Date("2026-11-14T09:00:00.000Z");
+    expect(hangarCapacityText(null, null)).toBe("no capacity reported");
+    expect(
+      hangarCapacityText(
+        { slots: { headless: 2, "display-browser": 1 }, blocked: { "display-godot": "vram: need 6000 MB, free 0 MB" }, free: { ram_mb: 12000, cpus: 4, vram_mb: 0, disk_mb: 50000 } },
+        at,
+      ),
+    ).toBe("headless: 2 slots; display-browser: 1 slot; display-godot blocked (vram: need 6000 MB, free 0 MB); free 12000 MB RAM, 4 CPUs, 0 MB VRAM, 50000 MB disk; reported 2026-11-14T09:00:00.000Z");
+    expect(hangarCapacityText({ slots: { headless: 0 } }, at)).toBe("headless: 0 slots; reported 2026-11-14T09:00:00.000Z");
+    expect(hangarCapacityText({}, at)).toBe("no slots, blocked flavors, or free figures; reported 2026-11-14T09:00:00.000Z");
+  });
+
   it("words each liveness state as the person reads it", () => {
-    const base = { hangar: "h", version: "1", intervalS: 30, now: new Date(), counts: { queued: 0, claimed: 0, running: 0 } };
+    const base = { hangar: "h", version: "1", intervalS: 30, now: new Date(), counts: { queued: 0, claimed: 0, running: 0 }, capacity: null, capacityAt: null };
     const at = new Date("2026-11-14T09:00:00.000Z");
     expect(hangarStatusText({ ...base, state: "online", lastSeenAt: at } as HangarStatus)).toBe("hangar online");
     expect(hangarStatusText({ ...base, state: "offline", lastSeenAt: at } as HangarStatus)).toBe("hangar offline since 2026-11-14T09:00:00.000Z");
@@ -207,6 +248,55 @@ async function endedSession(state: string, workItemId?: string): Promise<string>
   if (workItemId !== undefined) await db.execute(sql`INSERT INTO edges (src_id, dst_id, edge_type, source_system, ingest_run_id) VALUES (${id}::uuid, ${workItemId}::uuid, 'run_by', 'hangar', ${fixtureRun.id}::uuid)`);
   return id;
 }
+
+describe("brain_hangar_sessions says why a queued session waits", () => {
+  it("lists the ended sessions holding a disk, with their work items, when hangar blocks the flavor on disk; null on any other state", async () => {
+    const client = await connect();
+    const reviewItem = await workItem("Awaiting review fixture");
+    const held = await endedSession("stopped", reviewItem);
+    const [reviewNode] = await db.select({ externalId: nodes.externalId }).from(nodes).where(eq(nodes.id, reviewItem));
+    try {
+      await recordCheckIn(db, {
+        hangar: HANGAR,
+        version: "9.9.9",
+        capacity: { blocked: { "display-godot": "disk: need 8192 MB, free 1200 MB" }, usage: [{ session: held, allocated_bytes: 8_589_934_592, apparent_bytes: 10_737_418_240 }] },
+      });
+      const queuedItem = await workItem("Waiting fixture");
+      const { sessionId } = await request(client, queuedItem, "display-godot");
+
+      const [queued] = (await call(client, "brain_hangar_sessions", { workItemId: queuedItem })).sessions;
+      expect(queued.id).toBe(sessionId);
+      expect(queued.waiting.kind).toBe("disk_awaiting_review");
+      expect(queued.waiting.reasons).toContainEqual({ hangar: HANGAR, reason: "disk: need 8192 MB, free 1200 MB" });
+      expect(queued.waiting.text).toMatch(/^Waiting on disk: .*disk: need 8192 MB, free 1200 MB.*awaiting accept or table\.$/);
+      expect(queued.waiting.total).toBeGreaterThanOrEqual(1);
+      expect(queued.waiting.sessions.length).toBe(Math.min(queued.waiting.total, 20));
+      // Other suites' ended sessions may be older than ours; past 20, ours may not be listed.
+      if (queued.waiting.total <= 20) {
+        expect(queued.waiting.sessions).toContainEqual({
+          id: held,
+          claimedBy: HANGAR,
+          workItem: { id: reviewItem, externalId: reviewNode!.externalId, title: "Awaiting review fixture", project: null },
+          diskAllocatedBytes: 8_589_934_592,
+        });
+      }
+
+      const [ended] = (await call(client, "brain_hangar_sessions", { workItemId: reviewItem })).sessions;
+      expect(ended).toMatchObject({ id: held, state: "stopped", waiting: null });
+    } finally {
+      await db.delete(hangarCheckIns).where(eq(hangarCheckIns.hangar, HANGAR));
+    }
+  });
+
+  it("gives every queued session a reason of a known kind", async () => {
+    const client = await connect();
+    const item = await workItem("Any reason fixture");
+    await request(client, item, "headless");
+    const [queued] = (await call(client, "brain_hangar_sessions", { workItemId: item })).sessions;
+    expect(HANGAR_WAIT_KINDS).toContain(queued.waiting.kind);
+    expect(queued.waiting.text).toMatch(/^(Waiting|Next in line)/);
+  });
+});
 
 describe("brain_hangar_outcome_request and releasable sessions", () => {
   it("files a pending inbox item for a stopped session without setting its outcome; once the person tables it, it is releasable", async () => {

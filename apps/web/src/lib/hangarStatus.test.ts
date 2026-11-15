@@ -1,13 +1,15 @@
 // Tests for lib/hangarStatus.ts (hangar-queue tasks.md 2.7): the pill's
 // wording for each liveness state, today versus an earlier day, and the
-// tooltip's lines. Dates are built in local time, so the expectations hold
-// in any zone.
+// tooltip's lines, its capacity lines among them (hangar-capacity); and the
+// awaiting-review helpers: a work item's route and a disk's size. Dates are
+// built in local time, so the expectations hold in any zone.
 
 import { describe, expect, it } from "vitest";
-import { hangarPillCounts, hangarPillHidden, hangarPillLabel, hangarPillTitle, type HangarStatusView } from "./hangarStatus.js";
+import { awaitingWorkItemRoute, formatDiskBytes, hangarPillCounts, hangarPillHidden, hangarPillLabel, hangarPillTitle, type HangarStatusView } from "./hangarStatus.js";
+import { formatRoute } from "./route.js";
 
 const NOW = new Date(2026, 10, 14, 11, 0, 0);
-const base: HangarStatusView = { status: "online", hangar: "hangar-desktop", version: "0.4.1", lastSeenAt: new Date(2026, 10, 14, 10, 59, 30).toISOString(), queued: 2, claimed: 0, running: 1 };
+const base: HangarStatusView = { status: "online", hangar: "hangar-desktop", version: "0.4.1", lastSeenAt: new Date(2026, 10, 14, 10, 59, 30).toISOString(), queued: 2, claimed: 0, running: 1, capacity: null, capacityAt: null };
 
 describe("hangarPillLabel", () => {
   it("reads online without a time", () => {
@@ -31,8 +33,18 @@ describe("hangarPillLabel", () => {
 
 describe("hangarPillTitle", () => {
   it("names the hangar and version, the last check-in to the second, and the counts", () => {
-    expect(hangarPillTitle(base, NOW)).toBe("hangar-desktop 0.4.1\nLast check-in 10:59:30\n2 queued · 0 claimed · 1 running");
-    expect(hangarPillTitle({ ...base, version: null, lastSeenAt: new Date(2026, 10, 12, 9, 0, 5).toISOString() }, NOW)).toBe("hangar-desktop\nLast check-in Nov 12, 09:00:05\n2 queued · 0 claimed · 1 running");
+    expect(hangarPillTitle(base, NOW)).toBe("hangar-desktop 0.4.1\nLast check-in 10:59:30\nNo capacity reported\n2 queued · 0 claimed · 1 running");
+    expect(hangarPillTitle({ ...base, status: "offline", version: null, lastSeenAt: new Date(2026, 10, 12, 9, 0, 5).toISOString() }, NOW)).toBe("hangar-desktop\nLast check-in Nov 12, 09:00:05\n2 queued · 0 claimed · 1 running");
+  });
+
+  it("adds the free slots, each blocked flavor's reason, and when the capacity was reported", () => {
+    const capacityAt = new Date(2026, 10, 14, 10, 59, 0).toISOString();
+    const capacity = { slots: { headless: 2, "display-godot": 0, "display-browser": 1 }, blocked: { "display-godot": "disk: need 8192 MB, free 1200 MB" } };
+    expect(hangarPillTitle({ ...base, capacity, capacityAt }, NOW)).toBe(
+      "hangar-desktop 0.4.1\nLast check-in 10:59:30\nSlots: headless 2, display-browser 1\ndisplay-godot blocked: disk: need 8192 MB, free 1200 MB\nCapacity reported 10:59:00\n2 queued · 0 claimed · 1 running",
+    );
+    expect(hangarPillTitle({ ...base, capacity: { slots: { headless: 0 } }, capacityAt }, NOW)).toBe("hangar-desktop 0.4.1\nLast check-in 10:59:30\nNo free slots\nCapacity reported 10:59:00\n2 queued · 0 claimed · 1 running");
+    expect(hangarPillTitle({ ...base, capacity: {}, capacityAt: null }, NOW)).toBe("hangar-desktop 0.4.1\nLast check-in 10:59:30\nNo free slots\n2 queued · 0 claimed · 1 running");
   });
 
   it("says no hangar has checked in when none has", () => {
@@ -55,5 +67,25 @@ describe("hangarPillHidden", () => {
     expect(hangarPillHidden({ ...never, queued: 1 })).toBe(false);
     expect(hangarPillHidden({ ...base, status: "offline", queued: 0, claimed: 0, running: 0 })).toBe(false);
     expect(hangarPillHidden({ ...base, queued: 0, claimed: 0, running: 0 })).toBe(false);
+  });
+});
+
+describe("awaitingWorkItemRoute", () => {
+  it("opens the item on its project's board by its external id, and in the graph without a project", () => {
+    const item = { id: "8b1e4c1d-2f3a-4b5c-8d9e-0a1b2c3d4e5f", externalId: "bd-d38.5", project: "bd" };
+    expect(awaitingWorkItemRoute(item)).toEqual({ view: "board", viewId: null, projects: ["bd"], item: "bd-d38.5" });
+    expect(formatRoute(awaitingWorkItemRoute(item))).toContain("bd-d38.5");
+    expect(awaitingWorkItemRoute({ ...item, project: null })).toEqual({ view: "graph", q: null, types: [], node: item.id });
+  });
+});
+
+describe("formatDiskBytes", () => {
+  it("reads in binary units with one decimal, and bytes under a kilobyte whole", () => {
+    expect(formatDiskBytes(8 * 1024 ** 3)).toBe("8.0 GB");
+    expect(formatDiskBytes(1536 * 1024 ** 2)).toBe("1.5 GB");
+    expect(formatDiskBytes(512 * 1024 ** 2)).toBe("512.0 MB");
+    expect(formatDiskBytes(2048)).toBe("2.0 KB");
+    expect(formatDiskBytes(512)).toBe("512 B");
+    expect(formatDiskBytes(3 * 1024 ** 4)).toBe("3.0 TB");
   });
 });

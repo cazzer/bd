@@ -5,16 +5,20 @@
 // outcome; both ask first, each with its own warning, and send only from the
 // confirm button, which takes focus (Cancel gives it back to the opener); the
 // mutation's arguments; a refusal shown on the row; and "Change to …" until
-// hangar has released the session, which asks the same way. The tRPC client
-// is mocked.
+// hangar has released the session, which asks the same way. A queued session
+// shows why it waits, and on a disk full of undecided sessions links each to
+// its work item (hangar-capacity). The tRPC client and navigate are mocked.
 
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { formatRoute } from "../lib/route.js";
 import { ACCEPT_WARNING, HangarSessions, TABLE_WARNING } from "./HangarSessions.js";
 
 const trpcMock = vi.hoisted(() => ({ hangarSessions: { query: vi.fn() }, hangarSessionOutcome: { mutate: vi.fn() } }));
 vi.mock("../trpc.js", () => ({ trpc: trpcMock }));
+const navigateMock = vi.hoisted(() => vi.fn());
+vi.mock("../lib/navigate.js", () => ({ navigate: navigateMock }));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -39,6 +43,7 @@ function session(id: string, state: State, extra: Record<string, unknown> = {}) 
     failureReason: null,
     requeueReason: null,
     requestedAt: NOW,
+    waiting: null,
     updatedAt: NOW,
     ...extra,
   };
@@ -50,6 +55,7 @@ let root: Root;
 beforeEach(() => {
   trpcMock.hangarSessions.query.mockReset();
   trpcMock.hangarSessionOutcome.mutate.mockReset();
+  navigateMock.mockReset();
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -204,5 +210,72 @@ describe("HangarSessions", () => {
     await click(button(row("s-1"), "Accept session"));
     expect(row("s-1").querySelector('[role="alert"]')?.textContent).toBe(refused.message);
     expect(row("s-1").querySelector("[data-session-outcome]")).toBeNull();
+  });
+
+  test("a queued session says why it waits, in the server's words", async () => {
+    await render([session("s-q", "queued", { waiting: { kind: "next", text: "Waiting: 1 headless request ahead; hangar has room for headless.", ahead: 1 } }), session("s-r", "running")]);
+    const note = row("s-q").querySelector("[data-session-waiting]");
+    expect(note?.getAttribute("data-session-waiting")).toBe("next");
+    expect(note?.textContent).toBe("Waiting: 1 headless request ahead; hangar has room for headless.");
+    expect(row("s-r").querySelector("[data-session-waiting]")).toBeNull();
+    expect(row("s-q").querySelector("ul")).toBeNull();
+  });
+
+  test("a disk full of undecided sessions links each to its work item, with its disk when reported", async () => {
+    const onBoard = { id: "a-1", claimedBy: "hangar-linux", workItem: { id: "w-1", externalId: "bd-1", title: "Fix the thing", project: "bd" }, diskAllocatedBytes: 8 * 1024 ** 3 };
+    const inGraph = { id: "a-2", claimedBy: "hangar-linux", workItem: { id: "w-2", externalId: "x-2", title: "Loose item", project: null } };
+    const gone = { id: "a-3", claimedBy: null, workItem: null, diskAllocatedBytes: 1024 ** 3 };
+    const waiting = {
+      kind: "disk_awaiting_review",
+      text: "Waiting on disk: hangar-linux: disk: need 8192 MB, free 1200 MB. 25 ended sessions still hold a disk awaiting accept or table.",
+      reasons: [{ hangar: "hangar-linux", reason: "disk: need 8192 MB, free 1200 MB" }],
+      sessions: [onBoard, inGraph, gone],
+      total: 25,
+    };
+    await render([session("s-q", "queued", { waiting })]);
+    const list = row("s-q").querySelector<HTMLElement>('ul[aria-label="Sessions awaiting your decision"]');
+    expect(list).not.toBeNull();
+    expect(row("s-q").querySelector("[data-session-waiting]")?.textContent).toBe(waiting.text);
+
+    const item = (id: string): HTMLElement => list!.querySelector<HTMLElement>(`[data-awaiting-session="${id}"]`)!;
+    const boardLink = item("a-1").querySelector("a")!;
+    expect(boardLink.getAttribute("href")).toBe(formatRoute({ view: "board", viewId: null, projects: ["bd"], item: "bd-1" }));
+    expect(boardLink.textContent).toBe("bd-1 Fix the thing");
+    expect(boardLink.className).toContain("min-h-11");
+    expect(item("a-1").textContent).toContain("· 8.0 GB");
+
+    expect(item("a-2").querySelector("a")!.getAttribute("href")).toBe(formatRoute({ view: "graph", q: null, types: [], node: "w-2" }));
+    expect(item("a-2").textContent).not.toContain("·");
+
+    expect(item("a-3").querySelector("a")).toBeNull();
+    expect(item("a-3").textContent).toBe("(work item gone) · 1.0 GB");
+    expect(row("s-q").textContent).toContain("and 22 more");
+
+    // A plain click navigates in place; a modified one is left to the browser.
+    const plain = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 });
+    act(() => {
+      boardLink.dispatchEvent(plain);
+    });
+    expect(plain.defaultPrevented).toBe(true);
+    expect(navigateMock).toHaveBeenCalledWith({ view: "board", viewId: null, projects: ["bd"], item: "bd-1" }, "push");
+    // Noted where it reaches the document, then stopped there, since jsdom cannot open another page.
+    let leftToBrowser = false;
+    const keepPage = (e: Event): void => {
+      leftToBrowser = !e.defaultPrevented;
+      e.preventDefault();
+    };
+    document.addEventListener("click", keepPage);
+    act(() => {
+      boardLink.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0, metaKey: true }));
+    });
+    document.removeEventListener("click", keepPage);
+    expect(leftToBrowser).toBe(true);
+    expect(navigateMock).toHaveBeenCalledTimes(1);
+  });
+
+  test("lists no 'more' when every undecided session is shown", async () => {
+    const waiting = { kind: "disk_awaiting_review", text: "Waiting on disk: h: disk: full. 1 ended session still holds a disk awaiting accept or table.", reasons: [{ hangar: "h", reason: "disk: full" }], sessions: [{ id: "a-1", claimedBy: "h", workItem: null }], total: 1 };
+    await render([session("s-q", "queued", { waiting })]);
+    expect(row("s-q").textContent).not.toContain("more");
   });
 });

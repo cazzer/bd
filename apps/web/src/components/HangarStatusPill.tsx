@@ -1,8 +1,9 @@
 // The board header's hangar chip (hangar-queue design decision 7): "hangar
 // online", "hangar offline since …", or "hangar never checked in", then the
 // open session counts when there are any ("· 1 queued, 1 running"), with
-// the hangar's name, version, last check-in, and every count in its
-// tooltip. On phones the words give way to the dot, but the counts stay:
+// the hangar's name, version, last check-in, its latest capacity (free slots
+// per flavor, why each blocked flavor is blocked, and when that was
+// reported; hangar-capacity), and every count in its tooltip. On phones the words give way to the dot, but the counts stay:
 // they are what changes. With no hangar ever checked in and nothing open
 // the chip is left off. A status chip, not a control: it takes no focus and
 // has no action, so it needs no phone-sized hit target.
