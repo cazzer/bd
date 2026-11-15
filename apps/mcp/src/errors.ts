@@ -6,6 +6,10 @@
 // an operator instead.
 
 import {
+  HangarDecisionRefusedError,
+  InvalidHangarDecisionError,
+  RelayActionPendingError,
+  InvalidRelayActionError,
   asPgError,
   isDrizzleQueryError,
   ContentTooLargeError,
@@ -104,9 +108,41 @@ export function formatZodError(toolName: string, err: ZodError): CallToolResult 
  * differs by tool (NotAWorkItemError); every mapped
  * `KnowledgeStoreError` already names itself and the offending value.
  */
+/** A retired tool was called: it did nothing, and its message names what replaces it. */
+export class RetiredToolError extends Error {
+  constructor(
+    readonly toolName: string,
+    message: string,
+  ) {
+    super(`${toolName} is retired. ${message}`);
+    this.name = "RetiredToolError";
+  }
+}
+
 export function mapError(toolName: string, err: unknown): CallToolResult {
   if (err instanceof ZodError) {
     return formatZodError(toolName, err);
+  }
+  if (err instanceof RetiredToolError) return errorResult(err.message);
+
+  // --- Hangar decisions (brain_hangar_decide, brain_hangar_escalate) ---
+  if (err instanceof InvalidHangarDecisionError) {
+    return actionable(err, "Fix that argument and retry; nothing was written. A card is question (at most 140 characters), options (2-6 of {id, label, what?, risk?}), recommend (an option id), on_accept (at most 8 steps of at most 200 characters), and body (markdown).");
+  }
+  if (err instanceof HangarDecisionRefusedError) {
+    const hint =
+      err.reason === "escalated"
+        ? "Nothing was written. Wait for the person's decision on the review; it goes to the session by itself."
+        : err.reason === "session_ended" || err.reason === "session_state"
+          ? "Nothing was written. The session has ended; if it still holds a disk, release it with brain_hangar_outcome."
+          : "Nothing was written. Read the session's pendingDecision with brain_hangar_sessions.";
+    return actionable(err, hint);
+  }
+  if (err instanceof RelayActionPendingError && toolName === "brain_hangar_escalate") {
+    return actionable(err, "Nothing was escalated. Another review for this work item is still waiting for the laptop relay to file it; retry once it has.");
+  }
+  if (err instanceof InvalidRelayActionError && toolName === "brain_hangar_escalate") {
+    return actionable(err, "Nothing was escalated: the review could not be queued for the laptop relay. Shorten the card or body and retry.");
   }
 
   // --- Nodes (brain_write) ---
@@ -160,7 +196,7 @@ export function mapError(toolName: string, err: unknown): CallToolResult {
     return actionable(err, "Nothing was merged. A hangar session is not a duplicate of anything: it is bound to its token and its inbox items. Merge other nodes; leave sessions as they are.");
   }
   if (err instanceof HangarOutcomeMergeError) {
-    return actionable(err, "Nothing was merged. An outcome request is the person's card for one hangar session; it is not a duplicate of anything, and nothing is a duplicate of it. Leave it as it is; ask for an outcome with brain_hangar_outcome_request.");
+    return actionable(err, "Nothing was merged. An outcome request is the person's card for one hangar session; it is not a duplicate of anything, and nothing is a duplicate of it. Leave it as it is; a driver releases its session with brain_hangar_outcome.");
   }
   if (err instanceof MergeFailedError) {
     return actionable(err, RETRY_HINT);
@@ -224,7 +260,7 @@ export function mapError(toolName: string, err: unknown): CallToolResult {
     return actionable(err, "Nothing from this call was persisted. Queue a hangar session with brain_hangar_request and read sessions with brain_hangar_sessions; give any other node a different nodeType and sourceSystem, then retry.");
   }
   if (err instanceof ReservedInboxItemError) {
-    return actionable(err, "Nothing from this call was persisted. An outcome request (an inbox key starting \"hangar-outcome:\") is written only by brain_hangar_outcome_request, which writes its card itself; give any other inbox item a different externalId, then retry.");
+    return actionable(err, "Nothing from this call was persisted. An outcome request (an inbox key starting \"hangar-outcome:\") is reserved (the retired brain_hangar_outcome_request wrote it; a driver now releases its session with brain_hangar_outcome); give any other inbox item a different externalId, then retry.");
   }
   if (err instanceof ReservedHangarEdgeError) {
     return actionable(err, "Nothing from this call was persisted. A session's run_by link is written when it is queued (brain_hangar_request); give other edges a sourceSystem other than \"hangar\" and a source that is not a hangar session, then retry.");
@@ -236,12 +272,12 @@ export function mapError(toolName: string, err: unknown): CallToolResult {
     return actionable(
       err,
       err.kind === "state"
-        ? "Nothing was filed. Ask for an outcome only once the session has stopped or failed; check its state with brain_hangar_sessions."
-        : "Nothing was filed. Hangar has already released this session, so its outcome is final.",
+        ? "Nothing was set. Release a session only once it has stopped or failed (a merged or closed PR ends it); check its state with brain_hangar_sessions."
+        : "Nothing was set. Hangar has already released this session, so its outcome is final.",
     );
   }
-  if (err instanceof HangarSessionNotFoundError && toolName === "brain_hangar_outcome_request") {
-    return actionable(err, "Nothing was filed. Pass the id of a hangar session from brain_hangar_sessions.");
+  if (err instanceof HangarSessionNotFoundError && toolName === "brain_hangar_outcome") {
+    return actionable(err, "Nothing was set. Pass the id of a hangar session from brain_hangar_sessions.");
   }
   // Only hangar's REST API claims and reports sessions; no MCP tool reaches
   // these today, but a session-state refusal is never something to retry.

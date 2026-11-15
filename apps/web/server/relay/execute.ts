@@ -28,12 +28,33 @@
 //   `done { pane }`, or `failed` with herdr's (scrubbed) reason.
 // - `beads_reingest`: the registry is re-read, then the project is
 //   re-ingested and pushed now → `done { project, changed }`.
+// - `review_request` (hangar-driver-decisions: a driver's escalation): the
+//   project must be in the registry at the payload's `cwd`, as for a
+//   decision; then, with the relay's allowlisted `bd`, the work item is
+//   read (`show`), its open reviews listed, and the one whose `review.key`
+//   is the payload's reused, else one created under it; its `review`
+//   metadata is set, and a new review is made to block the work item
+//   (unless it is an epic, which bd forbids). → `done { review_id, reused }`,
+//   or `failed` naming the step, with `review_id` kept once one exists. The
+//   key makes a retry after a lost report find the review it filed rather
+//   than file another. The project is then re-ingested, best-effort, so the
+//   board shows the review at once. Never stale, like a re-ingest.
 //
 // It never throws: every outcome is a report. Nothing here logs; main.ts
 // logs the action's id, kind, and state, never the payload.
 
-import { InvalidRelayActionError, parseRelayPayload, RELAY_ACTION_KINDS, RELAY_MAX_AGE_S, type RelayActionKind, type ReviewDecisionPayload } from "@breakdown/core";
-import { ReviewRecordRefusedError, type ReviewWriter, type ReviewWriteResult, type RunHerdr } from "../review-writer.js";
+import {
+  InvalidRelayActionError,
+  parseRelayPayload,
+  RELAY_ACTION_KINDS,
+  RELAY_MAX_AGE_S,
+  relayReviewCreateArgs,
+  relayReviewListArgs,
+  type RelayActionKind,
+  type ReviewDecisionPayload,
+  type ReviewRequestPayload,
+} from "@breakdown/core";
+import { ReviewRecordRefusedError, type ReviewWriter, type ReviewWriteResult, type RunBd, type RunHerdr } from "../review-writer.js";
 import type { RelayRegistry } from "./registry.js";
 
 export type RelayReport =
@@ -52,6 +73,8 @@ export interface ExecuteDeps {
   registry: Pick<RelayRegistry, "get" | "refresh">;
   /** A writer whose runners are the relay's allowlisted ones (runners.ts `bdFor(project)`); made per project. */
   writerFor(project: string): ReviewWriter;
+  /** The relay's allowlisted `bd` for `project` (runners.ts `bdFor`), for filing a review; without it a review request is refused. */
+  bdFor?(project: string): RunBd;
   /** The allowlisted herdr runner (runners.ts). */
   runHerdr: RunHerdr;
   /** Re-ingests one registry project and pushes it (push.ts / the watcher). */
@@ -126,6 +149,63 @@ async function reviewDecision(deps: ExecuteDeps, payload: ReviewDecisionPayload)
   return { state: "failed", error: written.error ?? "the decision was not written", result: resultOf(written) };
 }
 
+/** One record from `bd show` / `bd create` JSON (an array of one, or the object). */
+function firstRecord(stdout: string): Record<string, unknown> | null {
+  const parsed: unknown = JSON.parse(stdout);
+  const record = Array.isArray(parsed) ? parsed[0] : parsed;
+  return record !== null && typeof record === "object" && !Array.isArray(record) ? (record as Record<string, unknown>) : null;
+}
+
+function reviewKeyOf(record: unknown): string | null {
+  const review = (record as { metadata?: { review?: { key?: unknown } } } | null)?.metadata?.review;
+  return typeof review?.key === "string" ? review.key : null;
+}
+
+async function reviewRequest(deps: ExecuteDeps, payload: ReviewRequestPayload): Promise<RelayReport> {
+  if (deps.bdFor === undefined) return { state: "failed", error: "refused: this relay cannot file reviews; nothing ran" };
+  const entry = await inRegistry(deps, payload.project_key);
+  if (entry === undefined) return { state: "failed", error: `refused: project ${payload.project_key} is not in this relay's registry; nothing ran` };
+  if (entry.dir !== payload.cwd) {
+    return { state: "failed", error: `refused: ${payload.cwd} is not project ${payload.project_key}'s checkout in this relay's registry (${entry.dir}); nothing ran` };
+  }
+  const bd = deps.bdFor(payload.project_key);
+  const key = typeof payload.review["key"] === "string" ? payload.review["key"] : null;
+  let reviewId: string | null = null;
+  let step = "bd show";
+  try {
+    const item = firstRecord(await bd(["show", payload.issue_id, "--json"], payload.cwd));
+    if (item === null || item["id"] !== payload.issue_id) return { state: "failed", error: `refused: bd show ${payload.issue_id} returned another issue or nothing; nothing was filed` };
+    step = "bd list";
+    const children: unknown = JSON.parse(await bd(relayReviewListArgs(payload.issue_id), payload.cwd));
+    const existing = Array.isArray(children)
+      ? children
+          .filter((c) => key !== null && reviewKeyOf(c) === key && typeof (c as { id?: unknown }).id === "string")
+          .sort((a, b) => String((b as { created_at?: unknown }).created_at ?? "").localeCompare(String((a as { created_at?: unknown }).created_at ?? "")))[0]
+      : undefined;
+    const reused = existing !== undefined;
+    if (reused) {
+      reviewId = (existing as { id: string }).id;
+    } else {
+      step = "bd create";
+      const created = firstRecord(await bd(relayReviewCreateArgs({ title: payload.title, parent: payload.issue_id, description: payload.description }), payload.cwd));
+      const id = created?.["id"];
+      if (typeof id !== "string") return { state: "failed", error: `bd create ran but printed no issue id; check the open reviews of ${payload.issue_id} before retrying` };
+      reviewId = id;
+    }
+    step = "bd update";
+    await bd(["update", reviewId, "--metadata", JSON.stringify({ review: payload.review })], payload.cwd);
+    if (!reused && item["issue_type"] !== "epic") {
+      step = "bd dep add";
+      await bd(["dep", "add", payload.issue_id, reviewId, "--type", "blocks"], payload.cwd);
+    }
+    // Best-effort: the board shows the review now rather than at the watcher's next change.
+    await deps.reingest(payload.project_key).catch(() => undefined);
+    return { state: "done", result: { review_id: reviewId, reused } };
+  } catch (err) {
+    return { state: "failed", error: `${step} failed: ${message(err)}`, ...(reviewId === null ? {} : { result: { review_id: reviewId } }) };
+  }
+}
+
 export async function executeAction(action: ClaimedAction, deps: ExecuteDeps): Promise<RelayReport> {
   let kind: RelayActionKind;
   let payload: unknown;
@@ -139,7 +219,7 @@ export async function executeAction(action: ClaimedAction, deps: ExecuteDeps): P
   if (!(deps.kinds ?? RELAY_ACTION_KINDS).includes(kind)) {
     return { state: "failed", error: `refused: this relay does not run ${kind} actions (--kinds); nothing ran` };
   }
-  if (kind !== "beads_reingest") {
+  if (kind !== "beads_reingest" && kind !== "review_request") {
     const stale = staleness(action.createdAt, deps.maxAgeMs ?? RELAY_MAX_AGE_S * 1000, (deps.now ?? Date.now)());
     if (stale !== null) return { state: "failed", error: stale };
   }
@@ -156,6 +236,8 @@ export async function executeAction(action: ClaimedAction, deps: ExecuteDeps): P
         return { state: "failed", error: message(err) };
       }
     }
+    case "review_request":
+      return reviewRequest(deps, payload as ReviewRequestPayload);
     case "beads_reingest": {
       const { project_key: project } = payload as { project_key: string };
       try {

@@ -133,6 +133,7 @@ import {
   unsafeSetHangarSessionOutcomeInTx,
   type HangarOutcome,
 } from "./hangar.js";
+import { unsafeRouteInboxDecisionInTx } from "./hangar-decisions.js";
 import type { IngestRunHandle } from "./ingest-runs.js";
 import { asPgError, formatPgInfo, sqlArray, type Tx } from "./sql-helpers.js";
 
@@ -287,7 +288,7 @@ export function isHangarOutcomeKey(sourceSystem: string, externalId: string): bo
 export function assertNoHangarOutcomeKeys(items: readonly { sourceSystem: string; externalId: string; label?: string }[]): void {
   for (const item of items) {
     if (isHangarOutcomeKey(item.sourceSystem, item.externalId)) {
-      throw new ReservedInboxItemError(item.label ?? `(${item.sourceSystem.trim()}/${item.externalId.trim()})`, `keys starting "${HANGAR_OUTCOME_KEY_PREFIX}" are written only by brain_hangar_outcome_request`);
+      throw new ReservedInboxItemError(item.label ?? `(${item.sourceSystem.trim()}/${item.externalId.trim()})`, `keys starting "${HANGAR_OUTCOME_KEY_PREFIX}" are reserved for outcome requests (a driver releases its session with brain_hangar_outcome)`);
     }
   }
 }
@@ -295,7 +296,7 @@ export function assertNoHangarOutcomeKeys(items: readonly { sourceSystem: string
 /** For a generic writer: refuses a stored item (normalized metadata) that carries an outcome request binding, whatever its key. */
 export function assertNotHangarOutcomeItem(label: string, stored: Record<string, unknown> | null | undefined): void {
   if (stored != null && stored[HANGAR_OUTCOME_KEY] !== undefined) {
-    throw new ReservedInboxItemError(label, "it is an outcome request, written only by brain_hangar_outcome_request");
+    throw new ReservedInboxItemError(label, "it is an outcome request, which no writer changes");
   }
 }
 
@@ -894,6 +895,14 @@ async function writeInboxFeedback(
       // An ended session reads nothing more; only the person's explicit
       // dismiss or release makes its item local (module header).
       if (endedSession !== null && (kind === "accept" || kind === "changes")) throw new InboxItemSessionEndedError(existing.id, endedSession);
+      // An escalated hangar decision that fell back to this item
+      // (hangar-escalation.ts): the decision is answered as well, matched on
+      // this item's id, and the session carries it on from its own message,
+      // so nothing is left here for an executor.
+      if (session !== null && kind !== "release") {
+        const routed = await unsafeRouteInboxDecisionInTx(tx, { itemId: existing.id, sessionId: session, decision: kind, ...(input.option === undefined ? {} : { option: input.option }), message, by: actor });
+        if (routed && kind !== "dismiss") after = "done";
+      }
       // A decision answers the agent's hand-back (`needs_you`) and its re-queue note (`revision`).
       const { needs_you: _handedBack, revision: _answered, ...rest } = current;
       if (endedSession !== null) delete rest["session"];

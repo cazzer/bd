@@ -30,7 +30,7 @@ export const RELAY_CLAIMED_TEXT = "Pending: the laptop relay is writing it";
 
 /** One item's action as `relayActionsFor` answers it (server routers/relay.ts `RelayOriginActionDto`). */
 export interface RelayOriginActionView extends RelayActionView {
-  kind: "review_decision" | "herdr_prompt" | "beads_reingest";
+  kind: "review_decision" | "herdr_prompt" | "beads_reingest" | "review_request";
   originNodeId: string;
   /** A review decision's `accept` or `changes`; null for any other kind. */
   decision: "accept" | "changes" | null;

@@ -7,7 +7,9 @@ Breakdown is the control plane for **hangar**, the service that runs remote Clau
 There are two callers, and each holds its own token.
 
 - **Hangar**, the service, holds a `hangar`-scoped token. It checks in, claims queued session requests, reports each session's state as it runs, and lists the sessions it holds so it can reconcile after a restart.
-- **A worker**, the Claude session inside a container that hangar started, holds the **session token** that hangar received when it claimed that session. The token is `agent`-scoped and bound to that one session. The worker uses it to read its session's messages here. It also uses it for Breakdown's MCP server and the inbox scripts (see [Session tokens](#session-tokens)).
+- **A worker**, the Claude session inside a container that hangar started, holds the **session token** that hangar received when it claimed that session. The token is `agent`-scoped and bound to that one session. The worker uses it to file its result for its driver and to read its session's messages here. It also uses it for Breakdown's MCP server and the inbox scripts (see [Session tokens](#session-tokens)).
+
+A third party never calls this API but decides much of what flows through it: the session's **driver**, the agent that requested the session (`brain_hangar_request`) and runs the work, over Breakdown's MCP server with its own `agent` token. The driver answers the decisions its sessions file, merges their PRs when nothing blocks them, and releases ended sessions. Only a big decision point, one that changes the architecture or sets a fundamental direction, goes to the person, as a review (see [Decisions](#decisions)).
 
 Every request goes from hangar's side to Breakdown. Breakdown never connects to hangar, so hangar can sit behind NAT and be offline for long stretches. Work queues here until hangar comes back.
 
@@ -24,7 +26,7 @@ https://<breakdown-host>/hangar/v1/...            # behind a TLS proxy such as `
 - **Health.** `GET /healthz` on the same port takes a token of any scope, including the `hangar` token, so hangar can probe Breakdown before it checks in. It is not part of this API's contract and answers in Breakdown's own format.
 
 - **Authentication.** Every request carries `Authorization: Bearer <token>`. A missing, unknown, or revoked token gets `401` with `WWW-Authenticate: Bearer`. A live token whose scope the endpoint does not accept gets `403`. Tokens never go in a query string, which is ignored.
-- **Scopes.** Each endpoint takes exactly one scope: `hangar` for the service endpoints, and `agent` with a bound session for `GET /hangar/v1/messages`. Breakdown's other scope, `human`, is refused on every endpoint here. The `hangar` token is refused everywhere else in Breakdown, except `GET /healthz`: the web API's other routes and MCP.
+- **Scopes.** Each endpoint takes exactly one scope: `hangar` for the service endpoints, and `agent` with a bound session for `GET /hangar/v1/messages` and `POST /hangar/v1/decision`. Breakdown's other scope, `human`, is refused on every endpoint here. The `hangar` token is refused everywhere else in Breakdown, except `GET /healthz`: the web API's other routes and MCP.
 - **Requests must arrive off loopback.** Breakdown trusts a request from its own machine (loopback peer, loopback `Host`) without reading any token, and treats it as the local person (`human`), so every endpoint here refuses it with `403`. Hangar reaches Breakdown over the tailnet, from another machine. If a proxy on Breakdown's machine fronts the server, it must set `X-Forwarded-For` (or `X-Real-IP` / `Forwarded`) to the remote address, which `tailscale serve` does. **A forwarder that adds no such header (socat, `ssh -R`, a bare nginx `proxy_pass`) is unsafe and must not be used.** It makes every remote request look local, so every peer that can reach it is the tokenless local person on the web API (tRPC) and on MCP: it can read the whole store and make every decision a person makes, with no token at all. Its requests to the endpoints here are refused, but that is the least of it.
 - **Host.** The `Host` header must be a name the operator allowed with `--allow-host`, either at the server's port or bare (a proxy on 443). Any other `Host` gets `403`, token or not. Use the tailnet hostname Breakdown is served under.
 - **Content.** Every response body is JSON (`Content-Type: application/json; charset=utf-8`, `Cache-Control: no-store`). `POST` and `PATCH` requests must send `Content-Type: application/json` and a UTF-8 JSON body of at most 64 KiB (65,536 bytes). `GET` requests send no body. Unknown request fields are ignored, and responses may carry fields this document does not list yet; ignore those (see [Versioning](#versioning)).
@@ -40,6 +42,7 @@ https://<breakdown-host>/hangar/v1/...            # behind a TLS proxy such as `
 | `POST` | `/hangar/v1/sessions/:id/requeue` | `hangar` | Give a claimed session back to the queue with a reason |
 | `GET` | `/hangar/v1/sessions` | `hangar` | List the sessions you hold, for reconciliation |
 | `GET` | `/hangar/v1/messages` | `agent` (session token) | A worker reads its session's messages (long-poll) |
+| `POST` | `/hangar/v1/decision` | `agent` (session token) | A worker files its result (a PR or a question) for its driver |
 
 `:id` is a session id, a lowercase uuid (uppercase is accepted). A path segment that is not a uuid gets `404 not_found`. A known path with the wrong method gets `405 method_not_allowed` with an `Allow` header. Any other path under `/hangar/v1/` gets `404 not_found`, including one with a trailing slash.
 
@@ -87,9 +90,9 @@ Every endpoint that returns a session uses this shape. Times are UTC ISO-8601 wi
 | `claimed_by` | string or null | The name of the hangar that holds it: the client name of that hangar's token. `null` while queued. |
 | `claimed_at` | time or null | When it was last claimed. |
 | `requested_at` | time | When it was requested. Claims take the oldest first, and a requeued session keeps its place. |
-| `outcome` | string or null | A person's decision on an ended session: `accepted`, `tabled`, or `null` for none yet. Only a person sets it (see [Releasing sessions](#releasing-sessions)). Treat a value you don't know as `null`. |
+| `outcome` | string or null | The decision on an ended session: `accepted`, `tabled`, or `null` for none yet. The session's driver sets it, or a person (see [Releasing sessions](#releasing-sessions)). Treat a value you don't know as `null`. |
 | `outcome_at` | time or null | When the outcome was last set. |
-| `outcome_by` | string or null | Who set it: the person's client name, or `human` for the local person. |
+| `outcome_by` | string or null | Who set it: the driver's or the person's client name, or `human` for the local person. |
 | `released` | boolean | Outcome set and no disk held (hangar acknowledged the release, or the session never had a disk): `outcome` is set and `disk_path` is `null`, so hangar holds nothing for the session. Computed; never sent by a client. |
 
 ### `POST /hangar/v1/check-in` — scope `hangar`
@@ -187,7 +190,7 @@ Request (every field optional, at least one of `state`, `container`, `host`, `di
 - `state`: the state to move to. The [state machine](#session-state-machine) decides which moves are allowed. Sending the current state is allowed, and leaves the state as it is while you update the other fields. Omitting it updates only the other fields, and that is allowed on an ended (`stopped` or `failed`) session too, within the rules below.
 - `container`, `host` (string, at most 200 characters), `disk_path` (string, at most 1,024 characters): a string sets the field, `null` or `""` clears it, and an omitted field is left as it is. Values are trimmed and must not contain control characters. Clearing `container` and `disk_path` on an ended session is how you acknowledge a release (see [Releasing sessions](#releasing-sessions)).
 - `reason` (string, 1–500 characters): why you failed the session, for example `git clone exited 128` or `repo "x/y" is not on this hangar's allowlist`. Used only with `state: "failed"`, and stored as the session's `failure_reason` on the move into `failed`; there it must be 1–500 characters, or the request is a `400 invalid_request`. A repeated `failed` report on a session that is already `failed` keeps the reason stored first. Sent with any other `state`, or without one, it is ignored like any unused field (see [Versioning](#versioning)).
-- `outcome` is not a field of this request. Only a person sets it, so a sent `outcome` is ignored like any unknown field.
+- `outcome` is not a field of this request. Only the session's driver or a person sets it, so a sent `outcome` is ignored like any unknown field.
 
 Response `200`:
 
@@ -201,7 +204,7 @@ On an ended (`stopped` or `failed`) session, a `PATCH` is refused with `409 sess
 
 - set `container` or `disk_path` to a value: on an ended session they only clear (`null`), so a released session is never un-released. Re-sending the value a field already holds is no change, and is answered `200`;
 - change anything but a clear on a released session (`released: true`), `host` included. Clearing is still taken, so the acknowledgement, and the same acknowledgement repeated after a lost answer, both answer `200`;
-- clear a `disk_path` the session still holds before a person has set its `outcome`. That is the release acknowledgement, and there is nothing to acknowledge until a person has decided. Clearing `container` alone is allowed.
+- clear a `disk_path` the session still holds before its `outcome` is set. That is the release acknowledgement, and there is nothing to acknowledge until the driver or a person has decided. Clearing `container` alone is allowed.
 
 Status codes:
 - `200`
@@ -291,7 +294,18 @@ Status codes: `200`, `400 invalid_request` (a bad `after` or `wait_s`), `401` (t
 
 #### Message kinds
 
-`kind` says how to read `body`. Today there is one kind. Ignore kinds you don't know, since new ones may be added within v1.
+`kind` says how to read `body`. Today there are two kinds, with the same body. Ignore kinds you don't know, since new ones may be added within v1.
+
+`session_decision`: the answer to the decision this session filed with [`POST /decision`](#post-hangarv1decision--scope-agent), from its driver or, on an escalation, from the person. The body has every `inbox_decision` field below, with `item_id` the decision's id, `decision` one of `accept`, `changes`, or `dismiss`, `outcome` one of `accepted`, `changes`, or `dismissed`, and `text` an instruction that names no inbox command (there is no inbox item to complete). It adds two fields:
+
+| Body field | Meaning |
+| --- | --- |
+| `by` | Who decided: the driver's client name, or the person's. |
+| `via` | `driver`, or how the person decided an escalation: `review` or `inbox`. |
+
+```json
+{ "id": 131, "kind": "session_decision", "body": { "item_id": "7c1d…", "title": "Cache the board query", "decision": "accept", "outcome": "accepted", "option": "b", "message": "global is simpler", "text": "[decision] Accepted option b: \"Cache the board query\". Note: global is simpler Decided by your driver (claude-driver). Carry it out now.", "by": "claude-driver", "via": "driver" }, "created_at": "2026-11-15T09:20:00.000Z" }
+```
 
 `inbox_decision`: a person acted on an inbox item this session filed. The worker files items through the web API's `inboxRequest` with its session token, for example `bin/inbox request` with `BREAKDOWN_TOKEN` set.
 
@@ -309,12 +323,61 @@ After a `session` message the item belongs to a local session. Later decisions o
 
 Decisions reach a session only while it is open. Once it is `stopped` or `failed`, nobody reads its messages. An accept or a send-back (`changes`) on an item it filed is then refused with `CONFLICT` and nothing is written: "The hangar session that filed this has ended. Hand it off to a local session or dismiss it." A remote worker's proposal never quietly turns into an execution on Breakdown's host with the person's credentials. The person can still dismiss the item, release it if it is held, or hand it off to a local session. None of these sends a message, and each one unbinds the item from the session. From then on the item is local. That is the person's explicit choice, so a later accept of a released item is an ordinary local accept.
 
+### `POST /hangar/v1/decision` — scope `agent`
+
+A worker files its result for its **driver**: a PR to review, or a question it needs answered before it can go on. The token must be a session token, and the decision is always the token's own session's; a session named in the body is ignored. It is stored as the session's pending decision. It is **not** an inbox item and never reaches the person's inbox: the driver reads it on `brain_hangar_sessions` (`pendingDecision`) and answers it, and the answer arrives on [`GET /messages`](#get-hangarv1messages--scope-agent) as a [`session_decision`](#message-kinds). Filing again (after a send-back, say) supersedes the session's pending decision, so a session has at most one.
+
+Request:
+
+```json
+{
+  "kind": "pr",
+  "title": "Cache the board query",
+  "summary": "Caches the board query per project; 400 ms → 20 ms.",
+  "pr_url": "https://github.com/cazzer/bd/pull/12",
+  "card": {
+    "question": "Merge #12, which caches the board query?",
+    "options": [{ "id": "a", "label": "Cache per project" }, { "id": "b", "label": "Cache globally", "risk": "stale across projects" }],
+    "recommend": "a",
+    "on_accept": ["merge #12"]
+  },
+  "body": "What changed and why, how it was verified. A ```diff or ```mermaid fence is fine."
+}
+```
+
+- `kind` (required): `pr` or `question`. A result with nothing to decide is not filed here; the worker ends the session.
+- `title` (required, 1–200 characters, one line).
+- `summary` (optional, at most 20,000 characters): markdown, the fallback when there is no card.
+- `pr_url` (required for `pr`, at most 2,000 characters): an http(s) URL.
+- `card` (optional): the decision card, exactly what `hangar-card check` prints: `question` (required, at most 140 characters), `options` (2 to 6 of `{ id, label, what?, risk? }`), `recommend` (an option id, only with options), `on_accept` (at most 8 steps). The rules are the card contract's (`fixtures/review-cards/README.md`), held strictly: a value over a limit is refused, never trimmed, and no other key is taken (`attachments` included; put a diff or diagram in `body`). A `key` it carries is dropped.
+- `body` (optional, at most 20,000 characters): the card's evidence, the markdown below its frontmatter.
+
+Response `200`:
+
+```json
+{ "decision": { "id": "7c1d…", "session_id": "3f0c2a9e-…", "kind": "pr", "title": "Cache the board query", "state": "pending", "created_at": "2026-11-15T09:12:30.512Z" } }
+```
+
+`decision.id` is the `item_id` the answer's message carries. Keep it, and act on `session_decision` messages whose `body.item_id` is it.
+
+Status codes: `200`, `400 invalid_json` / `invalid_request` (a bad kind, a missing `pr_url` on a `pr`, a card that breaks the contract; the message names the field), `401`, `403 forbidden` (not a session token) / `read_only`, `409 session_ended` (the session is not `claimed` or `running`), `413`, `415`.
+
+## Decisions
+
+Who decides what a session asks:
+
+- **The driver**, for everything routine: reviewing a PR (and merging it when nothing blocks it), picking among the session's options, answering a clarifying question, and releasing the session when it ends. Its MCP tools: `brain_hangar_decide { sessionId, decision: accept | changes | dismiss, option?, note? }` answers the pending decision, and `brain_hangar_outcome { sessionId, outcome: accepted | tabled, note? }` releases an ended session. None of this reaches the person.
+- **The person**, only for a big decision point: one that changes the architecture or sets a fundamental direction. The driver escalates with `brain_hangar_escalate { sessionId, card, note? }`. Breakdown files a **review** (a beads issue labelled `review`, carrying the driver's card) under the session's work item, through the laptop relay (a `review_request` action, [`docs/relay.md`](relay.md)), so it appears in the board's review queue and in Needs me. From then on the driver's `brain_hangar_decide` is refused on it: only the person answers it. When they decide the review on the board, Breakdown writes their decision to the session as a `session_decision` with `via: "review"`: at once on a Breakdown with `bd`, or when the relay reports the queued decision done.
+- **Fallback.** A work item with no registered beads project (one from another source, such as hangar's own items) has no tracker to file a review in. The escalation then files an inbox item with the card, bound to the session, as a worker's inbox request is. The person's decision on it reaches the session twice: as an `inbox_decision` for the inbox item (`item_id` is the inbox item's id), as before, and as a `session_decision` with `via: "inbox"` whose `item_id` is the decision's. Act on the second.
+
+Every answer, the driver's or the person's, arrives with the same body. A session that has ended reads nothing more, so the driver's answer is refused once it has stopped or failed.
+
 ## Releasing sessions
 
-Hangar keeps an ended session's disk, and its stopped container, until a person says they are done with the session. That decision is the session's `outcome`.
+Hangar keeps an ended session's disk, and its stopped container, until the session's driver (or a person) says the session is done with. That decision is the session's `outcome`.
 
 - **Values.** `null` (no decision yet), `accepted` (the work is done or kept), or `tabled` (set aside). Hangar treats both the same way: either one releases the session. The difference matters to people and to Breakdown. Treat any other value as `null` and keep the session, since a later v1 may add one.
-- **Who sets it.** Only a person, and only on a `stopped` or `failed` session: on Breakdown's board (a `human` token, or the local person), or by accepting an inbox request an agent filed (`brain_hangar_outcome_request`). Breakdown writes that request's card itself, the session's facts first and the agent's note quoted below them, and no other writer can create or change one, so what the person clicks always says which session it releases. An `agent` token can only ask. A session token can't even ask, and the `hangar` token never sets it: an `outcome` in a `PATCH` is ignored. The person can change it until hangar has released the session.
+- **Who sets it.** The session's driver, or a person, and only on a `stopped` or `failed` session. The driver sets it directly with `brain_hangar_outcome` (an `agent` token; `outcome_by` is its client name): releasing is the driver's call, and it never asks the person. A person sets it on Breakdown's board (a `human` token, or the local person), or by accepting an outcome request filed before `brain_hangar_outcome_request` was retired. A session token cannot set it (the worker never releases its own session), and the `hangar` token never sets it: an `outcome` in a `PATCH` is ignored. It can change until hangar has released the session.
 - **Ordering.** Setting it counts as a change of the session, so the session moves to the front of the newest-changed order. A just-decided session is inside your `limit=200` listing however many old sessions exist.
 
 On every check-in interval:
@@ -389,21 +452,21 @@ stateDiagram-v2
   2. **unknown**: no online hangar has a fresh capacity: none sent one, or the one it sent is older than three check-in intervals (a claim keeps hangar online but doesn't renew its capacity). It says when the last capacity was reported, if one was.
   3. **next**: an online hangar has a slot for the session's flavor. It says how many queued sessions of that flavor were requested before it.
   4. **not_offered**: no online hangar names the flavor in `slots` or `blocked`.
-  5. **disk_awaiting_review**: every online hangar that names the flavor blocks it with a `disk:` reason, and at least one ended session still holds a disk with no outcome. It quotes your reason (without the `disk:` prefix) and lists those sessions (up to 20, oldest ended first, with a total), each with its work item and the allocated bytes your `usage` reported for it. A person's accept or table releases them (see [Releasing sessions](#releasing-sessions)).
+  5. **disk_awaiting_review**: every online hangar that names the flavor blocks it with a `disk:` reason, and at least one ended session still holds a disk with no outcome. It quotes your reason (without the `disk:` prefix) and lists those sessions (up to 20, oldest ended first, with a total), each with its work item and the allocated bytes your `usage` reported for it. Their drivers release them with `brain_hangar_outcome`, accepted or tabled, without asking the person (see [Releasing sessions](#releasing-sessions)).
   6. **capacity**: otherwise. It quotes each blocking hangar's reason (`no free slot` for a flavor at 0 slots with no `blocked` entry).
 
-  Agents read it as `waiting` on each queued session from `brain_hangar_sessions`, whose response carries the sessions awaiting review once, as `awaitingReview` (`{ sessions, total }`, or `null` when no listed session waits on a full disk), rather than on every queued session. People see it on the session's row in the board drawer, where each session awaiting review links to its work item, or takes Accept or Table right there when it has no board to link to. `brain_hangar_status` and the board's hangar chip show the latest capacity and when it was reported.
+  Agents read it as `waiting` on each queued session from `brain_hangar_sessions`, whose response carries the ended sessions awaiting release once, as `awaitingReview` (`{ sessions, total }`, or `null` when no listed session waits on a full disk), rather than on every queued session; a driver releases the ones it drives. People see it on the session's row in the board drawer, where each session awaiting review links to its work item, or takes Accept or Table right there when it has no board to link to. `brain_hangar_status` and the board's hangar chip show the latest capacity and when it was reported.
 
 ## Session tokens
 
 - **One per claim.** A successful claim mints a new token, returned once in that response. Its client name is `session-<session id>`, its scope is `agent`, and it is bound to that session.
 - **Give it to the worker.** Pass it into the container that runs the session. It is the worker's only credential. With it, the worker can:
-  - read its messages here, with `GET /hangar/v1/messages`;
+  - read its messages here, with `GET /hangar/v1/messages`, and file its result for its driver with `POST /hangar/v1/decision`;
   - use Breakdown's MCP server (`Authorization: Bearer <token>` on `/mcp`, port 5320 by default), where its writes are attributed to `session-<id>`;
   - file and complete inbox requests with the inbox scripts (`BREAKDOWN_API=<web base URL> BREAKDOWN_TOKEN=<token> bin/inbox request …`). An item filed this way is bound to the session, and the person's decision on it arrives as an `inbox_decision` message. The token can re-send and complete only items its own session filed. A key that names another session's item, or a local or ingested one, is refused, and nothing is written.
 
   It cannot decide anything a person decides: no agent write, with any token, can set an inbox item to `accepted`, `changes`, or `dismissed`, or write its feedback. A new item is always `pending`. It cannot use the hangar endpoints.
-- **What it can reach.** A session token is a full `agent` credential on MCP, minus three tools. It can read the whole store, including every inbox item, not only its session's, and it can write nodes and edges anywhere outside the reserved hangar ones. It cannot call `brain_merge`, `brain_hangar_request`, or `brain_hangar_outcome_request`. Those tools are neither listed nor run for it, so it cannot merge nodes, queue more sessions, or ask the person to release a session. Treat it as a credential that can read and write your knowledge store, and hand it only to the worker it was minted for.
+- **What it can reach.** A session token is a full `agent` credential on MCP, minus three tools. It can read the whole store, including every inbox item, not only its session's, and it can write nodes and edges anywhere outside the reserved hangar ones. It cannot call `brain_merge`, `brain_hangar_request`, `brain_hangar_outcome`, `brain_hangar_decide`, `brain_hangar_escalate`, or the retired `brain_hangar_outcome_request`. Those tools are neither listed nor run for it, so it cannot merge nodes, queue more sessions, or release, decide, or escalate its own work: those are its driver's. Treat it as a credential that can read and write your knowledge store, and hand it only to the worker it was minted for.
 - **A leaked hangar token mints these.** Anyone holding the `hangar` token can claim queued sessions and receive their session tokens. To stop that, revoke the hangar token (`pnpm -s client-token revoke <hangar name>`). Its sessions' tokens die as those sessions end. Revoke a session token on its own with `pnpm -s client-token revoke session-<id>`.
 - **Lifetime.** The token dies when the session reaches `stopped` or `failed`, or is requeued. After that, every request with it gets `401`.
 - **Lost a token?** Breakdown cannot show it again. On startup, and whenever you are unsure, call `GET /hangar/v1/sessions?state=claimed`. Requeue any `claimed` session you hold no token for, with a reason such as `"hangar restarted before starting it"`, and a later claim gets a fresh token. For a `running` session whose worker lost its token, report `failed`.
@@ -441,7 +504,7 @@ Branch on `code`, which is stable within v1. `message` is for people, and its wo
 | 404 | `not_found` | No such endpoint, or no session with that id (a malformed id included). |
 | 405 | `method_not_allowed` | A known path with the wrong method. The `Allow` header lists the right ones. |
 | 409 | `invalid_transition` | The state change breaks the [state machine](#session-state-machine). |
-| 409 | `session_ended` | A `PATCH` on an ended session sets a placement field, changes a released session, or acknowledges a release before a person set an outcome (see [`PATCH`](#patch-hangarv1sessionsid--scope-hangar)). |
+| 409 | `session_ended` | A `PATCH` on an ended session sets a placement field, changes a released session, or acknowledges a release before an outcome was set (see [`PATCH`](#patch-hangarv1sessionsid--scope-hangar)); or a `POST /decision` for a session that is not `claimed` or `running`. |
 | 413 | `too_large` | The body is over 64 KiB, declared or sent. The connection is closed. |
 | 415 | `unsupported_media_type` | A `POST` or `PATCH` without `Content-Type: application/json`. |
 | 429 | `too_many_waiters` | This client already holds 4 long-polls open (see [Long-poll](#long-poll)). Sent with `Retry-After: 1`. |
@@ -454,3 +517,7 @@ Branch on `code`, which is stable within v1. `message` is for people, and its wo
   - **Requests.** Breakdown ignores a request body field it does not know. A newer hangar can send a field this server predates, and the request still succeeds as if the field were absent. Documented fields are still checked: a missing required field, a wrong type, or an out-of-range value is a `400 invalid_request`. So check a field's name against this document: a misspelled optional field is ignored, not refused.
   - **Responses.** Responses may gain fields, messages may gain kinds, and error messages may be reworded. Clients must ignore fields and kinds they don't know.
 - A field changes meaning or type only under a new prefix.
+- **Decisions (`POST /decision`, `session_decision`).** Added within v1, so either side may predate them:
+  - **An older hangar** keeps filing its result as an inbox item (`bin/inbox request` with the session token) and waiting for `inbox_decision`. That keeps working unchanged: the item reaches the person's inbox, as before, and their decision arrives as before. Only a driver's answers need the new endpoint, so until hangar moves, its decisions go to the person.
+  - **A newer hangar against an older Breakdown** gets `404 not_found` from `POST /decision`. Fall back to filing an inbox item, and keep reading both kinds: a `session_decision` for the decision's id, and an `inbox_decision` for an inbox item's.
+  - A worker should accept both kinds for whatever id it filed under, and ignore `by` and `via` if it has no use for them.

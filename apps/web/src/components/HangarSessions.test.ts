@@ -241,7 +241,7 @@ describe("HangarSessions", () => {
   const GONE_ID = "3f2a91c0-6f7d-4a54-9a0b-1c2d3e4f5a6b";
   const diskWaiting = (sessions: unknown[], total: number) => ({
     kind: "disk_awaiting_review",
-    text: `Waiting on disk (hangar-linux says "need 8192 MB, free 1200 MB"). ${total} ended sessions still hold disks; accept or table them to free space.`,
+    text: `Waiting on disk (hangar-linux says "need 8192 MB, free 1200 MB"). ${total} ended sessions still hold disks; their drivers release them (accepted or tabled) to free space.`,
     reasons: [{ hangar: "hangar-linux", reason: "disk: need 8192 MB, free 1200 MB" }],
     sessions,
     total,

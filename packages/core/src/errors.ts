@@ -776,7 +776,7 @@ export class HangarEndedSessionChangeError extends KnowledgeStoreError {
         ? `hangar session ${sessionId} has ended, so ${field} can only be cleared (null), not set`
         : kind === "released"
           ? `hangar session ${sessionId} is released (a person set its outcome and hangar holds nothing for it), so ${field} can no longer change`
-          : `hangar session ${sessionId} has no outcome yet, so its disk_path cannot be cleared: acknowledge a release only after a person has accepted or tabled the session`,
+          : `hangar session ${sessionId} has no outcome yet, so its disk_path cannot be cleared: acknowledge a release only after its driver or a person has accepted or tabled the session`,
     );
   }
 }
@@ -912,5 +912,35 @@ export class RelayActionNotClaimedByError extends KnowledgeStoreError {
         ? `relay action ${actionId} is claimed by ${JSON.stringify(claimedBy)}, not ${JSON.stringify(relay)}`
         : `relay action ${actionId} is ${state}, so ${JSON.stringify(relay)} cannot change it`,
     );
+  }
+}
+
+// --- Hangar decisions (hangar-driver-decisions) ----------------------------------------
+
+/**
+ * A hangar decision a call cannot act on (hangar-decisions.ts), `reason`
+ * saying why: the session has no open decision (`none`), the open one was
+ * escalated to the person, so only their decision answers it (`escalated`;
+ * an agent never decides a review), it was not escalated (`not_escalated`),
+ * its session has ended and reads no more messages (`session_ended`), or the
+ * session cannot file one now (`session_state`). Nothing was written.
+ */
+export class HangarDecisionRefusedError extends KnowledgeStoreError {
+  constructor(
+    readonly sessionId: string,
+    readonly reason: "none" | "escalated" | "not_escalated" | "session_ended" | "session_state",
+    detail: string,
+  ) {
+    super(`hangar session ${sessionId}: ${detail}`);
+  }
+}
+
+/** A hangar decision's field breaks the contract (hangar-decisions.ts), `field` naming it. Nothing was written. */
+export class InvalidHangarDecisionError extends KnowledgeStoreError {
+  constructor(
+    readonly field: string,
+    reason: string,
+  ) {
+    super(`${field}: ${reason}`);
   }
 }

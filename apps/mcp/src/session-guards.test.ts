@@ -85,13 +85,14 @@ async function session(): Promise<string> {
 }
 
 describe("a session-bound server", () => {
-  it("neither lists nor runs brain_merge, brain_hangar_request, and brain_hangar_outcome_request, and serves the other tools", async () => {
+  it("neither lists nor runs brain_merge, brain_hangar_request, the retired brain_hangar_outcome_request, or the driver's tools, and serves the other tools", async () => {
     const hangarSessionId = randomUUID();
     const client = await connect({ hangarSessionId });
     const names = (await client.listTools()).tools.map((t) => t.name);
     expect(names).not.toContain("brain_merge");
     expect(names).not.toContain("brain_hangar_request");
     expect(names).not.toContain("brain_hangar_outcome_request");
+    for (const name of ["brain_hangar_outcome", "brain_hangar_decide", "brain_hangar_escalate"]) expect(names).not.toContain(name);
     expect(names).toEqual(expect.arrayContaining(["brain_write", "brain_link", "brain_search", "brain_hangar_sessions"]));
 
     const [a, b] = [await fixture("dupe a", "doc"), await fixture("dupe b", "doc")];
@@ -108,7 +109,7 @@ describe("a session-bound server", () => {
 
   it("is the only kind narrowed: a host-minted token's server lists both", async () => {
     const names = (await (await connect({ tokenClient: "laptop" })).listTools()).tools.map((t) => t.name);
-    expect(names).toEqual(expect.arrayContaining(["brain_merge", "brain_hangar_request", "brain_hangar_outcome_request"]));
+    expect(names).toEqual(expect.arrayContaining(["brain_merge", "brain_hangar_request", "brain_hangar_outcome", "brain_hangar_decide", "brain_hangar_escalate"]));
   });
 });
 

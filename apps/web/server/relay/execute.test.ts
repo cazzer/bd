@@ -248,3 +248,61 @@ describe("executeAction: herdr prompts and re-ingests", () => {
     expect(await executeAction(act("beads_reingest", { project_key: "bd" }), deps)).toEqual({ state: "failed", error: "no issues to ingest" });
   });
 });
+
+describe("executeAction: review requests (a hangar driver's escalation)", () => {
+  const review = { images: [], summary: "Move the cache out of Postgres?", key: "hangar-0123456789abcdef0123456789abcdef", question: "Move the cache out of Postgres?", options: OPTIONS, recommend: "a" };
+  const request = { project_key: "bd", cwd: DIR, issue_id: "bd-w1", title: "Review: Move the cache out of Postgres?", description: "It changes the deployment.", review };
+
+  /** A relay whose bd answers show, list, and create as `answers` say, through the allowlisted runner. */
+  function filer(answers: { issueType?: string; children?: unknown[]; created?: string; fails?: string } = {}) {
+    const bd = vi.fn(async (args: readonly string[], _cwd: string) => {
+      if (answers.fails === args[0]) throw new Error(`bd ${args[0]} exited 1`);
+      if (args[0] === "show") return JSON.stringify([{ id: "bd-w1", issue_type: answers.issueType ?? "task" }]);
+      if (args[0] === "list") return JSON.stringify(answers.children ?? []);
+      if (args[0] === "create") return JSON.stringify({ id: answers.created ?? "bd-r9" });
+      return "";
+    });
+    const reg = { get: (project: string) => (project === "bd" ? { project, dir: DIR } : undefined), refresh: vi.fn(async () => false) };
+    const runners = createRelayRunners({ registry: reg, herdrSockets: [socket], bd, herdr: vi.fn(async () => {}), checkDir: () => null });
+    const reingest = vi.fn(async () => ({ changed: true }));
+    const deps: ExecuteDeps = { registry: reg, writerFor: () => createReviewWriter({}), bdFor: (p) => runners.bdFor(p), runHerdr: runners.runHerdr, reingest };
+    return { deps, bd, reingest };
+  }
+
+  it("files a new review under the work item: create, metadata, blocks; re-ingests; done { review_id }", async () => {
+    const { deps, bd, reingest } = filer();
+    const report = await executeAction(act("review_request", request, "2000-01-01T00:00:00.000Z"), deps);
+    expect(report).toEqual({ state: "done", result: { review_id: "bd-r9", reused: false } });
+    expect(bd.mock.calls.map(([args]) => args[0])).toEqual(["show", "list", "create", "update", "dep"]);
+    expect(bd.mock.calls[2]![0]).toEqual(["create", "--title", request.title, "--type", "task", "--labels", "review", "--no-inherit-labels", "--parent", "bd-w1", "-d", request.description, "--acceptance", "Accepted from the breakdown board", "--json"]);
+    expect(bd.mock.calls[3]![0]).toEqual(["update", "bd-r9", "--metadata", JSON.stringify({ review })]);
+    expect(bd.mock.calls[4]![0]).toEqual(["dep", "add", "bd-w1", "bd-r9", "--type", "blocks"]);
+    expect(bd.mock.calls.every(([, cwd]) => cwd === DIR)).toBe(true);
+    expect(reingest).toHaveBeenCalledWith("bd");
+  });
+
+  it("reuses the open review holding its key (a retry after a lost report), and adds no second dependency", async () => {
+    const { deps, bd } = filer({ children: [{ id: "bd-r1", created_at: "2026-11-15T10:00:00Z", metadata: { review: { key: review.key } } }, { id: "bd-r2", metadata: { review: { key: "other" } } }] });
+    expect(await executeAction(act("review_request", request), deps)).toEqual({ state: "done", result: { review_id: "bd-r1", reused: true } });
+    expect(bd.mock.calls.map(([args]) => args[0])).toEqual(["show", "list", "update"]);
+  });
+
+  it("does not make a review block an epic", async () => {
+    const { deps, bd } = filer({ issueType: "epic" });
+    expect((await executeAction(act("review_request", request), deps)).state).toBe("done");
+    expect(bd.mock.calls.map(([args]) => args[0])).not.toContain("dep");
+  });
+
+  it("names the failing step, keeping the review id once one exists; refuses another checkout and a relay that cannot file", async () => {
+    const failedUpdate = await executeAction(act("review_request", request), filer({ fails: "update" }).deps);
+    expect(failedUpdate).toEqual({ state: "failed", error: "bd update failed: bd update exited 1", result: { review_id: "bd-r9" } });
+    const failedCreate = await executeAction(act("review_request", request), filer({ fails: "create" }).deps);
+    expect(failedCreate).toMatchObject({ state: "failed", error: expect.stringMatching(/^bd create failed/) });
+    expect(failedCreate).not.toHaveProperty("result");
+    const elsewhere = filer();
+    expect(await executeAction(act("review_request", { ...request, cwd: "/Users/me/dev/other" }), elsewhere.deps)).toMatchObject({ state: "failed", error: expect.stringMatching(/^refused: .* is not project bd's checkout/) });
+    expect(elsewhere.bd).not.toHaveBeenCalled();
+    const { bdFor: _none, ...noFiler } = filer().deps;
+    expect(await executeAction(act("review_request", request), noFiler)).toMatchObject({ state: "failed", error: "refused: this relay cannot file reviews; nothing ran" });
+  });
+});

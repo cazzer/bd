@@ -26,7 +26,8 @@
 // decision or herdr prompt queued more than `RELAY_MAX_AGE_S` (24 h) ago is
 // failed at its next claim as stale rather than run: a decision or a reply
 // that old is no longer the person's present intent. A re-ingest is never
-// stale. A cheap probe runs first, so a long-poll that finds nothing opens
+// stale, and neither is a review request (hangar-driver-decisions): an
+// escalation waits for the person however long the relay was away. A cheap probe runs first, so a long-poll that finds nothing opens
 // no transaction.
 //
 // One action per target is open at a time: the unique open-target index
@@ -55,9 +56,12 @@ import {
   isAllowedHerdrArgs,
   isRelayIssueId,
   isRelayPane,
+  isRelayReviewMetadata,
   isRelayText,
   MAX_RELAY_HERDR_PAYLOAD_TEXT_LENGTH,
   MAX_RELAY_ISSUE_ID_LENGTH,
+  MAX_RELAY_REVIEW_DESCRIPTION_LENGTH,
+  MAX_RELAY_REVIEW_TITLE_LENGTH,
   RELAY_ISSUE_ID_PATTERN,
 } from "./relay-allowlist.js";
 import {
@@ -161,20 +165,45 @@ export const herdrPromptPayloadSchema = z
 
 export const beadsReingestPayloadSchema = z.strictObject({ project_key: projectKey });
 
+/**
+ * A review the relay files under a work item (hangar-driver-decisions: a
+ * driver's escalation): `issue_id` is the work item, `review` the review
+ * metadata `bd update --metadata` sets, whose `key` finds the review again
+ * on a retry, so a lost report never files a second one. Its shape is what
+ * `bin/review-request` writes for a card.
+ */
+export const reviewRequestPayloadSchema = z.strictObject({
+  project_key: projectKey,
+  cwd: z
+    .string()
+    .max(MAX_RELAY_CWD_LENGTH, `must be at most ${MAX_RELAY_CWD_LENGTH} characters`)
+    .refine((p) => path.isAbsolute(p), "must be an absolute path")
+    .refine((p) => !hasControlChar(p), "must not contain control characters"),
+  issue_id: issueId,
+  title: z.string().refine((t) => isRelayText(t, MAX_RELAY_REVIEW_TITLE_LENGTH), `must be 1 to ${MAX_RELAY_REVIEW_TITLE_LENGTH} characters, with no NUL, not starting with "-"`),
+  description: z.string().refine((t) => isRelayText(t, MAX_RELAY_REVIEW_DESCRIPTION_LENGTH), `must be 1 to ${MAX_RELAY_REVIEW_DESCRIPTION_LENGTH} characters, with no NUL, not starting with "-"`),
+  review: z
+    .record(z.string(), z.unknown())
+    .refine((review) => isRelayReviewMetadata(JSON.stringify({ review })), "must be a valid review card with a key (core reviews.ts), at most the metadata cap"),
+});
+
 export type ReviewDecisionPayload = z.infer<typeof reviewDecisionPayloadSchema>;
 export type HerdrPromptPayload = z.infer<typeof herdrPromptPayloadSchema>;
 export type BeadsReingestPayload = z.infer<typeof beadsReingestPayloadSchema>;
+export type ReviewRequestPayload = z.infer<typeof reviewRequestPayloadSchema>;
 
 export interface RelayPayloads {
   review_decision: ReviewDecisionPayload;
   herdr_prompt: HerdrPromptPayload;
   beads_reingest: BeadsReingestPayload;
+  review_request: ReviewRequestPayload;
 }
 
 export const RELAY_PAYLOAD_SCHEMAS = {
   review_decision: reviewDecisionPayloadSchema,
   herdr_prompt: herdrPromptPayloadSchema,
   beads_reingest: beadsReingestPayloadSchema,
+  review_request: reviewRequestPayloadSchema,
 } as const;
 
 function relayKind(value: unknown, field = "kind"): RelayActionKind {
@@ -495,7 +524,7 @@ export async function claimRelayAction(db: Database, input: ClaimRelayActionInpu
     for (let candidate = 0; candidate < MAX_RELAY_CLAIM_CANDIDATES; candidate += 1) {
       // A row this transaction marked failed no longer matches the predicate.
       const locked = await tx.execute<RelayActionRow & { stale: boolean }>(sql`
-        SELECT ${COLUMNS}, (kind <> 'beads_reingest' AND created_at < now() - make_interval(secs => ${RELAY_MAX_AGE_S}))
+        SELECT ${COLUMNS}, (kind NOT IN ('beads_reingest', 'review_request') AND created_at < now() - make_interval(secs => ${RELAY_MAX_AGE_S}))
           AS stale
         FROM relay_actions
         WHERE ${predicate}

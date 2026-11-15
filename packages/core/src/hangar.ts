@@ -1228,7 +1228,7 @@ export interface HangarWaitReason {
   reason: string;
 }
 
-/** An ended session still holding a disk with no outcome: a person's accept or table frees it. */
+/** An ended session still holding a disk with no outcome: its driver's release (or a person's accept or table) frees it. */
 export interface HangarAwaitingReviewSession {
   id: string;
   claimedBy: string | null;
@@ -1446,7 +1446,8 @@ export function classifyQueuedWait(session: { flavor: string; ahead: number }, c
       return bytes === undefined ? { ...s } : { ...s, diskAllocatedBytes: bytes };
     });
     const quoted = reasons.map((r) => quoteReason(r.hangar, r.reason.trim().slice(DISK_PREFIX.length).trim())).join("; ");
-    const held = total === 1 ? "1 ended session still holds a disk; accept or table it to free space." : `${total} ended sessions still hold disks; accept or table them to free space.`;
+    // Releasing is the driver's call (brain_hangar_outcome), not something to ask the person (hangar-driver-decisions).
+    const held = total === 1 ? "1 ended session still holds a disk; its driver releases it (accepted or tabled) to free space." : `${total} ended sessions still hold disks; their drivers release them (accepted or tabled) to free space.`;
     return { kind: "disk_awaiting_review", text: `Waiting on disk (${quoted}). ${held}`, reasons, sessions, total };
   }
   const quoted = reasons.map((r) => (r.reason === NO_FREE_SLOT ? `${r.hangar} has no free slot` : quoteReason(r.hangar, r.reason))).join("; ");

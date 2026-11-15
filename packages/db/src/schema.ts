@@ -455,6 +455,55 @@ export const hangarMessages = pgTable(
 );
 
 /**
+ * `hangar_decisions` — what a remote session asks its driver to decide (a
+ * PR to review, a question to answer), filed by the worker with its session
+ * token (`POST /hangar/v1/decision`; openspec/changes/hangar-driver-decisions).
+ * Rows, not nodes, like `hangar_messages`: a session's request and its
+ * answer are delivery, not knowledge, and never reach the person's inbox.
+ *
+ * State machine: pending → decided (the driver, or the person on an
+ * escalation) | escalated (the driver handed it to the person) | superseded
+ * (the session filed again). escalated → decided, or back to pending when
+ * the escalation could not be filed. `escalation` records where it went:
+ * `{ via: "review", project_key, issue_id, review_key, relay_action_id,
+ * review_id? }` or `{ via: "inbox", item_id }`; a person's decision is routed
+ * to the session only through a match on it, so the binding is the server's.
+ */
+export const HANGAR_DECISION_KINDS = ["pr", "question"] as const;
+export type HangarDecisionKind = (typeof HANGAR_DECISION_KINDS)[number];
+export const HANGAR_DECISION_STATES = ["pending", "decided", "escalated", "superseded"] as const;
+export type HangarDecisionState = (typeof HANGAR_DECISION_STATES)[number];
+
+export const hangarDecisions = pgTable(
+  "hangar_decisions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sessionId: uuid("session_id").notNull(),
+    kind: text("kind").$type<HangarDecisionKind>().notNull(),
+    title: text("title").notNull(),
+    summary: text("summary").notNull().default(""),
+    prUrl: text("pr_url"),
+    // The decision card (core reviews.ts `normalizeDecisionCard`) and its evidence body; null without one.
+    card: jsonb("card"),
+    state: text("state").$type<HangarDecisionState>().notNull().default("pending"),
+    escalation: jsonb("escalation"),
+    // `{ decision, outcome, option?, message, by, via }` once decided.
+    decision: jsonb("decision"),
+    filedBy: text("filed_by"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("hangar_decisions_session_idx").on(table.sessionId, table.createdAt),
+    index("hangar_decisions_open_idx")
+      .on(table.sessionId)
+      .where(sql`${table.state} IN ('pending', 'escalated')`),
+    check("hangar_decisions_kind_check", sql`${table.kind} IN ('pr', 'question')`),
+    check("hangar_decisions_state_check", sql`${table.state} IN ('pending', 'decided', 'escalated', 'superseded')`),
+  ],
+);
+
+/**
  * `relay_actions` — host-binary work a Breakdown without `bd` or `herdr`
  * queues for the laptop relay (laptop-relay decisions 1, 2, and 9). Rows,
  * not nodes: bookkeeping, not knowledge, and a revision per state change
@@ -470,7 +519,7 @@ export const hangarMessages = pgTable(
  * replies to one pane are two actions). The origin index serves the UI's
  * per-item read: a card or inbox row's open or recent action.
  */
-export const RELAY_ACTION_KINDS = ["review_decision", "herdr_prompt", "beads_reingest"] as const;
+export const RELAY_ACTION_KINDS = ["review_decision", "herdr_prompt", "beads_reingest", "review_request"] as const;
 export type RelayActionKind = (typeof RELAY_ACTION_KINDS)[number];
 export const RELAY_ACTION_STATES = ["queued", "claimed", "done", "failed"] as const;
 export type RelayActionState = (typeof RELAY_ACTION_STATES)[number];
@@ -505,7 +554,7 @@ export const relayActions = pgTable(
     uniqueIndex("relay_actions_open_target_idx")
       .on(table.kind, sql`(${table.payload}->>'project_key')`, sql`coalesce(${table.payload}->>'issue_id', '')`)
       .where(sql`${table.state} IN ('queued', 'claimed') AND ${table.kind} <> 'herdr_prompt'`),
-    check("relay_actions_kind_check", sql`${table.kind} IN ('review_decision', 'herdr_prompt', 'beads_reingest')`),
+    check("relay_actions_kind_check", sql`${table.kind} IN ('review_decision', 'herdr_prompt', 'beads_reingest', 'review_request')`),
     check("relay_actions_state_check", sql`${table.state} IN ('queued', 'claimed', 'done', 'failed')`),
   ],
 );

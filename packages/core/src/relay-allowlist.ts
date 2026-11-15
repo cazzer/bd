@@ -22,9 +22,16 @@
 //
 // The two read-only `bd` shapes are exactly what the beads ingest issues
 // (beads-ingest.ts `fetchIssues`, `fetchReviewComments`).
+//
+// Filing a review (a `review_request`, hangar-driver-decisions) adds four
+// shapes, the ones `bin/review-request` runs for a card: listing a work
+// item's open reviews, creating one under it (every literal fixed: type
+// task, label `review`, the review acceptance line), setting its `review`
+// metadata (a JSON object holding only `review`, a valid card with a key),
+// and making it block the work item.
 
 import { fitText } from "./fit-text.js";
-import { REVIEW_PANE_PATTERN } from "./reviews.js";
+import { MAX_REVIEW_METADATA_CHARS, normalizeReviewMetadata, REVIEW_KEY_PATTERN, REVIEW_PANE_PATTERN } from "./reviews.js";
 
 /** A beads issue id: a lowercase prefix, a hyphen, then the hash or dotted child suffix (`bd-d38.11`). */
 export const RELAY_ISSUE_ID_PATTERN = /^[a-z][a-z0-9-]*-[a-z0-9.]+$/;
@@ -55,6 +62,38 @@ export function fitRelayHerdrText(text: string): string {
 }
 
 const CHANGES_LABEL = "review:changes";
+/** A filed review's title (`Review: <question>`), as bin/review-request cuts it. */
+export const MAX_RELAY_REVIEW_TITLE_LENGTH = 120;
+/** A filed review's description: the card's evidence and its footer. */
+export const MAX_RELAY_REVIEW_DESCRIPTION_LENGTH = 16_000;
+/** `--metadata` JSON for a filed review: the review cap plus the `{"review":…}` wrapper. */
+export const MAX_RELAY_REVIEW_METADATA_LENGTH = MAX_REVIEW_METADATA_CHARS + 16;
+/** Every review bead's acceptance criteria (bin/review-request-lib.mjs REVIEW_ACCEPTANCE). */
+export const RELAY_REVIEW_ACCEPTANCE = "Accepted from the breakdown board";
+/** The open statuses `bd list` is asked for when looking for a work item's reviews. */
+export const RELAY_REVIEW_OPEN_STATUSES = "open,in_progress,blocked,deferred";
+
+/**
+ * Whether `json` is the `--metadata` a filed review takes: a JSON object
+ * with only `review`, whose card normalizes valid (core reviews.ts) and
+ * carries a key and a question, within the cap.
+ */
+export function isRelayReviewMetadata(json: unknown): json is string {
+  if (!isRelayText(json, MAX_RELAY_REVIEW_METADATA_LENGTH)) return false;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    return false;
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+  const keys = Object.keys(parsed);
+  if (keys.length !== 1 || keys[0] !== "review") return false;
+  const review = (parsed as Record<string, unknown>)["review"];
+  const normalized = normalizeReviewMetadata(review);
+  if ("invalid" in normalized) return false;
+  return typeof normalized.key === "string" && REVIEW_KEY_PATTERN.test(normalized.key) && typeof normalized.question === "string" && normalized.question !== "";
+}
 
 export function isRelayIssueId(value: unknown): value is string {
   return typeof value === "string" && value.length <= MAX_RELAY_ISSUE_ID_LENGTH && RELAY_ISSUE_ID_PATTERN.test(value);
@@ -83,13 +122,48 @@ export function isAllowedBdArgs(args: unknown): boolean {
       return (command === "show" || command === "comments") && isRelayIssueId(a) && b === "--json";
     case 4:
       if (command === "comments") return a === "add" && isRelayIssueId(b) && isRelayText(c, MAX_RELAY_BD_TEXT_LENGTH);
-      if (command === "update") return isRelayIssueId(a) && (b === "--add-label" || b === "--remove-label") && c === CHANGES_LABEL;
+      if (command === "update") {
+        if (b === "--metadata") return isRelayIssueId(a) && isRelayReviewMetadata(c);
+        return isRelayIssueId(a) && (b === "--add-label" || b === "--remove-label") && c === CHANGES_LABEL;
+      }
       if (command === "close") return isRelayIssueId(a) && b === "--reason" && isRelayText(c, MAX_RELAY_BD_TEXT_LENGTH);
       if (command === "list") return a === "--status=all" && b === "--limit=0" && c === "--json";
       return false;
+    case 6:
+      // dep add <work item> <review> --type blocks
+      return command === "dep" && a === "add" && isRelayIssueId(b) && isRelayIssueId(c) && args[4] === "--type" && args[5] === "blocks";
+    case 10:
+      // list --parent <work item> --label review --status <open> --limit 0 --json
+      return (
+        command === "list" && a === "--parent" && isRelayIssueId(b) && c === "--label" && args[4] === "review" &&
+        args[5] === "--status" && args[6] === RELAY_REVIEW_OPEN_STATUSES && args[7] === "--limit" && args[8] === "0" && args[9] === "--json"
+      );
+    case 15:
+      return isAllowedReviewCreate(args);
     default:
       return false;
   }
+}
+
+/** `create --title <t> --type task --labels review --no-inherit-labels --parent <id> -d <description> --acceptance <fixed> --json`. */
+function isAllowedReviewCreate(args: readonly string[]): boolean {
+  const literal = (i: number, value: string) => args[i] === value;
+  return (
+    literal(0, "create") && literal(1, "--title") && isRelayText(args[2], MAX_RELAY_REVIEW_TITLE_LENGTH) &&
+    literal(3, "--type") && literal(4, "task") && literal(5, "--labels") && literal(6, "review") && literal(7, "--no-inherit-labels") &&
+    literal(8, "--parent") && isRelayIssueId(args[9]) && literal(10, "-d") && isRelayText(args[11], MAX_RELAY_REVIEW_DESCRIPTION_LENGTH) &&
+    literal(12, "--acceptance") && literal(13, RELAY_REVIEW_ACCEPTANCE) && literal(14, "--json")
+  );
+}
+
+/** The `bd create` argument vector for a filed review (`isAllowedBdArgs` takes exactly this shape). */
+export function relayReviewCreateArgs(input: { title: string; parent: string; description: string }): string[] {
+  return ["create", "--title", input.title, "--type", "task", "--labels", "review", "--no-inherit-labels", "--parent", input.parent, "-d", input.description, "--acceptance", RELAY_REVIEW_ACCEPTANCE, "--json"];
+}
+
+/** The `bd list` argument vector for a work item's open reviews. */
+export function relayReviewListArgs(parent: string): string[] {
+  return ["list", "--parent", parent, "--label", "review", "--status", RELAY_REVIEW_OPEN_STATUSES, "--limit", "0", "--json"];
 }
 
 /** `text` with the relay's provenance line before it, on the same line: what the relay's herdr runner sends. */
