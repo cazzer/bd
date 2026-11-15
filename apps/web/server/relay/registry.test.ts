@@ -23,6 +23,10 @@ describe("checkoutProblem", () => {
     const link = path.join(tmp, "link");
     symlinkSync(real, link);
     expect(checkoutProblem(link)).toMatch(/^resolves to .*target/);
+    const linkedBeads = path.join(tmp, "linked-beads");
+    mkdirSync(linkedBeads);
+    symlinkSync(path.join(real, ".beads"), path.join(linkedBeads, ".beads"));
+    expect(checkoutProblem(linkedBeads)).toBe("has no .beads/ directory");
     expect(checkoutProblem(path.join(tmp, "missing"))).toBe("does not exist on this machine");
     const file = path.join(tmp, "file");
     writeFileSync(file, "");
@@ -35,12 +39,17 @@ describe("checkoutProblem", () => {
 describe("the relay registry", () => {
   const good = checkout("bd");
   const other = checkout("other");
+  const local = [
+    { project: "bd", dir: good },
+    { project: "other", dir: other },
+    { project: "gone", dir: path.join(tmp, "gone") },
+  ];
   const answer = { projects: [{ key: "bd", path: good }, { key: "other", path: other }, { key: "gone", path: path.join(tmp, "gone") }], push: true };
 
-  it("keeps the server's projects that are checkouts here, with the push flag", async () => {
+  it("keeps the local projects the server lists at the same path that are checkouts here, with the push flag", async () => {
     const lines: string[] = [];
     const send = vi.fn(async () => answer);
-    const registry = createRelayRegistry({ client: { send }, log: (l) => lines.push(l) });
+    const registry = createRelayRegistry({ client: { send }, local, log: (l) => lines.push(l) });
     expect(registry.loaded()).toBe(false);
     expect(await registry.refresh()).toBe(true);
     expect(send).toHaveBeenCalledWith("GET", "/relay/v1/projects", undefined, {});
@@ -57,17 +66,43 @@ describe("the relay registry", () => {
     expect(lines.length).toBe(said);
   });
 
-  it("narrows to --project keys and says when one is not registered", async () => {
+  it("never adds a project the server lists that the relay was not given, and never takes the server's path", async () => {
     const lines: string[] = [];
-    const registry = createRelayRegistry({ client: { send: async () => answer }, only: ["bd", "nope"], log: (l) => lines.push(l) });
+    const elsewhere = checkout("elsewhere");
+    const send = vi.fn(async () => ({
+      projects: [
+        { key: "bd", path: elsewhere },
+        { key: "intruder", path: other },
+        { key: "evil\n[relay] forged line", path: other },
+      ],
+      push: true,
+    }));
+    const registry = createRelayRegistry({ client: { send }, local: [{ project: "bd", dir: good }], log: (l) => lines.push(l) });
+    await registry.refresh();
+    expect(registry.entries()).toEqual([]);
+    expect(registry.get("bd")).toBeUndefined();
+    expect(registry.get("intruder")).toBeUndefined();
+    expect(lines).toContain(`[relay] warning: the server lists project bd at ${JSON.stringify(elsewhere)}, not this relay's ${good}; ignoring the server's entry and not serving bd until they agree`);
+    expect(lines.some((l) => l.startsWith("[relay] ignoring 2 project(s) the server lists") && l.includes("intruder"))).toBe(true);
+    expect(lines.every((l) => !l.includes("\n"))).toBe(true);
+
+    // Once the server agrees, the local path is served.
+    send.mockResolvedValueOnce({ projects: [{ key: "bd", path: good }], push: false });
+    expect(await registry.refresh()).toBe(true);
+    expect(registry.entries()).toEqual([{ project: "bd", dir: good }]);
+  });
+
+  it("narrows to what the server lists: a local project it does not list is not served, and says so", async () => {
+    const lines: string[] = [];
+    const registry = createRelayRegistry({ client: { send: async () => ({ projects: [{ key: "bd", path: good }], push: true }) }, local: [{ project: "bd", dir: good }, { project: "other", dir: other }], log: (l) => lines.push(l) });
     await registry.refresh();
     expect(registry.entries()).toEqual([{ project: "bd", dir: good }]);
-    expect(lines).toContain("[relay] project nope (--project) is not registered on the server; register it with a local beads ingest");
+    expect(lines).toContain(`[relay] project other (${other}) is not registered on the server; not serving it until it is (register it with a local beads ingest)`);
   });
 
   it("throws on a malformed answer, keeping what it had", async () => {
     const send = vi.fn(async () => answer as unknown);
-    const registry = createRelayRegistry({ client: { send } });
+    const registry = createRelayRegistry({ client: { send }, local });
     await registry.refresh();
     send.mockResolvedValueOnce({ projects: "x" });
     await expect(registry.refresh()).rejects.toThrow(/without projects and push/);

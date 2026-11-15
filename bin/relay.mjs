@@ -4,7 +4,7 @@
 // (relay-lib.mjs), then runs apps/web/server/relay/main.ts, which needs
 // tsx and @breakdown/core, so run it as
 //
-//   cd apps/web && node --import tsx ../../bin/relay.mjs --url … --token-file … --name …
+//   cd apps/web && node --import tsx ../../bin/relay.mjs --url … --token-file … --name … --project key=/abs/path
 //
 // (what `pnpm relay …` and the launchd service do).
 
@@ -42,6 +42,9 @@ const code = await runRelay({
   origin: parsed.origin,
   name: parsed.name,
   projects: parsed.projects,
+  kinds: parsed.kinds,
+  herdrSockets: parsed.herdrSockets,
+  maxAgeMs: parsed.maxAgeMs,
   readToken: () => readTokenFile(parsed.tokenFile),
 });
 process.exit(code);

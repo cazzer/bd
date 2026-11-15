@@ -4,7 +4,13 @@
 // The payload is parsed first, with core's own schema for its kind
 // (`parseRelayPayload`, the one Breakdown ran at enqueue), and an action
 // that breaks it is reported `failed` naming the field — before anything
-// else, so a forged action spawns nothing. Then, per kind:
+// else, so a malformed action spawns nothing. That bounds the action's
+// shape only; what bounds where it runs is the relay's own configuration.
+// Then two more refusals before anything runs: a kind this relay does not
+// claim (`--kinds`; Breakdown should not have handed it out), and a review
+// decision or herdr prompt whose `created_at` is older than `--max-age`
+// (24 h by default; a missing or unreadable `created_at` counts as too
+// old). A re-ingest is never stale. Then, per kind:
 //
 // - `review_decision`: the project must be in the registry at exactly the
 //   payload's `cwd` (the registry is re-read once when it is not, in case
@@ -12,9 +18,11 @@
 //   `createReviewWriter` the web server uses locally, with the relay's
 //   allowlisted runners — so `bd show`'s check-then-act stays in one place.
 //   `ok: true` → `done` with the writer's result; `ok: false` → `failed`
-//   with its error and the result kept; an issue already closed → `done`
-//   `{ note: "already applied", message }` (the decision ran before, and
-//   its report was lost or reclaimed); any other refusal of the record →
+//   with its error and the result kept; an accept on an issue already
+//   closed → `done` `{ note: "already applied", message }` (the decision
+//   ran before, and its report was lost or reclaimed); a request for
+//   changes on a closed issue → `failed` (`refused: the review is
+//   closed`), since it never closes one; any other refusal of the record →
 //   `failed` with `{ refused: <reason> }`.
 // - `herdr_prompt`: `agent prompt <pane> <text>` on the payload's socket →
 //   `done { pane }`, or `failed` with herdr's (scrubbed) reason.
@@ -24,7 +32,7 @@
 // It never throws: every outcome is a report. Nothing here logs; main.ts
 // logs the action's id, kind, and state, never the payload.
 
-import { InvalidRelayActionError, parseRelayPayload, type RelayActionKind, type ReviewDecisionPayload } from "@breakdown/core";
+import { InvalidRelayActionError, parseRelayPayload, RELAY_ACTION_KINDS, RELAY_MAX_AGE_S, type RelayActionKind, type ReviewDecisionPayload } from "@breakdown/core";
 import { ReviewRecordRefusedError, type ReviewWriter, type ReviewWriteResult, type RunHerdr } from "../review-writer.js";
 import type { RelayRegistry } from "./registry.js";
 
@@ -36,6 +44,8 @@ export interface ClaimedAction {
   id: string;
   kind: unknown;
   payload: unknown;
+  /** The claim's `created_at`, as the server sent it. */
+  createdAt: unknown;
 }
 
 export interface ExecuteDeps {
@@ -46,6 +56,25 @@ export interface ExecuteDeps {
   runHerdr: RunHerdr;
   /** Re-ingests one registry project and pushes it (push.ts / the watcher). */
   reingest(project: string): Promise<{ changed: boolean }>;
+  /** `--kinds`: the kinds this relay runs; every kind by default. */
+  kinds?: readonly RelayActionKind[];
+  /** `--max-age` in milliseconds; 24 h by default. */
+  maxAgeMs?: number;
+  /** The relay's clock (tests). */
+  now?: () => number;
+}
+
+/** Why a review decision or herdr prompt is too old to run, or null (module header). */
+function staleness(createdAt: unknown, maxAgeMs: number, now: number): string | null {
+  const at = typeof createdAt === "string" ? Date.parse(createdAt) : Number.NaN;
+  if (!Number.isFinite(at)) return "refused: the action carries no readable created_at, so its age is unknown; nothing ran";
+  if (now - at > maxAgeMs) return `refused: stale: queued ${new Date(at).toISOString()}, older than this relay's --max-age (${formatAge(maxAgeMs)}); nothing ran`;
+  return null;
+}
+
+function formatAge(ms: number): string {
+  for (const [unit, size] of [["d", 86_400_000], ["h", 3_600_000], ["m", 60_000]] as const) if (ms % size === 0) return `${ms / size} ${unit}`;
+  return `${Math.round(ms / 1000)} s`;
 }
 
 function message(err: unknown): string {
@@ -86,7 +115,9 @@ async function reviewDecision(deps: ExecuteDeps, payload: ReviewDecisionPayload)
     });
   } catch (err) {
     if (err instanceof ReviewRecordRefusedError) {
-      if (err.reason === "closed") return { state: "done", result: { note: "already applied", message: err.message } };
+      // Only an accept closes the issue, so only an accept can find its own earlier run already applied.
+      if (err.reason === "closed" && payload.decision === "accept") return { state: "done", result: { note: "already applied", message: err.message } };
+      if (err.reason === "closed") return { state: "failed", error: "refused: the review is closed", result: { refused: err.reason } };
       return { state: "failed", error: err.message, result: { refused: err.reason } };
     }
     return { state: "failed", error: message(err) };
@@ -104,6 +135,13 @@ export async function executeAction(action: ClaimedAction, deps: ExecuteDeps): P
   } catch (err) {
     const reason = err instanceof InvalidRelayActionError ? err.message : message(err);
     return { state: "failed", error: `refused: ${reason}; nothing ran` };
+  }
+  if (!(deps.kinds ?? RELAY_ACTION_KINDS).includes(kind)) {
+    return { state: "failed", error: `refused: this relay does not run ${kind} actions (--kinds); nothing ran` };
+  }
+  if (kind !== "beads_reingest") {
+    const stale = staleness(action.createdAt, deps.maxAgeMs ?? RELAY_MAX_AGE_S * 1000, (deps.now ?? Date.now)());
+    if (stale !== null) return { state: "failed", error: stale };
   }
 
   switch (kind) {
@@ -139,7 +177,7 @@ export async function executeAction(action: ClaimedAction, deps: ExecuteDeps): P
 /** For the log: what kind of refusal or failure, never the payload text. */
 export function reportSummary(report: RelayReport): string {
   if (report.state === "done") return "done";
-  if (report.error.startsWith("refused:")) return "failed (refused before running)";
   const refused = report.result?.["refused"];
-  return typeof refused === "string" ? `failed (the tracker's record refused it: ${refused})` : "failed";
+  if (typeof refused === "string") return `failed (the tracker's record refused it: ${refused})`;
+  return report.error.startsWith("refused:") ? "failed (refused before running)" : "failed";
 }

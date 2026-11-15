@@ -10,6 +10,7 @@ import { inArray, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { relayActions, relayCheckIns, type Database } from "@breakdown/db";
 import { InvalidRelayActionError, RelayActionNotClaimedByError, RelayActionNotFoundError, RelayActionPendingError } from "./errors.js";
+import { MAX_RELAY_HERDR_PAYLOAD_TEXT_LENGTH, MAX_RELAY_HERDR_TEXT_LENGTH, RELAY_PROVENANCE_LINE } from "./relay-allowlist.js";
 import {
   claimRelayAction,
   classifyRelayStatus,
@@ -18,7 +19,9 @@ import {
   getRelayAction,
   getRelayStatus,
   MAX_RELAY_ATTEMPTS,
+  MAX_RELAY_CLAIM_PROJECTS,
   parseRelayPayload,
+  RELAY_MAX_AGE_S,
   recordRelayCheckIn,
   RELAY_RECLAIM_AFTER_S,
   reportRelayAction,
@@ -77,6 +80,11 @@ async function enqueue(kind: RelayActionKind, payload: unknown): Promise<number>
   return action.id;
 }
 
+/** Backdates an action's `created_at` by `seconds`. */
+async function queuedAgo(id: number, seconds: number): Promise<void> {
+  await db.execute(sql`UPDATE relay_actions SET created_at = now() - make_interval(secs => ${seconds}) WHERE id = ${id}`);
+}
+
 async function age(id: number, seconds = RELAY_RECLAIM_AFTER_S + 1): Promise<void> {
   await db.execute(sql`UPDATE relay_actions SET claimed_at = now() - make_interval(secs => ${seconds}) WHERE id = ${id}`);
 }
@@ -103,6 +111,7 @@ describe("enqueueRelayAction", () => {
     ["a bad pane", "herdr_prompt", () => ({ pane: `${PREFIX}/x`, socket: "/tmp/herdr.sock", text: "hi" }), "payload.pane"],
     ["a herdr text that reads as a flag", "herdr_prompt", () => ({ pane: `${PREFIX}-pane`, socket: "/tmp/herdr.sock", text: "-x" }), "payload.text"],
     ["a relative socket", "herdr_prompt", () => ({ pane: `${PREFIX}-pane`, socket: "herdr.sock", text: "hi" }), "payload.socket"],
+    ["a herdr text with no room left for the relay's provenance line", "herdr_prompt", () => ({ pane: `${PREFIX}-pane`, socket: "/tmp/herdr.sock", text: "x".repeat(MAX_RELAY_HERDR_PAYLOAD_TEXT_LENGTH + 1) }), "payload.text"],
     ["a non-object payload", "beads_reingest", () => "project", "payload"],
   ] as const)("refuses a forged payload with %s, and writes nothing", async (_label, kind, build, field) => {
     const project = projectKey();
@@ -221,6 +230,55 @@ describe("claimRelayAction", () => {
     expect(failed?.error).toMatch(/stored payload breaks the herdr_prompt schema/);
   });
 
+  it("takes only actions of the projects named, and a herdr prompt by kind alone", async () => {
+    const relay = relayNamed("projects");
+    const mine = projectKey();
+    const theirs = projectKey();
+    const theirsReview = await enqueue("review_decision", reviewPayload(theirs));
+    const theirsReingest = await enqueue("beads_reingest", { project_key: theirs });
+    const prompt = await enqueue("herdr_prompt", { pane: `${PREFIX}-pane`, socket: "/tmp/herdr.sock", text: "Your item was accepted" });
+    const mineReview = await enqueue("review_decision", reviewPayload(mine));
+    const among = [theirsReview, theirsReingest, prompt, mineReview];
+
+    // A relay narrowed to `mine` never claims `theirs`, whatever the kind.
+    expect((await claimRelayAction(db, { relay, projects: [mine], among }))?.id).toBe(prompt);
+    expect((await claimRelayAction(db, { relay, projects: [mine], among }))?.id).toBe(mineReview);
+    expect(await claimRelayAction(db, { relay, projects: [mine], among })).toBeNull();
+    expect(await claimRelayAction(db, { relay, projects: [], among })).toBeNull();
+    expect(await getRelayAction(db, theirsReview)).toMatchObject({ state: "queued", attempts: 0 });
+    expect(await getRelayAction(db, theirsReingest)).toMatchObject({ state: "queued", attempts: 0 });
+
+    // A herdr prompt is excluded only by kind.
+    const prompt2 = await enqueue("herdr_prompt", { pane: `${PREFIX}-pane`, socket: "/tmp/herdr.sock", text: "Again" });
+    expect(await claimRelayAction(db, { relay, projects: [mine], kinds: ["review_decision", "beads_reingest"], among: [prompt2] })).toBeNull();
+
+    // Omitting projects serves every project, as before.
+    expect((await claimRelayAction(db, { relay, among }))?.id).toBe(theirsReview);
+
+    await expect(claimRelayAction(db, { relay, projects: ["../etc"], among })).rejects.toBeInstanceOf(InvalidRelayActionError);
+    await expect(claimRelayAction(db, { relay, projects: Array.from({ length: MAX_RELAY_CLAIM_PROJECTS + 1 }, (_, i) => `p${i}`), among })).rejects.toBeInstanceOf(InvalidRelayActionError);
+  });
+
+  it(`fails a review decision or herdr prompt queued over ${RELAY_MAX_AGE_S / 3600} h ago as stale, but never a re-ingest`, async () => {
+    const relay = relayNamed("stale");
+    const review = await enqueue("review_decision", reviewPayload(projectKey()));
+    const prompt = await enqueue("herdr_prompt", { pane: `${PREFIX}-pane`, socket: "/tmp/herdr.sock", text: "Old news" });
+    const reingest = await enqueue("beads_reingest", { project_key: projectKey() });
+    const fresh = await enqueue("review_decision", reviewPayload(projectKey()));
+    for (const id of [review, prompt, reingest]) await queuedAgo(id, RELAY_MAX_AGE_S + 60);
+    await queuedAgo(fresh, RELAY_MAX_AGE_S - 600);
+
+    // The two stale rows are failed in the claim's transaction, and the claim moves on to the re-ingest.
+    expect((await claimRelayAction(db, { relay, among: [review, prompt, reingest, fresh] }))?.id).toBe(reingest);
+    for (const id of [review, prompt]) {
+      const failed = await getRelayAction(db, id);
+      expect(failed).toMatchObject({ state: "failed", attempts: 0 });
+      expect(failed?.error).toBe(`stale: queued ${failed!.createdAt.toISOString()}, older than 24 h`);
+      expect(failed?.finishedAt).toBeInstanceOf(Date);
+    }
+    expect((await claimRelayAction(db, { relay, among: [fresh] }))?.id).toBe(fresh);
+  });
+
   it("counts as a check-in even when it finds nothing", async () => {
     const relay = relayNamed("idle");
     expect(await claimRelayAction(db, { relay, among: [] })).toBeNull();
@@ -307,5 +365,12 @@ describe("parseRelayPayload", () => {
     expect(parseRelayPayload("beads_reingest", { project_key: "breakdown" })).toEqual({ project_key: "breakdown" });
     expect(() => parseRelayPayload("review_decision", reviewPayload("breakdown", { issue_id: "BD 1" }))).toThrow(/payload\.issue_id/);
     expect(() => parseRelayPayload("shell" as RelayActionKind, {})).toThrow(InvalidRelayActionError);
+  });
+});
+
+describe("the provenance line's room", () => {
+  it("leaves the prompt as the relay sends it within the herdr cap", () => {
+    expect(RELAY_PROVENANCE_LINE.length + 1 + MAX_RELAY_HERDR_PAYLOAD_TEXT_LENGTH).toBe(MAX_RELAY_HERDR_TEXT_LENGTH);
+    expect(() => parseRelayPayload("herdr_prompt", { pane: "w1:p1", socket: "/tmp/h.sock", text: "x".repeat(MAX_RELAY_HERDR_PAYLOAD_TEXT_LENGTH) })).not.toThrow();
   });
 });

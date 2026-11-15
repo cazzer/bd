@@ -53,12 +53,22 @@ Before running anything, the relay SHALL check every command against an allowlis
 - `herdr agent prompt <pane> <text>`;
 - the read-only `bd` commands the beads ingest uses.
 
-Issue ids, panes, and project paths SHALL match their expected shapes. A project path SHALL be one the relay's own registry lists. Every command SHALL run with an argument vector, never through a shell.
+Issue ids, panes, and project paths SHALL match their expected shapes. Project paths SHALL come only from the relay's own configuration: Breakdown's project list MAY narrow the relay's projects but SHALL NOT add a project or change a project's path, and a server entry whose path differs from the relay's own SHALL be ignored. A project path SHALL be re-checked as its own realpath holding `.beads/` immediately before every `bd` command. A herdr command SHALL run only on a socket in the relay's own socket allowlist that is a socket owned by the relay's user, and every prompt the relay sends SHALL begin with a fixed line saying it was relayed and is untrusted input. Every command SHALL run with an argument vector, never through a shell.
 
 #### Scenario: Forged action
 
 - **WHEN** a queued action carries `bd delete` or a project path the relay does not know
 - **THEN** the relay refuses to run it and reports it `failed` naming the reason, and nothing runs
+
+#### Scenario: Breakdown re-points a project
+
+- **WHEN** Breakdown lists the relay's project at a path other than the relay's configured one, or lists a project the relay was not configured with
+- **THEN** the relay ignores that entry, logs a warning for the changed path, and runs nothing at the server's path
+
+#### Scenario: Stale decision
+
+- **WHEN** a review decision or herdr prompt has been queued for more than 24 hours
+- **THEN** it is failed as stale instead of run, and a re-ingest is never stale
 
 ### Requirement: The board stays live from the relay
 

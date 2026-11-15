@@ -50,6 +50,17 @@ describe("the relay client", () => {
     await expect(badFile.send("GET", "/relay/v1/projects")).rejects.toMatchObject({ code: "token_file", retryable: true, message: "token file /t has mode 0644" });
   });
 
+  it("never follows a redirect, and strips control characters from the server's error before it reaches a log", async () => {
+    const fetch = vi.fn(async (_url: string, _init: RequestInit) => json(500, { error: { code: "internal\n[relay] forged", message: "boom\n[relay] checked in to evil\u001b[31m\u202e" + "x".repeat(1000) } }));
+    const client = createRelayClient({ origin: "https://j", readToken: () => "t", fetch });
+    const err = (await client.send("GET", "/relay/v1/projects").catch((e: unknown) => e)) as RelayRequestError;
+    expect(fetch.mock.calls[0]![1].redirect).toBe("error");
+    expect(err.code).toBe("unknown");
+    expect(err.message).not.toMatch(/[\u0000-\u001f\u007f-\u009f\u202e]/);
+    expect(err.message.startsWith("GET /relay/v1/projects answered 500 unknown: boom [relay] checked in to evil [31m")).toBe(true);
+    expect(err.message.length).toBeLessThan(600);
+  });
+
   it("stops at once when its signal aborts, as not retryable", async () => {
     const stop = new AbortController();
     const client = createRelayClient({ origin: "https://j", readToken: () => "t", fetch: (_u, init) => new Promise((_r, reject) => init.signal!.addEventListener("abort", () => reject(new Error("aborted")))) });

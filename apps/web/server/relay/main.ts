@@ -4,15 +4,18 @@
 //
 // - **Check-in**, every `interval_s` the server answers (30 s), on its own
 //   loop so a long action never makes the relay look offline.
-// - **Claim → run → report**, one action at a time: a claim long-polls 30 s;
+// - **Claim → run → report**, one action at a time: a claim long-polls 30 s
+//   and names the kinds this relay runs (`--kinds`) and its local project
+//   keys (`--project`), so Breakdown hands it nothing else;
 //   the action runs (execute.ts); its report is retried with backoff until
 //   Breakdown takes it, because an unreported action is only reclaimed
 //   after 5 minutes. A report Breakdown refuses outright (409 not_claimer:
 //   it was reclaimed; 404) is given up and logged.
 // - **Push watcher**, only while the server's `GET /relay/v1/projects` says
 //   `push: true` (it has no `bd`): the beads watcher on this Mac's
-//   checkouts with push.ts as its sink. The registry is re-read every 5
-//   minutes, and the watcher follows it — started, stopped, or reloaded.
+//   checkouts with push.ts as its sink. The registry — the `--project`
+//   checkouts, narrowed by the server's list — is re-read every 5 minutes,
+//   and the watcher follows it — started, stopped, or reloaded.
 //
 // The claim loop waits for the first registry read, so a decision is never
 // refused for a registry not yet loaded.
@@ -32,7 +35,7 @@
 // every push needs it); a missing `herdr` is a warning, because only
 // prompts need it, and they fail one by one with the reason.
 
-import { findOnPath as coreFindOnPath, RELAY_CHECK_IN_INTERVAL_S } from "@breakdown/core";
+import { findOnPath as coreFindOnPath, RELAY_ACTION_KINDS, RELAY_CHECK_IN_INTERVAL_S, RELAY_MAX_AGE_S, type RelayActionKind } from "@breakdown/core";
 import { createBeadsWatcher, type BeadsWatcher, type BeadsWatcherOptions } from "../beads-watcher.js";
 import { createReviewWriter, type ReviewWriter } from "../review-writer.js";
 import { createBackoff, createRelayClient, RelayRequestError, sleep as defaultSleep, type FetchLike } from "./client.js";
@@ -55,8 +58,14 @@ export interface RelayOptions {
   origin: string;
   /** This relay's client name, for the log (the token decides who it is to Breakdown). */
   name: string;
-  /** `--project` keys; empty for every registered project. */
-  projects: readonly string[];
+  /** `--project key=path`: the only checkouts this relay may serve. */
+  projects: ReadonlyArray<{ key: string; path: string }>;
+  /** `--kinds`: the action kinds it claims; every kind by default. */
+  kinds?: readonly RelayActionKind[];
+  /** `--herdr-socket`: the herdr servers it may prompt through. */
+  herdrSockets: readonly string[];
+  /** `--max-age` in milliseconds; 24 h by default. */
+  maxAgeMs?: number;
   /** Reads and checks the token file (bin/relay-lib.mjs `readTokenFile`). */
   readToken: () => string | Promise<string>;
 }
@@ -73,9 +82,9 @@ export interface RelayDeps {
   /** The second signal's exit. */
   exit?: (code: number) => void;
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
-  /** The spawning runners (tests pass spies). */
-  runners?: Omit<RelayRunnerOptions, "registry">;
-  /** Replaces the registry's checkout check (tests). */
+  /** The spawning runners and the socket check (tests pass spies). */
+  runners?: Omit<RelayRunnerOptions, "registry" | "herdrSockets" | "checkDir">;
+  /** Replaces the registry's and the runners' checkout check (tests). */
   checkDir?: (dir: string) => string | null;
   /** Watcher seams (tests): clock, watchDir, fingerprint. */
   watcher?: Pick<BeadsWatcherOptions, "clock" | "watchDir" | "fingerprint" | "now" | "stopGraceMs">;
@@ -103,13 +112,14 @@ interface Claimed {
   kind: unknown;
   payload: unknown;
   attempts: unknown;
+  createdAt: unknown;
 }
 
 function claimedAction(body: unknown): Claimed | null {
   const action = (body as { action?: unknown } | null)?.action;
   if (action === null || action === undefined || typeof action !== "object") return null;
-  const { id, kind, payload, attempts } = action as Record<string, unknown>;
-  return { id: typeof id === "number" || typeof id === "string" ? String(id) : "", kind, payload, attempts };
+  const { id, kind, payload, attempts, created_at: createdAt } = action as Record<string, unknown>;
+  return { id: typeof id === "number" || typeof id === "string" ? String(id) : "", kind, payload, attempts, createdAt };
 }
 
 function reportBody(report: RelayReport): Record<string, unknown> {
@@ -124,6 +134,13 @@ export async function runRelay(options: RelayOptions, deps: RelayDeps = {}): Pro
   const sleep = deps.sleep ?? defaultSleep;
   const findOnPath = deps.findOnPath ?? ((binary: string) => coreFindOnPath(binary));
   const { origin, name } = options;
+  const kinds = options.kinds ?? [...RELAY_ACTION_KINDS];
+  const maxAgeMs = options.maxAgeMs ?? RELAY_MAX_AGE_S * 1000;
+  const localKeys = options.projects.map((p) => p.key);
+  if (localKeys.length === 0) {
+    warn("[relay] cannot start: no --project key=path given; the relay runs bd only in checkouts named on its own command line");
+    return 1;
+  }
 
   const bd = findOnPath("bd");
   if (bd === null) {
@@ -146,13 +163,14 @@ export async function runRelay(options: RelayOptions, deps: RelayDeps = {}): Pro
   });
 
   const client = createRelayClient({ origin, readToken: options.readToken, ...(deps.fetch === undefined ? {} : { fetch: deps.fetch }) });
-  const registry = createRelayRegistry({ client, only: options.projects, log: out, ...(deps.checkDir === undefined ? {} : { checkDir: deps.checkDir }) });
-  const runners = createRelayRunners({ registry, ...deps.runners });
+  const checkDir = deps.checkDir === undefined ? {} : { checkDir: deps.checkDir };
+  const registry = createRelayRegistry({ client, local: options.projects.map((p) => ({ project: p.key, dir: p.path })), log: out, ...checkDir });
+  const runners = createRelayRunners({ registry, herdrSockets: options.herdrSockets, ...deps.runners, ...checkDir });
   const sink = createPushSink({ client, runBdFor: (project) => runners.ingestBdFor(project) });
   const writers = new Map<string, ReviewWriter>();
   let watcher: BeadsWatcher | null = null;
 
-  out(`[relay] ${RELAY_VERSION} starting as ${name} for ${origin}; bd ${bd}${herdr === null ? "" : `, herdr ${herdr}`}${options.projects.length > 0 ? `; projects ${options.projects.join(", ")}` : ""}`);
+  out(`[relay] ${RELAY_VERSION} starting as ${name} for ${origin}; bd ${bd}${herdr === null ? "" : `, herdr ${herdr}`}; projects ${options.projects.map((p) => `${p.key}=${p.path}`).join(", ")}; kinds ${kinds.join(", ")}; herdr sockets ${options.herdrSockets.join(", ") || "none"}; max age ${Math.round(maxAgeMs / 60_000)} min`);
 
   function syncWatcher(changed: boolean): void {
     const push = registry.push();
@@ -206,6 +224,8 @@ export async function runRelay(options: RelayOptions, deps: RelayDeps = {}): Pro
     },
     runHerdr: runners.runHerdr,
     reingest,
+    kinds,
+    maxAgeMs,
   };
 
   async function firstRegistryRead(): Promise<boolean> {
@@ -282,7 +302,7 @@ export async function runRelay(options: RelayOptions, deps: RelayDeps = {}): Pro
       const started = Date.now();
       let body: unknown;
       try {
-        body = await client.send("POST", "/relay/v1/claim", { wait_s: CLAIM_WAIT_S }, { signal, timeoutMs: CLAIM_TIMEOUT_MS });
+        body = await client.send("POST", "/relay/v1/claim", { wait_s: CLAIM_WAIT_S, kinds, projects: localKeys }, { signal, timeoutMs: CLAIM_TIMEOUT_MS });
         backoff.reset();
         lastFailure = "";
       } catch (err) {

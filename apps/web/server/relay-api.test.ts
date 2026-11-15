@@ -237,6 +237,18 @@ describe("POST /relay/v1/claim", () => {
     expect((await getRelayAction(db, id))!.state).toBe("queued");
   });
 
+  it("takes only the projects named: a relay narrowed to one project never claims another's actions", async () => {
+    const id = await queued();
+    const key = `${PREFIX}-q${fixtureKey}`;
+    among = [id];
+    const other = await send("/relay/v1/claim", { token: tokens[RELAY_A], body: { projects: [`${PREFIX}-elsewhere`] } });
+    expect(other.json).toEqual({ action: null });
+    expect((await getRelayAction(db, id))!.state).toBe("queued");
+    const mine = await send("/relay/v1/claim", { token: tokens[RELAY_A], body: { projects: [`${PREFIX}-elsewhere`, key] } });
+    among = [];
+    expect((mine.json["action"] as { id: number }).id).toBe(id);
+  });
+
   it("refuses an agent token with 403 and changes nothing", async () => {
     const id = await queued();
     among = [id];
@@ -248,7 +260,7 @@ describe("POST /relay/v1/claim", () => {
   });
 
   it("refuses bad bodies with invalid_request", async () => {
-    for (const body of [{ wait_s: 31 }, { wait_s: -1 }, { wait_s: 1.5 }, { kinds: [] }, { kinds: ["bd_delete"] }, { kinds: ["herdr_prompt", "herdr_prompt"] }]) {
+    for (const body of [{ wait_s: 31 }, { wait_s: -1 }, { wait_s: 1.5 }, { kinds: [] }, { kinds: ["bd_delete"] }, { kinds: ["herdr_prompt", "herdr_prompt"] }, { projects: ["../etc"] }, { projects: "bd" }]) {
       const sent = await send("/relay/v1/claim", { token: tokens[RELAY_A], body });
       expect(sent.status, JSON.stringify(body)).toBe(400);
       expect(errorCode(sent)).toBe("invalid_request");

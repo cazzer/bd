@@ -15,6 +15,11 @@
 // same request again can help: a network failure, a timeout, a 401, a
 // 429, or a 5xx can; any other 4xx (the request itself is wrong, or the
 // action is no longer ours) cannot.
+//
+// A redirect is never followed (`redirect: "error"`): the Bearer token
+// goes only to the origin the relay was given. The server's error code and
+// message are untrusted text, so control and bidirectional characters are
+// stripped and the message cut short before they reach a log line.
 
 export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 export const MAX_BACKOFF_MS = 60_000;
@@ -56,6 +61,16 @@ export interface RelayClient {
   send(method: "GET" | "POST", path: string, body?: unknown, options?: SendOptions): Promise<unknown>;
 }
 
+const MAX_SERVER_MESSAGE_CHARS = 500;
+const UNSAFE_CHARS = /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+const CODE_RE = /^[a-z0-9_]{1,64}$/;
+
+/** Server-supplied text made safe for one log line (module header). */
+export function logSafe(text: string, max = MAX_SERVER_MESSAGE_CHARS): string {
+  const kept = text.replace(UNSAFE_CHARS, " ").replace(/ {2,}/g, " ").trim();
+  return kept.length > max ? `${kept.slice(0, max)}…` : kept;
+}
+
 function retryableStatus(status: number): boolean {
   return status === 401 || status === 408 || status === 429 || status >= 500;
 }
@@ -64,8 +79,8 @@ function retryableStatus(status: number): boolean {
 function serverError(text: string): { code: string; message: string } {
   try {
     const parsed = JSON.parse(text) as { error?: { code?: unknown; message?: unknown } };
-    const code = typeof parsed.error?.code === "string" ? parsed.error.code : "unknown";
-    const message = typeof parsed.error?.message === "string" ? parsed.error.message : "";
+    const code = typeof parsed.error?.code === "string" && CODE_RE.test(parsed.error.code) ? parsed.error.code : "unknown";
+    const message = typeof parsed.error?.message === "string" ? logSafe(parsed.error.message) : "";
     return { code, message };
   } catch {
     return { code: "unknown", message: "" };
@@ -102,6 +117,7 @@ export function createRelayClient(options: RelayClientOptions): RelayClient {
         res = await fetchFn(`${options.origin}${path}`, {
           method,
           headers,
+          redirect: "error",
           ...(body === undefined ? {} : { body: typeof body === "string" ? body : JSON.stringify(body) }),
           signal: combined,
         });

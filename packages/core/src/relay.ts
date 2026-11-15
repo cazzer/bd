@@ -7,18 +7,27 @@
 // string. Each kind's payload has a strict zod schema below; enqueue
 // refuses anything else, and the relay parses it again with the same
 // schemas before running it. Every free-text field the relay will pass to
-// a binary is also checked against the allowlist (relay-allowlist.ts), so
-// a forged action is refused twice.
+// a binary is also checked against the allowlist (relay-allowlist.ts).
+// Both checks bound an action's *shape* only: a compromised Breakdown can
+// still queue any well-formed action, and what keeps it from choosing
+// where `bd` runs or which herdr server is prompted is the relay's own
+// configuration (its projects and sockets), never anything stored here.
 //
 // State machine: queued → claimed → done | failed. Claiming is one
 // transaction: `FOR UPDATE SKIP LOCKED` on the oldest open row of an
-// admitted kind, so racing claims take different rows or none. A claimed
+// admitted kind (and, when the relay names its projects, of one of them;
+// a herdr prompt has no project and is admitted by kind alone), so racing
+// claims take different rows or none. A claimed
 // row whose claim is older than `RELAY_RECLAIM_AFTER_S` is claimable again
 // in the same predicate, so a relay that died mid-action loses nothing and
 // no sweeper runs. `attempts` counts claims not followed by a report (a
 // requeue gives its attempt back): a row claimed `MAX_RELAY_ATTEMPTS` times
-// without one is failed at its next claim rather than run again. A cheap
-// probe runs first, so a long-poll that finds nothing opens no transaction.
+// without one is failed at its next claim rather than run again. A review
+// decision or herdr prompt queued more than `RELAY_MAX_AGE_S` (24 h) ago is
+// failed at its next claim as stale rather than run: a decision or a reply
+// that old is no longer the person's present intent. A re-ingest is never
+// stale. A cheap probe runs first, so a long-poll that finds nothing opens
+// no transaction.
 //
 // One action per target is open at a time: the unique open-target index
 // (kind, project, issue; herdr prompts excluded) makes a second pending
@@ -46,7 +55,8 @@ import {
   isAllowedHerdrArgs,
   isRelayIssueId,
   isRelayPane,
-  MAX_RELAY_HERDR_TEXT_LENGTH,
+  isRelayText,
+  MAX_RELAY_HERDR_PAYLOAD_TEXT_LENGTH,
   MAX_RELAY_ISSUE_ID_LENGTH,
   RELAY_ISSUE_ID_PATTERN,
 } from "./relay-allowlist.js";
@@ -66,6 +76,10 @@ export { RELAY_ACTION_KINDS, RELAY_ACTION_STATES, type RelayActionKind, type Rel
 
 /** A claim older than this counts as abandoned, and the action is claimable again. */
 export const RELAY_RECLAIM_AFTER_S = 300;
+/** A review decision or herdr prompt queued longer ago than this is failed as stale at its next claim (module header). */
+export const RELAY_MAX_AGE_S = 24 * 60 * 60;
+/** The most project keys one claim may name. */
+export const MAX_RELAY_CLAIM_PROJECTS = 100;
 export const RELAY_CHECK_IN_INTERVAL_S = 30;
 /** The longest a claim long-poll waits. */
 export const MAX_RELAY_WAIT_S = 30;
@@ -83,6 +97,10 @@ export const MAX_RELAY_RESULT_CHARS = 10_000;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ACTION_ID_RE = /^[1-9]\d{0,17}$/;
 const ABANDONED_ERROR = `abandoned after ${MAX_RELAY_ATTEMPTS} claims without a report`;
+
+function staleError(createdAt: Date): string {
+  return `stale: queued ${createdAt.toISOString()}, older than ${RELAY_MAX_AGE_S / 3600} h`;
+}
 
 // --- Payload schemas (pure) ---------------------------------------------------
 
@@ -135,8 +153,9 @@ export const herdrPromptPayloadSchema = z
     text: z.string(),
   })
   .superRefine((p, ctx) => {
-    if (!isAllowedHerdrArgs(["agent", "prompt", p.pane, p.text])) {
-      ctx.addIssue({ code: "custom", path: ["text"], message: `must be 1 to ${MAX_RELAY_HERDR_TEXT_LENGTH} characters, with no NUL, not starting with "-"` });
+    // The relay prefixes its provenance line, so the payload's text leaves room for it (relay-allowlist.ts).
+    if (!isRelayText(p.text, MAX_RELAY_HERDR_PAYLOAD_TEXT_LENGTH) || !isAllowedHerdrArgs(["agent", "prompt", p.pane, p.text])) {
+      ctx.addIssue({ code: "custom", path: ["text"], message: `must be 1 to ${MAX_RELAY_HERDR_PAYLOAD_TEXT_LENGTH} characters, with no NUL, not starting with "-"` });
     }
   });
 
@@ -384,6 +403,13 @@ export interface ClaimRelayActionInput {
   /** The kinds it can run; every kind when omitted. */
   kinds?: readonly string[];
   /**
+   * The project keys it serves. When given, an action whose payload names
+   * a `project_key` is admitted only for one of these; an action with no
+   * project (a herdr prompt) is admitted by kind alone. Every project when
+   * omitted.
+   */
+  projects?: readonly string[];
+  /**
    * Restricts the claim to these action ids. A test seam: a suite sharing a
    * database with live data claims only its own fixtures this way.
    */
@@ -399,7 +425,9 @@ export interface ClaimRelayActionInput {
  * without a report, or a stored payload that breaks its kind's schema — is
  * marked `failed` with the reason, and the claim moves on to the next
  * candidate in the same transaction, up to `MAX_RELAY_CLAIM_CANDIDATES`
- * rows, rather than handing the relay something it must not run.
+ * rows, rather than handing the relay something it must not run. A review
+ * decision or herdr prompt queued over `RELAY_MAX_AGE_S` ago is failed the
+ * same way, as stale.
  */
 export async function claimRelayAction(db: Database, input: ClaimRelayActionInput): Promise<ClaimedRelayAction | null> {
   const relay = relayName(input.relay);
@@ -408,10 +436,12 @@ export async function claimRelayAction(db: Database, input: ClaimRelayActionInpu
   }
   const kinds = input.kinds === undefined ? [...RELAY_ACTION_KINDS] : [...new Set(input.kinds.map((k) => relayKind(k, "kinds")))];
   const among = input.among?.map(actionId);
+  const projects = input.projects === undefined ? undefined : claimProjects(input.projects);
 
   const predicate: SQL = sql`state IN ('queued', 'claimed')
     AND (state = 'queued' OR claimed_at < now() - make_interval(secs => ${RELAY_RECLAIM_AFTER_S}))
     AND kind = ANY(${sqlArray(kinds, "text")})
+    ${projects === undefined ? sql`` : sql`AND (payload->>'project_key' IS NULL OR payload->>'project_key' = ANY(${sqlArray(projects, "text")}))`}
     ${among === undefined ? sql`` : sql`AND id = ANY(${sqlArray(among, "bigint")})`}`;
 
   await touchCheckIn(db, relay);
@@ -421,8 +451,10 @@ export async function claimRelayAction(db: Database, input: ClaimRelayActionInpu
   return db.transaction(async (tx) => {
     for (let candidate = 0; candidate < MAX_RELAY_CLAIM_CANDIDATES; candidate += 1) {
       // A row this transaction marked failed no longer matches the predicate.
-      const locked = await tx.execute<RelayActionRow>(sql`
-        SELECT ${COLUMNS} FROM relay_actions
+      const locked = await tx.execute<RelayActionRow & { stale: boolean }>(sql`
+        SELECT ${COLUMNS}, (kind <> 'beads_reingest' AND created_at < now() - make_interval(secs => ${RELAY_MAX_AGE_S}))
+          AS stale
+        FROM relay_actions
         WHERE ${predicate}
         ORDER BY created_at, id
         LIMIT 1
@@ -435,6 +467,8 @@ export async function claimRelayAction(db: Database, input: ClaimRelayActionInpu
       let payload: RelayPayloads[RelayActionKind] | undefined;
       if (Number(row.attempts) >= MAX_RELAY_ATTEMPTS) {
         failure = ABANDONED_ERROR;
+      } else if (row.stale) {
+        failure = staleError(new Date(row.created_at));
       } else {
         try {
           payload = parseRelayPayload(row.kind, row.payload);
@@ -460,6 +494,16 @@ export async function claimRelayAction(db: Database, input: ClaimRelayActionInpu
     }
     return null;
   });
+}
+
+function claimProjects(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length > MAX_RELAY_CLAIM_PROJECTS) {
+    throw new InvalidRelayActionError("projects", value, `must list at most ${MAX_RELAY_CLAIM_PROJECTS} project keys`);
+  }
+  for (const key of value) {
+    if (typeof key !== "string" || !PROJECT_KEY_PATTERN.test(key)) throw new InvalidRelayActionError("projects", key, `must be project keys matching ${PROJECT_KEY_PATTERN}`);
+  }
+  return [...new Set(value as string[])];
 }
 
 // --- Reporting ------------------------------------------------------------------------------

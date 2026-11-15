@@ -7,7 +7,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { RELAY_ENDPOINTS } from "./relay-api.js";
+import { claimSchema, RELAY_ENDPOINTS } from "./relay-api.js";
 
 const DOC = fileURLToPath(new URL("../../../docs/relay.md", import.meta.url));
 const HEADING = /^### `(GET|POST|PATCH|PUT|DELETE) (\/relay\/v1\/[^`]+)` — scope `([a-z]+)`/gm;
@@ -18,5 +18,12 @@ describe("docs/relay.md", () => {
     const served = RELAY_ENDPOINTS.map((e) => `${e.method} ${e.path} ${e.scope}`);
     expect(new Set(documented).size, "a heading is repeated").toBe(documented.length);
     expect([...documented].sort()).toEqual([...served].sort());
+  });
+
+  it("documents every field a claim takes", () => {
+    const doc = readFileSync(DOC, "utf8");
+    const start = doc.indexOf("### `POST /relay/v1/claim`");
+    const section = doc.slice(start, doc.indexOf("\n### ", start + 1));
+    for (const field of Object.keys(claimSchema.shape)) expect(section, field).toContain(`- \`${field}\``);
   });
 });

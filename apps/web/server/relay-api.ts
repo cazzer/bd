@@ -53,6 +53,7 @@ import {
   InvalidRelayActionError,
   InvalidWorkItemError,
   listBeadsProjects,
+  MAX_RELAY_CLAIM_PROJECTS,
   MAX_RELAY_CWD_LENGTH,
   MAX_RELAY_FIELD_LENGTH,
   MAX_RELAY_ISSUE_ID_LENGTH,
@@ -132,12 +133,17 @@ const checkInSchema = z.object({
   version: z.string().trim().min(1).max(MAX_RELAY_FIELD_LENGTH),
 });
 
-const claimSchema = z.object({
+/** A claim's body; exported so the contract test checks every field is documented. */
+export const claimSchema = z.object({
   kinds: z
     .array(z.enum(RELAY_ACTION_KINDS))
     .min(1)
     .max(RELAY_ACTION_KINDS.length)
     .refine((kinds) => new Set(kinds).size === kinds.length, "must not name a kind twice")
+    .optional(),
+  projects: z
+    .array(z.string().regex(PROJECT_KEY_PATTERN, "must be project keys"))
+    .max(MAX_RELAY_CLAIM_PROJECTS)
     .optional(),
   wait_s: z.number().int().min(0).max(MAX_RELAY_WAIT_S).default(0),
 });
@@ -245,6 +251,7 @@ export function createRelayHandler({ db, readOnly = false, shutdownSignal, watch
           claimRelayAction(db, {
             relay: admitted.client,
             ...(body.kinds === undefined ? {} : { kinds: body.kinds }),
+            ...(body.projects === undefined ? {} : { projects: body.projects }),
             ...(claimAmong === undefined ? {} : { among: claimAmong() }),
           }),
         ),

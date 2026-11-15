@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { sleep as realSleep } from "./client.js";
-import { runRelay, RELAY_VERSION, type RelayDeps } from "./main.js";
+import { runRelay, RELAY_VERSION, type RelayDeps, type RelayOptions } from "./main.js";
 
 const DIR = "/Users/me/dev/bd";
+const UID = 501;
 const TOKEN = "bdt_secret_token_value";
 
 interface Action {
@@ -17,7 +18,7 @@ function fakeServer({ push = false, projects = [{ key: "bd", path: DIR }] } = {}
   const queue: Action[] = [];
   const reports: Array<{ id: string; body: Record<string, unknown> }> = [];
   const pushes: unknown[] = [];
-  const requests: Array<{ method: string; path: string; auth: string | undefined }> = [];
+  const requests: Array<{ method: string; path: string; auth: string | undefined; body: Record<string, unknown>; redirect: RequestInit["redirect"] }> = [];
   let checkIns = 0;
   /** Status codes the next result posts answer with, in order. */
   const resultFailures: number[] = [];
@@ -25,8 +26,8 @@ function fakeServer({ push = false, projects = [{ key: "bd", path: DIR }] } = {}
 
   const fetch = vi.fn(async (url: string, init: RequestInit): Promise<Response> => {
     const path = new URL(url).pathname;
-    requests.push({ method: init.method ?? "GET", path, auth: (init.headers as Record<string, string>)["Authorization"] });
     const body = typeof init.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : {};
+    requests.push({ method: init.method ?? "GET", path, auth: (init.headers as Record<string, string>)["Authorization"], body, redirect: init.redirect });
     if (path === "/relay/v1/check-in") {
       checkIns += 1;
       return reply(200, { interval_s: 30, now: new Date().toISOString() });
@@ -57,7 +58,7 @@ function fakeServer({ push = false, projects = [{ key: "bd", path: DIR }] } = {}
 
 const SHOWN = JSON.stringify([{ id: "bd-x1", status: "open", labels: ["review"], metadata: { review: {} } }]);
 
-function harness(server: ReturnType<typeof fakeServer>, overrides: Partial<RelayDeps> = {}) {
+function harness(server: ReturnType<typeof fakeServer>, overrides: Partial<RelayDeps> = {}, options: Partial<RelayOptions> = {}) {
   const out: string[] = [];
   const warn: string[] = [];
   let signalHandler: ((signal: string) => void) | null = null;
@@ -78,12 +79,12 @@ function harness(server: ReturnType<typeof fakeServer>, overrides: Partial<Relay
     },
     exit,
     sleep: (ms, signal) => realSleep(Math.min(ms, 10), signal),
-    runners: { bd, herdr, ingestBd, isSocket: () => true },
+    runners: { bd, herdr, ingestBd, inspectSocket: () => ({ isSocket: true, uid: UID }), uid: UID },
     checkDir: () => null,
     random: () => 0,
     ...overrides,
   };
-  const run = runRelay({ origin: "https://jetson.ts.net", name: "relay-laptop", projects: [], readToken: () => TOKEN }, deps);
+  const run = runRelay({ origin: "https://jetson.ts.net", name: "relay-laptop", projects: [{ key: "bd", path: DIR }], herdrSockets: ["/tmp/herdr.sock"], readToken: () => TOKEN, ...options }, deps);
   return {
     run,
     out,
@@ -183,7 +184,8 @@ describe("runRelay", () => {
         },
         herdr: async () => {},
         ingestBd: async () => "[]",
-        isSocket: () => true,
+        inspectSocket: () => ({ isSocket: true, uid: UID }),
+        uid: UID,
       },
     });
     server.queue.push({ id: 5, kind: "review_decision", payload: decision });
@@ -203,7 +205,7 @@ describe("runRelay", () => {
     const server = fakeServer();
     const gate = new Promise<void>(() => {});
     const relay = harness(server, {
-      runners: { bd: async (args) => (args[0] === "show" ? SHOWN : gate.then(() => "")), herdr: async () => {}, ingestBd: async () => "[]", isSocket: () => true },
+      runners: { bd: async (args) => (args[0] === "show" ? SHOWN : gate.then(() => "")), herdr: async () => {}, ingestBd: async () => "[]", inspectSocket: () => ({ isSocket: true, uid: UID }), uid: UID },
     });
     server.queue.push({ id: 6, kind: "review_decision", payload: decision });
     await until(() => relay.out.some((l) => l.includes("action 6 review_decision claimed")), "the claim");
@@ -234,5 +236,53 @@ describe("runRelay", () => {
     expect(server.pushes).toHaveLength(2);
     relay.signal();
     expect(await relay.run).toBe(0);
+  });
+
+  it("claims only its kinds and its own projects, and never redirects", async () => {
+    const server = fakeServer();
+    const relay = harness(server, {}, { kinds: ["review_decision", "beads_reingest"] });
+    await until(() => server.requests.some((r) => r.path === "/relay/v1/claim"), "a claim");
+    const claim = server.requests.find((r) => r.path === "/relay/v1/claim")!;
+    expect(claim.body).toEqual({ wait_s: 30, kinds: ["review_decision", "beads_reingest"], projects: ["bd"] });
+    expect(server.requests.every((r) => r.redirect === "error")).toBe(true);
+    relay.signal();
+    expect(await relay.run).toBe(0);
+  });
+
+  it("a relay narrowed to its own project runs nothing for another, even when the server hands it out", async () => {
+    const server = fakeServer({ projects: [{ key: "bd", path: DIR }, { key: "other", path: "/Users/me/dev/other" }] });
+    server.queue.push({ id: 51, kind: "review_decision", payload: { ...decision, project_key: "other", cwd: "/Users/me/dev/other" } });
+    server.queue.push({ id: 52, kind: "beads_reingest", payload: { project_key: "other" } });
+    const relay = harness(server);
+    await until(() => server.reports.length === 2, "two reports");
+    expect(server.reports.map((r) => r.body)).toEqual([
+      { state: "failed", error: "refused: project other is not in this relay's registry; nothing ran" },
+      { state: "failed", error: "refused: project other is not in this relay's registry; nothing ran" },
+    ]);
+    expect(relay.bd).not.toHaveBeenCalled();
+    expect(relay.ingestBd).not.toHaveBeenCalled();
+    relay.signal();
+    expect(await relay.run).toBe(0);
+  });
+
+  it("never takes the server's path for a project: a mismatch serves nothing and warns", async () => {
+    const server = fakeServer({ projects: [{ key: "bd", path: "/Users/attacker/bd" }] });
+    server.queue.push({ id: 61, kind: "review_decision", payload: { ...decision, cwd: "/Users/attacker/bd" } });
+    server.queue.push({ id: 62, kind: "review_decision", payload: decision });
+    const relay = harness(server);
+    await until(() => server.reports.length === 2, "two reports");
+    expect(server.reports.every((r) => r.body["state"] === "failed")).toBe(true);
+    expect(relay.bd).not.toHaveBeenCalled();
+    expect(relay.log()).toContain('[relay] warning: the server lists project bd at "/Users/attacker/bd", not this relay\'s /Users/me/dev/bd');
+    relay.signal();
+    expect(await relay.run).toBe(0);
+  });
+
+  it("refuses to start with no --project", async () => {
+    const server = fakeServer();
+    const relay = harness(server, {}, { projects: [] });
+    expect(await relay.run).toBe(1);
+    expect(relay.warn.join("\n")).toMatch(/no --project key=path given/);
+    expect(server.fetch).not.toHaveBeenCalled();
   });
 });

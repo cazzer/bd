@@ -7,7 +7,8 @@
 //
 // The plist runs one node process with no wrapper (no pnpm, no shell), so
 // launchd's SIGTERM reaches the relay itself, which finishes the action in
-// hand and reports it; ExitTimeOut gives it 60 s before SIGKILL. node is
+// hand and reports it; ExitTimeOut gives it 200 s before SIGKILL, above a
+// worst-case review decision (about 160 s of `bd` and herdr timeouts). node is
 // named by the absolute path that ran install. launchd's PATH is the
 // system's, without Homebrew or ~/.local/bin, so the plist sets PATH to the
 // directories holding `bd` and `herdr` as they resolve when install runs,
@@ -19,6 +20,16 @@
 // regular file of yours, mode 0600, one token) so a bad one is refused here
 // rather than crash-looping under launchd.
 //
+// The relay's configuration — its `--project key=/abs/path` checkouts (at
+// least one), `--kinds`, `--herdr-socket`s, and `--max-age` — is written
+// into the plist's arguments as given; Breakdown never supplies any of it
+// (relay-lib.mjs header). Install refuses a project path that is not a
+// beads checkout here (its own realpath, holding `.beads/`).
+//
+// The logs directory (~/Library/Logs/breakdown) is made, or narrowed to,
+// mode 0700, and the relay's two log files are created mode 0600 (or
+// narrowed to it): they carry action ids, project keys, and server errors.
+//
 // "Healthy" means launchd reports the job running with a pid and the
 // relay's log shows `[relay] checked in` after its latest `[relay] … starting`.
 
@@ -26,11 +37,12 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { parseArgs as parseNodeArgs } from "node:util";
 import { parsePrint, serviceDetails, xmlEscape } from "./mcp-service-lib.mjs";
-import { parseOrigin } from "./relay-lib.mjs";
+import { checkoutProblem as defaultCheckoutProblem, NAME_RE, parseOrigin, parseProjectFlag, parseRelayConfig, RELAY_CONFIG_OPTIONS } from "./relay-lib.mjs";
 
 export const LABEL = "dev.breakdown.relay";
 export const USAGE = [
-  "usage: relay-service install --url <http(s)://host[:port]> --name <client> [--token-file <path>] [--project <key>]...",
+  "usage: relay-service install --url <http(s)://host[:port]> --name <client> --project <key>=<absolute path>...",
+  "                             [--token-file <path>] [--kinds <kind>[,<kind>]...] [--herdr-socket <path>]... [--max-age <n>s|m|h|d]",
   "                              write the LaunchAgent and (re)load it; --token-file defaults to ~/.config/breakdown/relay-token",
   "       relay-service uninstall   stop the service and remove the LaunchAgent",
   "       relay-service status      loaded?, its bd/herdr, and whether it has checked in",
@@ -42,16 +54,14 @@ const SYSTEM_PATH = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
 const PID = /^\d+$/;
 const NOT_LOADED_CODES = new Set([3, 113]);
 const NOT_LOADED_TEXT = /no such process|could not find (specified )?service/i;
-/** The relay finishes the action in hand before it exits; a review decision takes seconds, rarely more. */
-export const EXIT_TIMEOUT_S = 60;
+/** The relay finishes the action in hand before it exits: above the ~160 s worst-case review decision. */
+export const EXIT_TIMEOUT_S = 200;
 const BOOTOUT_WAIT_ATTEMPTS = 280;
 const BOOTOUT_WAIT_MS = 250;
 /** How long install waits for the first check-in: tsx compiles the relay on first start. */
 export const CHECK_IN_DEADLINE_MS = 20_000;
 export const CHECK_IN_POLL_MS = 500;
 const LOG_LINES = 20;
-const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._@:-]{0,199}$/;
-const PROJECT_KEY_RE = /^[a-z0-9._-]{1,64}$/;
 
 export function servicePaths(homedir) {
   const logsDir = path.join(homedir, "Library", "Logs", "breakdown");
@@ -70,7 +80,8 @@ export function entryPath(repoRoot) {
 
 /**
  * @returns {{ help: true } | { error: string } | { command: "uninstall" | "status" }
- *   | { command: "install", origin: string, name: string, tokenFile: string | null, projects: string[] }}
+ *   | { command: "install", origin: string, name: string, tokenFile: string | null,
+ *       projects: { key: string, path: string }[], kinds: string | null, herdrSockets: string[], maxAge: string | null }}
  */
 export function parseArgs(argv) {
   let parsed;
@@ -83,7 +94,7 @@ export function parseArgs(argv) {
         url: { type: "string" },
         name: { type: "string" },
         "token-file": { type: "string" },
-        project: { type: "string", multiple: true },
+        ...RELAY_CONFIG_OPTIONS,
         help: { type: "boolean", short: "h" },
       },
     });
@@ -96,7 +107,7 @@ export function parseArgs(argv) {
   if (positionals.length > 1) return { error: `unexpected argument: ${positionals[1]}` };
   const [command] = positionals;
   if (!COMMANDS.has(command)) return { error: `unknown subcommand: ${command}` };
-  const flags = ["url", "name", "token-file", "project"].filter((f) => values[f] !== undefined);
+  const flags = ["url", "name", "token-file", ...Object.keys(RELAY_CONFIG_OPTIONS)].filter((f) => values[f] !== undefined);
   if (command !== "install") return flags.length > 0 ? { error: `--${flags[0]} applies only to install` } : { command };
 
   if (values.url === undefined) return { error: "--url is required" };
@@ -106,12 +117,16 @@ export function parseArgs(argv) {
   if (!NAME_RE.test(values.name)) return { error: `--name must be a client name (a letter or digit, then letters, digits, . _ @ : -), got ${JSON.stringify(values.name)}` };
   const tokenFile = values["token-file"] ?? null;
   if (tokenFile !== null && !path.isAbsolute(tokenFile)) return { error: `--token-file must be an absolute path, got ${tokenFile}` };
-  const projects = [];
-  for (const key of values.project ?? []) {
-    if (!PROJECT_KEY_RE.test(key)) return { error: `--project must be a project key matching [a-z0-9._-]{1,64}, got ${JSON.stringify(key)}` };
-    if (!projects.includes(key)) projects.push(key);
-  }
-  return { command, origin: origin.origin, name: values.name, tokenFile: tokenFile === null ? null : path.normalize(tokenFile), projects };
+  const config = parseRelayConfig(values);
+  if ("error" in config) return config;
+  return {
+    command,
+    origin: origin.origin,
+    name: values.name,
+    tokenFile: tokenFile === null ? null : path.normalize(tokenFile),
+    projects: config.projects,
+    ...config.explicit,
+  };
 }
 
 /** launchd's PATH: the directories of `bd` and `herdr` as resolved at install, then the system's; each once. */
@@ -124,13 +139,20 @@ export function servicePathEnv({ bd, herdr }) {
 }
 
 /** ProgramArguments: one node process, tsx as a loader, no wrapper between launchd and the relay. */
-export function programArguments({ execPath, repoRoot, origin, tokenFile, name, projects }) {
-  return [execPath, "--import", "tsx", entryPath(repoRoot), "--url", origin, "--token-file", tokenFile, "--name", name, ...projects.flatMap((p) => ["--project", p])];
+export function programArguments({ execPath, repoRoot, origin, tokenFile, name, projects, kinds = null, herdrSockets = [], maxAge = null }) {
+  return [
+    execPath, "--import", "tsx", entryPath(repoRoot),
+    "--url", origin, "--token-file", tokenFile, "--name", name,
+    ...projects.flatMap((p) => ["--project", `${p.key}=${p.path}`]),
+    ...(kinds === null ? [] : ["--kinds", kinds]),
+    ...herdrSockets.flatMap((s) => ["--herdr-socket", s]),
+    ...(maxAge === null ? [] : ["--max-age", maxAge]),
+  ];
 }
 
-export function renderPlist({ execPath, repoRoot, origin, tokenFile, name, projects, pathEnv, paths }) {
+export function renderPlist({ execPath, repoRoot, origin, tokenFile, name, projects, kinds = null, herdrSockets = [], maxAge = null, pathEnv, paths }) {
   const str = (value) => `<string>${xmlEscape(value)}</string>`;
-  const args = programArguments({ execPath, repoRoot, origin, tokenFile, name, projects })
+  const args = programArguments({ execPath, repoRoot, origin, tokenFile, name, projects, kinds, herdrSockets, maxAge })
     .map((arg) => `\t\t${str(arg)}`)
     .join("\n");
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -179,7 +201,11 @@ export function readPlist(xml) {
     const at = args.indexOf(name);
     return at >= 0 ? (args[at + 1] ?? null) : null;
   };
-  const projects = args.flatMap((arg, i) => (arg === "--project" && args[i + 1] !== undefined ? [args[i + 1]] : []));
+  const all = (name) => args.flatMap((arg, i) => (arg === name && args[i + 1] !== undefined ? [args[i + 1]] : []));
+  const projects = all("--project").flatMap((raw) => {
+    const parsed = parseProjectFlag(raw);
+    return "error" in parsed ? [] : [parsed.project];
+  });
   const pathRaw = /<key>PATH<\/key>\s*<string>([\s\S]*?)<\/string>/.exec(xml)?.[1];
   return {
     node: args[0] ?? null,
@@ -188,6 +214,9 @@ export function readPlist(xml) {
     tokenFile: flag("--token-file"),
     name: flag("--name"),
     projects,
+    kinds: flag("--kinds"),
+    herdrSockets: all("--herdr-socket"),
+    maxAge: flag("--max-age"),
     pathEnv: pathRaw === undefined ? null : xmlUnescape(pathRaw),
   };
 }
@@ -237,6 +266,26 @@ export function checkInState(outText) {
   return { started: true, checkedIn: checked !== undefined, line: checked ?? null };
 }
 
+/** The logs directory at 0700 and the relay's log files at 0600 (module header); a symlink in their place is refused. */
+async function prepareLogs(paths) {
+  await fs.mkdir(paths.logsDir, { recursive: true, mode: 0o700 });
+  const dir = await fs.lstat(paths.logsDir);
+  if (!dir.isDirectory()) throw new Refusal(`${paths.logsDir} is not a directory (a symlink?); remove it and install again`);
+  await fs.chmod(paths.logsDir, 0o700);
+  for (const file of [paths.outLog, paths.errLog]) {
+    let stat = null;
+    try {
+      stat = await fs.lstat(file);
+    } catch (err) {
+      if (err.code !== "ENOENT") throw err;
+    }
+    if (stat !== null && !stat.isFile()) throw new Refusal(`${file} is not a regular file (a symlink?); remove it and install again`);
+    const handle = await fs.open(file, "a", 0o600);
+    await handle.chmod(0o600);
+    await handle.close();
+  }
+}
+
 async function launchdJob(ctx) {
   const print = await ctx.run("launchctl", ["print", ctx.target], {});
   if (print.code !== 0) return { loaded: false, running: false, details: "", pid: null };
@@ -259,7 +308,7 @@ export async function runService(deps) {
     return { exitCode: 2 };
   }
   if (deps.platform !== "darwin") {
-    deps.warn(`${PREFIX}the service installer is macOS-only (launchd); this is ${deps.platform}. Run the relay under your own supervisor: cd apps/web && node --import tsx ../../bin/relay.mjs --url … --token-file … --name …`);
+    deps.warn(`${PREFIX}the service installer is macOS-only (launchd); this is ${deps.platform}. Run the relay under your own supervisor: cd apps/web && node --import tsx ../../bin/relay.mjs --url … --token-file … --name … --project <key>=<path>`);
     return { exitCode: 1 };
   }
   const ctx = { ...deps, paths: servicePaths(deps.homedir), target: `gui/${deps.uid}/${LABEL}`, domain: `gui/${deps.uid}` };
@@ -295,6 +344,11 @@ async function install(ctx, args) {
   } catch (err) {
     throw new Refusal(`${err.message}. Nothing was installed.`);
   }
+  const checkDir = ctx.checkoutProblem ?? defaultCheckoutProblem;
+  for (const project of args.projects) {
+    const problem = checkDir(project.path);
+    if (problem !== null) throw new Refusal(`--project ${project.key}: ${project.path} ${problem}; the relay runs bd only in a beads checkout at its real path. Nothing was installed.`);
+  }
   const bd = ctx.findOnPath("bd");
   if (bd === null) throw new Refusal("bd is not on PATH; the relay runs every action and push with it. Install it, or run this from a shell where `which bd` answers. Nothing was installed.");
   const herdr = ctx.findOnPath("herdr");
@@ -303,9 +357,21 @@ async function install(ctx, args) {
 
   const wasLoaded = await bootout(ctx);
   await fs.mkdir(path.dirname(paths.plist), { recursive: true });
-  await fs.mkdir(paths.logsDir, { recursive: true, mode: 0o700 });
+  await prepareLogs(paths);
   const tmp = `${paths.plist}.tmp`;
-  const plist = renderPlist({ execPath: ctx.execPath, repoRoot: ctx.repoRoot, origin: args.origin, tokenFile, name: args.name, projects: args.projects, pathEnv, paths });
+  const plist = renderPlist({
+    execPath: ctx.execPath,
+    repoRoot: ctx.repoRoot,
+    origin: args.origin,
+    tokenFile,
+    name: args.name,
+    projects: args.projects,
+    kinds: args.kinds,
+    herdrSockets: args.herdrSockets,
+    maxAge: args.maxAge,
+    pathEnv,
+    paths,
+  });
   await fs.writeFile(tmp, plist, { mode: 0o644 });
   await fs.rename(tmp, paths.plist);
 
@@ -321,7 +387,10 @@ async function install(ctx, args) {
   ctx.out(`  url         ${args.origin}`);
   ctx.out(`  name        ${args.name}`);
   ctx.out(`  token file  ${tokenFile}`);
-  ctx.out(`  projects    ${args.projects.length > 0 ? args.projects.join(", ") : "all registered"}`);
+  ctx.out(`  projects    ${args.projects.map((p) => `${p.key}=${p.path}`).join(", ")}`);
+  ctx.out(`  kinds       ${args.kinds ?? "all (review_decision, herdr_prompt, beads_reingest)"}`);
+  ctx.out(`  sockets     ${args.herdrSockets.length > 0 ? args.herdrSockets.join(", ") : "herdr's default (~/.config/herdr/herdr.sock)"}`);
+  ctx.out(`  max age     ${args.maxAge ?? "24h"}`);
   ctx.out(`  bd          ${bd}`);
   ctx.out(`  herdr       ${herdr ?? "not found"}`);
   ctx.out(`  PATH        ${pathEnv}`);
@@ -374,7 +443,11 @@ async function status(ctx) {
     ctx.out(`url         ${plist.origin ?? "(none in plist)"}`);
     ctx.out(`name        ${plist.name ?? "(none in plist)"}`);
     ctx.out(`token file  ${plist.tokenFile ?? "(none in plist)"}`);
-    ctx.out(`projects    ${plist.projects.length > 0 ? plist.projects.join(", ") : "all registered"}`);
+    ctx.out(`projects    ${plist.projects.length > 0 ? plist.projects.map((p) => `${p.key}=${p.path}`).join(", ") : "none: the relay refuses to start; reinstall with --project <key>=<path>"}`);
+    ctx.out(`kinds       ${plist.kinds ?? "all"}`);
+    ctx.out(`sockets     ${plist.herdrSockets.length > 0 ? plist.herdrSockets.join(", ") : "herdr's default (~/.config/herdr/herdr.sock)"}`);
+    ctx.out(`max age     ${plist.maxAge ?? "24h"}`);
+    if (plist.projects.length === 0) healthy = false;
     ctx.out(`node        ${plist.node ?? "(none in plist)"}`);
     ctx.out(`PATH        ${plist.pathEnv ?? "(none in plist)"}`);
     const bd = plist.pathEnv === null ? null : ctx.findOnPath("bd", plist.pathEnv);
