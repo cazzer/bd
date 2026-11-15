@@ -238,6 +238,79 @@ pnpm -s client-token revoke relay-laptop                 # stops the relay at on
 
 The client name is the relay's identity: it is `claimed_by` on its actions, its name in check-ins, and the actor of its pushed ingest runs. A leaked relay token can delay or drop queued decisions and push beads exports for registered projects; it cannot run anything on the Mac by itself, because the allowlist runs there. Revoke it with the command above.
 
+## Running the relay
+
+The relay is `bin/relay.mjs`, run from a checkout of this repo on the Mac that has `bd`, `herdr`, and the beads checkouts. Its code is `apps/web/server/relay/`: it runs the same review writer and beads watcher the web server runs locally, with allowlisted runners.
+
+### Install
+
+1. On the machine that runs Breakdown, mint its token (see [Minting the relay token](#minting-the-relay-token)).
+2. On the Mac, put the token in its file, readable by you alone:
+
+   ```bash
+   mkdir -p ~/.config/breakdown
+   (umask 077 && pbpaste > ~/.config/breakdown/relay-token)   # or printf '%s\n' "$TOKEN" > …
+   chmod 600 ~/.config/breakdown/relay-token
+   ```
+
+3. From the checkout, install the LaunchAgent (`dev.breakdown.relay`):
+
+   ```bash
+   pnpm relay:service install --url https://<breakdown-host> --name relay-laptop [--project bd]... [--token-file <path>]
+   ```
+
+   `--name` is the client name the token was minted for; it labels the log. `--project` (repeatable) limits the relay to those registered projects; without it, every project Breakdown lists whose path is a beads checkout on this Mac. `--token-file` defaults to `~/.config/breakdown/relay-token`. Install waits up to 20 s for the relay's first check-in and prints what it installed.
+
+To remove it: `pnpm relay:service uninstall` (the logs and the token file stay). To run it in a terminal instead: `pnpm relay --url … --token-file … --name …` (which is `node --import tsx ../../bin/relay.mjs` from `apps/web`).
+
+### The token file
+
+The token is the relay's own file, never an environment variable. The relay and the installer refuse a token file that:
+
+- is a symlink, or not a regular file;
+- is not owned by you;
+- has any group or other permission bit (the refusal names the mode in octal and says `chmod 600 <path>`);
+- holds anything but one token: one line of 1–512 characters with no whitespace inside.
+
+The relay reads the file at start and again after any `401`, so a rotated token is picked up by writing the new one into the file; no restart is needed. Nothing logs or prints the token.
+
+### PATH under launchd
+
+launchd starts jobs with the system's PATH, which has neither Homebrew nor `~/.local/bin`. Install resolves `bd` and `herdr` on the PATH of the shell it runs in and writes `PATH=<dir of bd>:<dir of herdr>:/usr/bin:/bin:/usr/sbin:/sbin` into the plist. So:
+
+- Install refuses without `bd` on PATH; the relay itself exits 1 at start without it.
+- Without `herdr`, install warns and the relay starts; every herdr prompt (review and inbox replies to agents) then fails with the reason.
+- After moving or reinstalling `bd` or `herdr` somewhere else, run install again.
+
+The plist names node by the absolute path that ran install, runs it with no wrapper so launchd's SIGTERM reaches the relay, and sets `KeepAlive` (restarted 10 s after an exit) and `ExitTimeOut` 60.
+
+### Status and logs
+
+`pnpm relay:service status` prints whether launchd has the job loaded and running, the URL, name, token file, and projects in the plist, the `bd` and `herdr` that resolve on the plist's PATH, and the relay's latest `[relay] checked in` line since it last started. It exits 0 only when the job runs, `bd` resolves, the token file passes, and a check-in followed the latest start.
+
+The logs are `~/Library/Logs/breakdown/relay.out.log` (start, check-in, each action) and `relay.err.log` (failures and retries). Every line starts with `[relay]` and names only Breakdown's origin, the client name, an action's id, kind, and state, an HTTP status, and Breakdown's error code and message. A person's review message and a herdr prompt never appear there; an action's error is on the board.
+
+### What it does
+
+- **Check-in** every `interval_s` (30 s), on its own loop, so a long action never makes it look offline.
+- **Claim, run, report**, one action at a time: a 30 s long-poll, then the action, then its report, retried with backoff until Breakdown takes it. A report Breakdown refuses (`409 not_claimer`, `404`) is given up and logged.
+  - Before running anything, the payload is parsed with the same schema Breakdown used at enqueue. A forged one, a `cwd` other than the project's checkout in the relay's registry, or a herdr socket that is not a socket on this Mac is reported `failed` with `refused: …` and nothing runs.
+  - `review_decision` runs the review writer, which re-reads the issue with `bd show` first. An issue already closed is reported `done` with `{ "note": "already applied" }`. The result is the writer's own: what was written, and whether the agent's pane was told.
+  - `herdr_prompt` is reported `done` with `{ "pane" }`, `beads_reingest` with `{ "project", "changed" }`.
+- **Registry.** `GET /projects` at start, before each `beads_reingest`, when a decision names a project it does not hold, and every 5 minutes. A project is kept only when its path is its own realpath (no symlink on the way), a directory, and holds `.beads/`; anything else is logged once and skipped. A project registered after the relay started is picked up within 5 minutes.
+- **Push watcher**, only while `GET /projects` says `push: true`: the server's beads watcher, run here with the push as its sink, so a bead edit on the Mac reaches open boards within a second or two. Each push carries the whole export; review threads unchanged since the last accepted push are not fetched again. An export over 8 MiB is refused before it is sent, with its size.
+- **Stopping.** The first SIGTERM or SIGINT ends the long-poll, lets the action in hand finish and report, stops the watcher, and exits 0. A second exits 130 at once.
+
+### When the Mac is asleep or offline
+
+Nothing is lost. Breakdown keeps each decision `queued`, the review or inbox card shows it pending, and the board's relay pill reads "relay offline since …" once the last check-in is three intervals old. The relay retries every request with exponential backoff, at most 60 s apart, and on waking claims the queued actions oldest first. A decision that waited is still guarded by `bd show`: one that no longer applies (the review was closed meanwhile, or its card changed) is reported as such, not run.
+
+**Caveat: a re-run `changes` decision comments twice.** If the relay dies after running a decision but before its report lands, Breakdown hands the action out again after 5 minutes. An accept is safe (the issue is closed, so the re-run is "already applied"), but request changes leaves the review open, so its re-run posts its comment a second time and re-adds the label. A `herdr_prompt` may likewise be delivered twice. It takes a relay death mid-action; a worst-case decision takes about 160 s against the 300 s reclaim.
+
+### End-to-end check
+
+`pnpm relay:e2e` runs the whole loop on this Mac against the database in `.env`: a web server started with a PATH holding neither `bd` nor `herdr` (so it queues), a proxy that makes the relay's requests arrive as from another machine, and the real relay with a throwaway `relay` token, against a scratch beads checkout at `~/Library/Caches/breakdown/relay-e2e` (project `e2e-relay`, emptied on each run) and a stub `herdr` on a real unix socket. It checks accept with an option, request changes, an inbox reply, and a bead edit reaching the board's event stream, then the same three decisions on a server with both binaries, which run directly and queue nothing. It refuses to start while any relay action is queued or claimed, never runs the real `herdr`, and revokes its token at the end. It is not part of `pnpm check`.
+
 ## Errors
 
 Every error response has this body:
