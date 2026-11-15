@@ -41,6 +41,8 @@ import {
   revertHangarEscalation,
   routeReviewDecision,
   unsafeLockEscalatableInTx,
+  unsafeLockStaleEscalationInTx,
+  unsafeRecordReviewWithdrawalInTx,
   unsafeMarkEscalatedInTx,
   type HangarDecision,
   type HangarDecisionCard,
@@ -187,19 +189,49 @@ export async function escalateHangarDecision(db: Database, input: EscalateHangar
   return { via: "inbox", decisionId: decision.id, inboxItemId: filed.id, reason };
 }
 
+/** The reason a stale escalation's review is closed with (bd text: never starts with "-"). */
+export function staleReviewReason(decision: Pick<HangarDecision, "sessionId" | "state">): string {
+  const why = decision.state === "decided" ? "its driver decided it" : "the session filed a new decision";
+  return `Withdrawn: ${why} while this review was being filed (hangar session ${decision.sessionId}), so nothing waits on it. Closed by Breakdown.`;
+}
+
+/**
+ * A review the relay filed for a decision that had moved on meanwhile (the
+ * session re-filed during the claim): its decision would route nowhere, and
+ * it blocks its work item. Queues a `review_withdraw` that closes it, once
+ * (recorded as `withdraw_action_id`, so a repeated report queues no second).
+ */
+async function withdrawStaleReview(db: Database, action: RelayAction, reviewId: string): Promise<void> {
+  const payload = action.payload as { project_key: string; cwd: string };
+  await db.transaction(async (tx) => {
+    const stale = await unsafeLockStaleEscalationInTx(tx, action.id);
+    if (stale === null) return;
+    const { action: withdraw } = await enqueueRelayAction(tx, {
+      kind: "review_withdraw",
+      payload: { project_key: payload.project_key, cwd: payload.cwd, issue_id: reviewId, reason: staleReviewReason(stale) },
+      requestedBy: "breakdown",
+      originNodeId: action.originNodeId,
+    });
+    await unsafeRecordReviewWithdrawalInTx(tx, { id: stale.id, reviewId, withdrawActionId: withdraw.id });
+  });
+}
+
 /**
  * The follow-up to a relay report that landed (module header): a review
  * request done records its bead id, failed puts the decision back to
- * pending; a review decision done is routed to its session. Anything else,
- * and a report already finished before, does nothing. Never throws: the
- * report is recorded either way, and a routing failure is logged by the
- * caller.
+ * pending, and one done for a decision that has moved on queues the
+ * review's withdrawal; a review decision done is routed to its session.
+ * Anything else does nothing. Idempotent, so it runs on a repeated report
+ * too. The report is recorded either way; the caller logs a failure here.
  */
 export async function onRelayActionReported(db: Database, action: RelayAction): Promise<void> {
   if (action.kind === "review_request") {
     const reviewId = (action.result as Record<string, unknown> | null)?.["review_id"];
-    if (action.state === "done" && typeof reviewId === "string" && isRelayIssueId(reviewId)) await recordHangarEscalationReview(db, { relayActionId: action.id, reviewId });
-    else if (action.state === "failed" || action.state === "done") await failHangarEscalation(db, { relayActionId: action.id, error: action.error ?? "the relay reported no review id" });
+    if (action.state === "done" && typeof reviewId === "string" && isRelayIssueId(reviewId)) {
+      if (!(await recordHangarEscalationReview(db, { relayActionId: action.id, reviewId }))) await withdrawStaleReview(db, action, reviewId);
+    } else if (action.state === "failed" || action.state === "done") {
+      await failHangarEscalation(db, { relayActionId: action.id, error: action.error ?? "the relay reported no review id" });
+    }
     return;
   }
   if (action.kind === "review_decision" && action.state === "done") {

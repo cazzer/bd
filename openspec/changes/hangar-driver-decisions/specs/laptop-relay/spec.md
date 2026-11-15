@@ -26,3 +26,12 @@ Filing a review SHALL use only allowlisted `bd` argument vectors whose literals 
 
 - **WHEN** a `review_request` payload carries a title starting with `-` or metadata that is not a keyed card
 - **THEN** Breakdown refuses it at enqueue, and the relay refuses it again before spawning anything
+
+### Requirement: The relay closes a stale escalated review
+
+The relay SHALL run a `review_withdraw` action: close an open review, with the given reason, only when `bd show` reads it as that exact issue labelled `review`. A review already closed SHALL be reported done. A `review_withdraw` SHALL never be failed as stale.
+
+#### Scenario: A review filed after its decision moved on
+
+- **WHEN** a session files a new decision while the relay is filing its earlier escalation's review R
+- **THEN** Breakdown queues a `review_withdraw` for R once, and the relay closes R

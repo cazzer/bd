@@ -23,7 +23,9 @@ import {
   routeReviewDecision,
   unsafeLockEscalatableInTx,
 } from "./hangar-decisions.js";
+import { HangarOutcomeMergeError } from "./errors.js";
 import { escalateHangarDecision, hangarEscalationReviewKey, onRelayActionReported } from "./hangar-escalation.js";
+import { mergeNodes } from "./merge.js";
 import { decideInboxItem, listInbox, requestInboxItem } from "./inbox.js";
 import { closeIngestRun, openIngestRun, type IngestRunHandle } from "./ingest-runs.js";
 import { upsertNodes } from "./nodes.js";
@@ -455,5 +457,76 @@ describe("review fixes (PR #12)", () => {
     expect(routed?.messageId).toEqual(expect.any(Number));
     expect((await readHangarMessages(db, { sessionId: q.id })).messages[0]?.body).toMatchObject({ item_id: filed.id, decision: "changes", via: "review" });
     expect((await getHangarDecision(db, filed.id))?.state).toBe("decided");
+  });
+});
+
+describe("second review fixes (PR #12)", () => {
+  const relayActionOf = (r: Awaited<ReturnType<typeof escalateHangarDecision>>) => (r.via === "review" ? r.relayActionId : -1);
+  const claim = (id: number) => claimRelayAction(db, { relay: RELAY, kinds: ["review_request", "review_withdraw"], projects: [PROJECT], among: [id] });
+
+  it("a decide while the relay has claimed the review_request is refused; once filed, the person's decision routes", async () => {
+    const s = await session({ beads: true });
+    const filed = await fileHangarDecision(db, { sessionId: s.id, kind: "question", title: "Q" });
+    const escalated = await escalateHangarDecision(db, { sessionId: s.id, card: CARD, actor: DRIVER });
+    expect((await claim(relayActionOf(escalated)))?.id).toBe(relayActionOf(escalated));
+    const err = await refusal(() => decideHangarDecision(db, { sessionId: s.id, decisionId: filed.id, decision: "accept", actor: DRIVER }));
+    expect(err).toMatchObject({ reason: "escalated", message: expect.stringMatching(/being filed .* retry shortly/) });
+    expect((await getRelayAction(db, relayActionOf(escalated)))?.state).toBe("claimed");
+    expect((await readHangarMessages(db, { sessionId: s.id })).messages).toEqual([]);
+
+    const reported = await reportRelayAction(db, { relay: RELAY, id: relayActionOf(escalated), state: "done", result: { review_id: `${PROJECT}-c1` } });
+    await onRelayActionReported(db, reported.action);
+    expect(await routeReviewDecision(db, { projectKey: PROJECT, reviewId: `${PROJECT}-c1`, decision: "accept", option: "a", message: "", by: "phone" })).toMatchObject({ decisionId: filed.id });
+  });
+
+  it("a re-file while the relay files the review queues a review_withdraw closing it, once", async () => {
+    const s = await session({ beads: true });
+    const first = await fileHangarDecision(db, { sessionId: s.id, kind: "question", title: "Q1" });
+    const escalated = await escalateHangarDecision(db, { sessionId: s.id, card: CARD, actor: DRIVER });
+    await claim(relayActionOf(escalated));
+    // The re-file is never refused; the claimed action is the relay's, so it is not withdrawn.
+    await fileHangarDecision(db, { sessionId: s.id, kind: "question", title: "Q2" });
+    expect((await getRelayAction(db, relayActionOf(escalated)))?.state).toBe("claimed");
+
+    const reported = await reportRelayAction(db, { relay: RELAY, id: relayActionOf(escalated), state: "done", result: { review_id: `${PROJECT}-s1` } });
+    await onRelayActionReported(db, reported.action);
+    const stale = await getHangarDecision(db, first.id);
+    expect(stale).toMatchObject({ state: "superseded", escalation: { review_id: `${PROJECT}-s1`, withdraw_action_id: expect.any(Number) } });
+    const withdrawId = stale!.escalation!.via === "review" ? stale!.escalation!.withdraw_action_id! : -1;
+    const withdraw = await getRelayAction(db, withdrawId);
+    expect(withdraw).toMatchObject({ kind: "review_withdraw", state: "queued", requestedBy: "breakdown" });
+    expect(parseRelayPayload("review_withdraw", withdraw!.payload)).toMatchObject({ project_key: PROJECT, cwd: `/tmp/${PROJECT}`, issue_id: `${PROJECT}-s1`, reason: expect.stringMatching(/^Withdrawn: the session filed a new decision/) });
+    expect(isAllowedBdArgs(["close", `${PROJECT}-s1`, "--reason", (withdraw!.payload as { reason: string }).reason])).toBe(true);
+
+    // A repeated report queues no second withdrawal; the person's decision on the stale review routes nowhere.
+    await onRelayActionReported(db, (await reportRelayAction(db, { relay: RELAY, id: relayActionOf(escalated), state: "done", result: { review_id: `${PROJECT}-s1` } })).action);
+    expect(await db.select({ id: relayActions.id }).from(relayActions).where(sql`kind = 'review_withdraw' AND payload->>'issue_id' = ${`${PROJECT}-s1`}`)).toHaveLength(1);
+    expect(await routeReviewDecision(db, { projectKey: PROJECT, reviewId: `${PROJECT}-s1`, decision: "accept", message: "", by: "phone" })).toBeNull();
+    // It is claimable by a relay, and never stale.
+    await db.execute(sql`UPDATE relay_actions SET created_at = now() - interval '3 days' WHERE id = ${withdrawId}`);
+    expect((await claim(withdrawId))?.id).toBe(withdrawId);
+  });
+
+  it("brain_merge refuses an escalation's inbox item, either way", async () => {
+    const s = await session();
+    await fileHangarDecision(db, { sessionId: s.id, kind: "question", title: "Q" });
+    const escalated = await escalateHangarDecision(db, { sessionId: s.id, card: CARD, actor: DRIVER });
+    const itemId = escalated.via === "inbox" ? escalated.inboxItemId : "";
+    const plain = (await upsertNodes(db, fixtureRun, [{ nodeType: "inbox_item", sourceSystem: FIXTURE_SOURCE, externalId: randomUUID(), title: "Plain", metadata: { source: "agent" } }])).rows[0]!.id;
+    fixtureNodes.push(plain);
+    for (const [loser, survivor] of [[plain, itemId], [itemId, plain]] as const) {
+      const err = await refusal(() => mergeNodes(db, loser, survivor, fixtureRun));
+      expect(err).toBeInstanceOf(HangarOutcomeMergeError);
+      expect(err).toMatchObject({ kind: "escalation", message: expect.stringMatching(/hangar escalation's inbox item/) });
+    }
+    expect((await db.execute<{ merged_into: string | null }>(sql`SELECT merged_into FROM nodes WHERE id = ${itemId}::uuid`)).rows[0]?.merged_into).toBeNull();
+  });
+
+  it("the review_withdraw payload takes a review id and a bd-safe reason only", () => {
+    const base = { project_key: "bd", cwd: "/Users/me/dev/bd", issue_id: "bd-r1", reason: "Withdrawn: superseded." };
+    expect(parseRelayPayload("review_withdraw", base)).toEqual(base);
+    expect(() => parseRelayPayload("review_withdraw", { ...base, reason: "--force" })).toThrow("payload.reason");
+    expect(() => parseRelayPayload("review_withdraw", { ...base, issue_id: "-x" })).toThrow("payload.issue_id");
+    expect(() => parseRelayPayload("review_withdraw", { ...base, args: ["delete"] })).toThrow("payload");
   });
 });

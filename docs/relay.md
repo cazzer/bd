@@ -66,14 +66,14 @@ Takes the oldest open action of a kind you name, for a project you name, and ret
 Request:
 
 ```json
-{ "kinds": ["review_decision", "herdr_prompt", "beads_reingest", "review_request"], "projects": ["bd"], "wait_s": 25 }
+{ "kinds": ["review_decision", "herdr_prompt", "beads_reingest", "review_request", "review_withdraw"], "projects": ["bd"], "wait_s": 25 }
 ```
 
-- `kinds` (array, optional): one or more of `review_decision`, `herdr_prompt`, `beads_reingest`, `review_request`, each at most once. Omitted: every kind.
-- `projects` (array, optional): up to 100 project keys, each matching `[a-z0-9._-]{1,64}`. When given, an action whose payload names a `project_key` (`review_decision`, `beads_reingest`, `review_request`) is claimable only if that key is listed; a `herdr_prompt` has no project and is claimable by kind alone. Omitted: every project. The relay always sends its own `--project` keys.
+- `kinds` (array, optional): one or more of `review_decision`, `herdr_prompt`, `beads_reingest`, `review_request`, `review_withdraw`, each at most once. Omitted: every kind.
+- `projects` (array, optional): up to 100 project keys, each matching `[a-z0-9._-]{1,64}`. When given, an action whose payload names a `project_key` (`review_decision`, `beads_reingest`, `review_request`, `review_withdraw`) is claimable only if that key is listed; a `herdr_prompt` has no project and is claimable by kind alone. Omitted: every project. The relay always sends its own `--project` keys.
 - `wait_s` (integer 0–30, default 0).
 
-**Stale actions.** A `review_decision` or `herdr_prompt` queued more than **24 hours** ago is not handed out: the claim that would take it marks it `failed` with `stale: queued <ISO time>, older than 24 h` and moves on. A decision or a reply that old is no longer the person's present intent; they decide again on the board. A `beads_reingest` is never stale, and neither is a `review_request`: an escalation waits for the person however long the relay was away.
+**Stale actions.** A `review_decision` or `herdr_prompt` queued more than **24 hours** ago is not handed out: the claim that would take it marks it `failed` with `stale: queued <ISO time>, older than 24 h` and moves on. A decision or a reply that old is no longer the person's present intent; they decide again on the board. A `beads_reingest` is never stale, and neither is a `review_request` or `review_withdraw`: an escalation waits for the person however long the relay was away.
 
 Response `200` with an action:
 
@@ -105,7 +105,8 @@ or, when nothing arrived in time, `{ "action": null }`.
   - `herdr_prompt`: `{ pane, socket, text }`: `herdr agent prompt <pane> <text>` on that socket.
   - `beads_reingest`: `{ project_key }`: re-ingest that project now and [push](#post-relayv1beads-ingest--scope-relay) it.
   - `review_request`: `{ project_key, cwd, issue_id, title, description, review }`: file a review under work item `issue_id`, a hangar driver's escalation ([`docs/hangar-api.md`](hangar-api.md#decisions)). `review` is the review metadata, a decision card with a `key`. Read the work item (`bd show`), list its open reviews, and reuse the one whose `review.key` is the payload's, else `bd create` one under it; set its metadata (`bd update --metadata`), and make a new one block the work item unless it is an epic. Report `done` with `{ "review_id": "<bead id>", "reused": <bool> }`; Breakdown routes the person's later decision on that review to the session that asked. The key means a retry after a lost report finds the review it filed rather than filing another. On a failure, report `failed` naming the step, with `{ "review_id" }` once one exists; Breakdown puts the decision back in the driver's hands. Breakdown may also fail a still-queued `review_request` itself, with `error` starting `withdrawn:`, when the driver decided before it was filed or the session filed a new decision; a relay never sees those. One failed when claimed (claimed three times without a report) goes back to the driver the same way. A repeated report is followed up again, so a review id whose first follow-up was lost is still recorded.
-- `created_at`: when it was queued. The relay refuses a `review_decision` or `herdr_prompt` (never a `review_request` or `beads_reingest`) older than its own `--max-age` (24 h by default), and one with no readable `created_at`, before running it.
+  - `review_withdraw`: `{ project_key, cwd, issue_id, reason }`: close review `issue_id`, which a `review_request` filed after the decision it was for had moved on (the session filed a new decision while the relay was filing it). Read it with `bd show`; refuse it unless it is that exact issue, labelled `review`. Close an open one with `bd close <id> --reason <reason>` (a closed review no longer blocks its work item) and re-ingest; report `done` with `{ "review_id", "closed": true }`, or `{ "closed": false, "note": "already closed" }` for one already closed. Breakdown queues it itself; it uses only the allowlisted `show` and `close` shapes.
+- `created_at`: when it was queued. The relay refuses a `review_decision` or `herdr_prompt` (never a `review_request`, `review_withdraw`, or `beads_reingest`) older than its own `--max-age` (24 h by default), and one with no readable `created_at`, before running it.
 - `attempts`: how many times it has been claimed without a report, this claim included.
 
 Status codes: `200`, `400`, `401`, `403`, `413`, `415`, `429 too_many_waiters`.
@@ -293,7 +294,7 @@ The relay is `bin/relay.mjs`, run from a checkout of this repo on the Mac that h
 
    - `--name` is the client name the token was minted for; it labels the log.
    - `--project <key>=<path>` (repeatable, at least one) is a beads checkout the relay serves: the project key Breakdown registered it under and its real path on this Mac. Install refuses a path that is not its own realpath or holds no `.beads/`.
-   - `--kinds` (comma-separated; default `review_decision,herdr_prompt,beads_reingest,review_request`) is what it claims.
+   - `--kinds` (comma-separated; default `review_decision,herdr_prompt,beads_reingest,review_request,review_withdraw`) is what it claims.
    - `--herdr-socket` (repeatable; default `~/.config/herdr/herdr.sock`) names the herdr servers it may prompt through.
    - `--max-age` (`<n>s`, `m`, `h`, or `d`; default `24h`) is the oldest decision or prompt it will run.
    - `--token-file` defaults to `~/.config/breakdown/relay-token`.
@@ -393,4 +394,4 @@ Branch on `code`, which is stable within v1. `message` is for people.
 
 Everything here is under `/relay/v1/`. A breaking change gets a new prefix. Within v1, Breakdown ignores request fields it does not know, and responses may gain fields; clients ignore those.
 
-`review_request` was added within v1. A relay that predates it never claims one: it names its own kinds, and an older relay's default list lacks it. Its actions wait on Breakdown, never stale, until a relay that knows the kind runs; update the relay on the Mac to file escalations.
+`review_request` and `review_withdraw` were added within v1. A relay that predates it never claims one: it names its own kinds, and an older relay's default list lacks it. Its actions wait on Breakdown, never stale, until a relay that knows the kind runs; update the relay on the Mac to file escalations.

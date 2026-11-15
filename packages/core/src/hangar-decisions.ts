@@ -81,7 +81,18 @@ export interface HangarDecisionCard {
 export type HangarEscalationCard = Pick<HangarDecisionCard, "question" | "options" | "recommend">;
 
 export type HangarEscalation =
-  | { via: "review"; project_key: string; issue_id: string; review_key: string; relay_action_id: number; card?: HangarEscalationCard; review_id?: string; error?: string }
+  | {
+      via: "review";
+      project_key: string;
+      issue_id: string;
+      review_key: string;
+      relay_action_id: number;
+      card?: HangarEscalationCard;
+      review_id?: string;
+      error?: string;
+      /** The `review_withdraw` relay action closing a review that landed after its decision moved on. */
+      withdraw_action_id?: number;
+    }
   /** `item_id` is null only while the item is being filed. */
   | { via: "inbox"; item_id: string | null; card?: HangarEscalationCard };
 
@@ -324,12 +335,13 @@ export function hangarEscalationUnfiled(escalation: HangarEscalation | null): bo
   return escalation !== null && escalation.via === "review" && escalation.review_id === undefined;
 }
 
-/** Fails a still-queued relay action Breakdown no longer wants run (a withdrawn or superseded escalation). A claimed one is the relay's already. */
-async function withdrawRelayActions(tx: Tx, where: ReturnType<typeof sql>, reason: string): Promise<void> {
-  await tx.execute(sql`
+/** Fails still-queued relay actions Breakdown no longer wants run (a withdrawn or superseded escalation); how many it failed. A claimed one is the relay's already. */
+async function withdrawRelayActions(tx: Tx, where: ReturnType<typeof sql>, reason: string): Promise<number> {
+  const withdrawn = await tx.execute(sql`
     UPDATE relay_actions SET state = 'failed', finished_at = now(), error = ${reason}
     WHERE kind = 'review_request' AND state = 'queued' AND id IN (${where})
   `);
+  return withdrawn.rowCount ?? 0;
 }
 
 // --- Filing --------------------------------------------------------------------------------
@@ -457,7 +469,8 @@ export interface DecideHangarDecisionResult {
  * when `decisionId` names another (`superseded`), when it was escalated and
  * its review filed (only the person answers it), and when the session has
  * ended. An escalation whose review is not filed yet is withdrawn: its
- * queued relay action is failed. The answer is checked against the card
+ * queued relay action is failed. One the relay has claimed (being filed) is
+ * refused as escalated, so no review is filed that routes nowhere. The answer is checked against the card
  * (`checkHangarDecisionAnswer`).
  */
 export async function decideHangarDecision(db: Database, input: DecideHangarDecisionInput): Promise<DecideHangarDecisionResult> {
@@ -474,8 +487,12 @@ export async function decideHangarDecision(db: Database, input: DecideHangarDeci
     }
     const answer = checkHangarDecisionAnswer(open, { decision: input.decision, option: input.option, note: input.note, by, via: "driver" });
     await assertSessionReads(tx, sessionId);
+    // Withdrawn only while its relay action is still queued: once the relay has claimed it, the review is being filed, and the person's decision on it must still route here.
     if (open.escalation?.via === "review" && open.state === "escalated") {
-      await withdrawRelayActions(tx, sql`SELECT ${open.escalation.relay_action_id}::bigint`, "withdrawn: the driver decided it before the review was filed");
+      const withdrawn = await withdrawRelayActions(tx, sql`SELECT ${open.escalation.relay_action_id}::bigint`, "withdrawn: the driver decided it before the review was filed");
+      if (withdrawn === 0) {
+        throw new HangarDecisionRefusedError(sessionId, "escalated", `decision ${open.id}'s review is being filed by the laptop relay right now; retry shortly: once it is filed, only the person's decision on it answers it, and if the relay fails it, the decision is yours again`);
+      }
     }
     const { messageId } = await resolveInTx(tx, open, answer, true);
     return { decision: { ...open, state: "decided", decision: answer }, messageId: messageId! };
@@ -537,6 +554,33 @@ export async function revertHangarEscalation(db: Database, id: string): Promise<
   await db.execute(sql`
     UPDATE hangar_decisions SET state = 'pending', escalation = NULL, updated_at = now()
     WHERE id = ${id}::uuid AND state = 'escalated' AND escalation->>'via' = 'inbox' AND escalation->>'item_id' IS NULL
+  `);
+}
+
+/**
+ * A review filed for a decision that moved on before it landed (the session
+ * re-filed while the relay was filing it): the decision, superseded or
+ * decided, row-locked, with its escalation; null when the action filed for a
+ * live escalation, or its stale review is already being withdrawn.
+ */
+export async function unsafeLockStaleEscalationInTx(tx: Tx, relayActionId: number): Promise<HangarDecision | null> {
+  const found = await tx.execute<DecisionRow>(sql`
+    SELECT ${COLUMNS} FROM hangar_decisions
+    WHERE state IN ('superseded', 'decided') AND escalation->>'via' = 'review' AND escalation->>'relay_action_id' = ${String(relayActionId)}
+      AND NOT (escalation ? 'withdraw_action_id')
+    LIMIT 1
+    FOR UPDATE
+  `);
+  const row = found.rows[0];
+  return row === undefined ? null : toDecision(row);
+}
+
+/** Records the stale review's bead id and the relay action that closes it, so a repeated report queues no second one. */
+export async function unsafeRecordReviewWithdrawalInTx(tx: Tx, input: { id: string; reviewId: string; withdrawActionId: number }): Promise<void> {
+  await tx.execute(sql`
+    UPDATE hangar_decisions
+    SET escalation = escalation || jsonb_build_object('review_id', ${input.reviewId}::text, 'withdraw_action_id', ${input.withdrawActionId}::bigint), updated_at = now()
+    WHERE id = ${input.id}::uuid
   `);
 }
 

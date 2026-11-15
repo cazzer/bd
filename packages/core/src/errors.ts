@@ -841,8 +841,10 @@ export class HangarOutcomeMergeError extends KnowledgeStoreError {
     readonly loserId: string,
     readonly survivorId: string,
     readonly outcomeNodeId: string,
+    /** `escalation`: the node is a hangar escalation's inbox item (key `hangar-decision:`), routed to its session on its id. */
+    readonly kind: "outcome" | "escalation" = "outcome",
   ) {
-    super(`cannot merge node ${loserId} into ${survivorId}: node ${outcomeNodeId} is a hangar outcome request, which is never merged`);
+    super(`cannot merge node ${loserId} into ${survivorId}: node ${outcomeNodeId} is ${kind === "escalation" ? "a hangar escalation's inbox item" : "a hangar outcome request"}, which is never merged`);
   }
 }
 

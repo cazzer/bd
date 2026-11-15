@@ -388,7 +388,7 @@ async function install(ctx, args) {
   ctx.out(`  name        ${args.name}`);
   ctx.out(`  token file  ${tokenFile}`);
   ctx.out(`  projects    ${args.projects.map((p) => `${p.key}=${p.path}`).join(", ")}`);
-  ctx.out(`  kinds       ${args.kinds ?? "all (review_decision, herdr_prompt, beads_reingest, review_request)"}`);
+  ctx.out(`  kinds       ${args.kinds ?? "all (review_decision, herdr_prompt, beads_reingest, review_request, review_withdraw)"}`);
   ctx.out(`  sockets     ${args.herdrSockets.length > 0 ? args.herdrSockets.join(", ") : "herdr's default (~/.config/herdr/herdr.sock)"}`);
   ctx.out(`  max age     ${args.maxAge ?? "24h"}`);
   ctx.out(`  bd          ${bd}`);

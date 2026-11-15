@@ -519,7 +519,7 @@ export const hangarDecisions = pgTable(
  * replies to one pane are two actions). The origin index serves the UI's
  * per-item read: a card or inbox row's open or recent action.
  */
-export const RELAY_ACTION_KINDS = ["review_decision", "herdr_prompt", "beads_reingest", "review_request"] as const;
+export const RELAY_ACTION_KINDS = ["review_decision", "herdr_prompt", "beads_reingest", "review_request", "review_withdraw"] as const;
 export type RelayActionKind = (typeof RELAY_ACTION_KINDS)[number];
 export const RELAY_ACTION_STATES = ["queued", "claimed", "done", "failed"] as const;
 export type RelayActionState = (typeof RELAY_ACTION_STATES)[number];
@@ -554,7 +554,7 @@ export const relayActions = pgTable(
     uniqueIndex("relay_actions_open_target_idx")
       .on(table.kind, sql`(${table.payload}->>'project_key')`, sql`coalesce(${table.payload}->>'issue_id', '')`)
       .where(sql`${table.state} IN ('queued', 'claimed') AND ${table.kind} <> 'herdr_prompt'`),
-    check("relay_actions_kind_check", sql`${table.kind} IN ('review_decision', 'herdr_prompt', 'beads_reingest', 'review_request')`),
+    check("relay_actions_kind_check", sql`${table.kind} IN ('review_decision', 'herdr_prompt', 'beads_reingest', 'review_request', 'review_withdraw')`),
     check("relay_actions_state_check", sql`${table.state} IN ('queued', 'claimed', 'done', 'failed')`),
   ],
 );

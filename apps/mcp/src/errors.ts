@@ -198,6 +198,9 @@ export function mapError(toolName: string, err: unknown): CallToolResult {
     return actionable(err, "Nothing was merged. A hangar session is not a duplicate of anything: it is bound to its token and its inbox items. Merge other nodes; leave sessions as they are.");
   }
   if (err instanceof HangarOutcomeMergeError) {
+    if (err.kind === "escalation") {
+      return actionable(err, "Nothing was merged. A hangar escalation's inbox item is the person's card for one session's decision, routed back to that session on its id; it is not a duplicate of anything. Leave it as it is.");
+    }
     return actionable(err, "Nothing was merged. An outcome request is the person's card for one hangar session; it is not a duplicate of anything, and nothing is a duplicate of it. Leave it as it is; a driver releases its session with brain_hangar_outcome.");
   }
   if (err instanceof MergeFailedError) {

@@ -306,3 +306,32 @@ describe("executeAction: review requests (a hangar driver's escalation)", () => 
     expect(await executeAction(act("review_request", request), noFiler)).toMatchObject({ state: "failed", error: "refused: this relay cannot file reviews; nothing ran" });
   });
 });
+
+describe("executeAction: review withdrawals (a stale escalation's review)", () => {
+  const withdraw = { project_key: "bd", cwd: DIR, issue_id: "bd-r9", reason: "Withdrawn: the session filed a new decision while this review was being filed." };
+
+  function closer(record: Record<string, unknown> | null) {
+    const bd = vi.fn(async (args: readonly string[], _cwd: string) => (args[0] === "show" ? JSON.stringify(record === null ? [] : [record]) : ""));
+    const reg = { get: (project: string) => (project === "bd" ? { project, dir: DIR } : undefined), refresh: vi.fn(async () => false) };
+    const runners = createRelayRunners({ registry: reg, herdrSockets: [socket], bd, herdr: vi.fn(async () => {}), checkDir: () => null });
+    const reingest = vi.fn(async () => ({ changed: true }));
+    const deps: ExecuteDeps = { registry: reg, writerFor: () => createReviewWriter({}), bdFor: (p) => runners.bdFor(p), runHerdr: runners.runHerdr, reingest };
+    return { deps, bd, reingest };
+  }
+
+  it("closes an open review with the reason, whatever its age, and re-ingests", async () => {
+    const { deps, bd, reingest } = closer({ id: "bd-r9", status: "open", labels: ["review"] });
+    expect(await executeAction(act("review_withdraw", withdraw, "2000-01-01T00:00:00.000Z"), deps)).toEqual({ state: "done", result: { review_id: "bd-r9", closed: true } });
+    expect(bd.mock.calls.map(([args]) => args)).toEqual([["show", "bd-r9", "--json"], ["close", "bd-r9", "--reason", withdraw.reason]]);
+    expect(reingest).toHaveBeenCalledWith("bd");
+  });
+
+  it("answers done for a review already closed, and refuses an issue that is not a review, closing nothing", async () => {
+    const closed = closer({ id: "bd-r9", status: "closed", labels: ["review"] });
+    expect(await executeAction(act("review_withdraw", withdraw), closed.deps)).toMatchObject({ state: "done", result: { closed: false, note: "already closed" } });
+    expect(closed.bd.mock.calls.map(([args]) => args[0])).toEqual(["show"]);
+    const task = closer({ id: "bd-r9", status: "open", labels: [] });
+    expect(await executeAction(act("review_withdraw", withdraw), task.deps)).toMatchObject({ state: "failed", error: expect.stringMatching(/^refused: bd-r9 is not a review/) });
+    expect(task.bd.mock.calls.map(([args]) => args[0])).toEqual(["show"]);
+  });
+});

@@ -39,6 +39,12 @@
 //   key makes a retry after a lost report find the review it filed rather
 //   than file another. The project is then re-ingested, best-effort, so the
 //   board shows the review at once. Never stale, like a re-ingest.
+// - `review_withdraw` (a review filed after its decision moved on): the
+//   same registry check, then `bd show` the review; it must be that exact
+//   issue, labelled `review`. An open one is closed with the payload's reason
+//   (a closed review blocks nothing) → `done { review_id, closed: true }`;
+//   one already closed → `done { review_id, closed: false, note }`. Never
+//   stale.
 //
 // It never throws: every outcome is a report. Nothing here logs; main.ts
 // logs the action's id, kind, and state, never the payload.
@@ -53,6 +59,7 @@ import {
   type RelayActionKind,
   type ReviewDecisionPayload,
   type ReviewRequestPayload,
+  type ReviewWithdrawPayload,
 } from "@breakdown/core";
 import { ReviewRecordRefusedError, type ReviewWriter, type ReviewWriteResult, type RunBd, type RunHerdr } from "../review-writer.js";
 import type { RelayRegistry } from "./registry.js";
@@ -206,6 +213,31 @@ async function reviewRequest(deps: ExecuteDeps, payload: ReviewRequestPayload): 
   }
 }
 
+async function reviewWithdraw(deps: ExecuteDeps, payload: ReviewWithdrawPayload): Promise<RelayReport> {
+  if (deps.bdFor === undefined) return { state: "failed", error: "refused: this relay cannot withdraw reviews; nothing ran" };
+  const entry = await inRegistry(deps, payload.project_key);
+  if (entry === undefined) return { state: "failed", error: `refused: project ${payload.project_key} is not in this relay's registry; nothing ran` };
+  if (entry.dir !== payload.cwd) {
+    return { state: "failed", error: `refused: ${payload.cwd} is not project ${payload.project_key}'s checkout in this relay's registry (${entry.dir}); nothing ran` };
+  }
+  const bd = deps.bdFor(payload.project_key);
+  let step = "bd show";
+  try {
+    const review = firstRecord(await bd(["show", payload.issue_id, "--json"], payload.cwd));
+    const labels = Array.isArray(review?.["labels"]) ? (review!["labels"] as unknown[]) : [];
+    if (review === null || review["id"] !== payload.issue_id || !labels.includes("review")) {
+      return { state: "failed", error: `refused: ${payload.issue_id} is not a review in project ${payload.project_key}; nothing was closed` };
+    }
+    if (review["status"] === "closed") return { state: "done", result: { review_id: payload.issue_id, closed: false, note: "already closed" } };
+    step = "bd close";
+    await bd(["close", payload.issue_id, "--reason", payload.reason], payload.cwd);
+    await deps.reingest(payload.project_key).catch(() => undefined);
+    return { state: "done", result: { review_id: payload.issue_id, closed: true } };
+  } catch (err) {
+    return { state: "failed", error: `${step} failed: ${message(err)}` };
+  }
+}
+
 export async function executeAction(action: ClaimedAction, deps: ExecuteDeps): Promise<RelayReport> {
   let kind: RelayActionKind;
   let payload: unknown;
@@ -219,7 +251,7 @@ export async function executeAction(action: ClaimedAction, deps: ExecuteDeps): P
   if (!(deps.kinds ?? RELAY_ACTION_KINDS).includes(kind)) {
     return { state: "failed", error: `refused: this relay does not run ${kind} actions (--kinds); nothing ran` };
   }
-  if (kind !== "beads_reingest" && kind !== "review_request") {
+  if (kind !== "beads_reingest" && kind !== "review_request" && kind !== "review_withdraw") {
     const stale = staleness(action.createdAt, deps.maxAgeMs ?? RELAY_MAX_AGE_S * 1000, (deps.now ?? Date.now)());
     if (stale !== null) return { state: "failed", error: stale };
   }
@@ -238,6 +270,8 @@ export async function executeAction(action: ClaimedAction, deps: ExecuteDeps): P
     }
     case "review_request":
       return reviewRequest(deps, payload as ReviewRequestPayload);
+    case "review_withdraw":
+      return reviewWithdraw(deps, payload as ReviewWithdrawPayload);
     case "beads_reingest": {
       const { project_key: project } = payload as { project_key: string };
       try {

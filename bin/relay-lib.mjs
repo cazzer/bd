@@ -31,7 +31,7 @@ import os from "node:os";
 import path from "node:path";
 import { parseArgs as parseNodeArgs } from "node:util";
 
-export const RELAY_KINDS = ["review_decision", "herdr_prompt", "beads_reingest", "review_request"];
+export const RELAY_KINDS = ["review_decision", "herdr_prompt", "beads_reingest", "review_request", "review_withdraw"];
 export const DEFAULT_MAX_AGE = "24h";
 
 export const RELAY_USAGE = [
