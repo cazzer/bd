@@ -22,6 +22,7 @@ import {
   socketFrom,
   parseArgs,
   parseJsonOutput,
+  previousRuns,
   requestReview,
   reviewMetadata,
   splitCard,
@@ -572,7 +573,13 @@ describe("requestReview writes", () => {
       BREAKDOWN_TOKEN: "bdt_secret", BREAKDOWN_UI: "http://jetson.test:4310" };
     const h = await harness(fx, { env, fetch: recording(fx.repo) });
     assert.equal(h.result.exitCode, 0);
-    assert.deepEqual(seen, [{ url: "http://jetson.test:4310/trpc/beadsProjects", auth: "Bearer bdt_secret" }]);
+    assert.deepEqual(seen[0], { url: "http://jetson.test:4310/trpc/beadsProjects", auth: "Bearer bdt_secret" });
+    // The images go up to the same host (remote media, below).
+    assert.equal(seen.length, 3);
+    for (const s of seen.slice(1)) {
+      assert.match(s.url, /^http:\/\/jetson\.test:4310\/review-uploads\/scratch\/scr-1\/[0-9a-f]{12}\/0[12]-[ab]\.png$/);
+      assert.equal(s.auth, "Bearer bdt_secret");
+    }
     const link = `http://jetson.test:4310/board?project=scratch&item=${REVIEW}`;
     assert.deepEqual(h.calls.find((c) => c.cmd === "open").args, ["-a", "Google Chrome", link]);
     assert.ok(h.out.includes(`Board: ${link}`));
@@ -1652,5 +1659,139 @@ describe("card-first usage", () => {
     const h = await harness(fx, { argv: [ITEM, "--summary", "Decide: A or B? Rec: A", "01-card.png", "contact-sheet.png"] });
     assert.equal(h.result.exitCode, 0, h.warn.join("\n"));
     assert.deepEqual(h.warn, []);
+  });
+});
+
+describe("remote media (bd-d38.6)", () => {
+  const REMOTE = "http://jetson.test:4310";
+  const remoteEnv = { HERDR_PANE_ID: "w1:p2", HERDR_SOCKET_PATH: SOCKET, BREAKDOWN_API: REMOTE, BREAKDOWN_TOKEN: "bdt_secret" };
+  const RUN_URL = /^\/review-uploads\/scratch\/scr-1\/([0-9a-f]{12})(?:\/|$)/;
+
+  /** A fake remote host: `log` interleaves its requests with bd create/update, `sent` holds each PUT and DELETE. */
+  function remoteHost(fx, { put, del } = {}) {
+    const log = [];
+    const sent = [];
+    const fetch = async (url, init = {}) => {
+      const method = init.method ?? "GET";
+      const at = url.replace(REMOTE, "");
+      log.push(`${method} ${at}`);
+      if (method === "GET") return { ok: true, status: 200, json: async () => ({ result: { data: { projects: [{ key: "scratch", path: fx.repo }] } } }) };
+      sent.push({ method, url: at, headers: init.headers, redirect: init.redirect, body: init.body === undefined ? undefined : await init.body.text() });
+      const answer = (method === "PUT" ? put : del)?.(at) ?? { status: 204 };
+      return { ok: answer.status < 300, status: answer.status, text: async () => answer.text ?? "" };
+    };
+    const handlers = {
+      "bd create --title": () => {
+        log.push("bd create");
+        return ok(JSON.stringify({ id: REVIEW, title: "Review: Board header" }));
+      },
+      [`bd update ${REVIEW}`]: () => {
+        log.push("bd update");
+        return ok();
+      },
+    };
+    return { log, sent, fetch, handlers };
+  }
+  const noSecret = (h) => assert.equal([...h.out, ...h.warn, ...h.calls.flatMap((c) => c.args)].some((x) => String(x).includes("bdt_secret")), false);
+
+  it("uploads every image before bd create and stores relative paths, copying nothing locally", async () => {
+    const fx = await fixture();
+    const host = remoteHost(fx);
+    const h = await harness(fx, { env: remoteEnv, fetch: host.fetch, handlers: host.handlers });
+    assert.equal(h.result.exitCode, 0, h.warn.join("\n"));
+    const run = RUN_URL.exec(host.sent[0].url)?.[1];
+    assert.ok(run);
+    assert.deepEqual(host.sent, [
+      { method: "PUT", url: `/review-uploads/scratch/scr-1/${run}/01-a.png`, headers: { authorization: "Bearer bdt_secret", "content-type": "image/png" }, redirect: "error", body: "A1" },
+      { method: "PUT", url: `/review-uploads/scratch/scr-1/${run}/02-b.png`, headers: { authorization: "Bearer bdt_secret", "content-type": "image/png" }, redirect: "error", body: "B1" },
+    ]);
+    assert.deepEqual(host.log, ["GET /trpc/beadsProjects", `PUT /review-uploads/scratch/scr-1/${run}/01-a.png`, `PUT /review-uploads/scratch/scr-1/${run}/02-b.png`, "bd create", "bd update"]);
+    assert.deepEqual(JSON.parse(callTo(h, "update").args[3]).review.images, [`scratch/scr-1/${run}/01-a.png`, `scratch/scr-1/${run}/02-b.png`]);
+    await assert.rejects(fs.stat(path.join(fx.home, ".local", "share", "breakdown", "reviews")), { code: "ENOENT" });
+    noSecret(h);
+  });
+
+  it("refuses with nothing filed when an upload fails, and removes the run", async () => {
+    const fx = await fixture();
+    const host = remoteHost(fx, { put: (at) => (at.endsWith("/02-b.png") ? { status: 413, text: "Too large\nmore" } : undefined) });
+    const h = await harness(fx, { env: remoteEnv, fetch: host.fetch, handlers: host.handlers });
+    await assertNothingFiled(fx, h);
+    assert.deepEqual(h.warn, [`review-request: could not upload the attachments to ${REMOTE}: 02-b.png: HTTP 413: Too large. Nothing was filed.`]);
+    const run = RUN_URL.exec(host.sent[0].url)[1];
+    assert.deepEqual(host.sent.filter((r) => r.method === "DELETE").map((r) => r.url), [`/review-uploads/scratch/scr-1/${run}`]);
+    noSecret(h);
+  });
+
+  it("removes the uploaded run when bd create fails", async () => {
+    const fx = await fixture();
+    const host = remoteHost(fx);
+    const h = await harness(fx, { env: remoteEnv, fetch: host.fetch, handlers: { ...host.handlers, "bd create --title": fail("Error: locked") } });
+    assert.equal(h.result.exitCode, 1);
+    const run = RUN_URL.exec(host.sent[0].url)[1];
+    assert.deepEqual(host.sent.map((r) => `${r.method} ${r.url}`), [
+      `PUT /review-uploads/scratch/scr-1/${run}/01-a.png`,
+      `PUT /review-uploads/scratch/scr-1/${run}/02-b.png`,
+      `DELETE /review-uploads/scratch/scr-1/${run}`,
+    ]);
+  });
+
+  it("on reuse removes only this item's earlier uploaded runs, after the update; a failed removal only warns", async () => {
+    const existing = {
+      id: REVIEW,
+      created_at: "2026-10-28T00:00:00Z",
+      labels: ["review"],
+      metadata: {
+        review: {
+          images: ["scratch/scr-1/old/01-a.png", "/Users/x/.local/share/breakdown/reviews/scratch/scr-1.1/01-a.png", "other/scr-1/zzz/01-a.png"],
+          summary: "old",
+        },
+      },
+    };
+    const item = { id: ITEM, title: "Board header", issue_type: "task", dependencies: [{ id: REVIEW, dependency_type: "blocks" }] };
+    const fx = await fixture();
+    const host = remoteHost(fx);
+    const h = await harness(fx, { env: remoteEnv, fetch: host.fetch, handlers: host.handlers, item, children: [existing] });
+    assert.equal(h.result.exitCode, 0, h.warn.join("\n"));
+    assert.deepEqual(host.sent.filter((r) => r.method === "DELETE").map((r) => r.url), ["/review-uploads/scratch/scr-1/old"]);
+    assert.deepEqual(host.log.slice(-2), ["bd update", "DELETE /review-uploads/scratch/scr-1/old"]);
+    assert.deepEqual(h.warn, []);
+
+    const failing = remoteHost(fx, { del: () => ({ status: 500 }) });
+    const again = await harness(fx, { env: remoteEnv, fetch: failing.fetch, handlers: failing.handlers, item, children: [existing] });
+    assert.equal(again.result.exitCode, 0);
+    assert.deepEqual(again.warn, ["review-request: could not remove earlier media scratch/scr-1/old on the server (HTTP 500)."]);
+  });
+
+  it("uploads a card's video and poster with their types and stores relative paths", async () => {
+    const fx = await fixture();
+    const card = await writeCard(fx, "---\nquestion: Which cut?\nattachments:\n  - { kind: video, path: cut.mp4, poster: cut.jpg }\n---\n");
+    await fs.writeFile(path.join(fx.worktree, "cards", "cut.mp4"), "V1");
+    await fs.writeFile(path.join(fx.worktree, "cards", "cut.jpg"), "P1");
+    const host = remoteHost(fx);
+    const h = await harness(fx, { env: remoteEnv, fetch: host.fetch, handlers: host.handlers, argv: [ITEM, card] });
+    assert.equal(h.result.exitCode, 0, h.warn.join("\n"));
+    const run = RUN_URL.exec(host.sent[0].url)[1];
+    assert.deepEqual(host.sent.map((r) => [r.url, r.headers["content-type"], r.body]), [
+      [`/review-uploads/scratch/scr-1/${run}/01-cut.mp4`, "video/mp4", "V1"],
+      [`/review-uploads/scratch/scr-1/${run}/02-cut.jpg`, "image/jpeg", "P1"],
+    ]);
+    assert.deepEqual(JSON.parse(callTo(h, "update").args[3]).review.attachments, [
+      { kind: "video", path: `scratch/scr-1/${run}/01-cut.mp4`, poster: `scratch/scr-1/${run}/02-cut.jpg` },
+    ]);
+  });
+
+  it("previousRuns collects this item's relative runs from images, paths, and posters, minus the kept run", () => {
+    const review = (recorded) => ({ metadata: { review: recorded } });
+    assert.deepEqual(previousRuns(review({ images: ["p/i/r1/01-a.png", "p/i/r2/02-b.png"] }), "p", "i", "r2"), ["r1"]);
+    assert.deepEqual(
+      previousRuns(review({ images: [], attachments: [{ kind: "video", path: "p/i/r3/01-v.mp4", poster: "p/i/r4/02-p.jpg" }, { kind: "diff", source: "+" }] }), "p", "i", "new"),
+      ["r3", "r4"],
+    );
+    assert.deepEqual(
+      previousRuns(review({ images: ["/abs/p/i/r1/01-a.png", "q/i/r1/01-a.png", "p/j/r1/01-a.png", "p/i/r1", "p/i/../01-a.png", "p/i/r1/x/01-a.png", 7] }), "p", "i", "new"),
+      [],
+    );
+    assert.deepEqual(previousRuns({}, "p", "i", "new"), []);
+    assert.deepEqual(previousRuns(null, "p", "i", "new"), []);
   });
 });

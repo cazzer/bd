@@ -35,9 +35,23 @@
 // path, then that video's poster), so an image-only card numbers exactly as
 // before. The legacy `images` list holds image attachments only. The image
 // form takes images only; a video given there is "not an image".
+//
+// Remote media (bd-d38.6; openspec/changes/remote-review-media). With
+// BREAKDOWN_API set, the board's host is another machine, so nothing is
+// copied locally: after `check()` and before any `bd create`, each request's
+// files are PUT one at a time to `/review-uploads/<project>/<item-id>/<run>/
+// <NN-name>` (raw body, the token's Bearer header), and the review stores
+// those relative paths, which the server resolves against its media root.
+// `<run>` is fresh random hex per request, since the review id is not known
+// yet and a closed review keeps its media. A failed upload DELETEs its run
+// and refuses with nothing filed; a run whose `bd update` never landed is
+// DELETEd on the way out; a refreshed review's earlier runs are DELETEd once
+// the update lands. Those DELETEs are best-effort: a failure warns and
+// changes no exit code. Without BREAKDOWN_API nothing changes.
 
+import { randomBytes } from "node:crypto";
 import fs from "node:fs/promises";
-import { realpathSync } from "node:fs";
+import { openAsBlob, realpathSync } from "node:fs";
 import path from "node:path";
 import { parseArgs as parseNodeArgs } from "node:util";
 
@@ -59,6 +73,8 @@ export const REVIEW_ROOT_PARTS = [".local", "share", "breakdown", "reviews"];
 export const DEFAULT_BOARD_URL = "http://localhost:5310";
 const DEFAULT_SERVER_PORT = "4310";
 const FETCH_TIMEOUT_MS = 5_000;
+/** Per uploaded file; the server's own request timeout is the same 300 s. */
+const UPLOAD_TIMEOUT_MS = 300_000;
 // The first character is never `-`, so an id cannot be read by bd as an option.
 const ITEM_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
 const PORT = /^\d{1,5}$/;
@@ -72,8 +88,18 @@ const CONTROL_CHAR = /[\u0000-\u001f\u007f]/;
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
 // Must agree with the content types apps/web/server/review-images.ts serves.
 const VIDEO_EXTENSIONS = new Set([".mp4", ".webm"]);
-/** A video attachment's size cap. */
+/** A video attachment's size cap. Must equal MAX_REVIEW_UPLOAD_BYTES in apps/web/server/review-uploads.ts. */
 export const MAX_VIDEO_BYTES = 200 * 2 ** 20;
+// The Content-Type each upload is sent with; must agree with CONTENT_TYPES in apps/web/server/review-images.ts.
+const MEDIA_TYPES = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".mp4": "video/mp4",
+  ".webm": "video/webm",
+};
 const MAX_SUMMARY = 2000;
 const MAX_IMAGES = 20;
 const MAX_TITLE = 120;
@@ -865,7 +891,10 @@ export async function requestReview(deps) {
     for (const [index, request] of requests.entries()) {
       if (request.card) checkCardSize(deps, request, { project: plan.project, existing: chosen[index] });
     }
-    for (const request of requests) stagedAll.push(await stageFiles(deps, plan.project.key, request.files));
+    const remote = Boolean(deps.env.BREAKDOWN_API);
+    for (const request of requests) {
+      stagedAll.push(remote ? await uploadFiles(deps, plan.project.key, request.itemId, request.files) : await stageFiles(deps, plan.project.key, request.files));
+    }
     const result = await fileAll(deps, requests, plan, chosen, stagedAll);
     if (result.exitCode === 0 && "summary" in parsed.args) {
       const warning = summaryWarning(parsed.args, deps.breakdownRoot);
@@ -878,7 +907,10 @@ export async function requestReview(deps) {
     return { exitCode: 1 };
   } finally {
     // Already gone once the files were moved into place; on any other path nothing may be left behind.
-    for (const staged of stagedAll) await fs.rm(staged.dir, { recursive: true, force: true });
+    for (const staged of stagedAll) {
+      if (!staged.remote) await fs.rm(staged.dir, { recursive: true, force: true });
+      else if (!staged.committed) await removeRun(deps, staged, staged.run, "uploaded");
+    }
   }
 }
 
@@ -1107,7 +1139,6 @@ async function stageFiles(deps, key, files) {
     const names = [];
     for (const [index, given] of files.entries()) {
       const name = copiedName(index, given);
-      // Copied on this machine only: a remote Breakdown (BREAKDOWN_API) can't serve them until bd-d38.6 uploads them.
       await fs.copyFile(path.resolve(deps.cwd, given), path.join(dir, name));
       names.push(name);
     }
@@ -1116,6 +1147,94 @@ async function stageFiles(deps, key, files) {
     if (dir) await fs.rm(dir, { recursive: true, force: true });
     throw new Refusal(`could not copy the attachments under ${projectDir}: ${err.message}. Nothing was filed.`);
   }
+}
+
+/** Why a fetch threw, in a few words: a timeout, else the socket's error code. Never a header. */
+function fetchFailure(err, timeoutMs) {
+  if (err?.name === "TimeoutError") return `no answer within ${timeoutMs / 1000} s`;
+  return err?.cause?.code ?? err?.cause?.message ?? err?.message ?? String(err);
+}
+
+function runUrl(deps, { projectKey, itemId }, run) {
+  return `${apiBase(deps.env)}/review-uploads/${projectKey}/${itemId}/${run}`;
+}
+
+/** DELETEs one run on the server: null when done, else why not. */
+async function deleteRun(deps, owner, run) {
+  try {
+    const response = await deps.fetch(runUrl(deps, owner, run), {
+      method: "DELETE",
+      headers: authHeaders(deps.env),
+      redirect: "error",
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+    return response.ok ? null : `HTTP ${response.status}`;
+  } catch (err) {
+    return fetchFailure(err, FETCH_TIMEOUT_MS);
+  }
+}
+
+/** deleteRun, warning on failure (best-effort; module header). */
+async function removeRun(deps, owner, run, which) {
+  const why = await deleteRun(deps, owner, run);
+  if (why !== null) deps.warn(`${PREFIX}could not remove ${which} media ${owner.projectKey}/${owner.itemId}/${run} on the server (${why}).`);
+}
+
+/**
+ * Uploads one request's files, in order, to a fresh run on the server
+ * (module header); a failure DELETEs the run and refuses with nothing filed.
+ * The stored paths are relative to the server's media root.
+ */
+async function uploadFiles(deps, projectKey, itemId, files) {
+  const owner = { projectKey, itemId };
+  const run = randomBytes(6).toString("hex");
+  const stored = [];
+  for (const [index, given] of files.entries()) {
+    const name = copiedName(index, given);
+    let why = null;
+    try {
+      const response = await deps.fetch(`${runUrl(deps, owner, run)}/${name}`, {
+        method: "PUT",
+        headers: { ...authHeaders(deps.env), "content-type": MEDIA_TYPES[path.extname(name).toLowerCase()] },
+        body: await openAsBlob(path.resolve(deps.cwd, given)),
+        redirect: "error",
+        signal: AbortSignal.timeout(UPLOAD_TIMEOUT_MS),
+      });
+      if (!response.ok) {
+        const detail = (await response.text().catch(() => "")).trim().split("\n")[0].slice(0, 200);
+        why = `HTTP ${response.status}${detail ? `: ${detail}` : ""}`;
+      }
+    } catch (err) {
+      why = fetchFailure(err, UPLOAD_TIMEOUT_MS);
+    }
+    if (why !== null) {
+      await removeRun(deps, owner, run, "uploaded");
+      throw new Refusal(`could not upload the attachments to ${apiBase(deps.env)}: ${name}: ${why}. Nothing was filed.`);
+    }
+    stored.push(`${projectKey}/${itemId}/${run}/${name}`);
+  }
+  return { remote: true, projectKey, itemId, run, stored, committed: false };
+}
+
+/**
+ * The runs of this item's uploaded media a review records, other than
+ * `keepRun`: every relative image, attachment path, and poster shaped
+ * `<projectKey>/<itemId>/<run>/<name>`. Absolute (local) paths are skipped.
+ */
+export function previousRuns(review, projectKey, itemId, keepRun) {
+  const recorded = review?.metadata?.review;
+  const paths = [
+    ...(Array.isArray(recorded?.images) ? recorded.images : []),
+    ...(Array.isArray(recorded?.attachments) ? recorded.attachments.flatMap((a) => [a?.path, a?.poster]) : []),
+  ];
+  const runs = new Set();
+  for (const stored of paths) {
+    if (typeof stored !== "string") continue;
+    const parts = stored.split("/");
+    if (parts.length !== 4 || parts[0] !== projectKey || parts[1] !== itemId || !parts.every((part) => SAFE_SEGMENT.test(part))) continue;
+    if (parts[2] !== keepRun) runs.add(parts[2]);
+  }
+  return [...runs];
 }
 
 /** Swaps the staged files in as the bead's directory; the previous files stay until the new ones are in place. */
@@ -1207,12 +1326,16 @@ async function fileOne(deps, request, { project, item, bdCwd }, existing, staged
   const id = review.id;
   const partial = (step, detail) => ({ ok: false, id, filedNothing: false, message: `review ${id} was filed but ${step} failed: ${detail}.` });
 
-  if (!SAFE_SEGMENT.test(id)) return partial("moving images into place", `issue id ${JSON.stringify(id)} is not a directory name`);
   let stored;
-  try {
-    stored = await placeImages(deps, project.key, id, staged);
-  } catch (err) {
-    return partial("moving images into place", err.message);
+  if (staged.remote) {
+    stored = staged.stored;
+  } else {
+    if (!SAFE_SEGMENT.test(id)) return partial("moving images into place", `issue id ${JSON.stringify(id)} is not a directory name`);
+    try {
+      stored = await placeImages(deps, project.key, id, staged);
+    } catch (err) {
+      return partial("moving images into place", err.message);
+    }
   }
 
   const metadata = request.card
@@ -1224,6 +1347,12 @@ async function fileOne(deps, request, { project, item, bdCwd }, existing, staged
   if (existing && request.card && review.title !== title) updateArgs.push("--title", title);
   const updated = await deps.run("bd", updateArgs, bdCwd);
   if (updated.code !== 0) return partial("bd update", firstLine(updated));
+  if (staged.remote) {
+    staged.committed = true;
+    if (existing) {
+      for (const run of previousRuns(review, project.key, request.itemId, staged.run)) await removeRun(deps, staged, run, "earlier");
+    }
+  }
 
   if (existing && finishedBefore(review)) {
     const commented = await deps.run("bd", ["comments", "add", id, `Review updated: ${request.headline}`], bdCwd);

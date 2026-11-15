@@ -169,6 +169,12 @@ describe("reviewImageUrl", () => {
     expect(reviewImageUrl("/Users/caleb/.local/share/breakdown/reviews/", media)).toBeNull();
   });
 
+  it("maps a relative stored path onto the root, and refuses one that climbs out", () => {
+    expect(reviewImageUrl("scratch/scr-1/0a1b2c3d4e5f/01-a b.png", root)).toBe("/review-images/scratch/scr-1/0a1b2c3d4e5f/01-a%20b.png");
+    expect(reviewImageUrl("../x.png", root)).toBeNull();
+    expect(reviewImageUrl("..", root)).toBeNull();
+  });
+
   it("round-trips through the resolver", async () => {
     for (const file of [path.join(root, "a.png"), path.join(root, "sub", "b.webp"), path.join(root, "with space #1?.png")]) {
       const resolved = await resolveReviewImage(reviewImageUrl(file, root)!, root);

@@ -124,6 +124,16 @@ describe("toBoardItemDto card", () => {
     expect(toBoardItemDto(item(noPoster), ROOT).card?.attachments[0]).toMatchObject({ posterUrl: null });
   });
 
+  it("maps a remote-filed review's relative paths to route URLs on this host's root", () => {
+    const shot = "bd/bd-1/0a1b2c3d4e5f/01-a.png";
+    const reel = "bd/bd-1/0a1b2c3d4e5f/02-reel.mp4";
+    const poster = "bd/bd-1/0a1b2c3d4e5f/03-reel.jpg";
+    const review = normalized({ images: [shot], pane: null, summary: "q", question: "q", attachments: [{ kind: "image", path: shot }, { kind: "video", path: reel, poster }] });
+    const dto = toBoardItemDto(item(review), ROOT);
+    expect(dto.reviewImages).toEqual([{ path: shot, name: "01-a.png", url: "/review-images/bd/bd-1/0a1b2c3d4e5f/01-a.png" }]);
+    expect(dto.card?.attachments[1]).toMatchObject({ url: "/review-images/bd/bd-1/0a1b2c3d4e5f/02-reel.mp4", posterUrl: "/review-images/bd/bd-1/0a1b2c3d4e5f/03-reel.jpg" });
+  });
+
   it("calls a review with any card key a card, even a question alone", () => {
     expect(toBoardItemDto(item(normalized({ images: [], pane: null, summary: "q", question: "q" })), ROOT).card?.legacy).toBe(false);
     expect(toBoardItemDto(item(normalized({ images: [], pane: null, summary: "", on_accept: ["x"] })), ROOT).card?.legacy).toBe(false);
