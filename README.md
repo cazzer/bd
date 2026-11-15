@@ -164,9 +164,9 @@ pnpm -s client-token list                           # client, scope, bound sessi
 pnpm -s client-token revoke phone
 ```
 
-The scope is required. `human` is for a person's devices (phone, laptop): it works on the web API and MCP. `agent` is for workers and the driver: it works on MCP, and on the web API it reaches only what `bin/inbox`, `bin/inbox-watch`, and `bin/review-request` call — filing an inbox request (`inboxRequest`), completing one a person accepted (`inboxComplete`), listing the inbox (`inbox`), and listing beads projects (`beadsProjects`), plus uploading and removing review media under `/review-uploads/`. Every other procedure, and reading the review images (`/review-images/`), answer an `agent` token with 403, so an agent can't approve its own inbox request, decide a review, or edit the graph from the web API. Each tRPC procedure declares the scopes it accepts. A tokenless loopback request counts as `human`. The third scope, `hangar`, belongs to the hangar service alone and reaches only its endpoints under `/hangar/v1/` (see [Hangar](#hangar)).
+The scope is required. `human` is for a person's devices (phone, laptop): it works on the web API and MCP. `agent` is for workers and the driver: it works on MCP, and on the web API it reaches only what `bin/inbox`, `bin/inbox-watch`, and `bin/review-request` call — filing an inbox request (`inboxRequest`), completing one a person accepted (`inboxComplete`), listing the inbox (`inbox`), and listing beads projects (`beadsProjects`), plus uploading and removing review media under `/review-uploads/`. Every other procedure, and reading the review images (`/review-images/`), answer an `agent` token with 403, so an agent can't approve its own inbox request, decide a review, or edit the graph from the web API. Each tRPC procedure declares the scopes it accepts. A tokenless loopback request counts as `human`. The third scope, `hangar`, belongs to the hangar service alone and reaches only its endpoints under `/hangar/v1/` (see [Hangar](#hangar)). The fourth, `relay`, belongs to the laptop relay alone and reaches only `/relay/v1/` (see [Laptop relay](#laptop-relay)).
 
-The inbox scripts send `$BREAKDOWN_TOKEN` as `Authorization: Bearer` when it is set, so a worker on another tailnet machine runs them with `BREAKDOWN_API=https://<host> BREAKDOWN_TOKEN=bdt_… bin/inbox request …`. Both variables belong to the scripts; the server reads neither.
+The inbox scripts send `$BREAKDOWN_TOKEN` as `Authorization: Bearer` when it is set, so a worker on another tailnet machine runs them with `BREAKDOWN_API=https://<host> BREAKDOWN_TOKEN=bdt_… bin/inbox request …`; `BREAKDOWN_UI` is the board the link `bin/inbox request` prints opens (default `http://localhost:5310`). `bin/inbox`, `bin/inbox-watch`, and `bin/review-request` resolve the three the same way: an empty value is unset, a trailing slash is dropped, and a URL that is not http(s) is refused. The variables belong to the scripts; the server reads none of them.
 
 `-s` keeps pnpm's `> pkg@version` banner off stdout, so `TOKEN=$(pnpm -s client-token create phone --scope human)` captures the token alone. The token is shown once and can't be recovered; lose it and revoke and re-create. Tokens can only be managed here: no MCP tool and no web API procedure creates, lists, or revokes one. A revoked token is refused on its next request, with no cache to wait out. `last_used_at` is updated at most once a minute per client, and still is when the server runs with `BRAIN_READ_ONLY=1`.
 
@@ -359,6 +359,26 @@ pnpm -s client-token revoke hangar-desktop                  # stops it at once
 **End-to-end check.** `pnpm hangar:e2e --web http://127.0.0.1:<port> --mcp http://127.0.0.1:<port>/mcp` drives the whole loop against running servers with a throwaway hangar token: check-in, a request over MCP claimed by long-poll, a session-token write over MCP, an inbox request and decision delivered as a message, and the token dying with the session. It refuses to start while real requests are queued, since it would claim one. It is not part of `pnpm check`.
 
 **Tests and a live hangar.** `pnpm check` queues hangar sessions of its own in the database it runs against. They are requested far in the future (2999) so an oldest-first claim reaches them last, its check-ins are named `test-…` and deleted afterwards, and its own claims take only its fixtures. A real hangar polling that database with nothing else queued would still claim a fixture. Stop the hangar service, or point it at another Breakdown, before running `pnpm check` against a shared database.
+
+## Laptop relay
+
+A Breakdown without `bd`, `herdr`, or the beads checkouts (the Jetson) still takes review decisions, sends replies to agents' herdr panes, and keeps the beads board live. It queues that work as relay actions, and a relay on the Mac, which has all three, claims each one, runs it, and reports it. The relay also watches the Mac's beads checkouts and pushes each change, so open boards move as they do locally. On a Breakdown that has `bd` and `herdr`, nothing is queued and the relay isn't needed. The HTTP contract and the operations guide are [`docs/relay.md`](docs/relay.md).
+
+**Set it up.** Mint the token on the Breakdown host, put it in a file only you can read on the Mac, and install the LaunchAgent from this checkout:
+
+```bash
+pnpm -s client-token create relay-laptop --scope relay      # on the Breakdown host; prints bdt_… once
+# on the Mac, into ~/.config/breakdown/relay-token, mode 0600
+pnpm relay:service install --url https://<breakdown-host> --name relay-laptop
+pnpm relay:service status                                    # loaded?, its bd and herdr, last check-in
+pnpm relay:service uninstall
+```
+
+The relay refuses a token file that is a symlink, not yours, or readable by group or others. launchd's PATH lacks Homebrew and `~/.local/bin`, so install writes the directories of `bd` and `herdr`, as they resolve in your shell, into the plist; run it again after moving either. Logs are `~/Library/Logs/breakdown/relay.{out,err}.log` and never carry the token or a person's message.
+
+**On the board.** A decision waiting for the relay shows as pending on its card until it is done or failed, with the failure's message. The relay pill next to hangar's reads "relay online", "relay offline since …", or "relay never checked in", and shows whenever the server lacks `bd` or `herdr` or actions are queued. While the Mac sleeps, decisions wait, and the relay runs them oldest first when it wakes. A `relay` token reaches only `/relay/v1/` and `/healthz`.
+
+**End-to-end check.** `pnpm relay:e2e` runs the loop on this Mac, in queue mode and then direct mode, with a scratch beads checkout and a stub `herdr`. It refuses to start while any relay action is queued. It is not part of `pnpm check`.
 
 ## Working on it
 

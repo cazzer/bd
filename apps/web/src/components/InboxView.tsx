@@ -24,12 +24,28 @@
 // on a card), d dismisses, c focuses the message box, o opens the item in an
 // interactive Claude session. Ctrl/Cmd+Enter accepts and Ctrl/Cmd+Shift+Enter
 // requests changes, as in the board's run.
+//
+// On a server without herdr (laptop-relay design.md decision 8) a decision
+// on a pane item comes back with its prompt queued for the laptop relay
+// (`notified.relay`). The relay's state is read per item, for the pane items
+// loaded (lib/useRelayActionsFor.ts: each one's open action, else the one
+// that finished in the last day), with every re-read of the list and every
+// 2 s while one is open. The strips under the header come from it: a
+// decision made here shows "the relay will tell the pane" for 5 s; every
+// loaded item whose prompt failed shows its error until dismissed, so a
+// second decision never hides the first's failure, and a failure that
+// happened while the inbox was closed shows when it opens. The detail says
+// the selected item's relay state, and its recipient line says the agent
+// will be told when the relay runs.
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { filterBySource, groupByWork, hangarOriginLabel, needsMeRows, REVIEW_SOURCE, sourcesOf, type NeedsMeRow, type WorkGroupSlot } from "../lib/inboxRows.js";
 import { navigate } from "../lib/navigate.js";
 import { CARD_MOVED_TEXT, cardActions, chosenOption, describeChosen, isCardMovedRefusal, type CardOption } from "../lib/reviewCard.js";
+import { describeRelayPrompt, type RelayActionView } from "../lib/relayAction.js";
 import { decisionBlocked } from "../lib/reviewDrawer.js";
+import { MAX_RELAY_ORIGIN_IDS, useRelayActionsFor } from "../lib/useRelayActionsFor.js";
+import { useRelayStatus } from "../lib/useRelayStatus.js";
 import { trpc } from "../trpc.js";
 import { cardShortcut, DecisionCardBody, DecisionFooter, primaryDecision, type CardOutcome, type DecisionCardData, type Refusal } from "./DecisionCard.js";
 import { EvidenceView } from "./EvidenceView.js";
@@ -121,6 +137,13 @@ export function InboxView({ item: selectedKey, source }: { item: string | null; 
   const [now, setNow] = useState(() => Date.now());
   const generation = useRef(0);
   const queue = useReviewQueue();
+  /** Decisions made here whose pane prompt was queued for the laptop relay: each shows its strip for a while. */
+  const [fresh, setFresh] = useState<ReadonlyArray<{ actionId: number; itemId: string; pane: string | null }>>([]);
+  /** Failed prompts whose strip the person dismissed (this visit). */
+  const [dismissed, setDismissed] = useState<ReadonlySet<number>>(() => new Set());
+  /** Bumped by every read of the list, so the relay read follows it. */
+  const [listVersion, setListVersion] = useState(0);
+  const herdrMissing = useRelayStatus()?.status.missingBinaries.includes("herdr") === true;
 
   const load = useCallback(async () => {
     const mine = ++generation.current;
@@ -132,6 +155,7 @@ export function InboxView({ item: selectedKey, source }: { item: string | null; 
       setData(result);
       setError(null);
       setNow(Date.now());
+      setListVersion((v) => v + 1);
     } catch (err) {
       if (mine !== generation.current) return;
       setError(messageOf(err));
@@ -155,6 +179,35 @@ export function InboxView({ item: selectedKey, source }: { item: string | null; 
     return map;
   }, [all]);
   const byId = useMemo(() => new Map(all.map((i) => [i.id, i])), [all]);
+
+  // The relay actions of the pane items loaded (module header): the ones
+  // decided here first, then the most recently updated, up to the read's cap.
+  const relayIds = useMemo(() => {
+    if (!herdrMissing && fresh.length === 0) return [];
+    const panes = all.filter((i) => i.pane !== null).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    return [...new Set([...fresh.map((f) => f.itemId).reverse(), ...panes.map((i) => i.id)])].slice(0, MAX_RELAY_ORIGIN_IDS);
+  }, [all, fresh, herdrMissing]);
+  const relayActions = useRelayActionsFor(relayIds, listVersion);
+  const promptOf = useCallback(
+    (itemId: string): RelayActionView | null => {
+      const action = relayActions.get(itemId);
+      return action !== undefined && action.kind === "herdr_prompt" ? action : null;
+    },
+    [relayActions],
+  );
+  const relayStrips = useMemo(() => {
+    const failed = [...relayActions.values()].filter((a) => a.kind === "herdr_prompt" && a.state === "failed" && !dismissed.has(a.id) && byId.has(a.originNodeId));
+    const failedIds = new Set(failed.map((a) => a.id));
+    return [
+      ...failed.map((a) => ({ actionId: a.id, action: a as RelayActionView | null, pane: byId.get(a.originNodeId)?.pane ?? null })),
+      ...fresh
+        .filter((f) => !failedIds.has(f.actionId) && !dismissed.has(f.actionId))
+        .map((f) => {
+          const action = promptOf(f.itemId);
+          return { actionId: f.actionId, action: action?.id === f.actionId ? action : null, pane: f.pane };
+        }),
+    ];
+  }, [relayActions, dismissed, byId, fresh, promptOf]);
 
   const needsMe = useMemo(() => needsMeRows(all, queue.reviews), [all, queue.reviews]);
   const sources = useMemo(() => sourcesOf(needsMe), [needsMe]);
@@ -232,7 +285,11 @@ export function InboxView({ item: selectedKey, source }: { item: string | null; 
 
   const decide = useCallback(
     async (item: Item, decision: Decision, message = "", option?: string) => {
-      await trpc.inboxDecision.mutate({ id: item.id, decision, message, ...(option === undefined ? {} : { option }) });
+      const result = await trpc.inboxDecision.mutate({ id: item.id, decision, message, ...(option === undefined ? {} : { option }) });
+      if ("relay" in result.notified) {
+        const actionId = result.notified.relay;
+        setFresh((prev) => [...prev.filter((f) => f.itemId !== item.id), { actionId, itemId: item.id, pane: item.pane }]);
+      }
       if (item.parentId === null) moveOnFrom(item.id);
       await load();
     },
@@ -323,6 +380,9 @@ export function InboxView({ item: selectedKey, source }: { item: string | null; 
           {error}
         </p>
       )}
+      {relayStrips.map((s) => (
+        <RelayActionNotice key={s.actionId} action={s.action} pane={s.pane} onDismiss={() => setDismissed((prev) => new Set(prev).add(s.actionId))} />
+      ))}
 
       <div className="flex min-h-0 flex-1 flex-col md:flex-row">
         <div className="flex max-h-[40dvh] shrink-0 flex-col border-b border-hairline md:max-h-none md:w-[380px] md:border-b-0 md:border-r">
@@ -386,12 +446,54 @@ export function InboxView({ item: selectedKey, source }: { item: string | null; 
                 onSelect={(id) => go(id)}
                 onOpenSession={openSession}
                 onReload={load}
+                herdrMissing={herdrMissing}
+                relay={promptOf(selectedItem.id)}
               />
             )}
           </section>
         )}
       </div>
     </main>
+  );
+}
+
+/** How long a pending (or told) relay notice stays before it goes away by itself. */
+const RELAY_NOTICE_MS = 5_000;
+
+/** The strip for one pane prompt queued for the laptop relay (module header): `action` null until the relay read answers for it. */
+function RelayActionNotice({ action, pane, onDismiss }: { action: RelayActionView | null; pane: string | null; onDismiss: () => void }) {
+  const [expired, setExpired] = useState(false);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setExpired(true), RELAY_NOTICE_MS);
+    return () => window.clearTimeout(timer);
+  }, []);
+  const notice = describeRelayPrompt(action, pane);
+  if (notice.tone === "error") {
+    return (
+      <div role="alert" data-relay-notice="error" className="mx-4 mt-3 flex items-start gap-3 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-2 text-sm text-red-300">
+        <span className="min-w-0 flex-1">{notice.text}</span>
+        <button type="button" onClick={onDismiss} className="min-h-11 shrink-0 rounded-md px-2 text-xs text-fg-muted hover:text-fg focus:outline-none focus:ring-2 focus:ring-accent sm:min-h-0">
+          Dismiss
+        </button>
+      </div>
+    );
+  }
+  if (expired) return null;
+  return (
+    <p role="status" data-relay-notice={notice.tone} className="mx-4 mt-3 rounded-xl border border-hairline bg-fg/[0.03] px-4 py-2 text-sm text-fg-muted">
+      {notice.text}
+    </p>
+  );
+}
+
+/** The selected item's relay notification, in the detail: pending, told, or the relay's error. */
+function RelayPromptLine({ action, pane }: { action: RelayActionView; pane: string | null }) {
+  const line = describeRelayPrompt(action, pane);
+  const tone = line.tone === "error" ? "border-red-500/30 bg-red-500/10 text-red-300" : line.tone === "pending" ? "border-amber-400/40 bg-amber-400/10 text-amber-200" : "border-hairline bg-fg/[0.03] text-fg-muted";
+  return (
+    <p data-relay-state={line.tone} className={`rounded-xl border px-3 py-2 text-sm ${tone}`}>
+      {line.text}
+    </p>
   );
 }
 
@@ -463,9 +565,13 @@ interface InboxDetailProps {
   onSelect: (id: string) => void;
   onOpenSession: (item: Item) => Promise<SessionLinkResult>;
   onReload: () => Promise<void>;
+  /** The server has no herdr: a pane is told by the laptop relay, when it runs. */
+  herdrMissing: boolean;
+  /** The item's pane prompt queued for the laptop relay, open or finished in the last day; null when there is none. */
+  relay: RelayActionView | null;
 }
 
-function InboxDetail({ item, parent, candidates, now, messageRef, keyed, onDecide, onRelease, onSelect, onOpenSession, onReload }: InboxDetailProps) {
+function InboxDetail({ item, parent, candidates, now, messageRef, keyed, onDecide, onRelease, onSelect, onOpenSession, onReload, herdrMissing, relay }: InboxDetailProps) {
   const [message, setMessageState] = useState("");
   const [pending, setPending] = useState<"accept" | "changes" | null>(null);
   const [pendingOption, setPendingOption] = useState<string | null>(null);
@@ -563,7 +669,9 @@ function InboxDetail({ item, parent, candidates, now, messageRef, keyed, onDecid
     item.hangarSession !== null
       ? "Will be sent to the hangar session that filed it."
       : item.pane !== null
-        ? `Will prompt the session that queued it (pane ${item.pane}).`
+        ? herdrMissing
+          ? `Will prompt the session that queued it (pane ${item.pane}); the agent will be told when the laptop relay runs.`
+          : `Will prompt the session that queued it (pane ${item.pane}).`
         : "Accepted items are carried out by the inbox watcher (or /inbox-execute).";
   const pendingIgnores = candidates.filter((c) => c.status === "pending" && (c.action === "ignore" || c.action === "none"));
 
@@ -591,6 +699,8 @@ function InboxDetail({ item, parent, candidates, now, messageRef, keyed, onDecid
           </p>
         )}
       </header>
+
+      {relay !== null && <RelayPromptLine action={relay} pane={item.pane} />}
 
       {item.revision !== null && item.status === "pending" && (
         <p role="note" className="rounded-xl border border-accent/40 bg-accent/10 px-3 py-2 text-sm text-fg">

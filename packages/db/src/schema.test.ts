@@ -4,7 +4,7 @@ import type { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDb, createPool, type Database } from "./client.js";
 import { resolveDatabaseUrl } from "./env.js";
-import { clientTokens, edges, hangarCheckIns, hangarMessages, ingestRuns, nodeRevisions, nodes, resolvedNodes } from "./schema.js";
+import { clientTokens, edges, hangarCheckIns, hangarMessages, ingestRuns, nodeRevisions, nodes, relayActions, relayCheckIns, resolvedNodes } from "./schema.js";
 
 /**
  * Integration tests against the real Postgres instance (no mocking) —
@@ -845,6 +845,17 @@ describe("client_tokens", () => {
     }
   });
 
+  it("accepts a relay scope", async () => {
+    const client = clientName();
+    try {
+      await db.insert(clientTokens).values({ client, tokenHash: randomBytes(32), scope: "relay" });
+      const [row] = await db.select({ scope: clientTokens.scope }).from(clientTokens).where(eq(clientTokens.client, client));
+      expect(row?.scope).toBe("relay");
+    } finally {
+      await db.delete(clientTokens).where(eq(clientTokens.client, client));
+    }
+  });
+
   it("accepts a hangar scope and refuses any other unknown one", async () => {
     const client = clientName();
     try {
@@ -967,6 +978,95 @@ describe("hangar_messages", () => {
       expect(index.rows[0]?.indexdef).toMatch(/\(session_id, id\)/);
     } finally {
       await db.delete(hangarMessages).where(eq(hangarMessages.sessionId, sessionId));
+    }
+  });
+});
+
+describe("relay_actions", () => {
+  async function pgErrorOf(fn: () => Promise<unknown>): Promise<{ code?: string; constraint?: string }> {
+    try {
+      await fn();
+    } catch (err) {
+      return ((err as { cause?: unknown }).cause ?? err) as { code?: string; constraint?: string };
+    }
+    throw new Error("expected the statement to be refused");
+  }
+
+  /** A project key no live row uses, so the open-target index sees only this test's rows. */
+  function projectKey(): string {
+    return `test-schema-relay-${randomUUID().slice(0, 8)}`;
+  }
+
+  it("defaults a new action to queued with no attempts, and refuses an unknown kind or state", async () => {
+    const project = projectKey();
+    try {
+      const [row] = await db.insert(relayActions).values({ kind: "beads_reingest", payload: { project_key: project } }).returning();
+      expect(row).toMatchObject({ kind: "beads_reingest", state: "queued", attempts: 0, claimedBy: null, finishedAt: null });
+      expect(row?.createdAt).toBeInstanceOf(Date);
+
+      const kind = await pgErrorOf(() => db.execute(sql`INSERT INTO relay_actions (kind, payload) VALUES ('bd_delete', ${JSON.stringify({ project_key: project })}::jsonb)`));
+      expect(kind.code).toBe("23514");
+      expect(kind.constraint).toBe("relay_actions_kind_check");
+      const state = await pgErrorOf(() => db.execute(sql`INSERT INTO relay_actions (kind, payload, state) VALUES ('herdr_prompt', '{}'::jsonb, 'running')`));
+      expect(state.code).toBe("23514");
+      expect(state.constraint).toBe("relay_actions_state_check");
+    } finally {
+      await db.delete(relayActions).where(sql`${relayActions.payload}->>'project_key' = ${project}`);
+    }
+  });
+
+  it("refuses a second open action on the same target, and allows one once the first is done", async () => {
+    const project = projectKey();
+    const payload = { project_key: project, issue_id: "test-1" };
+    try {
+      const [first] = await db.insert(relayActions).values({ kind: "review_decision", payload }).returning({ id: relayActions.id });
+      const duplicate = await pgErrorOf(() => db.insert(relayActions).values({ kind: "review_decision", payload: { ...payload, decision: "changes" } }));
+      expect(duplicate.code).toBe("23505");
+      expect(duplicate.constraint).toBe("relay_actions_open_target_idx");
+
+      // A claimed action is still open.
+      await db.update(relayActions).set({ state: "claimed", claimedBy: "test", claimedAt: sql`now()` }).where(eq(relayActions.id, first!.id));
+      expect((await pgErrorOf(() => db.insert(relayActions).values({ kind: "review_decision", payload }))).code).toBe("23505");
+
+      // Another issue in the same project, and another kind on the same project, are other targets.
+      await db.insert(relayActions).values({ kind: "review_decision", payload: { ...payload, issue_id: "test-2" } });
+      await db.insert(relayActions).values({ kind: "beads_reingest", payload: { project_key: project } });
+
+      await db.update(relayActions).set({ state: "done", finishedAt: sql`now()` }).where(eq(relayActions.id, first!.id));
+      await db.insert(relayActions).values({ kind: "review_decision", payload });
+      const open = await db.select({ id: relayActions.id }).from(relayActions).where(and(sql`${relayActions.payload}->>'project_key' = ${project}`, sql`${relayActions.payload}->>'issue_id' = 'test-1'`));
+      expect(open).toHaveLength(2);
+    } finally {
+      await db.delete(relayActions).where(sql`${relayActions.payload}->>'project_key' = ${project}`);
+    }
+  });
+
+  it("never treats two herdr prompts as one target", async () => {
+    const pane = `test-pane-${randomUUID().slice(0, 8)}`;
+    try {
+      const payload = { pane, socket: "/tmp/herdr.sock", text: "hello" };
+      await db.insert(relayActions).values([
+        { kind: "herdr_prompt", payload },
+        { kind: "herdr_prompt", payload },
+      ]);
+      const rows = await db.select({ id: relayActions.id }).from(relayActions).where(sql`${relayActions.payload}->>'pane' = ${pane}`);
+      expect(rows).toHaveLength(2);
+    } finally {
+      await db.delete(relayActions).where(sql`${relayActions.payload}->>'pane' = ${pane}`);
+    }
+  });
+});
+
+describe("relay_check_ins", () => {
+  it("keeps one row per relay with a 30-second default interval", async () => {
+    const relay = `test-schema-relay-${randomUUID()}`;
+    try {
+      const [first] = await db.insert(relayCheckIns).values({ relay, version: "1.0.0" }).returning();
+      expect(first).toMatchObject({ relay, version: "1.0.0", intervalS: 30 });
+      const duplicate = await db.insert(relayCheckIns).values({ relay }).catch((err: unknown) => ((err as { cause?: unknown }).cause ?? err) as { code?: string });
+      expect((duplicate as { code?: string }).code).toBe("23505");
+    } finally {
+      await db.delete(relayCheckIns).where(eq(relayCheckIns.relay, relay));
     }
   });
 });

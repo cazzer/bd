@@ -49,7 +49,7 @@ describe("beads watcher registry read", () => {
     const watched: string[] = [];
     const watcher = createBeadsWatcher({
       db,
-      ingest: (_db, o) => ingest(o),
+      ingest: (o) => ingest(o),
       watchDir: (dir) => {
         watched.push(dir);
         return { close: () => {} };

@@ -374,8 +374,9 @@ const bytea = customType<{ data: Buffer; driverData: Buffer }>({
  * (a phone, a laptop) are accepted by the web API and MCP, `agent` tokens
  * (workers, a driver) by MCP and the agent procedures only, so a worker
  * cannot decide its own inbox request, and the `hangar` token by the
- * hangar endpoints only (hangar-queue decision 1). It has no default:
- * every token states its scope.
+ * hangar endpoints only (hangar-queue decision 1), and the `relay` token
+ * (the laptop relay) by the relay endpoints only (laptop-relay decision 5).
+ * It has no default: every token states its scope.
  *
  * `session_id` binds a token to one `hangar_session` node (hangar-queue
  * decision 4): a hangar claim mints it, scope `agent`, and the session
@@ -383,7 +384,7 @@ const bytea = customType<{ data: Buffer; driverData: Buffer }>({
  * tombstoned, and the token's lifetime follows the session's state, not
  * the row's existence. Only an `agent` token may carry one.
  */
-export const CLIENT_TOKEN_SCOPES = ["human", "agent", "hangar"] as const;
+export const CLIENT_TOKEN_SCOPES = ["human", "agent", "hangar", "relay"] as const;
 export type ClientTokenScope = (typeof CLIENT_TOKEN_SCOPES)[number];
 
 export const clientTokens = pgTable(
@@ -405,7 +406,7 @@ export const clientTokens = pgTable(
       .on(table.client)
       .where(sql`${table.revokedAt} IS NULL`),
     index("client_tokens_session_id_idx").on(table.sessionId),
-    check("client_tokens_scope_check", sql`${table.scope} IN ('human', 'agent', 'hangar')`),
+    check("client_tokens_scope_check", sql`${table.scope} IN ('human', 'agent', 'hangar', 'relay')`),
     check("client_tokens_session_scope_check", sql`${table.sessionId} IS NULL OR ${table.scope} = 'agent'`),
   ],
 );
@@ -448,3 +449,72 @@ export const hangarMessages = pgTable(
   },
   (table) => [index("hangar_messages_session_id_id_idx").on(table.sessionId, table.id)],
 );
+
+/**
+ * `relay_actions` — host-binary work a Breakdown without `bd` or `herdr`
+ * queues for the laptop relay (laptop-relay decisions 1, 2, and 9). Rows,
+ * not nodes: bookkeeping, not knowledge, and a revision per state change
+ * would serve no reader. `payload` is validated data (packages/core/src/
+ * relay.ts), never a command string.
+ *
+ * State machine: queued → claimed → done | failed; a claim older than the
+ * reclaim window counts as queued again, in the claim's own predicate, so
+ * no sweeper runs. `attempts` counts claims; an action claimed three times
+ * without a report fails. The open index serves both the queued and the
+ * reclaim predicate. The open-target index makes a second pending action on
+ * the same project and issue a conflict (herdr prompts are excluded: two
+ * replies to one pane are two actions). The origin index serves the UI's
+ * per-item read: a card or inbox row's open or recent action.
+ */
+export const RELAY_ACTION_KINDS = ["review_decision", "herdr_prompt", "beads_reingest"] as const;
+export type RelayActionKind = (typeof RELAY_ACTION_KINDS)[number];
+export const RELAY_ACTION_STATES = ["queued", "claimed", "done", "failed"] as const;
+export type RelayActionState = (typeof RELAY_ACTION_STATES)[number];
+
+export const relayActions = pgTable(
+  "relay_actions",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    kind: text("kind").$type<RelayActionKind>().notNull(),
+    payload: jsonb("payload").notNull(),
+    state: text("state").$type<RelayActionState>().notNull().default("queued"),
+    attempts: integer("attempts").notNull().default(0),
+    claimedBy: text("claimed_by"),
+    claimedAt: timestamp("claimed_at", { withTimezone: true }),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    result: jsonb("result"),
+    error: text("error"),
+    requestedBy: text("requested_by"),
+    // The review or inbox item, for the UI. No foreign key: the node may be
+    // merged away, and the action's history outlives it.
+    originNodeId: uuid("origin_node_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("relay_actions_open_idx")
+      .on(table.createdAt, table.id)
+      .where(sql`${table.state} IN ('queued', 'claimed')`),
+    // A card or inbox reading its items' actions (core relay.ts `listRelayActionsForOrigins`).
+    index("relay_actions_origin_idx")
+      .on(table.originNodeId)
+      .where(sql`${table.originNodeId} IS NOT NULL`),
+    uniqueIndex("relay_actions_open_target_idx")
+      .on(table.kind, sql`(${table.payload}->>'project_key')`, sql`coalesce(${table.payload}->>'issue_id', '')`)
+      .where(sql`${table.state} IN ('queued', 'claimed') AND ${table.kind} <> 'herdr_prompt'`),
+    check("relay_actions_kind_check", sql`${table.kind} IN ('review_decision', 'herdr_prompt', 'beads_reingest')`),
+    check("relay_actions_state_check", sql`${table.state} IN ('queued', 'claimed', 'done', 'failed')`),
+  ],
+);
+
+/**
+ * `relay_check_ins` — one row per relay, upserted by every check-in and
+ * every claim, like `hangar_check_ins`. Status is computed on read against
+ * the database's `now()`: online while `now() - last_seen_at < 3 ×
+ * interval_s`.
+ */
+export const relayCheckIns = pgTable("relay_check_ins", {
+  relay: text("relay").primaryKey(),
+  lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+  version: text("version"),
+  intervalS: integer("interval_s").notNull().default(30),
+});

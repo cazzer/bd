@@ -22,6 +22,9 @@
     "bundle": "node bin/bundle-servers.mjs",
     "smoke:app": "node bin/compose-smoke.mjs",
     "hangar:e2e": "node bin/hangar-e2e.mjs",
+    "relay": "pnpm -s --filter @breakdown/web relay",
+    "relay:service": "node bin/relay-service.mjs",
+    "relay:e2e": "node bin/relay-e2e.mjs",
     "typecheck": "pnpm -r run typecheck",
     "test": "vitest run && node --test bin/*.test.mjs",
     "check": "pnpm typecheck && pnpm test"

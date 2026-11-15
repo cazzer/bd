@@ -20,6 +20,7 @@ const TAILNET = "breakdown.tail.example";
 const PHONE_TOKEN = "bdt_phone-token";
 const WORKER_TOKEN = "bdt_worker-token";
 const HANGAR_TOKEN = "bdt_hangar-token";
+const RELAY_TOKEN = "bdt_relay-token";
 const THROWING_TOKEN = "bdt_throws";
 
 let server: Server;
@@ -41,6 +42,7 @@ async function startDispatcher(withStatic: boolean): Promise<{ server: Server; p
       if (token === THROWING_TOKEN) throw new Error("token store unavailable");
       if (token === WORKER_TOKEN) return { client: "worker-1", scope: "agent", sessionId: null };
       if (token === HANGAR_TOKEN) return { client: "hangar-desktop", scope: "hangar", sessionId: null };
+      if (token === RELAY_TOKEN) return { client: "relay-laptop", scope: "relay", sessionId: null };
       return token === PHONE_TOKEN ? { client: "phone", scope: "human", sessionId: null } : null;
     },
     connect: async (req, res) => {
@@ -62,6 +64,10 @@ async function startDispatcher(withStatic: boolean): Promise<{ server: Server; p
     hangar: async (req, res, client) => {
       calls.push(`hangar ${req.method} ${req.url} ${client === null ? "client=null" : `client=${client.client}/${client.scope}`}`);
       res.end("hangar");
+    },
+    relay: async (req, res, client) => {
+      calls.push(`relay ${req.method} ${req.url} ${client === null ? "client=null" : `client=${client.client}/${client.scope}`}`);
+      res.end("relay");
     },
     trpc: (req, res) => {
       calls.push(`trpc ${req.url} ${admitted(req)}`);
@@ -300,8 +306,9 @@ describe("createRequestDispatcher: review media uploads", () => {
     expect(calls).toEqual([`uploads PUT ${upload} client=worker-1/agent`, "uploads DELETE /review-uploads/bd/bd-1/0a1b2c3d4e5f client=worker-1/agent"]);
   });
 
-  it("refuses a hangar token with 403", async () => {
+  it("refuses a hangar or relay token with 403", async () => {
     expect(await send(upload, { Host: tailnetHost(), ...bearer(HANGAR_TOKEN) }, "PUT")).toMatchObject({ status: 403, body: "Forbidden\n" });
+    expect(await send(upload, { Host: tailnetHost(), ...bearer(RELAY_TOKEN) }, "PUT")).toMatchObject({ status: 403, body: "Forbidden\n" });
     expect(calls).toEqual([]);
   });
 
@@ -356,6 +363,58 @@ describe("createRequestDispatcher: the hangar API", () => {
     }
     expect(calls.every((c) => c.startsWith("static "))).toBe(true);
     expect(calls).toHaveLength(5);
+  });
+});
+
+describe("createRequestDispatcher: the relay API", () => {
+  it("hands a relay token to the relay handler with what admission established", async () => {
+    expect(await send("/relay/v1/projects", { Host: tailnetHost(), ...bearer(RELAY_TOKEN) })).toMatchObject({ status: 200, body: "relay" });
+    expect(await send("/relay/v1/claim", { Host: tailnetHost(), ...bearer(RELAY_TOKEN) }, "POST")).toMatchObject({ status: 200, body: "relay" });
+    expect(calls).toEqual(["relay GET /relay/v1/projects client=relay-laptop/relay", "relay POST /relay/v1/claim client=relay-laptop/relay"]);
+  });
+
+  it("refuses a human, agent, or hangar token with a JSON 403, and a missing token with a JSON 401, calling nothing", async () => {
+    for (const token of [PHONE_TOKEN, WORKER_TOKEN, HANGAR_TOKEN]) {
+      const forbidden = await send("/relay/v1/claim", { Host: tailnetHost(), ...bearer(token) }, "POST");
+      expect(forbidden.status, token).toBe(403);
+      expect(forbidden.headers["content-type"]).toBe("application/json; charset=utf-8");
+      expect(JSON.parse(forbidden.body)).toEqual({ error: { code: "forbidden", message: "This token's scope cannot use the relay API." } });
+    }
+    const unauthorized = await send("/relay/v1/claim", { Host: tailnetHost() }, "POST");
+    expect(unauthorized.status).toBe(401);
+    expect(unauthorized.headers["www-authenticate"]).toBe("Bearer");
+    expect(JSON.parse(unauthorized.body)).toMatchObject({ error: { code: "unauthorized" } });
+    expect(calls).toEqual([]);
+  });
+
+  it("refuses the relay token everywhere but the relay API and the health check", async () => {
+    expect(await send("/trpc/board", { Host: tailnetHost(), ...bearer(RELAY_TOKEN) })).toMatchObject({ status: 403, body: "Forbidden\n" });
+    expect(await send("/review-images/rv/r1/a.png", { Host: tailnetHost(), ...bearer(RELAY_TOKEN) })).toMatchObject({ status: 403, body: "Forbidden\n" });
+    expect(await send("/review-uploads/bd/bd-1/0a1b2c3d4e5f/01-a.png", { Host: tailnetHost(), ...bearer(RELAY_TOKEN) }, "PUT")).toMatchObject({ status: 403, body: "Forbidden\n" });
+    expect(await send("/review-uploads/bd/bd-1/0a1b2c3d4e5f", { Host: tailnetHost(), ...bearer(RELAY_TOKEN) }, "DELETE")).toMatchObject({ status: 403, body: "Forbidden\n" });
+    expect(await send("/auth/connect", { Host: tailnetHost(), ...bearer(RELAY_TOKEN) })).toMatchObject({ status: 403, body: "Forbidden\n" });
+    const hangar = await send("/hangar/v1/claim", { Host: tailnetHost(), ...bearer(RELAY_TOKEN) }, "POST");
+    expect(hangar.status).toBe(403);
+    expect(JSON.parse(hangar.body)).toMatchObject({ error: { code: "forbidden" } });
+    expect(await send("/healthz", { Host: tailnetHost(), ...bearer(RELAY_TOKEN) })).toMatchObject({ status: 200, body: "health" });
+    expect(calls).toEqual(["health GET /healthz client=relay-laptop/relay"]);
+  });
+
+  it("goes to the relay API ahead of the built client; a spelling that only normalizes to it is the client's", async () => {
+    const host = `${TAILNET}:${staticPort}`;
+    expect(await send("/relay/v1/projects", { Host: host, ...bearer(RELAY_TOKEN) }, "GET", staticPort)).toMatchObject({ status: 200, body: "relay" });
+    const unauthorized = await send("/relay/v1/projects", { Host: host }, "GET", staticPort);
+    expect(unauthorized.status).toBe(401);
+    expect(JSON.parse(unauthorized.body)).toMatchObject({ error: { code: "unauthorized" } });
+    for (const path of ["/x/../relay/v1/claim", "/%72elay/v1/claim", "/relay/v1", "/RELAY/v1/claim"]) {
+      expect(await send(path, { Host: host, ...bearer(RELAY_TOKEN) }, "GET", staticPort), path).toMatchObject({ status: 200, body: "static" });
+    }
+    expect(calls).toEqual(["relay GET /relay/v1/projects client=relay-laptop/relay", "static GET /x/../relay/v1/claim", "static GET /%72elay/v1/claim", "static GET /relay/v1", "static GET /RELAY/v1/claim"]);
+  });
+
+  it("hands a tokenless loopback request to the relay handler as null, for it to refuse", async () => {
+    expect(await send("/relay/v1/projects", { Host: `127.0.0.1:${port}` })).toMatchObject({ status: 200, body: "relay" });
+    expect(calls).toEqual(["relay GET /relay/v1/projects client=null"]);
   });
 });
 
@@ -440,10 +499,11 @@ describe("routeFor", () => {
       expect(routeFor("/trpc", hasStatic)).toBe("trpc");
       expect(routeFor("/trpc/board", hasStatic)).toBe("trpc");
       expect(routeFor("/hangar/v1/claim", hasStatic)).toBe("hangar");
+      expect(routeFor("/relay/v1/claim", hasStatic)).toBe("relay");
     }
     const fallback = { false: "trpc", true: "static" } as const;
     for (const hasStatic of [false, true]) {
-      for (const path of ["/auth/connect/", "//auth/connect", "/AUTH/connect", "/healthz/", "http://127.0.0.1:1/review-images/a.png", "/x/../trpc/a", "/%74rpc/a", "/trpcx", "/hangar/v1", "/hangar/v2/claim", "/HANGAR/v1/claim", "/x/../hangar/v1/claim", "/"]) {
+      for (const path of ["/auth/connect/", "//auth/connect", "/AUTH/connect", "/healthz/", "http://127.0.0.1:1/review-images/a.png", "/x/../trpc/a", "/%74rpc/a", "/trpcx", "/hangar/v1", "/hangar/v2/claim", "/HANGAR/v1/claim", "/x/../hangar/v1/claim", "/relay/v1", "/relay/v2/claim", "/RELAY/v1/claim", "/"]) {
         expect(routeFor(path, hasStatic), path).toBe(fallback[`${hasStatic}`]);
       }
     }

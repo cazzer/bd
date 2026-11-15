@@ -153,6 +153,16 @@ describe("runTokenCli", () => {
     expect(err).toContain("--scope hangar: the hangar service; admitted by /hangar/v1 only");
   });
 
+  it("create --scope relay records a relay token, and usage names the scope", async () => {
+    const client = clientName();
+    const { code, out } = await run(["create", client, "--scope", "relay"]);
+    expect(code).toBe(0);
+    expect(out).toMatch(TOKEN_LINE);
+    const listed = (await run(["list"])).out.split("\n").find((l) => l.startsWith(`${client}\t`));
+    expect(listed).toMatch(/^[^\t]+\trelay\t-\tcreated /);
+    expect((await run([])).err).toContain("--scope relay: the laptop relay; admitted by /relay/v1 only");
+  });
+
   it.each([
     [[]],
     [["create"]],

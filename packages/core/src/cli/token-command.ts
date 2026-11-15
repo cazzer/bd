@@ -1,13 +1,14 @@
-// `pnpm -s client-token create <client> --scope human|agent|hangar | list |
-// revoke <client>` (tailnet-hosting, design decisions 3 and 9; hangar-queue
-// decisions 1 and 4), as a function over injected streams so tests drive it
-// without a child process. token.ts is the thin entrypoint.
+// `pnpm -s client-token create <client> --scope human|agent|hangar|relay |
+// list | revoke <client>` (tailnet-hosting, design decisions 3 and 9;
+// hangar-queue decisions 1 and 4; laptop-relay decision 5), as a function
+// over injected streams so tests drive it without a child process. token.ts is the thin entrypoint.
 //
 // stdout carries only the command's answer: for `create`, the token and a
 // newline, nothing else, so `TOKEN=$(pnpm -s client-token create phone
 // --scope human)` works. The scope has no default: an operator states
 // whether a token is a person's (web and MCP), an agent's (MCP and the agent
-// procedures), or the hangar service's (the hangar endpoints only). `list`
+// procedures), the hangar service's (the hangar endpoints only), or the
+// laptop relay's (the relay endpoints only). `list`
 // shows each row's bound hangar session, if any: session tokens are minted
 // by a hangar claim, never here. Notes and confirmations go to stderr. A token is never written
 // anywhere but that one stdout line, and `list` never shows one.
@@ -23,10 +24,11 @@ export interface TokenCliIo {
 }
 
 const USAGE =
-  "usage: pnpm -s client-token create <client> --scope human|agent|hangar | list | revoke <client>\n" +
+  "usage: pnpm -s client-token create <client> --scope human|agent|hangar|relay | list | revoke <client>\n" +
   "  --scope human: a person's device (phone, laptop); admitted by the web API and MCP\n" +
   "  --scope agent: a worker or driver; admitted by MCP and the agent procedures of the web API\n" +
-  "  --scope hangar: the hangar service; admitted by /hangar/v1 only\n";
+  "  --scope hangar: the hangar service; admitted by /hangar/v1 only\n" +
+  "  --scope relay: the laptop relay; admitted by /relay/v1 only\n";
 
 /** `<client> --scope <scope>` in either order, or undefined for anything else. */
 function parseCreateArgs(rest: readonly string[]): { client: string; scope: ClientTokenScope } | undefined {

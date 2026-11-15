@@ -13,6 +13,8 @@
 // always the admitting token's session, never one the request names.
 //
 // Every response is JSON; every error is `{ "error": { "code", "message" } }`.
+// The request plumbing (bodies, errors, long-poll, the waiter cap) lives in
+// json-api.ts, shared with the relay's API.
 // A write (POST, PATCH) needs `application/json`, at most
 // MAX_HANGAR_BODY_BYTES (declared or streamed), strict UTF-8, and a body the
 // endpoint's schema accepts. Unknown fields are dropped, not refused, so a
@@ -61,12 +63,11 @@ import {
 import type { Database } from "@breakdown/db";
 import { z } from "zod";
 import type { AdmittedClient } from "./context.js";
+import { ApiError, createWaiterCap, invalidRequest, longPoll, matchPath, readJsonBody as readCappedJsonBody, sendError, sendJson, splitUrl } from "./json-api.js";
 
 export const HANGAR_API_PREFIX = "/hangar/v1/";
 /** Every hangar request body is small JSON; anything past this is refused. */
 export const MAX_HANGAR_BODY_BYTES = 64 * 1024;
-/** How often a long-poll re-runs its query. */
-const POLL_INTERVAL_MS = 1000;
 /** What `GET /sessions` lists when no `state` is given: the open sessions hangar reconciles after a restart. */
 const DEFAULT_LISTED_STATES: readonly HangarSessionState[] = ["claimed", "running"];
 /** The most long-polls (claim and messages with `wait_s` > 0, together) one client may hold open at once. */
@@ -103,105 +104,10 @@ export interface HangarHandlerOptions {
   claimAmong?: () => readonly string[];
 }
 
-const JSON_HEADERS = { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } as const;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/** A refusal this handler answers with its own status and error code. */
-class HangarApiError extends Error {
-  constructor(
-    readonly status: number,
-    readonly code: string,
-    message: string,
-    readonly headers: Record<string, string> = {},
-  ) {
-    super(message);
-  }
-}
-
-const invalidRequest = (message: string): HangarApiError => new HangarApiError(400, "invalid_request", message);
-
-function sendJson(res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}): void {
-  // A long-poll whose client left has nobody to answer.
-  if (res.destroyed) return;
-  res.writeHead(status, { ...JSON_HEADERS, ...headers });
-  res.end(JSON.stringify(body));
-}
-
-function sendError(res: ServerResponse, err: HangarApiError): void {
-  sendJson(res, err.status, { error: { code: err.code, message: err.message } }, err.headers);
-}
-
-// --- Request bodies ----------------------------------------------------------------
-
-/** The whole body, or undefined once it passes `limit` bytes (auth-connect.ts's shape). */
-function readBody(req: IncomingMessage, limit: number): Promise<Buffer | undefined> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    let size = 0;
-    const cleanup = (): void => {
-      req.off("data", onData);
-      req.off("end", onEnd);
-      req.off("error", onError);
-    };
-    const onData = (chunk: Buffer): void => {
-      size += chunk.length;
-      if (size > limit) {
-        cleanup();
-        resolve(undefined);
-        return;
-      }
-      chunks.push(chunk);
-    };
-    const onEnd = (): void => {
-      cleanup();
-      resolve(Buffer.concat(chunks));
-    };
-    const onError = (err: Error): void => {
-      cleanup();
-      reject(err);
-    };
-    req.on("data", onData);
-    req.on("end", onEnd);
-    req.on("error", onError);
-  });
-}
-
-const TOO_LARGE = (): HangarApiError => new HangarApiError(413, "too_large", `The body must be at most ${MAX_HANGAR_BODY_BYTES} bytes.`, { Connection: "close" });
-
-function isJsonContentType(header: string | undefined): boolean {
-  if (header === undefined) return false;
-  return header.split(";")[0]!.trim().toLowerCase() === "application/json";
-}
-
-function formatIssues(error: z.ZodError): string {
-  return error.issues.map((issue) => `${issue.path.length === 0 ? "(body)" : issue.path.join(".")}: ${issue.message}`).join("; ");
-}
-
-/** The body parsed against `schema`, or a 415, 413, 400 invalid_json, or 400 invalid_request. */
-async function readJsonBody<T extends z.ZodType>(req: IncomingMessage, schema: T): Promise<z.infer<T>> {
-  if (!isJsonContentType(req.headers["content-type"])) {
-    throw new HangarApiError(415, "unsupported_media_type", "Send the body as Content-Type: application/json.");
-  }
-  const declared = req.headers["content-length"];
-  if (declared !== undefined && Number(declared) > MAX_HANGAR_BODY_BYTES) {
-    req.resume();
-    throw TOO_LARGE();
-  }
-  const raw = await readBody(req, MAX_HANGAR_BODY_BYTES);
-  if (raw === undefined) {
-    req.resume();
-    throw TOO_LARGE();
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(raw));
-  } catch {
-    throw new HangarApiError(400, "invalid_json", "The body is not valid UTF-8 JSON.");
-  }
-  const result = schema.safeParse(parsed);
-  if (!result.success) throw invalidRequest(formatIssues(result.error));
-  return result.data;
-}
+/** Every hangar body is capped at MAX_HANGAR_BODY_BYTES (json-api.ts). */
+const readJsonBody = <T extends z.ZodType>(req: IncomingMessage, schema: T): Promise<z.infer<T>> => readCappedJsonBody(req, schema, MAX_HANGAR_BODY_BYTES);
 
 const checkInSchema = z.object({
   version: z.string().trim().min(1).max(MAX_HANGAR_FIELD_LENGTH),
@@ -281,42 +187,6 @@ async function sessionJson(db: Database, session: HangarSession): Promise<Record
   return (await sessionsJson(db, [session]))[0]!;
 }
 
-// --- Long-poll ------------------------------------------------------------------------
-
-/** Resolves after `ms`, or as soon as `signal` aborts. */
-function pause(ms: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve) => {
-    if (signal.aborted) {
-      resolve();
-      return;
-    }
-    const done = (): void => {
-      clearTimeout(timer);
-      signal.removeEventListener("abort", done);
-      resolve();
-    };
-    const timer = setTimeout(done, ms);
-    signal.addEventListener("abort", done, { once: true });
-  });
-}
-
-/**
- * Runs `attempt` until it returns something, `waitS` seconds pass, or
- * `signal` aborts (module header); null when nothing turned up. An aborted
- * signal stops it before the next attempt, never after.
- */
-async function longPoll<T>(waitS: number, signal: AbortSignal, attempt: () => Promise<T | null>): Promise<T | null> {
-  const deadline = Date.now() + waitS * 1000;
-  for (;;) {
-    if (signal.aborted) return null;
-    const found = await attempt();
-    if (found !== null) return found;
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) return null;
-    await pause(Math.min(POLL_INTERVAL_MS, remaining), signal);
-  }
-}
-
 // --- The handler ------------------------------------------------------------------------
 
 interface Call {
@@ -332,48 +202,21 @@ interface Call {
 
 type EndpointHandler = (call: Call) => Promise<void>;
 
-/** The path's `:id`, or null when `path` does not fit `pattern` segment by segment. */
-function matchPath(pattern: string, path: string): { id: string | undefined } | null {
-  const want = pattern.split("/");
-  const got = path.split("/");
-  if (want.length !== got.length) return null;
-  let id: string | undefined;
-  for (let i = 0; i < want.length; i += 1) {
-    if (want[i] === ":id") id = got[i];
-    else if (want[i] !== got[i]) return null;
-  }
-  return { id };
-}
-
-function mapCoreError(err: unknown): HangarApiError | null {
-  if (err instanceof HangarApiError) return err;
-  if (err instanceof HangarTransitionError) return new HangarApiError(409, "invalid_transition", err.message);
-  if (err instanceof HangarSessionNotClaimedByError) return new HangarApiError(403, "not_claimer", err.message);
-  if (err instanceof HangarSessionNotFoundError) return new HangarApiError(404, "not_found", err.message);
+function mapCoreError(err: unknown): ApiError | null {
+  if (err instanceof ApiError) return err;
+  if (err instanceof HangarTransitionError) return new ApiError(409, "invalid_transition", err.message);
+  if (err instanceof HangarSessionNotClaimedByError) return new ApiError(403, "not_claimer", err.message);
+  if (err instanceof HangarSessionNotFoundError) return new ApiError(404, "not_found", err.message);
   if (err instanceof InvalidHangarSessionError || err instanceof InvalidLookupIdError) return invalidRequest(err.message);
   return null;
 }
 
 export function createHangarHandler({ db, readOnly = false, shutdownSignal, claimAmong }: HangarHandlerOptions): (req: IncomingMessage, res: ServerResponse, admitted: AdmittedClient | null) => Promise<void> {
-  /** Open long-polls per client (`MAX_CONCURRENT_LONG_POLLS`). */
-  const waiting = new Map<string, number>();
-
-  /** Runs a long-poll of `waitS` seconds for `client`, or refuses it with 429 when the client already holds the most allowed; `waitS` 0 is not a long-poll. */
-  async function asWaiter<T>(client: string, waitS: number, run: () => Promise<T>): Promise<T> {
-    if (waitS === 0) return run();
-    const held = waiting.get(client) ?? 0;
-    if (held >= MAX_CONCURRENT_LONG_POLLS) {
-      throw new HangarApiError(429, "too_many_waiters", `This client already holds ${MAX_CONCURRENT_LONG_POLLS} long-polls open (claim and messages together); retry once one answers.`, { "Retry-After": "1" });
-    }
-    waiting.set(client, held + 1);
-    try {
-      return await run();
-    } finally {
-      const left = (waiting.get(client) ?? 1) - 1;
-      if (left <= 0) waiting.delete(client);
-      else waiting.set(client, left);
-    }
-  }
+  /** Open long-polls per client (`MAX_CONCURRENT_LONG_POLLS`): a long-poll past the cap is refused with 429. */
+  const asWaiter = createWaiterCap(
+    MAX_CONCURRENT_LONG_POLLS,
+    `This client already holds ${MAX_CONCURRENT_LONG_POLLS} long-polls open (claim and messages together); retry once one answers.`,
+  );
 
   const handlers: Record<EndpointKey, EndpointHandler> = {
     "POST /hangar/v1/check-in": async ({ req, res, admitted }) => {
@@ -461,10 +304,7 @@ export function createHangarHandler({ db, readOnly = false, shutdownSignal, clai
 
   return async (req, res, admitted) => {
     const method = (req.method ?? "GET").toUpperCase();
-    const rawUrl = req.url ?? "/";
-    const queryAt = rawUrl.indexOf("?");
-    const path = queryAt === -1 ? rawUrl : rawUrl.slice(0, queryAt);
-    const query = new URLSearchParams(queryAt === -1 ? "" : rawUrl.slice(queryAt + 1));
+    const { path, query } = splitUrl(req.url);
 
     const disconnected = new AbortController();
     res.once("close", () => disconnected.abort());
@@ -475,18 +315,18 @@ export function createHangarHandler({ db, readOnly = false, shutdownSignal, clai
         const matched = matchPath(endpoint.path, path);
         return matched === null ? [] : [{ endpoint, id: matched.id }];
       });
-      if (matches.length === 0) throw new HangarApiError(404, "not_found", "No hangar endpoint has this path (docs/hangar-api.md lists them).");
+      if (matches.length === 0) throw new ApiError(404, "not_found", "No hangar endpoint has this path (docs/hangar-api.md lists them).");
       const id = matches[0]!.id;
-      if (id !== undefined && !UUID_RE.test(id)) throw new HangarApiError(404, "not_found", "No session has this id: a session id is a uuid.");
+      if (id !== undefined && !UUID_RE.test(id)) throw new ApiError(404, "not_found", "No session has this id: a session id is a uuid.");
       const hit = matches.find((m) => m.endpoint.method === method);
       if (hit === undefined) {
         const allow = [...new Set(matches.map((m) => m.endpoint.method))].join(", ");
-        throw new HangarApiError(405, "method_not_allowed", `This path takes ${allow}.`, { Allow: allow });
+        throw new ApiError(405, "method_not_allowed", `This path takes ${allow}.`, { Allow: allow });
       }
 
       const { endpoint } = hit;
       if (admitted === null) {
-        throw new HangarApiError(
+        throw new ApiError(
           403,
           "forbidden",
           "Requests over loopback are treated as the local person; reach this API through the tailnet host or a proxy that sets X-Forwarded-For (docs/hangar-api.md).",
@@ -494,12 +334,12 @@ export function createHangarHandler({ db, readOnly = false, shutdownSignal, clai
       }
       if (admitted.scope !== endpoint.scope) {
         const scope = admitted.scope;
-        throw new HangarApiError(403, "forbidden", `${/^[aeiou]/.test(scope) ? "An" : "A"} ${scope} token cannot call ${endpoint.method} ${endpoint.path}; it takes a ${endpoint.scope} token.`);
+        throw new ApiError(403, "forbidden", `${/^[aeiou]/.test(scope) ? "An" : "A"} ${scope} token cannot call ${endpoint.method} ${endpoint.path}; it takes a ${endpoint.scope} token.`);
       }
       if (endpoint.scope === "agent" && admitted.sessionId === null) {
-        throw new HangarApiError(403, "forbidden", `Only a session token (returned by a claim) can call ${endpoint.method} ${endpoint.path}.`);
+        throw new ApiError(403, "forbidden", `Only a session token (returned by a claim) can call ${endpoint.method} ${endpoint.path}.`);
       }
-      if (readOnly && method !== "GET") throw new HangarApiError(403, "read_only", "The server is read-only (BRAIN_READ_ONLY); hangar writes are refused.");
+      if (readOnly && method !== "GET") throw new ApiError(403, "read_only", "The server is read-only (BRAIN_READ_ONLY); hangar writes are refused.");
 
       await handlers[`${endpoint.method} ${endpoint.path}` as EndpointKey]({ req, res, admitted, id: id?.toLowerCase(), query, signal });
     } catch (err) {
@@ -510,7 +350,7 @@ export function createHangarHandler({ db, readOnly = false, shutdownSignal, clai
       }
       // The method and the path only: never a query string, header, or body.
       console.error(`[breakdown-web] hangar ${method} ${path} failed:`, err);
-      sendError(res, new HangarApiError(500, "internal", "Internal error; the server logged it."));
+      sendError(res, new ApiError(500, "internal", "Internal error; the server logged it."));
     }
   };
 }

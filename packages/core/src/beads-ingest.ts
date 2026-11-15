@@ -63,6 +63,20 @@
 // If a failure follows `openIngestRun`, the run is closed with the error
 // recorded in its `stats` (best effort) before the failure is rethrown, so
 // a failed load leaves no run open forever.
+//
+// The load is two halves (laptop-relay decisions 4 and 9), composed by
+// `ingestBeadsCheckout` in the order above:
+//   - `computeBeadsIngest(runBd, cwd, { priorThreads })` runs `bd` and
+//     returns the raw `issues` and review `comments` as plain data. It
+//     touches no database: which stored threads may be carried forward is
+//     an injected `priorThreads` lookup (the store locally, an in-memory
+//     cache on the relay); without one every thread is fetched.
+//   - `applyBeadsIngest(db, { project, path, issues, comments, actor })`
+//     builds every node itself (`mapBeadsIssueToNode`, and the registry
+//     node from `path`), runs the collision guard, and writes the run. The
+//     relay's push (`POST /relay/v1/beads-ingest`) calls it with the path
+//     Breakdown already has registered and the relay's client as `actor`,
+//     so a pushed batch can never re-point the registry.
 
 import { execFile } from "node:child_process";
 import { realpath, statSync } from "node:fs";
@@ -125,29 +139,39 @@ export interface IngestBeadsCheckoutResult {
   skippedUnknownType: number;
 }
 
-/** The default runner: `bd`'s own stderr is attached to the failure. BEADS_DIR / BEADS_DB are dropped from its environment: either would point `bd` at another database than the checkout's, whatever `cwd` says. */
-export const defaultRunBd: RunBd = async (args, cwd, signal) => {
-  const env = { ...process.env };
-  delete env["BEADS_DIR"];
-  delete env["BEADS_DB"];
-  try {
-    const { stdout } = await execFileAsync("bd", [...args], {
-      cwd,
-      env,
-      maxBuffer: 64 * 1024 * 1024,
-      timeout: BD_TIMEOUT_MS,
-      killSignal: "SIGKILL",
-      ...(signal ? { signal } : {}),
-    });
-    return stdout;
-  } catch (err) {
-    // spawn reports a missing cwd as ENOENT too; only a real cwd means bd itself is missing.
-    if ((err as NodeJS.ErrnoException).code === "ENOENT" && isDirectory(cwd)) throw new HostBinaryUnavailableError("bd");
-    const stderr = typeof (err as { stderr?: unknown }).stderr === "string" ? (err as { stderr: string }).stderr.trim() : "";
-    const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`bd ${args.join(" ")} failed in ${cwd}: ${stderr || message}`);
-  }
-};
+export interface IngestBdRunnerOptions {
+  /** The executable to run. Default `bd` (resolved on PATH). */
+  command?: string;
+}
+
+/** A runner over `execFile`, never a shell: `bd`'s own stderr is attached to the failure. BEADS_DIR / BEADS_DB are dropped from its environment: either would point `bd` at another database than the checkout's, whatever `cwd` says. */
+export function createIngestBdRunner({ command = "bd" }: IngestBdRunnerOptions = {}): RunBd {
+  return async (args, cwd, signal) => {
+    const env = { ...process.env };
+    delete env["BEADS_DIR"];
+    delete env["BEADS_DB"];
+    try {
+      const { stdout } = await execFileAsync(command, [...args], {
+        cwd,
+        env,
+        maxBuffer: 64 * 1024 * 1024,
+        timeout: BD_TIMEOUT_MS,
+        killSignal: "SIGKILL",
+        ...(signal ? { signal } : {}),
+      });
+      return stdout;
+    } catch (err) {
+      // spawn reports a missing cwd as ENOENT too; only a real cwd means bd itself is missing.
+      if ((err as NodeJS.ErrnoException).code === "ENOENT" && isDirectory(cwd)) throw new HostBinaryUnavailableError("bd");
+      const stderr = typeof (err as { stderr?: unknown }).stderr === "string" ? (err as { stderr: string }).stderr.trim() : "";
+      const message = err instanceof Error ? err.message : String(err);
+      throw new Error(`bd ${args.join(" ")} failed in ${cwd}: ${stderr || message}`);
+    }
+  };
+}
+
+/** The default runner: `bd` on PATH. */
+export const defaultRunBd: RunBd = createIngestBdRunner();
 
 function isDirectory(dir: string): boolean {
   try {
@@ -157,9 +181,12 @@ function isDirectory(dir: string): boolean {
   }
 }
 
-async function fetchIssues(runBd: RunBd, cwd: string, signal?: AbortSignal): Promise<BeadsIssue[]> {
-  const stdout = await runBd(["list", "--status=all", "--limit=0", "--json"], cwd, signal);
-  const parsed: unknown = JSON.parse(stdout);
+/**
+ * `bd list --json` output, already JSON-parsed, checked to be an array of
+ * rows each carrying a string `id`, `title`, and `status`; anything else
+ * throws a plain `Error` naming the first bad row.
+ */
+export function parseBeadsIssues(parsed: unknown): BeadsIssue[] {
   if (!Array.isArray(parsed)) {
     throw new Error("bd list --json did not return an array");
   }
@@ -172,53 +199,96 @@ async function fetchIssues(runBd: RunBd, cwd: string, signal?: AbortSignal): Pro
   return parsed as BeadsIssue[];
 }
 
+async function fetchIssues(runBd: RunBd, cwd: string, signal?: AbortSignal): Promise<BeadsIssue[]> {
+  const stdout = await runBd(["list", "--status=all", "--limit=0", "--json"], cwd, signal);
+  return parseBeadsIssues(JSON.parse(stdout));
+}
+
+/** A review's thread as last stored: what `priorThreads` answers per issue id. */
+export interface PriorReviewThread {
+  /** The stored `review_comment_count`, as stored (any JSON). */
+  count: unknown;
+  /** The stored `review_comments`, as stored (any JSON). */
+  comments: unknown;
+}
+
 /**
- * The comment thread of every review issue with comments, keyed by issue id.
- * One read first: a stored row of this project whose `review_comment_count`
- * equals the issue's `comment_count` has its stored thread carried forward
- * (normalization is idempotent, so the reload is `unchanged`); the rest are
- * fetched with `bd comments <id> --json`, one at a time.
+ * The stored threads that may be carried forward for these review issues,
+ * keyed by issue id; an issue missing from the answer is fetched. Only a
+ * thread belonging to the project being loaded may be answered.
  */
-async function fetchReviewComments(
-  db: Database,
-  runBd: RunBd,
-  cwd: string,
-  project: string | undefined,
-  issues: readonly BeadsIssue[],
-  signal?: AbortSignal,
-): Promise<Map<string, unknown[]>> {
+export type PriorReviewThreads = (issues: readonly BeadsIssue[]) => Promise<ReadonlyMap<string, PriorReviewThread>>;
+
+export interface ComputeBeadsIngestOptions {
+  /** Stored threads to carry forward (module header). Omitted: every thread is fetched. */
+  priorThreads?: PriorReviewThreads;
+  /** Aborts the `bd` invocations. */
+  signal?: AbortSignal;
+}
+
+export interface ComputedBeadsIngest {
+  /** `bd list --json`'s rows, checked by `parseBeadsIssues`; never empty. */
+  issues: BeadsIssue[];
+  /** Each review issue's comment thread, keyed by issue id: only reviews with comments appear. */
+  comments: Record<string, unknown[]>;
+}
+
+/**
+ * Runs the checkout's `bd` reads and returns them as plain data (module
+ * header). The comment thread of every review issue with comments is
+ * carried forward from `priorThreads` when its stored count equals the
+ * issue's `comment_count` (normalization is idempotent, so the reload is
+ * `unchanged`); the rest are fetched with `bd comments <id> --json`, one at
+ * a time. An empty export, or a failed or malformed `bd` call, throws a
+ * plain `Error`.
+ */
+export async function computeBeadsIngest(runBd: RunBd, cwd: string, options: ComputeBeadsIngestOptions = {}): Promise<ComputedBeadsIngest> {
+  const { signal } = options;
+  const issues = await fetchIssues(runBd, cwd, signal);
+  if (issues.length === 0) {
+    throw new Error("no issues to ingest");
+  }
   const byIssue = new Map<string, unknown[]>();
   const wanted = issues.filter((i) => isReviewIssue(i) && typeof i.comment_count === "number" && i.comment_count > 0);
-  if (wanted.length === 0) return byIssue;
-  const stored = await db
-    .select({
-      externalId: nodes.externalId,
-      project: sql<string | null>`${nodes.metadata}->>'project'`,
-      count: sql<unknown>`${nodes.metadata}->'review_comment_count'`,
-      comments: sql<unknown>`${nodes.metadata}->'review_comments'`,
-    })
-    .from(nodes)
-    .where(and(eq(nodes.sourceSystem, BEADS_SOURCE_SYSTEM), inArray(nodes.externalId, wanted.map((i) => i.id))));
-  const storedById = new Map(stored.map((row) => [row.externalId, row]));
-  for (const issue of wanted) {
-    const prior = storedById.get(issue.id);
-    if (prior && prior.project === (project ?? null) && prior.count === issue.comment_count) {
-      byIssue.set(issue.id, Array.isArray(prior.comments) ? prior.comments : []);
-      continue;
+  if (wanted.length > 0) {
+    const stored = options.priorThreads === undefined ? new Map<string, PriorReviewThread>() : await options.priorThreads(wanted);
+    for (const issue of wanted) {
+      const prior = stored.get(issue.id);
+      if (prior && prior.count === issue.comment_count) {
+        byIssue.set(issue.id, Array.isArray(prior.comments) ? prior.comments : []);
+        continue;
+      }
+      const stdout = await runBd(["comments", issue.id, "--json"], cwd, signal);
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(stdout);
+      } catch (err) {
+        throw new Error(`bd comments ${issue.id} --json returned invalid JSON`, { cause: err });
+      }
+      if (!Array.isArray(parsed)) {
+        throw new Error(`bd comments ${issue.id} --json did not return an array`);
+      }
+      byIssue.set(issue.id, parsed);
     }
-    const stdout = await runBd(["comments", issue.id, "--json"], cwd, signal);
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(stdout);
-    } catch (err) {
-      throw new Error(`bd comments ${issue.id} --json returned invalid JSON`, { cause: err });
-    }
-    if (!Array.isArray(parsed)) {
-      throw new Error(`bd comments ${issue.id} --json did not return an array`);
-    }
-    byIssue.set(issue.id, parsed);
   }
-  return byIssue;
+  // fromEntries defines own properties, so no issue id can reach the prototype.
+  return { issues, comments: Object.fromEntries(byIssue) };
+}
+
+/** The store's threads for `priorThreads`: one read of the exact `(beads, id)` rows, keeping those of `project` (null: project-less rows). */
+function storedReviewThreads(db: Database, project: string | undefined): PriorReviewThreads {
+  return async (issues) => {
+    const stored = await db
+      .select({
+        externalId: nodes.externalId,
+        project: sql<string | null>`${nodes.metadata}->>'project'`,
+        count: sql<unknown>`${nodes.metadata}->'review_comment_count'`,
+        comments: sql<unknown>`${nodes.metadata}->'review_comments'`,
+      })
+      .from(nodes)
+      .where(and(eq(nodes.sourceSystem, BEADS_SOURCE_SYSTEM), inArray(nodes.externalId, issues.map((i) => i.id))));
+    return new Map(stored.filter((row) => row.project === (project ?? null)).map((row) => [row.externalId, { count: row.count, comments: row.comments }]));
+  };
 }
 
 /** Canonical key: trimmed and valid, else `InvalidWorkItemError` naming `project` (an explicit empty key included). */
@@ -269,25 +339,32 @@ async function assertNoProjectConflict(db: Database, project: string | undefined
   }
 }
 
-/**
- * Loads one beads checkout. See the module header. Throws
- * `InvalidWorkItemError` (a bad `project` key, naming `project`, or a row
- * violating the contract), `BeadsProjectConflictError`, or the write
- * path's own errors; a failed `bd`, a missing directory, or an empty export
- * throws a plain `Error`.
- */
-export async function ingestBeadsCheckout(db: Database, options: IngestBeadsCheckoutOptions): Promise<IngestBeadsCheckoutResult> {
-  const project = canonicalProject(options.project);
-  const checkoutPath = await resolveCheckoutPath(options.dir);
-  const runBd = options.runBd ?? defaultRunBd;
-  const issues = await fetchIssues(runBd, checkoutPath, options.signal);
-  if (issues.length === 0) {
-    throw new Error("no issues to ingest");
-  }
-  const comments = await fetchReviewComments(db, runBd, checkoutPath, project, issues, options.signal);
+export interface ApplyBeadsIngestOptions {
+  /** The canonical project key (already through `canonicalProject`); undefined for a project-less load. */
+  project?: string | undefined;
+  /** The real absolute checkout path: stored on the registry node and compared by the guard. */
+  path: string;
+  issues: readonly BeadsIssue[];
+  /** Review threads keyed by issue id (`ComputedBeadsIngest.comments`); an issue missing here has none. */
+  comments: Readonly<Record<string, readonly unknown[]>>;
+  /** The run's actor. Default `BEADS_INGEST_ACTOR`; a relay push names its client. */
+  actor?: string;
+}
 
+/**
+ * Writes one computed load (module header): maps every issue, adds the
+ * registry node, runs the collision guard, derives the edges, then upserts
+ * and reconciles inside one `beads` ingest run attributed to `actor`, closed
+ * with the error on failure. Throws `InvalidWorkItemError` (a row violating
+ * the contract), `BeadsProjectConflictError`, or the write path's own errors.
+ */
+export async function applyBeadsIngest(db: Database, options: ApplyBeadsIngestOptions): Promise<IngestBeadsCheckoutResult> {
+  const { project, path: checkoutPath, issues, comments } = options;
   const nodeInputs: NodeInput[] = issues.map((issue, index) =>
-    mapBeadsIssueToNode(issue, index, { ...(project === undefined ? {} : { project }), comments: comments.get(issue.id) ?? [] }),
+    mapBeadsIssueToNode(issue, index, {
+      ...(project === undefined ? {} : { project }),
+      comments: Object.hasOwn(comments, issue.id) ? comments[issue.id]! : [],
+    }),
   );
   if (project !== undefined) {
     nodeInputs.push({
@@ -310,7 +387,7 @@ export async function ingestBeadsCheckout(db: Database, options: IngestBeadsChec
     skippedUnknownType: derived.skippedUnknownType,
   };
 
-  const run = await openIngestRun(db, BEADS_SOURCE_SYSTEM, { actor: BEADS_INGEST_ACTOR });
+  const run = await openIngestRun(db, BEADS_SOURCE_SYSTEM, { actor: options.actor ?? BEADS_INGEST_ACTOR });
   try {
     const nodeResult = await upsertNodes(db, run, nodeInputs);
     const nodeIdByExternalId = new Map(nodeResult.rows.map((r) => [r.externalId, r.id]));
@@ -345,4 +422,21 @@ export async function ingestBeadsCheckout(db: Database, options: IngestBeadsChec
     await closeIngestRun(db, run, { ...stats, error: err instanceof Error ? err.message : String(err) }).catch(() => undefined);
     throw err;
   }
+}
+
+/**
+ * Loads one beads checkout: `computeBeadsIngest` then `applyBeadsIngest`
+ * (module header). Throws `InvalidWorkItemError` (a bad `project` key,
+ * naming `project`, or a row violating the contract),
+ * `BeadsProjectConflictError`, or the write path's own errors; a failed
+ * `bd`, a missing directory, or an empty export throws a plain `Error`.
+ */
+export async function ingestBeadsCheckout(db: Database, options: IngestBeadsCheckoutOptions): Promise<IngestBeadsCheckoutResult> {
+  const project = canonicalProject(options.project);
+  const checkoutPath = await resolveCheckoutPath(options.dir);
+  const { issues, comments } = await computeBeadsIngest(options.runBd ?? defaultRunBd, checkoutPath, {
+    priorThreads: storedReviewThreads(db, project),
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
+  });
+  return applyBeadsIngest(db, { project, path: checkoutPath, issues, comments });
 }

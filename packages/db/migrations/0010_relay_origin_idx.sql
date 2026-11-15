@@ -1,0 +1,1 @@
+CREATE INDEX "relay_actions_origin_idx" ON "relay_actions" USING btree ("origin_node_id") WHERE "relay_actions"."origin_node_id" IS NOT NULL;

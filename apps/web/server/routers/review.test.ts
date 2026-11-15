@@ -11,9 +11,9 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { closeIngestRun, mergeNodes, openIngestRun, upsertNodes, type IngestRunHandle } from "@breakdown/core";
-import { createDb, createPool, ingestRuns, nodes, resolveDatabaseUrl, type Database } from "@breakdown/db";
-import { and, eq, inArray } from "drizzle-orm";
+import { closeIngestRun, getRelayAction, mergeNodes, openIngestRun, upsertNodes, type IngestRunHandle } from "@breakdown/core";
+import { createDb, createPool, ingestRuns, nodes, relayActions, resolveDatabaseUrl, type Database } from "@breakdown/db";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { BeadsWatcher } from "../beads-watcher.js";
 import type { Context } from "../context.js";
@@ -37,12 +37,17 @@ const UNREGISTERED = `rvu-${TAG}`;
 const MISSING_DIR = `rvm-${TAG}`;
 const FORGED = `rvf-${TAG}`;
 const id = (n: string) => `rv${TAG}-${n}`;
+/** A bead id the review contract accepts but the relay's allowlist does not (uppercase, no '-'). */
+const UNRELAYABLE = `RV${TAG}_odd`;
 const EXTERNAL_IDS = [
   `project:${PROJECT}`,
   `project:${MISSING_DIR}`,
   `project:${FORGED}`,
-  ...["r1", "r2", "plain", "closed", "orphan", "missing", "forged", "fx", "fy", "card"].map(id),
+  ...["r1", "r2", "plain", "closed", "orphan", "missing", "forged", "fx", "fy", "card", "q1", "q2", "q3"].map(id),
+  UNRELAYABLE,
 ];
+/** Relay actions this file queued, deleted by id. No relay claims them: this suite never claims. */
+const ACTION_IDS: number[] = [];
 
 beforeAll(async () => {
   // The writer logs every notification it could not make; keep the run quiet.
@@ -81,6 +86,11 @@ beforeAll(async () => {
     item(id("forged"), FORGED),
     item(id("fx"), PROJECT),
     item(id("fy"), PROJECT),
+    // Queue-mode targets, each decided once (a second open decision on one is a CONFLICT).
+    item(id("q1"), PROJECT),
+    item(id("q2"), PROJECT),
+    item(id("q3"), PROJECT),
+    item(UNRELAYABLE, PROJECT),
     // The store's copy carries a card offering B; the tracker's record (the fake `bd show`) decides.
     item(id("card"), PROJECT, { review: { ...review, question: "Which migration?", options: [{ id: "A", label: "Keep" }, { id: "B", label: "Skip" }], recommend: "A" } }),
   ]);
@@ -91,6 +101,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  if (ACTION_IDS.length > 0) await db.delete(relayActions).where(inArray(relayActions.id, ACTION_IDS));
   await closeIngestRun(db, beadsRun);
   await closeIngestRun(db, agentRun);
   await db.delete(nodes).where(and(eq(nodes.sourceSystem, "beads"), inArray(nodes.externalId, EXTERNAL_IDS)));
@@ -226,14 +237,95 @@ describe("reviewDecision", () => {
     expect(calls).toEqual([]);
   });
 
-  it("refuses naming bd when it is missing from PATH, even for an unknown project, before the database", async () => {
-    for (const target of [{ project: UNREGISTERED, item: id("orphan") }, { project: PROJECT, item: id("r1") }]) {
-      const { caller, calls, wake } = setup({ db: poisonedDb(), missingBinaries: ["bd"] });
-      const err = await caller.reviewDecision({ ...target, decision: "accept", message: "" }).catch((e: unknown) => e);
-      expect(err).toMatchObject({ code: "PRECONDITION_FAILED", message: "bd is unavailable on this server: not found on PATH" });
+  describe("without bd on PATH (queued for the laptop relay)", () => {
+    const queued = () => setup({ missingBinaries: ["bd"] });
+
+    it("queues an accept as a review_decision action with the registry's checkout, the stored id, and the option; runs nothing", async () => {
+      const { caller, calls, wake } = queued();
+      const seen = { question: "Which migration?", label: "Skip", what: "drop the tracking table" };
+      const result = await caller.reviewDecision({ project: PROJECT, item: id("q1"), decision: "accept", message: "  skip it  ", option: "B", seen });
+      expect(result).toEqual({ queued: true, actionId: expect.any(Number), decision: "accept", item: id("q1") });
+      if (!("queued" in result)) throw new Error("expected a queued decision");
+      ACTION_IDS.push(result.actionId);
+
+      const action = await getRelayAction(db, result.actionId);
+      expect(action).toMatchObject({
+        kind: "review_decision",
+        state: "queued",
+        requestedBy: "human",
+        payload: { project_key: PROJECT, cwd: checkout, issue_id: id("q1"), decision: "accept", message: "skip it", option: "B", seen },
+      });
+      expect(action!.originNodeId).toEqual(expect.stringMatching(/^[0-9a-f-]{36}$/));
       expect(calls).toEqual([]);
       expect(wake).not.toHaveBeenCalled();
-    }
+    });
+
+    it("records the admitting client as the requester and needs no review writer", async () => {
+      const caller = createCaller({ db, missingBinaries: ["bd"], client: "phone-1" });
+      const result = await caller.reviewDecision({ project: PROJECT, item: id("q2"), decision: "changes", message: "tighten it" });
+      if (!("queued" in result)) throw new Error("expected a queued decision");
+      ACTION_IDS.push(result.actionId);
+      const action = await getRelayAction(db, result.actionId);
+      expect(action).toMatchObject({ requestedBy: "phone-1", payload: { decision: "changes", message: "tighten it" } });
+      expect(action!.payload).not.toHaveProperty("option");
+      expect(action!.payload).not.toHaveProperty("seen");
+    });
+
+    it("refuses a second decision on a review already waiting for the relay with CONFLICT naming the action", async () => {
+      const { caller } = queued();
+      const first = await caller.reviewDecision({ project: PROJECT, item: id("q3"), decision: "changes", message: "first" });
+      if (!("queued" in first)) throw new Error("expected a queued decision");
+      ACTION_IDS.push(first.actionId);
+      const err = await caller.reviewDecision({ project: PROJECT, item: id("q3"), decision: "accept", message: "" }).catch((e: unknown) => e);
+      expect(err).toMatchObject({ code: "CONFLICT", message: `A decision on this review is already waiting for the laptop relay (action ${first.actionId}).` });
+    });
+
+    it("refuses a bead id the relay's allowlist does not accept, naming it, and queues nothing", async () => {
+      const { caller } = queued();
+      const err = await caller.reviewDecision({ project: PROJECT, item: UNRELAYABLE, decision: "accept", message: "" }).catch((e: unknown) => e);
+      expect(err).toMatchObject({ code: "PRECONDITION_FAILED" });
+      expect((err as Error).message).toContain(UNRELAYABLE);
+      const open = await db.select({ id: relayActions.id }).from(relayActions).where(sql`${relayActions.payload}->>'issue_id' = ${UNRELAYABLE}`);
+      expect(open).toEqual([]);
+    });
+
+    it.each([
+      ["an unregistered project", { project: UNREGISTERED, item: id("orphan") }, "NOT_FOUND", UNREGISTERED],
+      ["a registry node an agent wrote", { project: FORGED, item: id("forged") }, "NOT_FOUND", FORGED],
+      ["an item merged into another bead", { project: PROJECT, item: id("fx") }, "PRECONDITION_FAILED", id("fy")],
+      ["an item that is not a review", { project: PROJECT, item: id("plain") }, "PRECONDITION_FAILED", "not a review"],
+      ["a closed review", { project: PROJECT, item: id("closed") }, "CONFLICT", "already closed"],
+    ])("still runs the store checks: refuses %s, queuing nothing", async (_name, target, code, mentions) => {
+      const { caller } = queued();
+      const err = await caller.reviewDecision({ ...target, decision: "accept", message: "" }).catch((e: unknown) => e);
+      expect(err).toMatchObject({ code });
+      expect((err as Error).message).toContain(mentions);
+      const open = await db.select({ id: relayActions.id }).from(relayActions).where(sql`${relayActions.payload}->>'issue_id' = ${target.item}`);
+      expect(open).toEqual([]);
+    });
+
+    it("skips the stat of the checkout: the registered path is the laptop's", async () => {
+      const { caller } = queued();
+      const result = await caller.reviewDecision({ project: MISSING_DIR, item: id("missing"), decision: "changes", message: "on the laptop" });
+      if (!("queued" in result)) throw new Error("expected a queued decision");
+      ACTION_IDS.push(result.actionId);
+      expect((await getRelayAction(db, result.actionId))!.payload).toMatchObject({ cwd: path.join(checkout, "not-a-dir") });
+    });
+
+    it("still refuses on a read-only server before the database", async () => {
+      const { caller } = setup({ db: poisonedDb(), readOnly: true, missingBinaries: ["bd"] });
+      await expect(caller.reviewDecision({ project: PROJECT, item: id("r1"), decision: "accept", message: "" })).rejects.toMatchObject({ code: "FORBIDDEN" });
+    });
+  });
+
+  it("runs bd directly and queues nothing when bd is on PATH", async () => {
+    const { caller, calls } = setup();
+    const result = await caller.reviewDecision({ project: PROJECT, item: id("r2"), decision: "changes", message: "direct" });
+    expect(result).toMatchObject({ ok: true, written: ["comment", "add-changes-label"] });
+    expect(result).not.toHaveProperty("queued");
+    expect(calls.map((c) => c.args[0])).toEqual(["show", "comments", "update"]);
+    const open = await db.select({ id: relayActions.id }).from(relayActions).where(sql`${relayActions.payload}->>'issue_id' = ${id("r2")}`);
+    expect(open).toEqual([]);
   });
 
   it("still decides when only herdr is missing", async () => {
@@ -411,7 +503,7 @@ describe("reviewDecision", () => {
     const result = await caller.reviewDecision({ project: PROJECT, item: id("r2"), decision: "changes", message: "fix" });
 
     expect(result).toMatchObject({ ok: false, written: [], uncertain: "comment", partial: false });
-    expect(result.error).toContain("may have been written");
+    expect((result as { error?: string }).error).toContain("may have been written");
     expect(wake).toHaveBeenCalledTimes(1);
   });
 

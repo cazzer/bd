@@ -51,6 +51,17 @@ describe("procedure scopes", () => {
     expect(procedures.filter(([path]) => scopesOf(path).includes("hangar")).map(([path]) => path)).toEqual([]);
   });
 
+  it("opens no procedure to a relay token", () => {
+    expect(procedures.filter(([path]) => scopesOf(path).includes("relay")).map(([path]) => path)).toEqual([]);
+  });
+
+  it("keeps the relay's status and actions to a person (laptop-relay decision 9)", async () => {
+    for (const name of ["relayStatus", "relayAction", "relayActionsFor"]) expect(scopesOf(name), name).toEqual(["human"]);
+    expect(await refusal(() => caller("agent").relayStatus())).toMatchObject({ code: "FORBIDDEN" });
+    expect(await refusal(() => caller("relay").relayAction({ id: 1 }))).toMatchObject({ code: "FORBIDDEN" });
+    expect(await refusal(() => caller("agent").relayActionsFor({ originNodeIds: [] }))).toMatchObject({ code: "FORBIDDEN" });
+  });
+
   it("refuses an agent caller on a person's procedure with FORBIDDEN before validating its input", async () => {
     const agent = caller("agent");
     const createNote = await refusal(() => agent.createNote({ title: "", content: "" } as never));

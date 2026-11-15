@@ -63,11 +63,13 @@ import {
   type BoardLane,
   type Highlights,
 } from "../lib/boardRow.js";
+import { describeRefresh } from "../lib/relayAction.js";
 import { drawerProject } from "../lib/reviewDrawer.js";
 import { formatRoute, type BoardRoute, type GraphRoute } from "../lib/route.js";
 import { viewFilterOf, type ViewNode } from "../lib/viewFilter.js";
 import { trpc } from "../trpc.js";
 import { HangarStatusPill } from "./HangarStatusPill.js";
+import { RelayStatusPill } from "./RelayStatusPill.js";
 import { ReviewDrawer, useWideDrawer } from "./ReviewDrawer.js";
 import { HeaderSearch } from "./HeaderSearch.js";
 import { ReviewQueuePill, storeDraft, useShellDrawer } from "./ReviewQueue.js";
@@ -279,7 +281,7 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
       const outcomes = await trpc.refreshBoard.mutate();
       const failed = outcomes.filter((o) => !o.ok);
       setEventErrors(new Map(failed.map((o) => [o.project, o.ok ? "" : o.error])));
-      setRefreshNote(failed.length > 0 ? `Refreshed; ${failed.length} failed.` : `Refreshed ${outcomes.length} project${outcomes.length === 1 ? "" : "s"}.`);
+      setRefreshNote(describeRefresh(outcomes.length, outcomes.filter((o) => "queued" in o).length, failed.length));
       readRef.current?.();
     } catch (err) {
       setRefreshNote(messageOf(err, "Refresh failed."));
@@ -394,6 +396,7 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
         <div className="ml-auto flex flex-wrap items-center justify-end gap-3 text-xs text-fg-muted">
           <HeaderSearch />
           <HangarStatusPill />
+          <RelayStatusPill />
           <ReviewQueuePill />
           {view && (
             <button

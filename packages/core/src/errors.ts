@@ -770,3 +770,62 @@ export class ReservedHangarEdgeError extends KnowledgeStoreError {
     super(`edge ${itemLabel} is reserved for the hangar queue: ${reason}`);
   }
 }
+
+// --- Relay actions (laptop-relay change) ---------------------------------
+
+/** A relay action's kind or payload, or an argument to a relay call, breaks the contract (relay.ts); nothing was written. */
+export class InvalidRelayActionError extends KnowledgeStoreError {
+  constructor(
+    readonly field: string,
+    readonly value: unknown,
+    reason: string,
+  ) {
+    super(`invalid relay action: ${field} (got ${preview(value)}) ${reason}`);
+  }
+}
+
+function preview(value: unknown): string {
+  const json = JSON.stringify(value) ?? String(value);
+  return json.length > 80 ? `${json.slice(0, 80)}…` : json;
+}
+
+/**
+ * An action on the same target (kind, project, issue) is still queued or
+ * claimed, so a second one is refused; `openActionId` names it. Nothing
+ * was written.
+ */
+export class RelayActionPendingError extends KnowledgeStoreError {
+  constructor(
+    readonly kind: string,
+    readonly projectKey: string,
+    readonly issueId: string | null,
+    readonly openActionId: number,
+  ) {
+    super(
+      `a ${kind} for ${projectKey}${issueId === null ? "" : `/${issueId}`} is already pending as relay action ${openActionId}; wait for it to finish`,
+    );
+  }
+}
+
+/** A relay call named an action id that does not exist. */
+export class RelayActionNotFoundError extends KnowledgeStoreError {
+  constructor(readonly actionId: string) {
+    super(`relay action ${actionId} does not exist`);
+  }
+}
+
+/** A relay tried to report or requeue an action it does not hold: another relay claimed it, it is queued, or it is finished. */
+export class RelayActionNotClaimedByError extends KnowledgeStoreError {
+  constructor(
+    readonly actionId: string,
+    readonly relay: string,
+    readonly state: string,
+    readonly claimedBy: string | null,
+  ) {
+    super(
+      state === "claimed" && claimedBy !== null
+        ? `relay action ${actionId} is claimed by ${JSON.stringify(claimedBy)}, not ${JSON.stringify(relay)}`
+        : `relay action ${actionId} is ${state}, so ${JSON.stringify(relay)} cannot change it`,
+    );
+  }
+}

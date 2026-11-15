@@ -5,9 +5,9 @@
 // token, and no tRPC procedure or MCP tool calls the create, list, or revoke
 // functions: only `verifyClientToken` is meant for the servers.
 //
-// Every token carries a scope, `human`, `agent`, or `hangar` (design
-// decision 9; hangar-queue decision 1); the servers' admission policies
-// decide which scopes each accepts.
+// Every token carries a scope, `human`, `agent`, `hangar`, or `relay`
+// (design decision 9; hangar-queue decision 1; laptop-relay decision 5);
+// the servers' admission policies decide which scopes each accepts.
 //
 // A session token (hangar-queue decision 4) is the one token minted off the
 // host CLI: a hangar claim calls `createSessionToken` inside its own

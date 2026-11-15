@@ -191,6 +191,9 @@ importers:
       drizzle-orm:
         specifier: 0.45.2
         version: 0.45.2(@types/pg@8.23.1)(pg@8.23.0)
+      zod:
+        specifier: 4.5.4
+        version: 4.5.4
     devDependencies:
       tsx:
         specifier: 4.23.13

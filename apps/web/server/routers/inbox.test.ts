@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
-import { closeIngestRun, HostBinaryUnavailableError, inboxNotifyText, listInbox, openIngestRun, requestInboxItem, upsertNodes, type IngestRunHandle } from "@breakdown/core";
-import { createDb, createPool, hangarMessages, ingestRuns, nodes, resolveDatabaseUrl, type Database } from "@breakdown/db";
+import { closeIngestRun, getRelayAction, HostBinaryUnavailableError, inboxNotifyText, listInbox, MAX_INBOX_FEEDBACK_LENGTH, MAX_RELAY_HERDR_PAYLOAD_TEXT_LENGTH, openIngestRun, requestInboxItem, upsertNodes, type IngestRunHandle } from "@breakdown/core";
+import { createDb, createPool, hangarMessages, ingestRuns, nodes, relayActions, resolveDatabaseUrl, type Database } from "@breakdown/db";
 import { TRPCError } from "@trpc/server";
 import { and, eq, inArray, like, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -14,6 +14,8 @@ let db: Database;
 const KEY = `session:inbox-router-${randomUUID().slice(0, 8)}`;
 const SESSIONS: string[] = [];
 const SESSION_NODES: string[] = [];
+/** Relay actions this file queued, deleted by id; nothing here claims them. */
+const ACTION_IDS: number[] = [];
 let run: IngestRunHandle;
 const CARD = { question: "Track or ignore?", options: [{ id: "track", label: "Track" }, { id: "ignore", label: "Ignore" }], recommend: "ignore" };
 
@@ -24,6 +26,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  if (ACTION_IDS.length > 0) await db.delete(relayActions).where(inArray(relayActions.id, ACTION_IDS));
   if (SESSIONS.length > 0) await db.delete(hangarMessages).where(inArray(hangarMessages.sessionId, SESSIONS));
   await db.delete(nodes).where(and(eq(nodes.sourceSystem, "inbox"), like(nodes.externalId, `${KEY}%`)));
   if (SESSION_NODES.length > 0) await db.delete(nodes).where(inArray(nodes.id, SESSION_NODES));
@@ -263,5 +266,85 @@ describe("inbox delivery by where the item came from", () => {
     expect(refused).toBeInstanceOf(TRPCError);
     expect((refused as TRPCError).code).toBe("FORBIDDEN");
     expect(await worker(mine).inboxComplete({ id: filed.id, note: "done" })).toMatchObject({ id: filed.id });
+  });
+});
+
+// laptop-relay decision 6: without herdr, a pane item's prompt is queued for
+// the laptop relay; a session item is told through its messages as before.
+describe("inbox delivery without herdr (queued for the laptop relay)", () => {
+  const noHerdr: (args: readonly string[], socket: string) => Promise<void> = async () => {
+    throw new Error("herdr should not run");
+  };
+
+  it("queues the pane's prompt as a herdr_prompt action and reports its id", async () => {
+    const filed = await caller().inboxRequest({ key: `${KEY}-relay-pane`, title: "Relay ask", content: "x", metadata: { source: "session", pane: "w1:p6", socket: "/Users/someone/.config/herdr/herdr.sock" } });
+    const decided = await createCallerFactory(appRouter)({ db, runHerdr: noHerdr, missingBinaries: ["herdr"], client: "phone-2" }).inboxDecision({ id: filed.id, decision: "accept", message: "go ahead" });
+    expect(decided.notified).toEqual({ ok: true, relay: expect.any(Number) });
+    const actionId = (decided.notified as { relay: number }).relay;
+    ACTION_IDS.push(actionId);
+    expect(await getRelayAction(db, actionId)).toMatchObject({
+      kind: "herdr_prompt",
+      state: "queued",
+      requestedBy: "phone-2",
+      originNodeId: filed.id,
+      payload: { pane: "w1:p6", socket: "/Users/someone/.config/herdr/herdr.sock", text: inboxNotifyText({ id: filed.id, title: "Relay ask", after: "accepted" }, "go ahead") },
+    });
+  });
+
+  it("queues the prompt for a near-limit note and title whole, within the relay payload's cap (core fitRelayHerdrText cuts anything longer)", async () => {
+    const herdrless = createCallerFactory(appRouter)({ db, runHerdr: noHerdr, missingBinaries: ["herdr"] });
+    const note = `${"n".repeat(MAX_INBOX_FEEDBACK_LENGTH - 4)} end`;
+    const near = await caller().inboxRequest({ key: `${KEY}-relay-near`, title: "t".repeat(500), content: "x", metadata: { source: "session", pane: "w1:p6", socket: "/tmp/herdr.sock" } });
+    const fits = await herdrless.inboxDecision({ id: near.id, decision: "changes", message: note });
+    const fitsId = (fits.notified as { relay: number }).relay;
+    ACTION_IDS.push(fitsId);
+    const whole = inboxNotifyText({ id: near.id, title: "t".repeat(500), after: "changes" }, note);
+    expect(whole.length).toBeLessThanOrEqual(MAX_RELAY_HERDR_PAYLOAD_TEXT_LENGTH);
+    expect((await getRelayAction(db, fitsId))?.payload).toMatchObject({ text: whole });
+  });
+
+  it("reports an action it could not queue as not notified, and still records the decision", async () => {
+    const filed = await caller().inboxRequest({ key: `${KEY}-relay-fail`, title: "Relay fail", content: "x", metadata: { source: "session", pane: "w1:p7", socket: "/tmp/herdr.sock" } });
+    // The queue is down; the decision's own writes (in their transaction) are not.
+    const queueDown = new Proxy(db, {
+      get(target, key, receiver) {
+        if (key !== "execute") return Reflect.get(target, key, receiver);
+        return (query: { queryChunks?: unknown[] }) => {
+          const text = (query.queryChunks ?? []).map((c) => (c !== null && typeof c === "object" && Array.isArray((c as { value?: unknown }).value) ? (c as { value: string[] }).value.join("") : "")).join("");
+          if (text.includes("INSERT INTO relay_actions")) return Promise.reject(new Error("relay queue unavailable"));
+          return target.execute(query as never);
+        };
+      },
+    });
+    const errors: unknown[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => void errors.push(args);
+    try {
+      const decided = await createCallerFactory(appRouter)({ db: queueDown, runHerdr: noHerdr, missingBinaries: ["herdr"] }).inboxDecision({ id: filed.id, decision: "dismiss" });
+      expect(decided.notified).toEqual({ ok: false, reason: "could not queue the notification" });
+      expect(decided.after).toBe("dismissed");
+    } finally {
+      console.error = original;
+    }
+    expect(errors).toHaveLength(1);
+  });
+
+  it("still sends a session item's decision to its messages, queuing nothing", async () => {
+    const session = await sessionNode("running");
+    const worker = createCallerFactory(appRouter)({ db, client: `session-${session}`, scope: "agent", sessionId: session });
+    const filed = await worker.inboxRequest({ key: `${KEY}-relay-remote`, title: "Remote ask", content: "x", metadata: { source: "session" } });
+    await db.execute(sql`UPDATE nodes SET metadata = metadata || '{"pane": "w1:p9", "socket": "/tmp/herdr.sock"}'::jsonb WHERE id = ${filed.id}::uuid`);
+    const decided = await createCallerFactory(appRouter)({ db, runHerdr: noHerdr, missingBinaries: ["herdr"] }).inboxDecision({ id: filed.id, decision: "accept", message: "ok" });
+    expect(decided.notified).toEqual({ ok: true, session });
+    expect(await db.select({ id: relayActions.id }).from(relayActions).where(eq(relayActions.originNodeId, filed.id))).toEqual([]);
+  });
+
+  it("prompts through herdr directly and queues nothing when herdr is on PATH", async () => {
+    const filed = await caller().inboxRequest({ key: `${KEY}-relay-direct`, title: "Direct ask", content: "x", metadata: { source: "session", pane: "w1:p8", socket: "/tmp/herdr.sock" } });
+    const calls: (readonly string[])[] = [];
+    const decided = await createCallerFactory(appRouter)({ db, runHerdr: async (args) => void calls.push(args) }).inboxDecision({ id: filed.id, decision: "dismiss" });
+    expect(decided.notified).toEqual({ ok: true, pane: "w1:p8" });
+    expect(calls).toHaveLength(1);
+    expect(await db.select({ id: relayActions.id }).from(relayActions).where(eq(relayActions.originNodeId, filed.id))).toEqual([]);
   });
 });

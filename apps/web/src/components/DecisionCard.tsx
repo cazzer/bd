@@ -148,6 +148,7 @@ export function DecisionFooter({
   optionDescId,
   outcome,
   refusal,
+  waiting = false,
   decide,
 }: {
   open: boolean;
@@ -173,6 +174,8 @@ export function DecisionFooter({
   optionDescId: (id: string) => string;
   outcome: CardOutcome | null;
   refusal: Refusal | null;
+  /** A decision is queued for the laptop relay and not yet reported: the form is held, the outcome line says so. */
+  waiting?: boolean;
   decide: (decision: ReviewDecisionKind, option?: CardOption) => void;
 }) {
   const messageId = useId();
@@ -180,17 +183,27 @@ export function DecisionFooter({
   const hintId = useId();
   const recipientId = useId();
   const reportRef = useRef<HTMLDivElement>(null);
-  const busy = pending !== null;
+  const writing = pending !== null;
+  const busy = writing || waiting;
   const compact = labels.acceptShort !== undefined && labels.changesShort !== undefined;
 
   // Focus follows the outcome, so a keyboard or screen-reader user lands on
   // what happened — and sits on that line while the write is in flight, so
-  // the pressed button disabling never drops focus out of the panel.
+  // the pressed button disabling never drops focus out of the panel. Only
+  // on a transition: a write starting, the form coming back (busy ending),
+  // an outcome settling (from none or pending to a final tone), or a new
+  // refusal. A host re-sending the same pending outcome (a relay poll), or a
+  // card reopened on a decision already waiting, moves nothing.
+  const seen = useRef({ writing, busy, tone: outcome?.tone ?? null, refusal });
   useEffect(() => {
-    if (busy || outcome !== null || refusal !== null) reportRef.current?.focus();
-  }, [busy, outcome, refusal]);
+    const was = seen.current;
+    const tone = outcome?.tone ?? null;
+    seen.current = { writing, busy, tone, refusal };
+    const settled = tone !== null && tone !== "pending" && (was.tone === null || was.tone === "pending");
+    if ((writing && !was.writing) || (!busy && was.busy) || settled || (refusal !== null && refusal !== was.refusal)) reportRef.current?.focus();
+  }, [writing, busy, outcome, refusal]);
 
-  const failure: Refusal | null = refusal ?? (outcome !== null && outcome.tone !== "ok" ? { text: outcome.text, detail: null } : null);
+  const failure: Refusal | null = refusal ?? (outcome !== null && outcome.tone !== "ok" && outcome.tone !== "pending" ? { text: outcome.text, detail: null } : null);
   // One row until it is focused or holds a draft, at every width, so the footer leaves the card its height.
   const textareaHeight = message !== "" ? "h-[4.5rem]" : "h-10 focus:h-[4.5rem]";
   const hintElsewhere = labels.hintTarget !== undefined;
@@ -319,7 +332,7 @@ export function DecisionFooter({
               )}
             </>
           )}
-          {labels.extra?.({ busy })}
+          {labels.extra?.({ busy: writing })}
         </div>
       )}
       {open && !hintElsewhere && (
@@ -345,8 +358,8 @@ export function DecisionFooter({
             {refusal === null && outcome?.notified && <span className="mt-1 block text-fg-muted">{outcome.notified}</span>}
           </div>
         ) : (
-          <p role="status" className="text-xs text-emerald-300">
-            {busy && <span className="text-fg-muted">Writing the decision…</span>}
+          <p role="status" data-outcome-tone={outcome?.tone} className={`text-xs ${outcome?.tone === "pending" ? "text-amber-200" : "text-emerald-300"}`}>
+            {writing && <span className="text-fg-muted">Writing the decision…</span>}
             {outcome && (
               <>
                 {outcome.text}
