@@ -22,7 +22,7 @@ const trpcMock = vi.hoisted(() => ({
 }));
 const relayStatus = vi.hoisted(() => ({ missing: ["herdr"] as string[] }));
 vi.mock("../trpc.js", () => ({ trpc: trpcMock, HttpStatusError: class HttpStatusError extends Error {} }));
-vi.mock("../lib/navigate.js", () => ({ navigate: vi.fn() }));
+vi.mock("../lib/navigate.js", () => ({ navigate: vi.fn(), addressProjects: () => [] }));
 vi.mock("../lib/useRelayStatus.js", () => ({ useRelayStatus: () => ({ status: { missingBinaries: relayStatus.missing }, at: new Date() }) }));
 vi.mock("./ReviewQueue.js", () => ({
   useReviewQueue: () => ({ reviews: [], loaded: true, version: 0 }),

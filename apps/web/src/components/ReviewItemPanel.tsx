@@ -675,7 +675,7 @@ function Chip({ children, tone = "muted" }: { children: ReactNode; tone?: ChipTo
 }
 
 function GraphLink({ nodeId, className, children = "Open in graph" }: { nodeId: string; className: string; children?: ReactNode }) {
-  const route: GraphRoute = { view: "graph", q: null, types: [], node: nodeId };
+  const route: GraphRoute = { view: "graph", q: null, types: [], node: nodeId, projects: [] };
   function open(e: MouseEvent<HTMLAnchorElement>) {
     if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
     e.preventDefault();

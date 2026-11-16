@@ -9,22 +9,22 @@
 // parameters and nothing else).
 
 import { describe, expect, it } from "vitest";
-import { BOARD_VIEW_PATH, CODE_VIEW_PATH, FEED_VIEW_PATH, formatRoute, GRAPH_VIEW_PATH, graphRouteFromSearch, parseRoute, ROADMAP_VIEW_PATH, SEARCH_VIEW_PATH, TIMELINE_VIEW_PATH, type BoardRoute, type CodeRoute, type FeedRoute, type GraphRoute, type RoadmapRoute, type Route, type SearchRoute, type TimelineRoute } from "./route.js";
+import { BOARD_VIEW_PATH, CODE_VIEW_PATH, FEED_VIEW_PATH, formatRoute, GRAPH_VIEW_PATH, graphRouteFromSearch, parseRoute, withProjects, type InboxRoute, ROADMAP_VIEW_PATH, SEARCH_VIEW_PATH, TIMELINE_VIEW_PATH, type BoardRoute, type CodeRoute, type FeedRoute, type GraphRoute, type RoadmapRoute, type Route, type SearchRoute, type TimelineRoute } from "./route.js";
 
 function graph(partial: Partial<Omit<GraphRoute, "view">> = {}): GraphRoute {
-  return { view: "graph", q: null, types: [], node: null, ...partial };
+  return { view: "graph", q: null, types: [], node: null, projects: [], ...partial };
 }
 
-function feed(viewId: string | null = null): FeedRoute {
-  return { view: "feed", viewId };
+function feed(viewId: string | null = null, projects: string[] = []): FeedRoute {
+  return { view: "feed", viewId, projects };
 }
 
-function code(viewId: string | null = null, node: string | null = null): CodeRoute {
-  return { view: "code", viewId, node };
+function code(viewId: string | null = null, node: string | null = null, projects: string[] = []): CodeRoute {
+  return { view: "code", viewId, node, projects };
 }
 
-function timeline(viewId: string | null = null, node: string | null = null, types: string[] = []): TimelineRoute {
-  return { view: "timeline", viewId, node, types };
+function timeline(viewId: string | null = null, node: string | null = null, types: string[] = [], projects: string[] = []): TimelineRoute {
+  return { view: "timeline", viewId, node, types, projects };
 }
 
 function search(partial: Partial<Omit<SearchRoute, "view">> = {}): SearchRoute {
@@ -513,5 +513,57 @@ describe("search route (search-results-view)", () => {
 
   it("ignores unknown parameters", () => {
     expect(parseRoute("/search", "?q=x&node=n&view=v1&item=i&zoom=1")).toEqual(search({ q: "x" }));
+  });
+});
+
+describe("project on every route (shared-nav-header)", () => {
+  const VIEW_ID = "0b8d1e4a-2f5c-4c6e-9a7b-1d2e3f4a5b6c";
+  const inbox = (partial: Partial<Omit<InboxRoute, "view">> = {}): InboxRoute => ({ view: "inbox", item: null, projects: [], ...partial });
+
+  const routes: Array<[string, Route]> = [
+    ["graph", graph({ q: "spec", types: ["doc"], node: "n1", projects: ["tides"] })],
+    ["feed", feed(VIEW_ID, ["tides"])],
+    ["feed with no view", feed(null, ["tides", "skyos"])],
+    ["code", code(VIEW_ID, "n1", ["tides"])],
+    ["timeline", timeline(VIEW_ID, "n1", ["doc"], ["tides"])],
+    ["inbox", inbox({ item: "i1", projects: ["tides"] })],
+    ["inbox with a source", inbox({ item: null, source: "gmail", projects: ["tides"] })],
+    ["board", board(VIEW_ID, ["tides"], "tides-r1")],
+    ["roadmap", { view: "roadmap", projects: ["tides"], item: "sky-1" }],
+    ["search", search({ q: "x", projects: ["tides"] })],
+  ];
+
+  for (const [name, route] of routes) {
+    it(`round-trips ${name} with projects`, () => {
+      expect(roundTrip(route)).toEqual(route);
+    });
+  }
+
+  it("appends project after a view's own parameters, so addresses without one are unchanged", () => {
+    expect(formatRoute(graph({ q: "x", node: "n1", projects: ["tides"] }))).toBe("/graph?q=x&node=n1&project=tides");
+    expect(formatRoute(feed(VIEW_ID, ["tides"]))).toBe(`/feed?view=${VIEW_ID}&project=tides`);
+    expect(formatRoute(feed(null, ["tides"]))).toBe("/feed?project=tides");
+    expect(formatRoute(timeline("v1", null, ["doc"], ["tides"]))).toBe("/timeline?view=v1&type=doc&project=tides");
+    expect(formatRoute(inbox({ item: "i1", source: "gmail", projects: ["a", "b"] }))).toBe("/inbox?item=i1&source=gmail&project=a&project=b");
+    expect(formatRoute(inbox())).toBe("/inbox");
+  });
+
+  it("collects project the board's way on every route: trimmed, empties dropped, duplicates collapsed", () => {
+    expect(parseRoute("/timeline", "?view=v1&project=%20tides%20&project=&project=tides&project=skyos")).toEqual(timeline("v1", null, [], ["tides", "skyos"]));
+    expect(parseRoute("/inbox", "?project=tides")).toEqual(inbox({ projects: ["tides"] }));
+  });
+
+  it("carries project through the unknown-path redirect", () => {
+    expect(parseRoute("/", "?project=tides")).toBeNull();
+    expect(graphRouteFromSearch("?q=x&project=tides")).toEqual(graph({ q: "x", projects: ["tides"] }));
+    expect(formatRoute(graphRouteFromSearch("?project=tides"))).toBe("/graph?project=tides");
+  });
+
+  it("withProjects replaces projects and nothing else", () => {
+    const route = timeline("v1", "n1", ["doc"], ["old"]);
+    const next = withProjects(route, ["tides"]);
+    expect(next).toEqual(timeline("v1", "n1", ["doc"], ["tides"]));
+    expect(route.projects).toEqual(["old"]);
+    expect(withProjects(board("v1", ["a"], "a-1"), [])).toEqual(board("v1", [], "a-1"));
   });
 });

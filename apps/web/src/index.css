@@ -51,6 +51,23 @@
   color-scheme: dark;
 }
 
+/*
+ * The shell header's height (shared-nav-header, design.md decision 9):
+ * AppHeader.tsx is exactly this tall on every view, and whatever must clear
+ * it — the graph's fixed layers, the review drawer — offsets against this
+ * token rather than a per-view number. Taller below `sm`, where the
+ * header's controls are 44px touch targets.
+ */
+:root {
+  --header-h: 3.75rem;
+}
+
+@media (min-width: 40rem) {
+  :root {
+    --header-h: 3.5rem;
+  }
+}
+
 body {
   margin: 0;
   overflow: hidden;

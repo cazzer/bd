@@ -65,7 +65,7 @@ export function ReviewDrawer({ project, item, boardLoaded, boardVersion, initial
       aria-labelledby={titleId}
       role={wide ? undefined : "dialog"}
       aria-modal={wide ? undefined : true}
-      className="glass fixed inset-0 z-40 flex flex-col overflow-hidden rounded-none border-0 bg-surface-strong sm:inset-auto sm:top-3 sm:right-3 sm:bottom-3 sm:w-[480px] sm:rounded-2xl sm:border"
+      className="glass fixed inset-0 z-40 flex flex-col overflow-hidden rounded-none border-0 bg-surface-strong sm:inset-auto sm:top-[calc(var(--header-h)+0.75rem)] sm:right-3 sm:bottom-3 sm:w-[480px] sm:rounded-2xl sm:border"
     >
       <ReviewItemPanel
         project={project}

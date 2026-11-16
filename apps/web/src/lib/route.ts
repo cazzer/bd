@@ -56,12 +56,16 @@ export interface GraphRoute {
   q: string | null;
   types: string[];
   node: string | null;
+  /** The reader's chosen projects, carried for the shell header (shared-nav-header, design.md decision 2); the graph is not filtered by them. */
+  projects: string[];
 }
 
 /** The feed view (node-views, design.md decision 5): the id of the `view` node whose filter it draws, or `null` when the address names none — FeedView's "no view" empty state, never a redirect. */
 export interface FeedRoute {
   view: "feed";
   viewId: string | null;
+  /** Carried, not filtered by (see `GraphRoute.projects`). */
+  projects: string[];
 }
 
 /**
@@ -75,6 +79,8 @@ export interface CodeRoute {
   view: "code";
   viewId: string | null;
   node: string | null;
+  /** Carried, not filtered by (see `GraphRoute.projects`). */
+  projects: string[];
 }
 
 /**
@@ -93,6 +99,8 @@ export interface TimelineRoute {
   viewId: string | null;
   node: string | null;
   types: string[];
+  /** Carried, not filtered by (see `GraphRoute.projects`). */
+  projects: string[];
 }
 
 /**
@@ -136,6 +144,8 @@ export interface InboxRoute {
   view: "inbox";
   item: string | null;
   source?: string | null;
+  /** Carried, not filtered by (see `GraphRoute.projects`). */
+  projects: string[];
 }
 
 /**
@@ -178,7 +188,7 @@ function nonEmpty(s: string | null): string | null {
  */
 export function graphRouteFromSearch(search: string): GraphRoute {
   const params = new URLSearchParams(search);
-  return { view: "graph", q: nonEmpty(params.get("q")), types: typesFrom(params), node: nonEmpty(params.get("node")) };
+  return { view: "graph", q: nonEmpty(params.get("q")), types: typesFrom(params), node: nonEmpty(params.get("node")), projects: projectsFrom(params) };
 }
 
 /** Every `type` parameter, trimmed, empties dropped, duplicates collapsed to their first occurrence, order otherwise kept — the graph's rule, which the timeline shares. */
@@ -202,7 +212,7 @@ function typesFrom(params: URLSearchParams): string[] {
  */
 function feedRouteFromSearch(search: string): FeedRoute {
   const params = new URLSearchParams(search);
-  return { view: "feed", viewId: nonEmpty(params.get("view")) };
+  return { view: "feed", viewId: nonEmpty(params.get("view")), projects: projectsFrom(params) };
 }
 
 /**
@@ -213,7 +223,7 @@ function feedRouteFromSearch(search: string): FeedRoute {
  */
 function codeRouteFromSearch(search: string): CodeRoute {
   const params = new URLSearchParams(search);
-  return { view: "code", viewId: nonEmpty(params.get("view")), node: nonEmpty(params.get("node")) };
+  return { view: "code", viewId: nonEmpty(params.get("view")), node: nonEmpty(params.get("node")), projects: projectsFrom(params) };
 }
 
 /**
@@ -224,7 +234,7 @@ function codeRouteFromSearch(search: string): CodeRoute {
  */
 function timelineRouteFromSearch(search: string): TimelineRoute {
   const params = new URLSearchParams(search);
-  return { view: "timeline", viewId: nonEmpty(params.get("view")), node: nonEmpty(params.get("node")), types: typesFrom(params) };
+  return { view: "timeline", viewId: nonEmpty(params.get("view")), node: nonEmpty(params.get("node")), types: typesFrom(params), projects: projectsFrom(params) };
 }
 
 /**
@@ -244,8 +254,8 @@ function roadmapRouteFromSearch(search: string): RoadmapRoute {
   return { view: "roadmap", projects: projectsFrom(params), item: nonEmpty(params.get("item")) };
 }
 
-/** Every `project` parameter, trimmed, empties dropped, duplicates collapsed to their first occurrence, order otherwise kept — the board's rule, which the search view shares. */
-function projectsFrom(params: URLSearchParams): string[] {
+/** Every `project` parameter, trimmed, empties dropped, duplicates collapsed to their first occurrence, order otherwise kept — the board's rule, which every route shares (shared-nav-header, design.md decision 2). */
+export function projectsFrom(params: URLSearchParams): string[] {
   const projects: string[] = [];
   for (const raw of params.getAll("project")) {
     const project = raw.trim();
@@ -302,7 +312,9 @@ export function parseRoute(pathname: string, search: string): Route | null {
   if (path === INBOX_VIEW_PATH) {
     const params = new URLSearchParams(search);
     const source = nonEmpty(params.get("source"));
-    return source === null ? { view: "inbox", item: nonEmpty(params.get("item")) } : { view: "inbox", item: nonEmpty(params.get("item")), source };
+    const item = nonEmpty(params.get("item"));
+    const projects = projectsFrom(params);
+    return source === null ? { view: "inbox", item, projects } : { view: "inbox", item, source, projects };
   }
   return null;
 }
@@ -311,9 +323,10 @@ export function parseRoute(pathname: string, search: string): Route | null {
  * The URL (path + query string, no origin) for a route. Parameters are
  * emitted in a fixed order — for the graph `q`, each `type` in order,
  * `node`; for the feed just `view`; for the code view `view` then `node`;
- * for the timeline `view`, `node`, then each `type` in order; for the board
- * `view`, each `project` in order, then `item`; for the roadmap each
- * `project` in order, then `item`; for the search view `q`,
+ * for the timeline `view`, `node`, then each `type` in order; for the inbox
+ * `item` then `source` (each of these five then each `project` in order);
+ * for the board `view`, each `project` in order, then `item`; for the
+ * roadmap each `project` in order, then `item`; for the search view `q`,
  * each `type`, each `project`, then `review=1` only when set — and
  * absent ones are omitted, so two structurally equal routes always
  * format to the same string: lib/navigate.ts relies on that to skip a
@@ -339,10 +352,27 @@ export function formatRoute(route: Route): string {
       const params = new URLSearchParams();
       if (route.item !== null) params.set("item", route.item);
       if (route.source != null) params.set("source", route.source);
+      appendProjects(params, route.projects);
       const query = params.toString();
       return query === "" ? INBOX_VIEW_PATH : `${INBOX_VIEW_PATH}?${query}`;
     }
   }
+}
+
+/** Each `project` in order. Graph, feed, code, timeline and inbox append it after their own parameters, so their addresses without one are unchanged. */
+function appendProjects(params: URLSearchParams, projects: readonly string[]): void {
+  for (const project of projects) {
+    params.append("project", project);
+  }
+}
+
+/**
+ * `route` with its `projects` replaced, nothing else touched — how the
+ * shell header builds every link it draws (shared-nav-header, design.md
+ * decision 2), so the chosen project follows the reader to any view.
+ */
+export function withProjects<R extends Route>(route: R, projects: readonly string[]): R {
+  return { ...route, projects: [...projects] };
 }
 
 function formatGraphRoute(route: GraphRoute): string {
@@ -356,17 +386,19 @@ function formatGraphRoute(route: GraphRoute): string {
   if (route.node !== null) {
     params.set("node", route.node);
   }
+  appendProjects(params, route.projects);
   const query = params.toString();
   return query.length > 0 ? `${GRAPH_VIEW_PATH}?${query}` : GRAPH_VIEW_PATH;
 }
 
 function formatFeedRoute(route: FeedRoute): string {
-  if (route.viewId === null) {
-    return FEED_VIEW_PATH;
-  }
   const params = new URLSearchParams();
-  params.set("view", route.viewId);
-  return `${FEED_VIEW_PATH}?${params.toString()}`;
+  if (route.viewId !== null) {
+    params.set("view", route.viewId);
+  }
+  appendProjects(params, route.projects);
+  const query = params.toString();
+  return query.length > 0 ? `${FEED_VIEW_PATH}?${query}` : FEED_VIEW_PATH;
 }
 
 function formatCodeRoute(route: CodeRoute): string {
@@ -377,6 +409,7 @@ function formatCodeRoute(route: CodeRoute): string {
   if (route.node !== null) {
     params.set("node", route.node);
   }
+  appendProjects(params, route.projects);
   const query = params.toString();
   return query.length > 0 ? `${CODE_VIEW_PATH}?${query}` : CODE_VIEW_PATH;
 }
@@ -392,6 +425,7 @@ function formatTimelineRoute(route: TimelineRoute): string {
   for (const type of route.types) {
     params.append("type", type);
   }
+  appendProjects(params, route.projects);
   const query = params.toString();
   return query.length > 0 ? `${TIMELINE_VIEW_PATH}?${query}` : TIMELINE_VIEW_PATH;
 }

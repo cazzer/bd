@@ -1,11 +1,11 @@
 ## 1. Shell header, routes, project and nav
 
-- [ ] 1.1 `lib/route.ts`: `projects` on graph, feed, code, timeline, inbox routes (parse/format via `projectsFrom`); `withProjects(route, projects)`; generalize `chooseProject` to any route (drops `item` only on board/roadmap); tests incl. round-trips and unknown-path redirect carrying `project`
-- [ ] 1.2 Shell context reading `beadsProjects` once; `switcherOffer` fed from it (board with a view still offers the view's projects)
-- [ ] 1.3 `AppHeader` in `App.tsx` outside the memoized view: ProjectSwitcher (with "not filtered here" hint on unscoped routes), nav links Graph · Board · Roadmap · Inbox · Search with `aria-current`, HeaderSearch, Hangar/Relay pills, review control slot; `--header-h` token; `inert` while a narrow shell drawer is open
-- [ ] 1.4 `ViewsMenu`: `trpc.list` of view nodes on open, grouped by renderer, opens the renderer route with `viewId` and current `project`; error line on failure; tests on the pure grouping
-- [ ] 1.5 Phone: below `sm` nav + Views collapse into a Menu disclosure (aria-expanded, Escape, focus return); jsdom tests
-- [ ] 1.6 `pnpm check` passes (bd-lev aside)
+- [x] 1.1 `lib/route.ts`: `projects` on graph, feed, code, timeline, inbox routes (parse/format via `projectsFrom`); `withProjects(route, projects)`; generalize `chooseProject` to any route (drops `item` only on board/roadmap); tests incl. round-trips and unknown-path redirect carrying `project`
+- [x] 1.2 Shell context reading `beadsProjects` once; `switcherOffer` fed from it (board with a view still offers the view's projects)
+- [x] 1.3 `AppHeader` in `App.tsx` outside the memoized view: ProjectSwitcher (with "not filtered here" hint on unscoped routes), nav links Graph · Board · Roadmap · Inbox · Search with `aria-current`, HeaderSearch, Hangar/Relay pills, review control slot; `--header-h` token; `inert` while a narrow shell drawer is open
+- [x] 1.4 `ViewsMenu`: `trpc.list` of view nodes on open, grouped by renderer, opens the renderer route with `viewId` and current `project`; error line on failure; tests on the pure grouping
+- [x] 1.5 Phone: below `sm` nav + Views collapse into a Menu disclosure (aria-expanded, Escape, focus return); jsdom tests
+- [x] 1.6 `pnpm check` passes (bd-lev aside)
 
 ## 2. Review control with inbox entry
 

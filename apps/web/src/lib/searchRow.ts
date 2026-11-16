@@ -63,11 +63,11 @@ export function resultRoute(row: Pick<FoundRow, "id" | "nodeType" | "externalId"
   if (row.isReview && row.project !== null && row.nodeType === "work_item") {
     return { view: "board", viewId: null, projects: [row.project], item: row.externalId };
   }
-  return { view: "graph", q: null, types: [], node: row.id };
+  return { view: "graph", q: null, types: [], node: row.id, projects: [] };
 }
 
 /** The bare graph — no search, nothing selected. */
-export const GRAPH_HOME: GraphRoute = { view: "graph", q: null, types: [], node: null };
+export const GRAPH_HOME: GraphRoute = { view: "graph", q: null, types: [], node: null, projects: [] };
 
 /**
  * The header's graph link: the graph drawing the current text's matches
@@ -80,12 +80,12 @@ export function openInGraphLink(route: SearchRoute): { route: GraphRoute; label:
     return { route: GRAPH_HOME, label: "Open the graph" };
   }
   const dropsFilters = route.projects.length > 0 || route.reviewsOnly;
-  return { route: { view: "graph", q: route.q, types: route.types, node: null }, label: dropsFilters ? "Open in graph (text and types only)" : "Open in graph" };
+  return { route: { view: "graph", q: route.q, types: route.types, node: null, projects: [] }, label: dropsFilters ? "Open in graph (text and types only)" : "Open in graph" };
 }
 
 /** The graph's own search for the text alone, whose approximate fallback may find what exact matching did not; `null` with no text. */
 export function approximateSearchRoute(route: SearchRoute): GraphRoute | null {
-  return route.q === null ? null : { view: "graph", q: route.q, types: [], node: null };
+  return route.q === null ? null : { view: "graph", q: route.q, types: [], node: null, projects: [] };
 }
 
 function toggled(values: readonly string[], value: string): string[] {

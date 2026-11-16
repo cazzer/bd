@@ -139,7 +139,7 @@ import {
 } from "../graph/expansion.js";
 import { drawnTypeCounts, rankNeighborTypes, topStoreTypes, typeColorsForStore, type TypeCount } from "../graph/typePrevalence.js";
 import { endpointId } from "../graph/nodeEdges.js";
-import { navigate } from "../lib/navigate.js";
+import { addressProjects, navigate } from "../lib/navigate.js";
 import { graphRouteFromSearch, parseRoute, type GraphRoute } from "../lib/route.js";
 import { searchRouteFor } from "../lib/searchRow.js";
 import { matchNodeTypes } from "../lib/typeMatch.js";
@@ -365,7 +365,7 @@ export function GraphView() {
 
   /** The current `submittedSearch` with `node` — what every selection-change site replace-writes. */
   function routeFor(node: string | null): GraphRoute {
-    return { view: "graph", q: submittedSearch?.q ?? null, types: submittedSearch?.types ?? [], node };
+    return { view: "graph", q: submittedSearch?.q ?? null, types: submittedSearch?.types ?? [], node, projects: addressProjects() };
   }
 
   /**
@@ -719,18 +719,18 @@ export function GraphView() {
   function handleOpenDefaultView(view: OfferedView) {
     leaveView();
     if (view.renderer === "code") {
-      navigate({ view: "code", viewId: view.id, node: selectedNodeId }, "push");
+      navigate({ view: "code", viewId: view.id, node: selectedNodeId, projects: addressProjects() }, "push");
       return;
     }
     if (view.renderer === "timeline") {
-      navigate({ view: "timeline", viewId: view.id, node: selectedNodeId, types: [] }, "push");
+      navigate({ view: "timeline", viewId: view.id, node: selectedNodeId, types: [], projects: addressProjects() }, "push");
       return;
     }
     if (view.renderer === "board") {
-      navigate({ view: "board", viewId: view.id, projects: [], item: null }, "push");
+      navigate({ view: "board", viewId: view.id, projects: addressProjects(), item: null }, "push");
       return;
     }
-    navigate({ view: "feed", viewId: view.id }, "push");
+    navigate({ view: "feed", viewId: view.id, projects: addressProjects() }, "push");
   }
 
   /**
@@ -1135,7 +1135,7 @@ export function GraphView() {
   const insetRight = rightColumnOpen ? RIGHT_COLUMN_OFFSET_PX + rightColumnWidthPx : 0;
 
   return (
-    <div className="h-dvh w-screen overflow-hidden">
+    <div className="h-full w-screen overflow-hidden">
       {/*
         Empty-state ambience (bd-8ub review, immersive brief item 11): a
         static vignette + sparse starfield, `-z-10` so it always sits
@@ -1147,8 +1147,8 @@ export function GraphView() {
       */}
       <div aria-hidden="true" className="ambience pointer-events-none fixed inset-0 -z-10" />
 
-      {/* The map is the page (design.md) — the canvas's own fixed, full-viewport layer, sized independently of every panel below. */}
-      <div className="fixed inset-0">
+      {/* The map is the page (design.md) — the canvas's own fixed layer, the viewport below the shell header (--header-h), sized independently of every panel below. */}
+      <div className="fixed inset-x-0 top-[var(--header-h)] bottom-0">
         <GraphCanvas
           data={visibleGraph}
           onNodeExpand={handleNodeClick}
@@ -1162,7 +1162,7 @@ export function GraphView() {
       </div>
 
       {/* Top-center: search bar + "New note" popover. Below `sm` it would cover the review queue's pill at the head of the right column (review-queue), so there it starts under the pill's row. */}
-      <div className="pointer-events-none fixed inset-x-0 top-[4.25rem] z-20 flex justify-center px-4 sm:top-4">
+      <div className="pointer-events-none fixed inset-x-0 top-[calc(var(--header-h)+4.25rem)] z-20 flex justify-center px-4 sm:top-[calc(var(--header-h)+1rem)]">
         <div className="pointer-events-auto">
           <SearchBar
             query={query}
@@ -1228,7 +1228,7 @@ export function GraphView() {
         tabbable under the drawer. Closing the drawer shows it again before
         focus returns to the pill.
       */}
-      <div className={`pointer-events-none fixed top-4 right-4 bottom-4 z-10 flex ${shellDrawerOpen ? "sm:invisible" : ""} ${rightColumnWidthClass} flex-col items-stretch gap-3`}>
+      <div className={`pointer-events-none fixed top-[calc(var(--header-h)+1rem)] right-4 bottom-4 z-10 flex ${shellDrawerOpen ? "sm:invisible" : ""} ${rightColumnWidthClass} flex-col items-stretch gap-3`}>
         <div className="pointer-events-auto shrink-0 self-end">
           <ReviewQueuePill variant="floating" />
         </div>

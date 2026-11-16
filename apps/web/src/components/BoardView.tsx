@@ -85,7 +85,7 @@ import { ProjectSwitcher } from "./ProjectSwitcher.js";
 import { ReviewQueuePill, storeDraft, useShellDrawer } from "./ReviewQueue.js";
 import { WorkViewToggle } from "./WorkViewToggle.js";
 
-const GRAPH_HOME: GraphRoute = { view: "graph", q: null, types: [], node: null };
+const GRAPH_HOME: GraphRoute = { view: "graph", q: null, types: [], node: null, projects: [] };
 
 type ViewState =
   | { kind: "loading" }
@@ -408,7 +408,7 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
   const switcherShown = (viewState.kind === "loading" || viewState.kind === "ready") && (switcherFallback || switcherOffered?.length !== 0);
 
   return (
-    <main className={`flex h-dvh w-screen flex-col overflow-hidden ${drawerOpen || shellDrawerOpen ? "sm:pr-[492px]" : ""}`}>
+    <main className={`flex h-full w-screen flex-col overflow-hidden ${drawerOpen || shellDrawerOpen ? "sm:pr-[492px]" : ""}`}>
       <div aria-hidden="true" className="ambience pointer-events-none fixed inset-0 -z-10" />
       <header inert={drawerOpen && !wide} className="glass m-3 mb-0 flex flex-wrap items-center gap-x-4 gap-y-2 p-3">
         {heading === null ? <h1 className="sr-only">Board</h1> : <h1 className="min-w-0 truncate text-base font-semibold text-fg">{heading}</h1>}

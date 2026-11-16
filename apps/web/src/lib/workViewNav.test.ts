@@ -5,7 +5,7 @@
 
 import { describe, expect, it } from "vitest";
 import { PROJECT_KEY_PATTERN } from "./boardRow.js";
-import { formatRoute, parseRoute, type BoardRoute, type RoadmapRoute } from "./route.js";
+import { formatRoute, parseRoute, type BoardRoute, type GraphRoute, type InboxRoute, type RoadmapRoute, type SearchRoute } from "./route.js";
 import { ALL_PROJECTS_CHOICE, boardToRoadmap, chooseProject, roadmapToBoard, SEVERAL_PROJECTS_VALUE, switcherOffer, switcherState, viewCarriedProjects } from "./workViewNav.js";
 
 const OFFERED = ["skyos", "tides", "strides"];
@@ -81,6 +81,15 @@ describe("chooseProject", () => {
   it("works on the roadmap's route too", () => {
     const roadmap: RoadmapRoute = { view: "roadmap", projects: [], item: "sky-1" };
     expect(formatRoute(chooseProject(roadmap, OFFERED, "tides"))).toBe("/roadmap?project=tides");
+  });
+
+  it("changes only the projects on a route the project does not scope (shared-nav-header)", () => {
+    const inbox: InboxRoute = { view: "inbox", item: "i1", source: "gmail", projects: [] };
+    expect(chooseProject(inbox, OFFERED, "skyos")).toEqual({ ...inbox, projects: ["skyos"] });
+    const graph: GraphRoute = { view: "graph", q: "x", types: ["doc"], node: "n1", projects: ["tides"] };
+    expect(chooseProject(graph, OFFERED, ALL_PROJECTS_CHOICE)).toEqual({ ...graph, projects: [] });
+    const search: SearchRoute = { view: "search", q: "x", types: [], projects: ["tides", "skyos"], reviewsOnly: true };
+    expect(formatRoute(chooseProject(search, OFFERED, "tides"))).toBe("/search?q=x&project=tides&review=1");
   });
 });
 

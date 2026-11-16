@@ -57,7 +57,7 @@ type ListCursor = NonNullable<ListResult["nextCursor"]>;
 const PAGE_SIZE = 50;
 
 /** The bare graph — no search, nothing selected — which is where "Open the graph" goes. */
-const GRAPH_HOME: GraphRoute = { view: "graph", q: null, types: [], node: null };
+const GRAPH_HOME: GraphRoute = { view: "graph", q: null, types: [], node: null, projects: [] };
 
 type FeedState =
   | { kind: "no-view" }
@@ -173,7 +173,7 @@ export function FeedView({ viewId }: { viewId: string | null }) {
 
   /** Row activation (node-views/spec.md, "Activating a row"): a push, so the browser's back control returns to this feed. */
   function activate(row: FeedRow) {
-    navigate({ view: "graph", q: null, types: [], node: row.id }, "push");
+    navigate({ view: "graph", q: null, types: [], node: row.id, projects: [] }, "push");
   }
 
   // A real `href` so the link is a link (middle-click, copy address); a
@@ -192,7 +192,7 @@ export function FeedView({ viewId }: { viewId: string | null }) {
   return (
     // `body` is `overflow: hidden` (index.css, for the canvas), so this
     // element is the page's own scroll container.
-    <main className={`h-dvh w-screen overflow-y-auto ${shellDrawerOpen ? "sm:pr-[492px]" : ""}`}>
+    <main className={`h-full w-screen overflow-y-auto ${shellDrawerOpen ? "sm:pr-[492px]" : ""}`}>
       <div aria-hidden="true" className="ambience pointer-events-none fixed inset-0 -z-10" />
       <div className="mx-auto max-w-3xl px-4 py-6">
         <header className="glass mb-4 flex flex-wrap items-start justify-between gap-4 p-4 sm:flex-nowrap">

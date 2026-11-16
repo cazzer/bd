@@ -11,7 +11,7 @@
 // toggle, drops the open item: the drawer belongs to what was shown before.
 
 import { chosenProjects, offeredProjects } from "./boardRow.js";
-import type { BoardRoute, RoadmapRoute } from "./route.js";
+import type { BoardRoute, RoadmapRoute, Route } from "./route.js";
 
 /** The switcher's value for "All projects". Never a project key: the key pattern needs at least one character. */
 export const ALL_PROJECTS_CHOICE = "";
@@ -50,11 +50,14 @@ export function switcherState(offered: readonly string[] | null, address: readon
  * The route after choosing from the switcher: the address's `project`
  * replaced by the chosen key, or dropped for "All projects" (and for a key
  * that is not offered, or the only one offered, since either way every
- * offered project shows), and the open item dropped. The view is kept.
+ * offered project shows). The view is kept. On the board and the roadmap
+ * the open item is dropped too — the drawer belongs to what was shown
+ * before; on every other route only `projects` changes (shared-nav-header,
+ * design.md decision 2).
  */
-export function chooseProject<R extends BoardRoute | RoadmapRoute>(route: R, offered: readonly string[], choice: string): R {
+export function chooseProject<R extends Route>(route: R, offered: readonly string[], choice: string): R {
   const projects = choice !== ALL_PROJECTS_CHOICE && offered.includes(choice) && offered.length > 1 ? [choice] : [];
-  return { ...route, projects, item: null };
+  return route.view === "board" || route.view === "roadmap" ? { ...route, projects, item: null } : { ...route, projects };
 }
 
 /**

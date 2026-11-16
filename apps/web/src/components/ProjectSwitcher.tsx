@@ -19,6 +19,11 @@
 // address's own projects: the switcher is still a live menu, reading the
 // address as while loading and offering "All projects" beside them, so a
 // reader can always switch away from a project that fails to read.
+//
+// On a view `project` does not filter (the shell header on the graph, feed,
+// code, timeline or inbox — shared-nav-header, design.md decision 3), the
+// caller passes a `hint` saying so: the box's tooltip and its accessible
+// description.
 
 import { useId } from "react";
 import { ALL_PROJECTS_CHOICE, SEVERAL_PROJECTS_VALUE, switcherState } from "../lib/workViewNav.js";
@@ -32,17 +37,19 @@ export interface ProjectSwitcherProps {
   onChoose: (choice: string) => void;
   /** True when the registry could not be read and `offered` is the address's projects. */
   fallback?: boolean;
+  /** Said of a view the choice does not filter ("The inbox is not filtered by project."): tooltip and accessible description. */
+  hint?: string | null;
 }
 
-const BOX = "min-h-11 w-44 rounded-lg border py-1 pl-2.5 text-base sm:min-h-0 sm:text-xs";
+const BOX = "min-h-11 w-36 rounded-lg border py-1 pl-2.5 text-base sm:min-h-0 sm:w-44 sm:text-xs";
 
-export function ProjectSwitcher({ offered, address, onChoose, fallback = false }: ProjectSwitcherProps) {
+export function ProjectSwitcher({ offered, address, onChoose, fallback = false, hint = null }: ProjectSwitcherProps) {
   const state = switcherState(fallback ? null : offered, address);
   const id = useId();
 
   if (!fallback && offered !== null && offered.length === 1) {
     return (
-      <span className={`${BOX} inline-flex items-center truncate border-transparent pr-2.5 text-fg`}>
+      <span className={`${BOX} inline-flex items-center truncate border-transparent pr-2.5 text-fg`} title={hint ?? undefined} aria-description={hint ?? undefined}>
         <span className="sr-only">Project: </span>
         {offered[0]}
       </span>
@@ -59,7 +66,8 @@ export function ProjectSwitcher({ offered, address, onChoose, fallback = false }
         id={id}
         value={state.value}
         disabled={loading}
-        title={state.title ?? undefined}
+        title={[state.title, hint].filter((t) => t !== null).join("\n") || undefined}
+        aria-description={hint ?? undefined}
         onChange={(e) => {
           if (e.target.value !== state.value) onChoose(e.target.value);
         }}

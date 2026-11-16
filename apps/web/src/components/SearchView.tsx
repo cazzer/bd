@@ -264,7 +264,7 @@ export function SearchView({ route }: { route: SearchRoute }) {
       onScroll={(e) => {
         scrollTopRef.current = e.currentTarget.scrollTop;
       }}
-      className={`h-dvh w-screen overflow-y-auto ${shellDrawerOpen ? "sm:pr-[492px]" : ""}`}
+      className={`h-full w-screen overflow-y-auto ${shellDrawerOpen ? "sm:pr-[492px]" : ""}`}
     >
       <div aria-hidden="true" className="ambience pointer-events-none fixed inset-0 -z-10" />
       <div className="mx-auto max-w-5xl px-4 py-6">

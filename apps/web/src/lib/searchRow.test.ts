@@ -49,7 +49,7 @@ describe("resultRoute", () => {
 describe("openInGraphLink", () => {
   it("carries the text and chosen types, and says so when projects or reviews only stay behind", () => {
     const link = openInGraphLink(search({ q: "cuts", types: ["work_item", "gh-pr"], projects: ["p"], reviewsOnly: true }));
-    expect(link.route).toEqual({ view: "graph", q: "cuts", types: ["work_item", "gh-pr"], node: null });
+    expect(link.route).toEqual({ view: "graph", q: "cuts", types: ["work_item", "gh-pr"], node: null, projects: [] });
     expect(formatRoute(link.route)).toBe("/graph?q=cuts&type=work_item&type=gh-pr");
     expect(link.label).toBe("Open in graph (text and types only)");
     expect(openInGraphLink(search({ q: "cuts", reviewsOnly: true })).label).toBe("Open in graph (text and types only)");

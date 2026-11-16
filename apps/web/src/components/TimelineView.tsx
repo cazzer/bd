@@ -114,7 +114,7 @@ import { useEffect, useMemo, useState, type CSSProperties, type MouseEvent } fro
 import { colorForNodeType } from "../graph/palette.js";
 import { typeColorsForStore, type TypeCount } from "../graph/typePrevalence.js";
 import { extractLinks, pickRowFields } from "../lib/feedRow.js";
-import { navigate } from "../lib/navigate.js";
+import { addressProjects, navigate } from "../lib/navigate.js";
 import { formatRoute, type GraphRoute } from "../lib/route.js";
 import {
   addressTypesFor,
@@ -145,7 +145,7 @@ type TimelineCursor = NonNullable<TimelineResult["nextCursor"]>;
 const PAGE_SIZE = 50;
 
 /** The bare graph — no search, nothing selected — which is where "Open the graph" goes. */
-const GRAPH_HOME: GraphRoute = { view: "graph", q: null, types: [], node: null };
+const GRAPH_HOME: GraphRoute = { view: "graph", q: null, types: [], node: null, projects: [] };
 
 export interface TimelineViewProps {
   viewId: string | null;
@@ -221,7 +221,7 @@ function pageKeyOf(viewId: string, node: string, chosen: readonly string[] | nul
 
 /** The route that opens `id` selected in the graph. */
 function graphRouteFor(id: string): GraphRoute {
-  return { view: "graph", q: null, types: [], node: id };
+  return { view: "graph", q: null, types: [], node: id, projects: [] };
 }
 
 /**
@@ -450,7 +450,7 @@ export function TimelineView({ viewId, node, types }: TimelineViewProps) {
     if (selection === null || selection.chosen === null) {
       return;
     }
-    navigate({ view: "timeline", viewId, node, types: addressTypesFor(toggleType(selection.chosen, type)) }, "replace");
+    navigate({ view: "timeline", viewId, node, types: addressTypesFor(toggleType(selection.chosen, type)), projects: addressProjects() }, "replace");
   }
 
   const viewTitle = view.kind === "ready" ? view.view.title || "(untitled view)" : null;
@@ -528,7 +528,7 @@ export function TimelineView({ viewId, node, types }: TimelineViewProps) {
   return (
     // `body` is `overflow: hidden` (index.css, for the canvas), so this
     // element is the page's own scroll container.
-    <main className={`h-dvh w-screen overflow-y-auto ${shellDrawerOpen ? "sm:pr-[492px]" : ""}`}>
+    <main className={`h-full w-screen overflow-y-auto ${shellDrawerOpen ? "sm:pr-[492px]" : ""}`}>
       <div aria-hidden="true" className="ambience pointer-events-none fixed inset-0 -z-10" />
       <div className="mx-auto max-w-3xl px-4 py-6">
         <header className="glass mb-4 flex flex-wrap items-start justify-between gap-4 p-4 sm:flex-nowrap">

@@ -58,7 +58,7 @@ import { TRPCClientError } from "@trpc/client";
 import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { loadLanguage } from "../lib/codeLanguage.js";
 import { ancestorsOf, buildTree, childrenOf, isContainer, isExpandable, rootKeyOf, type CodeTree, type TreeRow } from "../lib/codeTree.js";
-import { navigate } from "../lib/navigate.js";
+import { addressProjects, navigate } from "../lib/navigate.js";
 import { formatRoute, type GraphRoute } from "../lib/route.js";
 import { viewFilterOf } from "../lib/viewFilter.js";
 import { trpc } from "../trpc.js";
@@ -73,7 +73,7 @@ type LookedUpNode = Awaited<ReturnType<typeof trpc.getNodes.query>>["nodes"][num
 const ROOT_PAGE_SIZE = 50;
 
 /** The bare graph — no search, nothing selected — which is where "Open the graph" goes. */
-const GRAPH_HOME: GraphRoute = { view: "graph", q: null, types: [], node: null };
+const GRAPH_HOME: GraphRoute = { view: "graph", q: null, types: [], node: null, projects: [] };
 
 /** `forViewId` is the address the ready state was loaded for: a render can still hold the previous view's state after `viewId` changed, and anything that reads the store from it must wait for the reload. */
 type ViewState =
@@ -366,7 +366,7 @@ export function CodeView({ viewId, node }: { viewId: string | null; node: string
     if (isExpandable(row)) {
       setExpanded((previous) => (previous.has(row.id) ? previous : new Set(previous).add(row.id)));
     }
-    navigate({ view: "code", viewId, node: row.id }, "push");
+    navigate({ view: "code", viewId, node: row.id, projects: addressProjects() }, "push");
   }
 
   // A real `href` so the link is a link (middle-click, copy address); a
@@ -392,7 +392,7 @@ export function CodeView({ viewId, node }: { viewId: string | null; node: string
             ? "Loading…"
             : null;
     return (
-      <main className={`flex h-dvh w-screen items-center justify-center overflow-hidden ${shellDrawerOpen ? "sm:pr-[492px]" : ""}`}>
+      <main className={`flex h-full w-screen items-center justify-center overflow-hidden ${shellDrawerOpen ? "sm:pr-[492px]" : ""}`}>
         <div aria-hidden="true" className="ambience pointer-events-none fixed inset-0 -z-10" />
         <div className="glass w-96 p-6">
           <h1 className="text-base font-semibold text-fg">Code</h1>
@@ -412,7 +412,7 @@ export function CodeView({ viewId, node }: { viewId: string | null; node: string
 
   // The graph link names the shown node when there is one to name —
   // even one this view does not hold, since the graph can still draw it.
-  const graphRoute: GraphRoute = shown.kind === "ready" ? { view: "graph", q: null, types: [], node: shown.node.id } : GRAPH_HOME;
+  const graphRoute: GraphRoute = shown.kind === "ready" ? { view: "graph", q: null, types: [], node: shown.node.id, projects: [] } : GRAPH_HOME;
   const shownRow = owner.kind === "found" && node !== null ? owner.tree.rows.get(node) : undefined;
   const path = shown.kind === "ready" ? (shownRow?.path ?? metadataText(shown.node.metadata, "path") ?? shown.node.title) : null;
   const rootsLine = `${view.roots.length} root${view.roots.length === 1 ? "" : "s"} shown${view.hasMore ? " · more match this view" : ""}`;
@@ -420,7 +420,7 @@ export function CodeView({ viewId, node }: { viewId: string | null; node: string
   const paneError = shown.kind === "error" ? shown.message : owner.kind === "error" ? owner.message : null;
 
   return (
-    <main className={`flex h-dvh w-screen gap-3 overflow-hidden p-3 ${shellDrawerOpen ? "sm:pr-[504px]" : ""}`}>
+    <main className={`flex h-full w-screen gap-3 overflow-hidden p-3 ${shellDrawerOpen ? "sm:pr-[504px]" : ""}`}>
       <div aria-hidden="true" className="ambience pointer-events-none fixed inset-0 -z-10" />
 
       <nav aria-label="Tree" className="glass flex w-72 shrink-0 flex-col overflow-hidden">

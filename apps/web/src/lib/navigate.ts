@@ -23,7 +23,7 @@
 // React; unlike route.ts, this module does touch `location` and
 // `history`, which is why it is the one that does.
 
-import { formatRoute, type Route } from "./route.js";
+import { formatRoute, projectsFrom, type Route } from "./route.js";
 
 type NavigationListener = () => void;
 
@@ -43,6 +43,17 @@ export function navigate(route: Route, mode: "push" | "replace"): void {
   for (const listener of listeners) {
     listener();
   }
+}
+
+/**
+ * The address's `project` list right now — what a view's own address write
+ * carries so the reader's projects survive it (shared-nav-header, design.md
+ * decision 2: a view that ignores `projects` keeps it in the address
+ * untouched). Read at write time, so a view's async path never carries a
+ * stale list.
+ */
+export function addressProjects(): string[] {
+  return projectsFrom(new URLSearchParams(location.search));
 }
 
 /** Run `listener` after every history write `navigate` makes; returns the unsubscribe. App.tsx is the intended (and only) subscriber. */

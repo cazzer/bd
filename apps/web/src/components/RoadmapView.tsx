@@ -293,7 +293,7 @@ export function RoadmapView({ projects, item }: RoadmapViewProps) {
   const allEmpty = sections.length > 0 && sections.every((s) => !s.loading && s.groups.length === 0);
 
   return (
-    <main className={`flex h-dvh w-screen flex-col overflow-hidden ${drawerOpen || shellDrawerOpen ? "sm:pr-[492px]" : ""}`}>
+    <main className={`flex h-full w-screen flex-col overflow-hidden ${drawerOpen || shellDrawerOpen ? "sm:pr-[492px]" : ""}`}>
       <div aria-hidden="true" className="ambience pointer-events-none fixed inset-0 -z-10" />
       <header inert={drawerOpen && !wide} className="glass m-3 mb-0 flex flex-wrap items-center gap-x-4 gap-y-2 p-3">
         <h1 className="sr-only">Roadmap</h1>

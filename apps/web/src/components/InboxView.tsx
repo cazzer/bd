@@ -45,7 +45,7 @@
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { filterBySource, groupByWork, hangarOriginLabel, needsMeRows, REVIEW_SOURCE, sourcesOf, type NeedsMeRow, type WorkGroupSlot } from "../lib/inboxRows.js";
-import { navigate } from "../lib/navigate.js";
+import { addressProjects, navigate } from "../lib/navigate.js";
 import { CARD_MOVED_TEXT, cardActions, chosenOption, describeChosen, isCardMovedRefusal, type CardOption } from "../lib/reviewCard.js";
 import { describeRelayPrompt, type RelayActionView } from "../lib/relayAction.js";
 import { decisionBlocked } from "../lib/reviewDrawer.js";
@@ -265,7 +265,7 @@ export function InboxView({ item: selectedKey, source }: { item: string | null; 
     if (home !== undefined) setTab((current) => (TABS.find((t) => t.key === current)!.statuses.includes(addressedStatus) ? current : home));
   }, [selectedKey, addressedStatus]);
 
-  const go = useCallback((item: string | null, nextSource: string | null = source) => navigate({ view: "inbox", item, source: nextSource }, "replace"), [source]);
+  const go = useCallback((item: string | null, nextSource: string | null = source) => navigate({ view: "inbox", item, source: nextSource, projects: addressProjects() }, "replace"), [source]);
 
   const move = useCallback(
     (delta: number) => {
@@ -350,7 +350,7 @@ export function InboxView({ item: selectedKey, source }: { item: string | null; 
   }
 
   return (
-    <main className="flex h-dvh w-screen flex-col overflow-hidden">
+    <main className="flex h-full w-screen flex-col overflow-hidden">
       <div aria-hidden="true" className="ambience pointer-events-none fixed inset-0 -z-10" />
       <header className="flex flex-wrap items-center justify-between gap-3 border-b border-hairline px-4 py-3">
         <div className="flex items-center gap-3">
