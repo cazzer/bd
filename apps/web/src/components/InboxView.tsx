@@ -44,7 +44,7 @@
 // what a click releases, and that it deletes the disk.
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
-import { filterBySource, groupByWork, hangarOriginLabel, needsMeRows, REVIEW_SOURCE, sourcesOf, type NeedsMeRow, type WorkGroupSlot } from "../lib/inboxRows.js";
+import { filterBySource, groupByWork, hangarOriginLabel, INBOX_POLL_MS, needsMeRows, REVIEW_SOURCE, sourcesOf, type NeedsMeRow, type WorkGroupSlot } from "../lib/inboxRows.js";
 import { addressProjects, navigate } from "../lib/navigate.js";
 import { CARD_MOVED_TEXT, cardActions, chosenOption, describeChosen, isCardMovedRefusal, type CardOption } from "../lib/reviewCard.js";
 import { describeRelayPrompt, type RelayActionView } from "../lib/relayAction.js";
@@ -72,8 +72,6 @@ const TABS: { key: Tab; label: string; statuses: Item["status"][] }[] = [
   { key: "agent", label: "With agent", statuses: ["changes", "accepted", "session"] },
   { key: "closed", label: "Closed", statuses: ["done", "dismissed"] },
 ];
-
-const POLL_MS = 15_000;
 
 const SOURCE_LABEL: Record<string, string> = {
   gmail: "Email",
@@ -171,7 +169,7 @@ export function InboxView({ item: selectedKey, source }: { item: string | null; 
     void load();
     const timer = window.setInterval(() => {
       if (document.visibilityState === "visible") void load();
-    }, POLL_MS);
+    }, INBOX_POLL_MS);
     return () => window.clearInterval(timer);
   }, [load]);
 

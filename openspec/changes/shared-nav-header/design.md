@@ -44,9 +44,11 @@ See proposal.md for why. Current state (from a read of `apps/web` at de2bd71):
    - *Alternative:* a new `views` procedure. Rejected; `list` already validates the filter.
 
 6. **Review control = `ReviewQueuePill` plus inbox.**
-   - **Inbox count:** the shell polls `trpc.inbox` on InboxView's own 15 s cadence. It counts pending top-level items with the same predicate InboxView uses for Needs me, extracted into `lib/inboxRows.ts` so the two can't disagree.
-   - **Display:** the pill shows `reviews` and, when greater than 0, an inbox count with an sr-only label for each.
-   - **Popover:** the existing list and "Review all", plus a "Go to inbox" link. That link carries `project`, opens Needs me, and closes the popover.
+   - **Inbox count:** the shell header polls `trpc.inbox` (pending items only) on InboxView's own 15 s cadence (`INBOX_POLL_MS`, shared); the poll stops while the tab is hidden and reads at once when it shows again. It counts pending top-level items with the same predicate InboxView uses for Needs me (`needsMeItem`), extracted into `lib/inboxRows.ts` so the two can't disagree.
+   - **Counting rule:** the review count is the queue's pending reviews; the inbox count is the inbox items of Needs me and never the reviews Needs me merges from the queue. The two add up to Needs me's count, and no row is counted twice.
+   - **Display:** the pill shows `reviews` and, when greater than 0, an inbox count beside a tray icon, each with its own sr-only label ("2 reviews pending", "3 inbox items need you") that together form the control's name, also its tooltip; the visible numbers are hidden from assistive technology. In every tier but wide the pill is compact: no state word, no divider, bare numbers.
+   - **Popover:** the existing list and "Review all", plus a "Go to inbox" link beside "Open the board". That link carries the header links' `project` and opens `/inbox` (Needs me is the inbox's first tab, so no tab parameter is needed), and closes the popover. Like the board link on the board, it is not offered on the inbox itself.
+   - **Anchor:** the popover anchors under, and returns focus to, the pill that opened it, while it is in the document; else the first registered pill (the header's). The provider's fallback pill is gone: the header's pill is on every view.
    - **Failure:** an inbox read failure hides only the inbox count.
    - **Already true:** reviews decided in the queue leave Needs me because both read `useReviewQueue`. A test pins it.
    - *Alternative:* a separate Inbox pill. Rejected: two adjacent counters for overlapping lists make the duplication more visible, not less.

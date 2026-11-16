@@ -94,11 +94,15 @@ describe("pill text", () => {
     expect(countText(0, false)).toBe("…");
   });
 
-  it("carries the live state then the count in the accessible name, as the pill reads; zero reads as an empty queue", () => {
-    expect(pillLabel(3, true, "live")).toBe("Live, 3 reviews waiting");
-    expect(pillLabel(1, true, "connecting")).toBe("Connecting, 1 review waiting");
-    expect(pillLabel(0, true, "offline")).toBe("Offline, no reviews waiting");
+  it("names the live state, the reviews, then the inbox items when there are any; zero reads as an empty queue", () => {
+    expect(pillLabel(3, true, "live")).toBe("Live, 3 reviews pending");
+    expect(pillLabel(1, true, "connecting")).toBe("Connecting, 1 review pending");
+    expect(pillLabel(0, true, "offline")).toBe("Offline, no reviews pending");
     expect(pillLabel(0, false, "connecting")).toBe("Connecting, review queue not read yet");
+    expect(pillLabel(2, true, "live", 3)).toBe("Live, 2 reviews pending, 3 inbox items need you");
+    expect(pillLabel(2, true, "live", 1)).toBe("Live, 2 reviews pending, 1 inbox item needs you");
+    expect(pillLabel(2, true, "live", 0)).toBe("Live, 2 reviews pending");
+    expect(pillLabel(2, true, "live", null)).toBe("Live, 2 reviews pending");
   });
 
   it("words the waiting count", () => {

@@ -81,11 +81,33 @@ export function waitingText(total: number): string {
   return `${total} review${total === 1 ? "" : "s"} waiting`;
 }
 
-/** The pill's accessible name, in the order the pill reads: the live state, then the count ("Live, 3 reviews waiting"). */
-export function pillLabel(total: number, loaded: boolean, live: LiveState): string {
-  const state = live === "live" ? "Live" : live === "connecting" ? "Connecting" : "Offline";
-  if (!loaded) return `${state}, review queue not read yet`;
-  return `${state}, ${waitingText(total).replace(/^No/, "no")}`;
+/** The live state as the pill's accessible name begins: "Live", "Connecting", "Offline". */
+export function liveLabel(live: LiveState): string {
+  return live === "live" ? "Live" : live === "connecting" ? "Connecting" : "Offline";
+}
+
+/** The review count for a screen reader: "2 reviews pending", "1 review pending", "no reviews pending", or "review queue not read yet". */
+export function reviewCountLabel(total: number, loaded: boolean): string {
+  if (!loaded) return "review queue not read yet";
+  if (total === 0) return "no reviews pending";
+  return `${total} review${total === 1 ? "" : "s"} pending`;
+}
+
+/** The inbox count for a screen reader: "3 inbox items need you", "1 inbox item needs you". */
+export function inboxCountLabel(count: number): string {
+  return count === 1 ? "1 inbox item needs you" : `${count} inbox items need you`;
+}
+
+/**
+ * The review control's name, in the order it reads: the live state, the
+ * reviews, then the inbox items when there are any to count ("Live, 2
+ * reviews pending, 3 inbox items need you"). A null inbox count (not read,
+ * or the read failed) and a zero say nothing about the inbox.
+ */
+export function pillLabel(total: number, loaded: boolean, live: LiveState, inbox: number | null = null): string {
+  const parts = [liveLabel(live), reviewCountLabel(total, loaded)];
+  if (inbox !== null && inbox > 0) parts.push(inboxCountLabel(inbox));
+  return parts.join(", ");
 }
 
 /** The order line under the popover's header: "Oldest first", or "Oldest 100 of 120" when the read was cut short. */

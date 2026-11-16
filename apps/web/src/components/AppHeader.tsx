@@ -41,6 +41,12 @@
 // Status. The header polls hangar and the relay once (`useHangarStatus`,
 // `useRelayStatus`) and draws the chips wherever the tier puts them.
 //
+// Review control. The review pill with the inbox count beside it (design.md
+// decision 6): the header polls the inbox's pending items itself
+// (lib/useInboxCount.ts), and hands the pill its "Go to inbox" route — the
+// inbox's Needs me with the projects every header link carries. The pill is
+// compact (bare counts) in every tier but wide.
+//
 // Stacking. Above a drawer (z-[45] over the drawers' z-40, under the
 // portalled queue popover's z-50), so a menu panel is never covered by one;
 // while a drawer is a modal sheet (below ReviewDrawer's wide query) — the
@@ -49,11 +55,12 @@
 
 import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { navigate } from "../lib/navigate.js";
-import { withProjects, type Route } from "../lib/route.js";
+import { withProjects, type InboxRoute, type Route } from "../lib/route.js";
 import { searchRouteFor } from "../lib/searchRow.js";
 import { boardViewProjects, carriedProjects, currentPlace, currentSavedViewId, headerSwitcherOffer, navLinks, shownView, unfilteredHint, type NavLink } from "../lib/shellNav.js";
 import { useDisclosure } from "../lib/useDisclosure.js";
 import { useMediaQuery } from "../lib/useMediaQuery.js";
+import { useInboxCount } from "../lib/useInboxCount.js";
 import { useRelayStatus, type PolledRelayStatus } from "../lib/useRelayStatus.js";
 import { chooseProject } from "../lib/workViewNav.js";
 import { HangarStatusChip, hangarShownOffline, useHangarStatus, type PolledHangarStatus } from "./HangarStatusPill.js";
@@ -124,6 +131,8 @@ const SMALL_BUTTON =
 
 const PANEL = "rounded-2xl border border-hairline bg-ground p-2 shadow-[0_12px_40px_-12px_rgba(0,0,0,0.65)]";
 
+const INBOX_HOME: InboxRoute = { view: "inbox", item: null, projects: [] };
+
 export interface AppHeaderProps {
   route: Route;
 }
@@ -135,6 +144,7 @@ export function AppHeader({ route }: AppHeaderProps) {
   const { open: shellDrawerOpen } = useShellDrawer();
   const hangar = useHangarStatus();
   const relay = useRelayStatus();
+  const inboxCount = useInboxCount();
   const boardDrawerOpen = (route.view === "board" || route.view === "roadmap") && route.item !== null;
   const inert = !drawerWide && (shellDrawerOpen || boardDrawerOpen);
 
@@ -199,8 +209,7 @@ export function AppHeader({ route }: AppHeaderProps) {
               <RelayStatusChip polled={relay} compact={compact} />
             </div>
           )}
-          {/* The review control's place (shared-nav-header task group 2 makes it the review control with the inbox count). */}
-          <ReviewQueuePill compact={tier === "mid" || tier === "narrow"} />
+          <ReviewQueuePill compact={tier !== "wide"} inboxCount={inboxCount} inboxRoute={withProjects(INBOX_HOME, carried)} />
         </div>
       </div>
     </header>

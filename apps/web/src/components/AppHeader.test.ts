@@ -14,7 +14,7 @@
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { parseRoute, type Route } from "../lib/route.js";
+import { formatRoute, parseRoute, type Route } from "../lib/route.js";
 import type { HangarStatusView } from "../lib/hangarStatus.js";
 import type { RelayStatusView } from "../lib/relayStatus.js";
 import type { ShellProjects } from "../lib/shellNav.js";
@@ -29,6 +29,7 @@ const env = vi.hoisted(() => ({
   retries: 0,
   hangar: null as { status: HangarStatusView; at: Date } | null,
   relay: null as { status: RelayStatusView; at: Date } | null,
+  inboxCount: null as number | null,
 }));
 vi.mock("../trpc.js", () => ({ trpc: trpcMock }));
 vi.mock("../lib/navigate.js", () => ({ navigate: navigateMock }));
@@ -37,12 +38,14 @@ vi.mock("./ReviewDrawer.js", () => ({ useWideDrawer: () => env.wideDrawer }));
 vi.mock("./ReviewQueue.js", async () => {
   const { createElement: h } = await import("react");
   return {
-    ReviewQueuePill: ({ compact }: { compact?: boolean }) => h("button", { type: "button", "data-stub": "review-pill", "data-compact": String(compact ?? false) }, "reviews"),
+    ReviewQueuePill: ({ compact, inboxCount, inboxRoute }: { compact?: boolean; inboxCount?: number | null; inboxRoute?: Route }) =>
+      h("button", { type: "button", "data-stub": "review-pill", "data-compact": String(compact ?? false), "data-inbox-count": String(inboxCount ?? null), "data-inbox-href": inboxRoute === undefined ? "" : formatRoute(inboxRoute) }, "reviews"),
     useShellDrawer: () => ({ open: env.shellDrawerOpen, drafts: new Map() }),
   };
 });
 vi.mock("./HangarStatusPill.js", async (importOriginal) => ({ ...(await importOriginal<object>()), useHangarStatus: () => env.hangar }));
 vi.mock("../lib/useRelayStatus.js", () => ({ useRelayStatus: () => env.relay }));
+vi.mock("../lib/useInboxCount.js", () => ({ useInboxCount: () => env.inboxCount }));
 
 const { AppHeader } = await import("./AppHeader.js");
 const { forgetSavedViews } = await import("./ViewsMenu.js");
@@ -63,6 +66,7 @@ beforeEach(() => {
   env.retries = 0;
   env.hangar = { status: HANGAR_ONLINE, at: new Date() };
   env.relay = { status: RELAY, at: new Date() };
+  env.inboxCount = null;
   navigateMock.mockReset();
   trpcMock.list.query.mockReset();
   forgetSavedViews();
@@ -352,12 +356,23 @@ describe("AppHeader width tiers", () => {
   test("phone: the status pills move into the Menu, which flags an offline status", () => {
     env.width = 390;
     render("/graph");
+    expect(container.querySelector('[data-stub="review-pill"]')?.getAttribute("data-compact")).toBe("true");
     expect(inPanel(container.querySelector("[data-hangar-pill]"))).toBe(true);
     expect(container.querySelector("[data-menu-warning]")).toBeNull();
     env.hangar = { status: { ...HANGAR_ONLINE, status: "offline" }, at: new Date() };
     render("/graph");
     expect(container.querySelector("[data-menu-warning]")).not.toBeNull();
     expect(menuButton().getAttribute("aria-label")).toBe("Views and navigation, current: Graph (a status is offline)");
+  });
+});
+
+describe("AppHeader review control", () => {
+  test("gets the header's inbox count and a Go to inbox route on Needs me carrying the project", () => {
+    env.inboxCount = 3;
+    render("/roadmap?project=tides&item=tides-1");
+    const pill = container.querySelector('[data-stub="review-pill"]')!;
+    expect(pill.getAttribute("data-inbox-count")).toBe("3");
+    expect(pill.getAttribute("data-inbox-href")).toBe("/inbox?project=tides");
   });
 });
 

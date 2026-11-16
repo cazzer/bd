@@ -6,9 +6,17 @@
 //
 // A review has no priority of its own; it ranks as P1, because an agent is
 // blocked on it while it waits.
+//
+// The shell header's inbox count (shared-nav-header, design.md decision 6)
+// counts the inbox items of Needs me through the same predicate,
+// `needsMeItem`, and never the reviews: those are the review control's own
+// count, so the two numbers add up to Needs me and none is counted twice.
 
 export const REVIEW_SOURCE = "review";
 export const REVIEW_PRIORITY = 1;
+
+/** How often the inbox re-reads its items: InboxView's list and the shell header's count alike. */
+export const INBOX_POLL_MS = 15_000;
 
 export interface InboxRowItem {
   id: string;
@@ -49,10 +57,20 @@ export function reviewKey(review: QueueReviewRow): string {
   return `${review.project}/${review.externalId}`;
 }
 
+/** Whether an inbox item is listed under Needs me: a pending top-level item (a batch's candidates come with their batch). */
+export function needsMeItem(item: Pick<InboxRowItem, "status" | "parentId">): boolean {
+  return item.parentId === null && item.status === "pending";
+}
+
+/** How many inbox items Needs me lists — reviews not included (module header). */
+export function needsMeItemCount(items: readonly Pick<InboxRowItem, "status" | "parentId">[]): number {
+  return items.filter(needsMeItem).length;
+}
+
 export function needsMeRows<I extends InboxRowItem, R extends QueueReviewRow>(items: readonly I[], reviews: readonly R[]): NeedsMeRow<I, R>[] {
   const rows: NeedsMeRow<I, R>[] = [];
   for (const item of items) {
-    if (item.parentId === null && item.status === "pending") rows.push({ kind: "inbox", key: item.id, priority: item.priority, at: item.receivedAt, source: item.source, item });
+    if (needsMeItem(item)) rows.push({ kind: "inbox", key: item.id, priority: item.priority, at: item.receivedAt, source: item.source, item });
   }
   for (const review of reviews) rows.push({ kind: "review", key: reviewKey(review), priority: REVIEW_PRIORITY, at: review.requestedAt, source: REVIEW_SOURCE, review });
   return rows.sort((a, b) => a.priority - b.priority || Date.parse(a.at) - Date.parse(b.at) || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));

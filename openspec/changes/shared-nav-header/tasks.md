@@ -9,11 +9,11 @@
 
 ## 2. Review control with inbox entry
 
-- [ ] 2.1 Extract the Needs-me pending predicate from InboxView into `lib/inboxRows.ts`; InboxView uses it unchanged (tests pass)
-- [ ] 2.2 Shell polls `trpc.inbox` every 15 s (paused when hidden) for the pending inbox count; failures hide only that count
-- [ ] 2.3 `ReviewQueuePill` → review control: review count (live, as today) + inbox count with sr-only labels; popover keeps queue rows and Review all, adds "Go to inbox" (carries `project`, closes popover); remove the provider's fallback-pill placement
-- [ ] 2.4 Test: a review decided through the queue leaves Needs me without a reload (shared `useReviewQueue` state); test the control with inbox read failing
-- [ ] 2.5 `pnpm check` passes
+- [x] 2.1 Extract the Needs-me pending predicate from InboxView into `lib/inboxRows.ts`; InboxView uses it unchanged (tests pass)
+- [x] 2.2 Shell polls `trpc.inbox` every 15 s (paused when hidden) for the pending inbox count; failures hide only that count
+- [x] 2.3 `ReviewQueuePill` → review control: review count (live, as today) + inbox count with sr-only labels; popover keeps queue rows and Review all, adds "Go to inbox" (carries `project`, closes popover); remove the provider's fallback-pill placement
+- [x] 2.4 Test: a review decided through the queue leaves Needs me without a reload (shared `useReviewQueue` state); test the control with inbox read failing
+- [x] 2.5 `pnpm check` passes
 
 ## 3. Views adopt the shell
 
