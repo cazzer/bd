@@ -110,11 +110,11 @@
 // it is in the address bar.
 
 import { TRPCClientError } from "@trpc/client";
-import { useEffect, useMemo, useState, type CSSProperties, type MouseEvent } from "react";
+import { useEffect, useMemo, useState, type CSSProperties, type MouseEvent, type ReactNode } from "react";
 import { colorForNodeType } from "../graph/palette.js";
 import { typeColorsForStore, type TypeCount } from "../graph/typePrevalence.js";
 import { extractLinks, pickRowFields } from "../lib/feedRow.js";
-import { addressProjects, navigate } from "../lib/navigate.js";
+import { addressProjects, navigate, withAddressProjects } from "../lib/navigate.js";
 import { formatRoute, type GraphRoute } from "../lib/route.js";
 import {
   addressTypesFor,
@@ -150,6 +150,9 @@ export interface TimelineViewProps {
   node: string | null;
   types: string[];
 }
+
+/** The bare graph — no search, nothing selected — where the "choose a node" copy points. */
+const GRAPH_HOME: GraphRoute = { view: "graph", q: null, types: [], node: null, projects: [] };
 
 /** What the header needs of a node: its id and title. */
 interface NodeRef {
@@ -457,7 +460,9 @@ export function TimelineView({ viewId, node, types }: TimelineViewProps) {
   // The toolbar's graph link names the anchor once it is known; before that,
   // or in an empty state, there is none (the header's Graph link is the bare graph).
   const graphRoute: GraphRoute | null = anchorRef !== null ? graphRouteFor(anchorRef.id) : null;
-  const heading = anchorRef !== null && viewTitle !== null ? `${anchorRef.title || "(untitled)"} · ${viewTitle}` : "Timeline";
+  // The saved view's title is the heading, as on the feed and code views; the anchor leads the status line.
+  const heading = viewTitle ?? "Timeline";
+  const anchorTitle = anchorRef !== null ? anchorRef.title || "(untitled)" : null;
 
   // The rows on screen: the loaded page, or the previous page dimmed
   // while the next loads.
@@ -475,15 +480,15 @@ export function TimelineView({ viewId, node, types }: TimelineViewProps) {
   const rowTypeCounts = useMemo(() => countRowsByType(shownRows ?? []), [shownRows]);
 
   // The status line, always mounted so the toolbar keeps its height and a
-  // change is announced: the count (or the one zero-row sentence) while a
-  // page is shown, "Loading…" while anything loads, the view's name while
-  // a view is loaded but no anchor is (so the "choose a node" state names
-  // the view, as the spec asks), empty when the body carries the copy.
+  // change is announced: the anchor's title, then the count (or the one
+  // zero-row sentence) while a page is shown, "Loading…" while anything
+  // loads, empty when the body carries the copy (the heading names the
+  // view, so the "choose a node" state names it, as the spec asks).
   let status = "";
   if (view.kind === "loading" || (view.kind === "ready" && view.forViewId !== viewId)) {
     status = "Loading…";
   } else if (view.kind === "ready" && node === null) {
-    status = viewTitle ?? "";
+    status = "";
   } else if (view.kind !== "ready" || anchorMissing || anchor.kind === "error") {
     status = "";
   } else if (anchor.kind === "loading" || pageLoading || page.kind === "idle") {
@@ -500,6 +505,8 @@ export function TimelineView({ viewId, node, types }: TimelineViewProps) {
     }
   }
 
+  const statusLine = [anchorTitle, status].filter((part) => part !== null && part !== "").join(" · ");
+
   // The chip bar: drawn whenever the view names types and an anchor is
   // addressed, in every page state — the chips are the address's, not
   // the page's, so they stay while a page loads or when nothing is chosen.
@@ -507,13 +514,22 @@ export function TimelineView({ viewId, node, types }: TimelineViewProps) {
   const showChips = chips !== null && node !== null && !anchorMissing;
 
   // The body's one paragraph of copy, for the states with no page to draw.
-  let copy: string | null = null;
+  let copy: ReactNode = null;
   if (view.kind === "no-view") {
     copy = "No view is named in the address.";
   } else if (view.kind === "not-a-view") {
     copy = "The address does not name a view.";
   } else if (view.kind === "ready" && view.forViewId === viewId && node === null) {
-    copy = "Choose a node in the graph to see its timeline.";
+    const graphHome = withAddressProjects(GRAPH_HOME);
+    copy = (
+      <>
+        Choose a node in{" "}
+        <a href={formatRoute(graphHome)} onClick={pushOnPlainClick(graphHome)} className="rounded text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-accent">
+          the graph
+        </a>{" "}
+        to see its timeline.
+      </>
+    );
   } else if (view.kind === "ready" && anchorMissing) {
     copy = "That node was not found.";
   }
@@ -529,7 +545,7 @@ export function TimelineView({ viewId, node, types }: TimelineViewProps) {
       <ViewToolbar
         title={heading}
         column="max-w-3xl"
-        status={status}
+        status={statusLine}
         actions={
           graphRoute !== null && (
             <a href={formatRoute(graphRoute)} onClick={pushOnPlainClick(graphRoute)} className="shrink-0 rounded text-sm text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-accent">

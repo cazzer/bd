@@ -6,11 +6,14 @@
 //
 // Header: the shell's (AppHeader.tsx, shared-nav-header), which owns the
 // project switcher (a switch drops the open item) and the Board and Roadmap
-// nav links that replaced the roadmap's own toggle; the roadmap has no
-// toolbar of its own, only an h1 for screen readers (the header's current
-// Roadmap link names it). It still reads the registry itself, on every
-// roadmap read, for what it offers and each project's `lastIngest` error,
-// so the error list is as current as the rows.
+// nav links that replaced the roadmap's own toggle. Its toolbar
+// (ViewToolbar.tsx) is the board's row, so the two views' content starts at
+// the same height: an h1 for screen readers (the header's current Roadmap
+// link names it) and Refresh, which re-reads the roadmap now. It still reads
+// the registry itself, on every roadmap read, for what it offers and each
+// project's `lastIngest` error, so the error list is as current as the rows,
+// and hands each answer to the shell (`reportRegistry`) so the header's
+// switcher picks up a newly registered project.
 //
 // Sections and groups are lib/roadmapRows.ts; the axis, bars, remaining
 // spans, markers, overdue rule, and date labels are lib/roadmapLayout.ts.
@@ -76,6 +79,8 @@ import { formatRoute, type RoadmapRoute } from "../lib/route.js";
 import { trpc } from "../trpc.js";
 import { ReviewDrawer, useWideDrawer } from "./ReviewDrawer.js";
 import { storeDraft, useShellDrawer } from "./ReviewQueue.js";
+import { useShellProjects } from "./ShellProjects.js";
+import { TOOLBAR_BUTTON, ViewToolbar } from "./ViewToolbar.js";
 
 type BeadsProjectsAnswer = Awaited<ReturnType<typeof trpc.beadsProjects.query>>["projects"];
 type RoadmapAnswer = Awaited<ReturnType<typeof trpc.roadmap.query>>;
@@ -139,6 +144,12 @@ export function RoadmapView({ projects, item }: RoadmapViewProps) {
   const watchedRef = useRef<readonly string[] | null>(null);
   const wide = useWideDrawer();
   const { open: shellDrawerOpen, drafts } = useShellDrawer();
+  const { reportRegistry } = useShellProjects();
+  /** Refresh was pressed and the read it asked for has not finished (live reads alone do not relabel it). */
+  const [refreshAsked, setRefreshAsked] = useState(false);
+  useEffect(() => {
+    if (!reading) setRefreshAsked(false);
+  }, [reading]);
 
   // The live effect (see the header): register with the live stream, read in onStarted.
   useEffect(() => {
@@ -152,6 +163,7 @@ export function RoadmapView({ projects, item }: RoadmapViewProps) {
         if (disposed) return;
         keys = reg.map((p) => p.key);
         setRegistry(reg);
+        reportRegistry(keys);
       } catch (err) {
         if (disposed) return;
         // Without the registry the roadmap is still read: the address's projects, or every registered one (the server knows them).
@@ -287,9 +299,26 @@ export function RoadmapView({ projects, item }: RoadmapViewProps) {
   return (
     <main className={`flex h-full w-screen flex-col overflow-hidden ${drawerOpen || shellDrawerOpen ? "sm:pr-[492px]" : ""}`}>
       <div aria-hidden="true" className="ambience pointer-events-none fixed inset-0 -z-10" />
-      <h1 className="sr-only">Roadmap</h1>
+      <ViewToolbar
+        inert={drawerOpen && !wide}
+        title="Roadmap"
+        titleHidden
+        actions={
+          <button
+            type="button"
+            onClick={() => {
+              setRefreshAsked(true);
+              readRef.current?.();
+            }}
+            disabled={refreshAsked}
+            className={TOOLBAR_BUTTON}
+          >
+            {refreshAsked ? "Refreshing…" : "Refresh"}
+          </button>
+        }
+      />
 
-      <div inert={drawerOpen && !wide} className="flex min-h-0 flex-1 flex-col gap-3 p-3">
+      <div inert={drawerOpen && !wide} className="flex min-h-0 flex-1 flex-col gap-3 px-3 pb-3">
         {readError && (
           <p role="alert" className="rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-2 text-sm text-red-300">
             {readError}

@@ -1,17 +1,17 @@
-// The board header's relay chip (laptop-relay design.md decision 8): "relay
+// The shell header's relay chip (laptop-relay design.md decision 8): "relay
 // online", "relay offline since …", or "relay never checked in", then the
 // open action count when there is one ("· 2 pending"), with the relay's
 // name, version, last check-in, the counts, and what this server lacks in
 // its tooltip. It shows only when it matters: the server lacks `bd` or
 // `herdr`, or actions are open. On phones the words give way to the dot,
 // but the count stays. A status chip, not a control, like the hangar chip
-// beside it (HangarStatusPill.tsx), which it mirrors; it reads through
-// useRelayStatus, and disappears while reads fail. The shell header polls
+// beside it (HangarStatusPill.tsx), which it mirrors; it draws what
+// useRelayStatus read, and disappears while reads fail. The shell header polls
 // once and draws `RelayStatusChip`, `compact` where its row is tight, as it
 // does the hangar chip.
 
 import { relayPillHidden, relayPillLabel, relayPillPending, relayPillTitle, type RelayStatusView } from "../lib/relayStatus.js";
-import { useRelayStatus, type PolledRelayStatus } from "../lib/useRelayStatus.js";
+import type { PolledRelayStatus } from "../lib/useRelayStatus.js";
 
 /** Filled = online, ring = offline, dashed ring = never: the shape carries the state, not only the colour. */
 function RelayLight({ status }: { status: RelayStatusView["status"] }) {
@@ -22,10 +22,6 @@ function RelayLight({ status }: { status: RelayStatusView["status"] }) {
         ? "border-[1.5px] border-red-400"
         : "border-[1.5px] border-dashed border-fg-muted";
   return <span aria-hidden="true" data-relay={status} className={`inline-block size-2 shrink-0 rounded-full ${cls}`} />;
-}
-
-export function RelayStatusPill() {
-  return <RelayStatusChip polled={useRelayStatus()} />;
 }
 
 /** Whether the chip would show the relay offline: what a closed menu holding it flags. */

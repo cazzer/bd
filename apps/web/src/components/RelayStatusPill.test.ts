@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 //
-// The board header's relay chip (laptop-relay tasks.md 1.7): it words the
+// The shell header's relay chip (useRelayStatus feeding RelayStatusChip) (laptop-relay tasks.md 1.7): it words the
 // status the server answers with the pending count beside it, shows only
 // while the server lacks a binary or actions are open, polls every 30 s
 // only while the tab is visible, and disappears while reads fail.
@@ -9,13 +9,18 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { RelayStatusView } from "../lib/relayStatus.js";
-import { RELAY_STATUS_POLL_MS } from "../lib/useRelayStatus.js";
-import { RelayStatusPill } from "./RelayStatusPill.js";
+import { RELAY_STATUS_POLL_MS, useRelayStatus } from "../lib/useRelayStatus.js";
+import { RelayStatusChip } from "./RelayStatusPill.js";
 
 const trpcMock = vi.hoisted(() => ({ relayStatus: { query: vi.fn() } }));
 vi.mock("../trpc.js", () => ({ trpc: trpcMock }));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+/** The shell header's wiring: one poll feeding the chip. */
+function RelayStatusPill({ compact = false }: { compact?: boolean }) {
+  return createElement(RelayStatusChip, { polled: useRelayStatus(), compact });
+}
 
 let container: HTMLDivElement;
 let root: Root;
@@ -53,7 +58,7 @@ async function advance(ms: number): Promise<void> {
 
 const chip = (): HTMLElement | null => container.querySelector('[role="status"]');
 
-describe("RelayStatusPill", () => {
+describe("RelayStatusChip", () => {
   test("shows the status and pending count as a status chip, with the details in its title", async () => {
     trpcMock.relayStatus.query.mockResolvedValue(ONLINE);
     act(() => root.render(createElement(RelayStatusPill)));
@@ -114,5 +119,15 @@ describe("RelayStatusPill", () => {
 
     await advance(RELAY_STATUS_POLL_MS);
     expect(chip()?.textContent).toBe("relay online · 3 pending");
+  });
+
+  test("compact: the dot and the pending number, the words kept for screen readers", async () => {
+    trpcMock.relayStatus.query.mockResolvedValue(ONLINE);
+    act(() => root.render(createElement(RelayStatusPill, { compact: true })));
+    await settle();
+    expect(container.querySelector("[data-relay-pending]")?.getAttribute("aria-hidden")).toBe("true");
+    expect(container.querySelector("[data-relay-pending]")?.textContent).toBe("3");
+    expect(chip()?.textContent).toContain("relay online");
+    expect(chip()?.textContent).toContain("3 pending");
   });
 });

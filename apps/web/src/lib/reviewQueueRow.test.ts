@@ -5,7 +5,9 @@
 import { describe, expect, it } from "vitest";
 import {
   countText,
+  emptyQueueText,
   focusReturnTarget,
+  inboxLinkText,
   formatAge,
   formatImageCount,
   liveText,
@@ -217,5 +219,21 @@ describe("popoverPlacement", () => {
     expect(placed.right).toBe(740);
     expect(1440 - placed.right - placed.width).toBe(300);
     expect(popoverPlacement({ bottom: 90, right: 300 }, 1440).right).toBe(1440 - 12 - 400);
+  });
+});
+
+describe("the popover's inbox words (shared-nav-header review fixes)", () => {
+  it("names the inbox count on the link only when there is one", () => {
+    expect(inboxLinkText(3)).toBe("Go to inbox · 3 need you");
+    expect(inboxLinkText(0)).toBe("Go to inbox");
+    expect(inboxLinkText(null)).toBe("Go to inbox");
+  });
+
+  it("says what waits in the inbox when no review does", () => {
+    expect(emptyQueueText(false, 3)).toBe("Reading the queue…");
+    expect(emptyQueueText(true, null)).toBe("No reviews waiting");
+    expect(emptyQueueText(true, 0)).toBe("No reviews waiting");
+    expect(emptyQueueText(true, 1)).toBe("No reviews waiting — 1 inbox item needs you");
+    expect(emptyQueueText(true, 3)).toBe("No reviews waiting — 3 inbox items need you");
   });
 });

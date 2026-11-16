@@ -116,6 +116,18 @@ export function pillLabel(total: number, loaded: boolean, live: LiveState, inbox
   return parts.join(", ");
 }
 
+/** The popover's "Go to inbox" link text: with the inbox count when there is one ("Go to inbox · 3 need you"). */
+export function inboxLinkText(inbox: number | null): string {
+  return inbox !== null && inbox > 0 ? `Go to inbox · ${inbox} need you` : "Go to inbox";
+}
+
+/** The popover's empty state: no reviews, and the inbox items waiting when the count is known and above 0. */
+export function emptyQueueText(loaded: boolean, inbox: number | null): string {
+  if (!loaded) return "Reading the queue…";
+  if (inbox === null || inbox <= 0) return "No reviews waiting";
+  return `No reviews waiting — ${inboxCountLabel(inbox)}`;
+}
+
 /** The order line under the popover's header: "Oldest first", or "Oldest 100 of 120" when the read was cut short. */
 export function orderNote(shown: number, total: number, truncated: boolean): string {
   if (!truncated || total <= shown) return "Oldest first";

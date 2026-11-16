@@ -287,6 +287,14 @@ export function InboxView({ item: selectedKey, source }: { item: string | null; 
     [rows, go],
   );
 
+  // A reload after the reader changed something (a decision, a release, a
+  // session opened, a card that moved under them, a work link removed): the
+  // header's inbox count is told at once rather than at its next poll.
+  const reloadChanged = useCallback(async () => {
+    await load();
+    inboxChanged();
+  }, [load]);
+
   const decide = useCallback(
     async (item: Item, decision: Decision, message = "", option?: string) => {
       const result = await trpc.inboxDecision.mutate({ id: item.id, decision, message, ...(option === undefined ? {} : { option }) });
@@ -295,29 +303,26 @@ export function InboxView({ item: selectedKey, source }: { item: string | null; 
         setFresh((prev) => [...prev.filter((f) => f.itemId !== item.id), { actionId, itemId: item.id, pane: item.pane }]);
       }
       if (item.parentId === null) moveOnFrom(item.id);
-      await load();
-      inboxChanged();
+      await reloadChanged();
     },
-    [moveOnFrom, load],
+    [moveOnFrom, reloadChanged],
   );
 
   const release = useCallback(
     async (item: Item) => {
       await trpc.inboxRelease.mutate({ id: item.id });
-      await load();
-      inboxChanged();
+      await reloadChanged();
     },
-    [load],
+    [reloadChanged],
   );
 
   const openSession = useCallback(
     async (item: Item): Promise<SessionLinkResult> => {
       const r = await trpc.inboxOpenSession.mutate({ id: item.id });
-      await load();
-      inboxChanged();
+      await reloadChanged();
       return { ok: true, tab: r.tab };
     },
-    [load],
+    [reloadChanged],
   );
 
   const message = useRef<HTMLTextAreaElement | null>(null);
@@ -357,6 +362,7 @@ export function InboxView({ item: selectedKey, source }: { item: string | null; 
       <div className="border-b border-hairline">
         <ViewToolbar
           title="Inbox"
+          titleHidden="below-sm"
           actions={
             <p className="hidden lg:block">
               <kbd className="rounded border border-hairline px-1">j</kbd>/<kbd className="rounded border border-hairline px-1">k</kbd> move ·{" "}
@@ -365,14 +371,15 @@ export function InboxView({ item: selectedKey, source }: { item: string | null; 
             </p>
           }
         >
-          <nav aria-label="Inbox tabs" className="flex flex-wrap gap-1">
+          {/* One row: below `sm` it scrolls sideways rather than wrapping (the Menu button names the inbox there, so the title is sr-only). */}
+          <nav aria-label="Inbox tabs" className="flex min-w-0 gap-1 overflow-x-auto p-0.5 max-sm:flex-1">
             {TABS.map((t) => (
               <button
                 key={t.key}
                 type="button"
                 onClick={() => pickTab(t.key)}
                 aria-pressed={tab === t.key}
-                className={`rounded-lg px-3 py-1 text-xs font-medium focus:outline-none focus:ring-2 focus:ring-accent ${tab === t.key ? "bg-surface-strong text-fg" : "text-fg-muted hover:text-fg"}`}
+                className={`shrink-0 rounded-lg px-3 py-1 text-xs font-medium whitespace-nowrap focus:outline-none focus:ring-2 focus:ring-accent ${tab === t.key ? "bg-surface-strong text-fg" : "text-fg-muted hover:text-fg"}`}
               >
                 {t.label} <span className="ml-1 tabular-nums text-fg-muted">{counts[t.key]}</span>
               </button>
@@ -451,7 +458,7 @@ export function InboxView({ item: selectedKey, source }: { item: string | null; 
                 onRelease={release}
                 onSelect={(id) => go(id)}
                 onOpenSession={openSession}
-                onReload={load}
+                onReload={reloadChanged}
                 herdrMissing={herdrMissing}
                 relay={promptOf(selectedItem.id)}
               />

@@ -4,13 +4,16 @@
 //
 // - the beads project registry (`beadsProjects`), read once on mount. A
 //   failed read is retried when the reader next focuses the switcher
-//   (`retryRegistry`), never on a timer;
+//   (`retryRegistry`), never on a timer. The board and the roadmap read the
+//   registry themselves on every live read (for each project's `lastIngest`
+//   error) and hand each answer here (`reportRegistry`), so a project
+//   registered while one of them is open reaches the switcher at once, at
+//   no cost of its own;
 // - the saved view the address names (feed, code, timeline, or a board's
 //   `view`), read by id: its title names the collapsed Menu, and a board
 //   view's own projects are what the header's switcher offers there.
 //
-// Only the header reads this; the board and the roadmap still read the
-// registry themselves for their per-project ingest errors.
+// Only the header reads it.
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { filterProjects } from "../lib/boardRow.js";
@@ -21,9 +24,15 @@ import { trpc } from "../trpc.js";
 export interface ShellProjectsValue extends ShellProjects {
   /** Read the registry again; a no-op unless the last read failed. */
   retryRegistry: () => void;
+  /** A registry answer a view read for itself (the board's, the roadmap's): the shell takes it as its own. */
+  reportRegistry: (keys: readonly string[]) => void;
 }
 
-const ShellProjectsContext = createContext<ShellProjectsValue>({ registry: null, registryFailed: false, view: null, retryRegistry: () => {} });
+const ShellProjectsContext = createContext<ShellProjectsValue>({ registry: null, registryFailed: false, view: null, retryRegistry: () => {}, reportRegistry: () => {} });
+
+function sameKeys(a: readonly string[] | null, b: readonly string[]): boolean {
+  return a !== null && a.length === b.length && a.every((k, i) => k === b[i]);
+}
 
 export function useShellProjects(): ShellProjectsValue {
   return useContext(ShellProjectsContext);
@@ -87,6 +96,11 @@ export function ShellProjectsProvider({ viewId, children }: ShellProjectsProvide
     };
   }, [viewId]);
 
-  const value = useMemo<ShellProjectsValue>(() => ({ registry, registryFailed, view, retryRegistry }), [registry, registryFailed, view, retryRegistry]);
+  const reportRegistry = useCallback((keys: readonly string[]) => {
+    setRegistry((prev) => (sameKeys(prev, keys) ? prev : [...keys]));
+    setRegistryFailed(false);
+  }, []);
+
+  const value = useMemo<ShellProjectsValue>(() => ({ registry, registryFailed, view, retryRegistry, reportRegistry }), [registry, registryFailed, view, retryRegistry, reportRegistry]);
   return <ShellProjectsContext.Provider value={value}>{children}</ShellProjectsContext.Provider>;
 }

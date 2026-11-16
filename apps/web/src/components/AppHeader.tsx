@@ -24,7 +24,8 @@
 // Size. The header is a normal-flow bar `--header-h` tall (index.css) on
 // every view; it never wraps. Its contents follow four width tiers, chosen
 // in script (`headerTier`) so each control is mounted once:
-// - wide (80rem up): everything inline, search as a box, status pills and
+// - wide (80rem up): everything inline, search as a box (on the graph, the
+//   mid tier's magnifier: the graph's floating bar is its box), status pills and
 //   the review pill worded — unless worded they would be clipped, when they
 //   go compact until the bar is wider than it was then (`useClipFallback`);
 // - mid (56rem up): nav and Views inline; search behind a magnifier button
@@ -36,6 +37,10 @@
 // - phone: the same Menu, which also holds the status pills — the Menu
 //   button then carries a warning dot while hangar or the relay shows
 //   offline, so status is never hidden behind a closed disclosure unflagged.
+//   The switcher sizes to its content there and the Menu button takes the
+//   rest of the row, so the current place's name is cut only when it must be.
+// Below the wide tier the search view puts its own box in its toolbar
+// (SearchView.tsx), so /search always shows an editable query.
 // Within a row the search box gives up width first, then the status pills
 // are clipped, so the review control at the end is never pushed out. On
 // wide and mid, when even the compact status pills are clipped, the review
@@ -170,6 +175,9 @@ export function AppHeader({ route }: AppHeaderProps) {
   }
   const searchText = route.view === "search" ? (route.q ?? "") : "";
   const collapsed = tier === "narrow" || tier === "phone";
+  // The graph's own floating bar is its search box, so there the wide tier's box is the mid tier's magnifier too.
+  const searchBox = tier === "wide" && route.view !== "graph";
+  const searchButton = tier === "mid" || (tier === "wide" && route.view === "graph");
   const barRef = useRef<HTMLDivElement>(null);
   const chipsRef = useRef<HTMLDivElement>(null);
   const barWidth = useBarWidth(barRef);
@@ -209,12 +217,12 @@ export function AppHeader({ route }: AppHeaderProps) {
           </nav>
         )}
         <div className="ml-auto flex min-w-0 items-center justify-end gap-2 text-xs text-fg-muted">
-          {tier === "wide" && (
+          {searchBox && (
             <div className="flex min-w-0 shrink-[4] [&_input]:min-w-24">
               <HeaderSearch initialText={searchText} onSubmit={submitSearch} />
             </div>
           )}
-          {tier === "mid" && <SearchPopover initialText={searchText} onSearch={submitSearch} />}
+          {searchButton && <SearchPopover initialText={searchText} onSearch={submitSearch} />}
           {tier !== "phone" && (
             <div ref={chipsRef} className="flex min-w-0 items-center gap-2 overflow-hidden">
               <HangarStatusChip polled={hangar} compact={compact} />
@@ -318,9 +326,9 @@ function HeaderMenu({ links, projects, currentViewId, place, unfilteredLine, sea
         aria-controls={panelId}
         onClick={toggle}
         onKeyDown={onButtonKeyDown}
-        className={`${SMALL_BUTTON} relative min-w-0 gap-1 px-2.5 text-xs pointer-coarse:text-sm`}
+        className={`${SMALL_BUTTON} relative min-w-0 gap-1 px-2.5 text-xs max-sm:flex-1 max-sm:justify-between pointer-coarse:text-sm`}
       >
-        <span className="max-w-[7rem] min-w-0 truncate sm:max-w-[10rem]">{place}</span>
+        <span className="min-w-0 truncate sm:max-w-[10rem]">{place}</span>
         <svg aria-hidden="true" viewBox="0 0 12 12" className={`h-3 w-3 shrink-0 text-fg-muted motion-safe:transition-transform ${open ? "rotate-180" : ""}`}>
           <path d="M3 4.5 6 7.5 9 4.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
         </svg>

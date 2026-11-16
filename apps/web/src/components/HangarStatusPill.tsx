@@ -1,4 +1,4 @@
-// The board header's hangar chip (hangar-queue design decision 7): "hangar
+// The shell header's hangar chip (hangar-queue design decision 7): "hangar
 // online", "hangar offline since …", or "hangar never checked in", then the
 // open session counts when there are any ("· 1 queued, 1 running"), with
 // the hangar's name, version, last check-in, its latest capacity (free slots
@@ -79,10 +79,6 @@ function HangarLight({ status }: { status: HangarStatusView["status"] }) {
         ? "border-[1.5px] border-red-400"
         : "border-[1.5px] border-dashed border-fg-muted";
   return <span aria-hidden="true" data-hangar={status} className={`inline-block size-2 shrink-0 rounded-full ${cls}`} />;
-}
-
-export function HangarStatusPill() {
-  return <HangarStatusChip polled={useHangarStatus()} />;
 }
 
 /** Whether the chip would show hangar offline: what a closed menu holding it flags. */

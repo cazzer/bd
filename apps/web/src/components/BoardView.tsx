@@ -26,7 +26,9 @@
 // The board still reads the registry itself, on every board read, rather
 // than taking the shell's (ShellProjects.tsx): its offered projects must be
 // those the board read was made against, and each project's `lastIngest`
-// error — the per-project error list — must be as current as the cards.
+// error — the per-project error list — must be as current as the cards. It
+// hands each answer to the shell (`reportRegistry`), so the header's
+// switcher picks up a newly registered project with the board.
 //
 // The drawer (board-visual-reviews, task 4.4): activating a card pushes its
 // external id as `item`; closing pushes the address without it and returns
@@ -83,7 +85,8 @@ import { trpc } from "../trpc.js";
 import { ReviewDrawer, useWideDrawer } from "./ReviewDrawer.js";
 import { LaneMilestone } from "./LaneMilestone.js";
 import { storeDraft, useShellDrawer } from "./ReviewQueue.js";
-import { ViewToolbar } from "./ViewToolbar.js";
+import { useShellProjects } from "./ShellProjects.js";
+import { TOOLBAR_BUTTON, ViewToolbar } from "./ViewToolbar.js";
 
 type ViewState =
   | { kind: "loading" }
@@ -140,6 +143,7 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
   // Unsent drawer messages by item, shared with the shell's queue drawer, so
   // closing a drawer, switching cards, or switching drawers never drops one.
   const { open: shellDrawerOpen, drafts } = useShellDrawer();
+  const { reportRegistry } = useShellProjects();
   const projectsRef = useRef(projects);
   const appliedKeyRef = useRef(projects.join("\u0000"));
   const readRef = useRef<(() => void) | null>(null);
@@ -198,7 +202,10 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
     async function readOnce() {
       const ids = [...pending];
       const address = projectsRef.current;
-      const registryRead = trpc.beadsProjects.query().then((reg) => reg.projects);
+      const registryRead = trpc.beadsProjects.query().then((reg) => {
+        if (!disposed) reportRegistry(reg.projects.map((p) => p.key));
+        return reg.projects;
+      });
       try {
         let registry: BeadsProjectsAnswer;
         let board: BoardData["board"];
@@ -379,16 +386,9 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
         title={heading ?? "Board"}
         titleHidden={heading === null}
         actions={
-          view && (
-            <button
-              type="button"
-              onClick={() => void refresh()}
-              disabled={refreshing}
-              className="min-h-11 rounded-lg border border-hairline px-3 py-1 font-medium sm:min-h-7 text-fg hover:bg-surface-strong focus:outline-none focus:ring-2 focus:ring-accent disabled:opacity-60"
-            >
-              {refreshing ? "Refreshing…" : "Refresh"}
-            </button>
-          )
+          <button type="button" onClick={() => void refresh()} disabled={refreshing || view === null} className={TOOLBAR_BUTTON}>
+            {refreshing ? "Refreshing…" : "Refresh"}
+          </button>
         }
       />
 

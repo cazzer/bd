@@ -349,11 +349,19 @@ describe("AppHeader width tiers", () => {
 
   test("wide: nav inline, a search box, worded status pills, the full review pill", () => {
     env.width = 1300;
-    render("/graph");
+    render("/board");
     expect(container.querySelector('nav[aria-label="Main"]')?.closest("[hidden]")).toBeNull();
     expect(searchBox()).not.toBeNull();
+    expect(container.querySelector('button[aria-label="Search everything"]')).toBeNull();
     expect(hangarWords()?.className).toBe("sr-only sm:not-sr-only");
     expect(reviewPill()).toEqual({ compact: "false", bare: "false" });
+  });
+
+  test("wide on the graph: search is the magnifier, so the graph's own bar is the only box", () => {
+    env.width = 1300;
+    render("/graph");
+    expect(searchBox()).toBeNull();
+    expect(container.querySelector('button[aria-label="Search everything"]')).not.toBeNull();
   });
 
   test("wide: clipped status words go compact first, and the review pill keeps its count words", () => {
@@ -458,8 +466,12 @@ describe("AppHeader not-filtered state", () => {
   test("a visible tag in the switcher's box, and on a phone the Menu's first line", () => {
     render("/inbox");
     expect(container.querySelector("[data-unfiltered-marker]")?.textContent).toBe("unfiltered");
+    // The phone's mark (shown below `sm` only) is a dot; the project's text stays full colour there.
+    expect(container.querySelector("[data-unfiltered-dot]")).not.toBeNull();
+    expect(container.querySelector("header select")?.className).toMatch(/(^| )text-fg( |$)/);
     render("/board");
     expect(container.querySelector("[data-unfiltered-marker]")).toBeNull();
+    expect(container.querySelector("[data-unfiltered-dot]")).toBeNull();
     env.width = 390;
     act(() => root.unmount());
     root = createRoot(container);

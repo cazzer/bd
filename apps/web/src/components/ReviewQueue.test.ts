@@ -165,9 +165,11 @@ describe("the review control's counts", () => {
     expect(shownNumbers).toEqual(["2", "3"]);
   });
 
-  test("words the review count unless bare, and carries a tooltip only without the state word", () => {
+  test("words the review count unless bare, and always carries its name as a tooltip", () => {
     shell(queueOf([review(1), review(2)]), GRAPH, createElement(ReviewQueuePill, { inboxCount: 3 }));
-    expect(pills()[0]!.hasAttribute("title")).toBe(false);
+    expect(pills()[0]!.getAttribute("title")).toBe("Live, 2 reviews pending, 3 inbox items need you");
+    // The name is not repeated in the spoken text: the title is the tooltip, the sr-only pieces the name.
+    expect(spokenText(pills()[0]!)).toBe("Live, 2 reviews pending, 3 inbox items need you");
     expect(shownText(pills()[0]!)).toEqual(["2 reviews", "3"]);
     shell(queueOf([review(1), review(2)]), GRAPH, createElement(ReviewQueuePill, { compact: true, inboxCount: 3 }));
     expect(pills()[0]!.getAttribute("title")).toBe("Live, 2 reviews pending, 3 inbox items need you");
@@ -238,6 +240,23 @@ describe("Go to inbox", () => {
     shell(queueOf([]), { view: "feed", viewId: "v1", projects: ["skyos"] }, createElement(ReviewQueuePill));
     click(pills()[0]!);
     expect(linkIn(popover()!, "Go to inbox").getAttribute("href")).toBe("/inbox?project=skyos");
+  });
+
+  test("names the inbox count when there is one", () => {
+    shell(queueOf([review(1)]), GRAPH, createElement(ReviewQueuePill, { inboxRoute: TIDES_INBOX, inboxCount: 3 }));
+    click(pills()[0]!);
+    expect(linkIn(popover()!, "Go to inbox · 3 need you").getAttribute("href")).toBe("/inbox?project=tides");
+  });
+
+  test("with no review waiting, the empty state says what the inbox holds and carries Go to inbox", () => {
+    shell(queueOf([]), GRAPH, createElement(ReviewQueuePill, { inboxRoute: TIDES_INBOX, inboxCount: 3 }));
+    click(pills()[0]!);
+    const dialog = popover()!;
+    expect(dialog.textContent).toContain("No reviews waiting — 3 inbox items need you");
+    expect([...dialog.querySelectorAll("a")].map((a) => a.textContent)).toEqual(["Go to inbox", "Open the board"]);
+    shell(queueOf([]), GRAPH, createElement(ReviewQueuePill, { inboxRoute: TIDES_INBOX, inboxCount: 0 }));
+    expect(popover()!.textContent).toContain("No reviews waiting");
+    expect([...popover()!.querySelectorAll("a")].map((a) => a.textContent)).toEqual(["Open the board", "Go to inbox"]);
   });
 
   test("is not offered on the inbox itself", () => {

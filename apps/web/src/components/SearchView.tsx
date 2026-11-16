@@ -41,6 +41,7 @@ import {
   openInGraphLink,
   resultRoute,
   rowStatus,
+  searchRouteFor,
   toggleProject,
   toggleType,
   visibleFacetOptions,
@@ -52,6 +53,8 @@ import {
 import { parseSnippetSegments } from "../lib/snippet.js";
 import { useMediaQuery } from "../lib/useMediaQuery.js";
 import { trpc } from "../trpc.js";
+import { HEADER_WIDE_QUERY } from "./AppHeader.js";
+import { HeaderSearch } from "./HeaderSearch.js";
 import { useShellDrawer } from "./ReviewQueue.js";
 import { ViewToolbar } from "./ViewToolbar.js";
 
@@ -131,11 +134,13 @@ export function SearchView({ route }: { route: SearchRoute }) {
   // Pads itself clear of the review queue's drawer from `sm` up, as the feed does (ReviewQueue.tsx).
   const shellDrawerOpen = useShellDrawer().open;
   const wide = useMediaQuery("(min-width: 640px)");
+  // The header draws a search box only at its wide tier; below it the query is edited here.
+  const headerBox = useMediaQuery(HEADER_WIDE_QUERY);
   const [state, setState] = useState<SearchState>({ phase: { kind: "loading" }, shown: null, loadingMore: false, moreError: null });
   const [retry, setRetry] = useState(0);
   const key = formatRoute(route);
 
-  const mainRef = useRef<HTMLDivElement>(null);
+  const scrollerRef = useRef<HTMLDivElement>(null);
   const scrollTopRef = useRef(0);
   const pendingScroll = useRef<{ key: string; top: number } | null>(null);
   const stateRef = useRef(state);
@@ -191,8 +196,8 @@ export function SearchView({ route }: { route: SearchRoute }) {
   // A cached answer returns to where it was scrolled; a fresh one starts at the top once it lands.
   useLayoutEffect(() => {
     const pending = pendingScroll.current;
-    if (pending !== null && state.shown?.key === pending.key && mainRef.current) {
-      mainRef.current.scrollTop = pending.top;
+    if (pending !== null && state.shown?.key === pending.key && scrollerRef.current) {
+      scrollerRef.current.scrollTop = pending.top;
       scrollTopRef.current = pending.top;
       pendingScroll.current = null;
     }
@@ -258,7 +263,7 @@ export function SearchView({ route }: { route: SearchRoute }) {
   return (
     <main className={`flex h-full w-screen flex-col overflow-hidden ${shellDrawerOpen ? "sm:pr-[492px]" : ""}`}>
       <div aria-hidden="true" className="ambience pointer-events-none fixed inset-0 -z-10" />
-      {/* The search box is the shell header's, which on this view edits this address's text. */}
+      {/* At the header's wide tier its search box edits this address's text; below it (a magnifier or the Menu there), the box is here, so the page always shows its query. */}
       <ViewToolbar
         title={heading}
         column="max-w-5xl"
@@ -274,10 +279,16 @@ export function SearchView({ route }: { route: SearchRoute }) {
             </a>
           )
         }
-      />
+      >
+        {!headerBox && (
+          <div className="w-72 min-w-0 max-sm:basis-full">
+            <HeaderSearch initialText={route.q ?? ""} fill onSubmit={(text) => navigate({ ...route, q: searchRouteFor(text).q }, "push")} />
+          </div>
+        )}
+      </ViewToolbar>
       {/* `body` is `overflow: hidden` (index.css, for the canvas), so this element is the page's own scroll container. */}
       <div
-        ref={mainRef}
+        ref={scrollerRef}
         onScroll={(e) => {
           scrollTopRef.current = e.currentTarget.scrollTop;
         }}

@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 //
 // What the shell knows about projects (shared-nav-header tasks.md 1.2): the
-// registry read once, a failed read retried only when asked, and the saved
+// registry read once, a failed read retried only when asked, a view's own
+// registry read taken over (board, roadmap), and the saved
 // view the address names — a board view's projects, a view of another
 // renderer, and an id that is no view.
 
@@ -56,6 +57,19 @@ afterEach(() => {
 });
 
 describe("ShellProjectsProvider", () => {
+  test("takes a registry a view read for itself, without reading again", async () => {
+    trpcMock.beadsProjects.query.mockResolvedValue({ projects: [{ key: "tides" }] });
+    render(null);
+    await settle();
+    expect(seen!.registry).toEqual(["tides"]);
+    const first = seen!.registry;
+    act(() => seen!.reportRegistry(["tides"]));
+    expect(seen!.registry).toBe(first);
+    act(() => seen!.reportRegistry(["tides", "navg"]));
+    expect(seen!.registry).toEqual(["tides", "navg"]);
+    expect(trpcMock.beadsProjects.query).toHaveBeenCalledTimes(1);
+  });
+
   test("reads the registry once, and a failed read again only when asked", async () => {
     trpcMock.beadsProjects.query.mockRejectedValueOnce(new Error("down"));
     render(null);

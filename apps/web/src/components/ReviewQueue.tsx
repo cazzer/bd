@@ -1,10 +1,9 @@
 // The review queue in the shell (review-queue, design.md decisions 3-4,
 // prototype A): the queue state App.tsx reads once, outside its view
 // switch, shared through `ReviewQueueContext`; the review control
-// (`ReviewQueuePill`) the shell header draws, and which some views still
-// place in their own headers until they adopt the shell's (shared-nav-header
-// task group 3); the popover anchored under the pill that opened it; and the
-// drawer a pick opens over the current view.
+// (`ReviewQueuePill`) the shell header draws (AppHeader.tsx, on every view);
+// the popover anchored under the pill that opened it; and the drawer a pick
+// opens over the current view.
 //
 // Two contexts, so a queue read re-renders only what shows the queue. The
 // queue context (queue, live state, popover actions) is read by the pills
@@ -26,8 +25,8 @@
 // lib/reviewQueueRow.ts `pillLabel`); the visible numbers are hidden from
 // assistive technology. Compact drops the state word; bare also drops the
 // divider and the word "reviews", leaving numbers (the header picks which,
-// AppHeader.tsx). Without the state word the name is also the tooltip,
-// there only, so a worded pill is not announced twice. The state word sits
+// AppHeader.tsx). The name is also the tooltip, always, so the inbox count
+// is legible on hover however bare the pill is. The state word sits
 // in a box wide enough for "Connecting…", so a flip never shifts the
 // header. A null inbox count (not read yet, or the read failed) shows
 // no inbox count, and the pill works as before. Every pill registers with
@@ -60,7 +59,10 @@
 // 6) sits in its header, disabled while the queue is empty. Its footer
 // links to the board (except on the board) and to the inbox's Needs me
 // (except on the inbox): "Go to inbox" opens `/inbox` — Needs me is the
-// inbox's first tab. Both carry the routes the anchoring pill was last
+// inbox's first tab — and names the inbox count when there is one ("Go to
+// inbox · 3 need you"). With no review waiting but inbox items that are,
+// the empty state says so and holds "Go to inbox" as its action instead of
+// the footer. Both links carry the routes the anchoring pill was last
 // rendered with (the header passes its links' projects, kept in step while
 // the popover is open), else the address's projects, and close the popover.
 //
@@ -112,6 +114,8 @@ import {
   liveText,
   moveActive,
   orderNote,
+  emptyQueueText,
+  inboxLinkText,
   pillLabel,
   popoverPlacement,
   reconcileActive,
@@ -146,16 +150,17 @@ interface ReviewQueueContextValue {
   syncPill: (pill: PillTarget) => void;
 }
 
-/** A pill as the popover sees it: where to anchor and return focus, and where its footer links go (null: the address's projects). */
+/** A pill as the popover sees it: where to anchor and return focus, where its footer links go (null: the address's projects), and the inbox count it shows. */
 interface PillTarget {
   el: HTMLElement;
   inboxRoute: InboxRoute | null;
   boardRoute: BoardRoute | null;
+  inboxCount: number | null;
 }
 
 /** The pill nothing has rendered links for yet: the address's projects. */
 function bareTarget(el: HTMLElement): PillTarget {
-  return { el, inboxRoute: null, boardRoute: null };
+  return { el, inboxRoute: null, boardRoute: null, inboxCount: null };
 }
 
 function routeKey(route: Route | null): string | null {
@@ -163,7 +168,7 @@ function routeKey(route: Route | null): string | null {
 }
 
 function sameLinks(a: PillTarget, b: PillTarget): boolean {
-  return routeKey(a.inboxRoute) === routeKey(b.inboxRoute) && routeKey(a.boardRoute) === routeKey(b.boardRoute);
+  return routeKey(a.inboxRoute) === routeKey(b.inboxRoute) && routeKey(a.boardRoute) === routeKey(b.boardRoute) && a.inboxCount === b.inboxCount;
 }
 
 const ReviewQueueContext = createContext<ReviewQueueContextValue | null>(null);
@@ -358,6 +363,7 @@ export function ReviewQueueProvider({ queue, live, route, children }: ReviewQueu
               initialFocusId={shownPopover.focusId}
               boardRoute={route.view === "board" ? null : (shownPopover.pill?.boardRoute ?? withAddressProjects(BOARD_HOME))}
               inboxRoute={route.view === "inbox" ? null : (shownPopover.pill?.inboxRoute ?? withAddressProjects(INBOX_HOME))}
+              inboxCount={shownPopover.pill?.inboxCount ?? null}
               focusRef={popoverFocus}
               onPick={openReview}
               onClose={closePopover}
@@ -412,8 +418,6 @@ function useQueueAnnouncement(queue: ReviewQueueState, live: LiveState): string 
 }
 
 export interface ReviewQueuePillProps {
-  /** `inline` sits in a header bar; `floating` stands alone (the graph's right column) with its own surface. */
-  variant?: "inline" | "floating";
   /** Without the state word, at every width; it stays in the accessible name. */
   compact?: boolean;
   /** Numbers only: no state word, divider, or "reviews" (the header's narrow tiers, or when words don't fit). */
@@ -426,8 +430,8 @@ export interface ReviewQueuePillProps {
   boardRoute?: BoardRoute;
 }
 
-/** The review control: the shell header's, and the pill a view still places in its own header. */
-export function ReviewQueuePill({ variant = "inline", compact = false, bare = false, inboxCount = null, inboxRoute, boardRoute }: ReviewQueuePillProps) {
+/** The review control the shell header draws. */
+export function ReviewQueuePill({ compact = false, bare = false, inboxCount = null, inboxRoute, boardRoute }: ReviewQueuePillProps) {
   const { queue, live, popoverPill, togglePopover, openPopover, closePopover, focusPopover, registerPill, syncPill } = useReviewQueueContext();
   const [el, setEl] = useState<HTMLButtonElement | null>(null);
   const expanded = el !== null && popoverPill === el;
@@ -437,17 +441,17 @@ export function ReviewQueuePill({ variant = "inline", compact = false, bare = fa
     return registerPill(el);
   }, [el, registerPill]);
 
-  // While the popover is open here, its footer links follow this pill's routes.
+  // While the popover is open here, its footer links and inbox words follow this pill's.
   const inboxKey = routeKey(inboxRoute ?? null);
   const boardKey = routeKey(boardRoute ?? null);
   useLayoutEffect(() => {
-    if (expanded && el !== null) syncPill({ el, inboxRoute: inboxRoute ?? null, boardRoute: boardRoute ?? null });
+    if (expanded && el !== null) syncPill({ el, inboxRoute: inboxRoute ?? null, boardRoute: boardRoute ?? null, inboxCount });
     // The keys stand for the routes, which are fresh objects on every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [expanded, el, inboxKey, boardKey, syncPill]);
+  }, [expanded, el, inboxKey, boardKey, inboxCount, syncPill]);
 
   function target(): PillTarget | null {
-    return el === null ? null : { el, inboxRoute: inboxRoute ?? null, boardRoute: boardRoute ?? null };
+    return el === null ? null : { el, inboxRoute: inboxRoute ?? null, boardRoute: boardRoute ?? null, inboxCount };
   }
 
   function onKeyDown(e: KeyboardEvent<HTMLButtonElement>) {
@@ -465,7 +469,6 @@ export function ReviewQueuePill({ variant = "inline", compact = false, bare = fa
   const wordless = compact || bare;
   const zero = !queue.loaded || queue.total === 0;
   const inboxShown = inboxCount !== null && inboxCount > 0;
-  const surface = variant === "floating" ? "h-11 sm:h-8 bg-surface-strong backdrop-blur-lg shadow-[0_12px_40px_-12px_rgba(0,0,0,0.65)]" : "h-11 sm:h-7";
   const ring = expanded ? "border-accent/60 ring-2 ring-accent ring-offset-2 ring-offset-ground" : "border-hairline hover:bg-surface-strong";
   const spacing = bare ? "gap-1.5 pr-[5px] pl-2.5" : "gap-2 pr-[5px] pl-3";
 
@@ -473,7 +476,7 @@ export function ReviewQueuePill({ variant = "inline", compact = false, bare = fa
     <button
       ref={setEl}
       type="button"
-      title={wordless ? pillLabel(queue.total, queue.loaded, live, inboxCount) : undefined}
+      title={pillLabel(queue.total, queue.loaded, live, inboxCount)}
       aria-haspopup="dialog"
       aria-expanded={expanded}
       onClick={() => {
@@ -482,7 +485,7 @@ export function ReviewQueuePill({ variant = "inline", compact = false, bare = fa
       }}
       onKeyDown={onKeyDown}
       data-review-control=""
-      className={`inline-flex shrink-0 items-center rounded-full border text-xs whitespace-nowrap focus:outline-none focus-visible:ring-2 focus-visible:ring-accent ${spacing} ${surface} ${ring}`}
+      className={`inline-flex shrink-0 items-center rounded-full border text-xs whitespace-nowrap focus:outline-none focus-visible:ring-2 focus-visible:ring-accent ${spacing} h-11 sm:h-7 ${ring}`}
     >
       {/* Wide enough for "Connecting…" from `sm` up, so a state flip never moves the header's other controls. */}
       <span className={`inline-flex items-center gap-2 ${wordless ? "" : "sm:min-w-[5.25rem]"}`}>
@@ -561,6 +564,8 @@ interface QueuePopoverProps {
   boardRoute: BoardRoute | null;
   /** Where "Go to inbox" goes; null hides it (on the inbox itself). */
   inboxRoute: InboxRoute | null;
+  /** The inbox items needing the reader, as the anchoring pill shows them; null when not known. */
+  inboxCount: number | null;
   /** Set to this popover's "focus the active row" while it is mounted. */
   focusRef: { current: (() => void) | null };
   onPick: (review: QueueReview) => void;
@@ -587,11 +592,13 @@ const TABBABLE = "button:not([disabled]):not([tabindex='-1']), a[href]";
 
 const FOOTER_LINK = "inline-flex min-h-11 items-center rounded text-xs text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-accent sm:min-h-0";
 
-function QueuePopover({ anchor, anchorVersion, queue, live, initialFocusId, boardRoute, inboxRoute, focusRef, onPick, onClose, onReviewAll }: QueuePopoverProps) {
+function QueuePopover({ anchor, anchorVersion, queue, live, initialFocusId, boardRoute, inboxRoute, inboxCount, focusRef, onPick, onClose, onReviewAll }: QueuePopoverProps) {
   const titleId = useId();
   const rootRef = useRef<HTMLDivElement>(null);
   const rowRefs = useRef(new Map<string, HTMLButtonElement>());
   const reviews = queue.reviews;
+  /** No review waiting but inbox items are: the empty state carries "Go to inbox" instead of the footer. */
+  const inboxInEmpty = reviews.length === 0 && queue.loaded && inboxRoute !== null && inboxCount !== null && inboxCount > 0;
   const [active, setActive] = useState(() => Math.max(0, initialFocusId === null ? 0 : reviews.findIndex((r) => r.id === initialFocusId)));
   const activeId = useRef<string | null>(reviews[active]?.id ?? null);
   const focusInList = useRef(false);
@@ -758,7 +765,14 @@ function QueuePopover({ anchor, anchorVersion, queue, live, initialFocusId, boar
       )}
 
       {reviews.length === 0 ? (
-        <p className="px-4 py-7 text-center text-[13px] text-fg-muted">{queue.loaded ? "No reviews waiting" : "Reading the queue…"}</p>
+        <div className="px-4 py-7 text-center text-[13px] text-fg-muted">
+          <p>{emptyQueueText(queue.loaded, inboxCount)}</p>
+          {inboxInEmpty && (
+            <ShellLink route={inboxRoute} onNavigate={() => onClose(false)} className={`${FOOTER_LINK} mt-2 text-[13px]`}>
+              Go to inbox
+            </ShellLink>
+          )}
+        </div>
       ) : (
         <ul
           role="list"
@@ -803,16 +817,16 @@ function QueuePopover({ anchor, anchorVersion, queue, live, initialFocusId, boar
             <Kbd>Esc</Kbd> close
           </span>
         </span>
-        {(boardRoute !== null || inboxRoute !== null) && (
+        {(boardRoute !== null || (inboxRoute !== null && !inboxInEmpty)) && (
           <span className="ml-auto flex items-center gap-3">
             {boardRoute !== null && (
               <ShellLink route={boardRoute} onNavigate={() => onClose(false)} className={FOOTER_LINK}>
                 Open the board
               </ShellLink>
             )}
-            {inboxRoute !== null && (
+            {inboxRoute !== null && !inboxInEmpty && (
               <ShellLink route={inboxRoute} onNavigate={() => onClose(false)} className={FOOTER_LINK}>
-                Go to inbox
+                {inboxLinkText(inboxCount)}
               </ShellLink>
             )}
           </span>

@@ -45,8 +45,8 @@
 // selected node into view without collapsing what the person opened.
 //
 // The empty states — no view, not a view, node not in this view — each
-// keep the address with a way to the graph (code-view/spec.md, "The code
-// view is addressable"); `/code?view=abc` parses and `getNodes` rejects
+// keep the address, and the shell header's nav is the way to the graph
+// (code-view/spec.md, "The code view is addressable"); `/code?view=abc` parses and `getNodes` rejects
 // the id with BAD_REQUEST, read as "names no view" the way the feed reads
 // it. User copy never repeats a raw id: it is in the address bar.
 
@@ -72,8 +72,6 @@ type LookedUpNode = Awaited<ReturnType<typeof trpc.getNodes.query>>["nodes"][num
 /** Roots per `list` call — design.md decision 3. No "load more": the header says how many are shown. */
 const ROOT_PAGE_SIZE = 50;
 
-/** The bare graph — no search, nothing selected — which is where "Open the graph" goes. */
-const GRAPH_HOME: GraphRoute = { view: "graph", q: null, types: [], node: null, projects: [] };
 
 /** `forViewId` is the address the ready state was loaded for: a render can still hold the previous view's state after `viewId` changed, and anything that reads the store from it must wait for the reload. */
 type ViewState =
@@ -392,19 +390,16 @@ export function CodeView({ viewId, node }: { viewId: string | null; node: string
             ? "Loading…"
             : null;
     return (
-      <main className={`flex h-full w-screen items-center justify-center overflow-hidden ${shellDrawerOpen ? "sm:pr-[492px]" : ""}`}>
+      <main className={`flex h-full w-screen flex-col overflow-hidden ${shellDrawerOpen ? "sm:pr-[492px]" : ""}`}>
         <div aria-hidden="true" className="ambience pointer-events-none fixed inset-0 -z-10" />
-        <div className="glass w-96 p-6">
-          <h1 className="text-base font-semibold text-fg">Code</h1>
-          {copy !== null && <p className="mt-2 text-sm text-fg-muted">{copy}</p>}
+        <ViewToolbar title="Code" />
+        <div className="px-3 pb-3">
+          {copy !== null && <p className="glass p-4 text-sm text-fg-muted">{copy}</p>}
           {view.kind === "error" && (
-            <p role="alert" className="mt-2 rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+            <p role="alert" className="rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
               {view.message}
             </p>
           )}
-          <a href={formatRoute(withAddressProjects(GRAPH_HOME))} onClick={handleGraphLink(withAddressProjects(GRAPH_HOME))} className="mt-4 inline-block rounded text-sm text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-accent">
-            Open the graph
-          </a>
         </div>
       </main>
     );
