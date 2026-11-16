@@ -1,6 +1,7 @@
 // The header search box (search-results-view, design.md decision 7): one
-// compact input and a submit button, mounted beside `ReviewQueuePill` in
-// every view's header but the graph's, which keeps its own SearchBar.
+// compact input and a submit button, mounted by the shell header
+// (AppHeader.tsx) on every view; the graph also keeps its own SearchBar,
+// its entry point.
 // Submitting opens the results view for the text — whitespace-only opens
 // it with no text rather than doing nothing (search-results/spec.md,
 // "Every view offers search"). The typed text is local state seeded from
@@ -8,7 +9,11 @@
 // view, on back/forward) — but never while the box has focus, so a submit
 // from the results view keeps the caret where the person is typing rather
 // than remounting the input. The input has no `id`: GraphView's bar owns
-// `search-input`, and nothing needs to target this one.
+// `search-input`, and nothing needs to target this one. The submit button
+// reads "Go", so it never sits beside the shell header's Search link as a
+// second "Search" (shared-nav-header). `fill` stretches the box across its
+// container (the header's phone Menu); `autoFocus` focuses it on mount (the
+// header's search popover).
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { navigate } from "../lib/navigate.js";
@@ -19,9 +24,13 @@ export interface HeaderSearchProps {
   initialText?: string;
   /** Called with the submitted text instead of the default push to `/search?q=<text>` — the results view uses it to keep its filters. */
   onSubmit?: (text: string) => void;
+  /** Stretch across the container instead of the fixed box width. */
+  fill?: boolean;
+  /** Focus the box on mount. */
+  autoFocus?: boolean;
 }
 
-export function HeaderSearch({ initialText = "", onSubmit }: HeaderSearchProps) {
+export function HeaderSearch({ initialText = "", onSubmit, fill = false, autoFocus = false }: HeaderSearchProps) {
   const [text, setText] = useState(initialText);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -41,7 +50,7 @@ export function HeaderSearch({ initialText = "", onSubmit }: HeaderSearchProps) 
   }
 
   return (
-    <form role="search" onSubmit={handleSubmit} className="flex min-w-0 items-center gap-1.5">
+    <form role="search" onSubmit={handleSubmit} className={`flex min-w-0 items-center gap-1.5 ${fill ? "w-full" : ""}`}>
       <input
         ref={inputRef}
         type="search"
@@ -51,13 +60,14 @@ export function HeaderSearch({ initialText = "", onSubmit }: HeaderSearchProps) 
         onChange={(e) => setText(e.target.value)}
         placeholder="Search…"
         aria-label="Search everything"
-        className="min-h-11 w-36 min-w-0 rounded-lg border border-hairline bg-surface-strong px-2.5 py-1 text-base text-fg placeholder:text-fg-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent sm:min-h-0 sm:w-48 sm:text-xs"
+        autoFocus={autoFocus}
+        className={`min-h-11 min-w-0 ${fill ? "flex-1" : "w-36 sm:w-48"} rounded-lg border border-hairline bg-surface-strong px-2.5 py-1 text-base text-fg placeholder:text-fg-muted focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent sm:min-h-0 sm:text-xs`}
       />
       <button
         type="submit"
         className="min-h-11 shrink-0 rounded-lg border border-hairline px-2.5 py-1 text-xs font-medium text-fg hover:bg-surface-strong focus:outline-none focus:ring-2 focus:ring-accent sm:min-h-0"
       >
-        Search
+        Go
       </button>
     </form>
   );

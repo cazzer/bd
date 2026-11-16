@@ -35,19 +35,20 @@
 // error it is.
 //
 // User copy never repeats a raw id (url-addressable-views review): it is
-// in the address bar. The empty states keep the "Feed" heading and an
-// `<a href="/graph">` to the graph so a bookmark to a dead view still
-// reads as a page of this app with a way out.
+// in the address bar. The empty states keep the "Feed" heading, and the
+// shell header's nav is the way out of a bookmark to a dead view.
+//
+// The title and row count sit in the view's toolbar (ViewToolbar.tsx),
+// fixed under the shell header; the rows scroll beneath it.
 
 import { TRPCClientError } from "@trpc/client";
-import { useEffect, useState, type MouseEvent } from "react";
+import { useEffect, useState } from "react";
 import { extractLinks, pickRowFields } from "../lib/feedRow.js";
-import { navigate } from "../lib/navigate.js";
-import { formatRoute, type GraphRoute } from "../lib/route.js";
+import { addressProjects, navigate } from "../lib/navigate.js";
 import { viewFilterOf, type ViewFilter, type ViewNode } from "../lib/viewFilter.js";
 import { trpc } from "../trpc.js";
-import { HeaderSearch } from "./HeaderSearch.js";
-import { ReviewQueuePill, useShellDrawer } from "./ReviewQueue.js";
+import { useShellDrawer } from "./ReviewQueue.js";
+import { ViewToolbar } from "./ViewToolbar.js";
 
 type ListResult = Awaited<ReturnType<typeof trpc.list.query>>;
 type FeedRow = ListResult["nodes"][number];
@@ -56,8 +57,6 @@ type ListCursor = NonNullable<ListResult["nextCursor"]>;
 /** Rows per `list` call — design.md decision 6. */
 const PAGE_SIZE = 50;
 
-/** The bare graph — no search, nothing selected — which is where "Open the graph" goes. */
-const GRAPH_HOME: GraphRoute = { view: "graph", q: null, types: [], node: null };
 
 type FeedState =
   | { kind: "no-view" }
@@ -173,87 +172,60 @@ export function FeedView({ viewId }: { viewId: string | null }) {
 
   /** Row activation (node-views/spec.md, "Activating a row"): a push, so the browser's back control returns to this feed. */
   function activate(row: FeedRow) {
-    navigate({ view: "graph", q: null, types: [], node: row.id }, "push");
-  }
-
-  // A real `href` so the link is a link (middle-click, copy address); a
-  // plain left click goes through `navigate` so the shell swaps views
-  // without a page load, the way every in-app move does.
-  function handleOpenGraph(e: MouseEvent<HTMLAnchorElement>) {
-    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) {
-      return;
-    }
-    e.preventDefault();
-    navigate(GRAPH_HOME, "push");
+    navigate({ view: "graph", q: null, types: [], node: row.id, projects: addressProjects() }, "push");
   }
 
   const heading = state.kind === "ready" ? state.view.title || "(untitled view)" : "Feed";
 
   return (
-    // `body` is `overflow: hidden` (index.css, for the canvas), so this
-    // element is the page's own scroll container.
-    <main className={`h-dvh w-screen overflow-y-auto ${shellDrawerOpen ? "sm:pr-[492px]" : ""}`}>
+    <main className={`flex h-full w-screen flex-col overflow-hidden ${shellDrawerOpen ? "sm:pr-[492px]" : ""}`}>
       <div aria-hidden="true" className="ambience pointer-events-none fixed inset-0 -z-10" />
-      <div className="mx-auto max-w-3xl px-4 py-6">
-        <header className="glass mb-4 flex flex-wrap items-start justify-between gap-4 p-4 sm:flex-nowrap">
-          <div className="min-w-0">
-            <h1 className="truncate text-base font-semibold text-fg">{heading}</h1>
-            {state.kind === "ready" && (
-              <p className="mt-0.5 text-xs text-fg-muted" role="status">
-                {state.rows.length === 0 ? "No nodes match this view." : `${state.rows.length} shown${state.hasMore ? " · more match this view" : ""}`}
-              </p>
-            )}
-          </div>
-          <div className="flex min-w-0 flex-wrap items-center justify-end gap-3">
-            <a
-              href={formatRoute(GRAPH_HOME)}
-              onClick={handleOpenGraph}
-              className="shrink-0 rounded text-sm text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-accent"
-            >
-              Open the graph
-            </a>
-            <HeaderSearch />
-            <ReviewQueuePill />
-          </div>
-        </header>
+      <ViewToolbar
+        title={heading}
+        column="max-w-3xl"
+        status={state.kind === "ready" ? (state.rows.length === 0 ? "No nodes match this view." : `${state.rows.length} shown${state.hasMore ? " · more match this view" : ""}`) : undefined}
+      />
+      {/* `body` is `overflow: hidden` (index.css, for the canvas), so this element is the page's own scroll container. */}
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="mx-auto max-w-3xl px-4 pt-2 pb-6">
+          {state.kind === "no-view" && <p className="glass p-4 text-sm text-fg-muted">No view is named in the address.</p>}
+          {state.kind === "not-a-view" && <p className="glass p-4 text-sm text-fg-muted">The address does not name a view.</p>}
+          {state.kind === "loading" && <p className="glass p-4 text-sm text-fg-muted">Loading…</p>}
+          {state.kind === "error" && (
+            <p role="alert" className="rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+              {state.message}
+            </p>
+          )}
 
-        {state.kind === "no-view" && <p className="glass p-4 text-sm text-fg-muted">No view is named in the address.</p>}
-        {state.kind === "not-a-view" && <p className="glass p-4 text-sm text-fg-muted">The address does not name a view.</p>}
-        {state.kind === "loading" && <p className="glass p-4 text-sm text-fg-muted">Loading…</p>}
-        {state.kind === "error" && (
-          <p role="alert" className="rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
-            {state.message}
-          </p>
-        )}
+          {state.kind === "ready" && state.rows.length === 0 && <p className="glass p-4 text-sm text-fg-muted">No nodes match this view.</p>}
 
-        {state.kind === "ready" && state.rows.length === 0 && <p className="glass p-4 text-sm text-fg-muted">No nodes match this view.</p>}
-
-        {state.kind === "ready" && state.rows.length > 0 && (
-          <>
-            <ul aria-label="Feed rows" className="space-y-2">
-              {state.rows.map((row) => (
-                <FeedRowItem key={row.id} row={row} onActivate={activate} />
-              ))}
-            </ul>
-            {state.hasMore && (
-              <div className="mt-4 flex items-center gap-3">
-                <button
-                  type="button"
-                  onClick={() => void loadMore()}
-                  disabled={state.loadingMore}
-                  className="rounded-lg border border-hairline px-3 py-1.5 text-xs font-medium text-fg hover:bg-surface-strong focus:outline-none focus:ring-2 focus:ring-accent disabled:opacity-60"
-                >
-                  {state.loadingMore ? "Loading…" : "Load more"}
-                </button>
-                {state.moreError && (
-                  <span role="alert" className="text-xs text-red-300">
-                    {state.moreError}
-                  </span>
-                )}
-              </div>
-            )}
-          </>
-        )}
+          {state.kind === "ready" && state.rows.length > 0 && (
+            <>
+              <ul aria-label="Feed rows" className="space-y-2">
+                {state.rows.map((row) => (
+                  <FeedRowItem key={row.id} row={row} onActivate={activate} />
+                ))}
+              </ul>
+              {state.hasMore && (
+                <div className="mt-4 flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => void loadMore()}
+                    disabled={state.loadingMore}
+                    className="rounded-lg border border-hairline px-3 py-1.5 text-xs font-medium text-fg hover:bg-surface-strong focus:outline-none focus:ring-2 focus:ring-accent disabled:opacity-60"
+                  >
+                    {state.loadingMore ? "Loading…" : "Load more"}
+                  </button>
+                  {state.moreError && (
+                    <span role="alert" className="text-xs text-red-300">
+                      {state.moreError}
+                    </span>
+                  )}
+                </div>
+              )}
+            </>
+          )}
+        </div>
       </div>
     </main>
   );

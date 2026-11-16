@@ -36,10 +36,10 @@
 // keeping the previous answer on screen meanwhile; a failed read is said on
 // the section when there is one to say it on, and leaves it off otherwise.
 
-import { useCallback, useEffect, useId, useRef, useState, type MouseEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { awaitingWorkItemRoute, formatDiskBytes, formatInstant } from "../lib/hangarStatus.js";
-import { navigate } from "../lib/navigate.js";
-import { formatRoute, type Route } from "../lib/route.js";
+import type { Route } from "../lib/route.js";
+import { ShellLink } from "./ShellLink.js";
 import { trpc } from "../trpc.js";
 import { SectionTitle } from "./ReviewAttachments.js";
 
@@ -401,14 +401,9 @@ function AwaitingItem({ session, workItemId, onSettled }: AwaitingItemProps) {
 
 /** An in-app link: a plain left click navigates in place; a modified click (new tab, new window) is the browser's. */
 function RouteLink({ route, children }: { route: Route; children: ReactNode }) {
-  function open(e: MouseEvent<HTMLAnchorElement>) {
-    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-    e.preventDefault();
-    navigate(route, "push");
-  }
   return (
-    <a href={formatRoute(route)} onClick={open} className="inline-flex min-h-11 items-center gap-1 rounded text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-accent sm:min-h-0">
+    <ShellLink route={route} className="inline-flex min-h-11 items-center gap-1 rounded text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-accent sm:min-h-0">
       {children}
-    </a>
+    </ShellLink>
   );
 }

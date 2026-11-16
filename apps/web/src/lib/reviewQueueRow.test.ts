@@ -5,7 +5,9 @@
 import { describe, expect, it } from "vitest";
 import {
   countText,
+  emptyQueueText,
   focusReturnTarget,
+  inboxLinkText,
   formatAge,
   formatImageCount,
   liveText,
@@ -94,11 +96,15 @@ describe("pill text", () => {
     expect(countText(0, false)).toBe("…");
   });
 
-  it("carries the live state then the count in the accessible name, as the pill reads; zero reads as an empty queue", () => {
-    expect(pillLabel(3, true, "live")).toBe("Live, 3 reviews waiting");
-    expect(pillLabel(1, true, "connecting")).toBe("Connecting, 1 review waiting");
-    expect(pillLabel(0, true, "offline")).toBe("Offline, no reviews waiting");
+  it("names the live state, the reviews, then the inbox items when there are any; zero reads as an empty queue", () => {
+    expect(pillLabel(3, true, "live")).toBe("Live, 3 reviews pending");
+    expect(pillLabel(1, true, "connecting")).toBe("Connecting, 1 review pending");
+    expect(pillLabel(0, true, "offline")).toBe("Offline, no reviews pending");
     expect(pillLabel(0, false, "connecting")).toBe("Connecting, review queue not read yet");
+    expect(pillLabel(2, true, "live", 3)).toBe("Live, 2 reviews pending, 3 inbox items need you");
+    expect(pillLabel(2, true, "live", 1)).toBe("Live, 2 reviews pending, 1 inbox item needs you");
+    expect(pillLabel(2, true, "live", 0)).toBe("Live, 2 reviews pending");
+    expect(pillLabel(2, true, "live", null)).toBe("Live, 2 reviews pending");
   });
 
   it("words the waiting count", () => {
@@ -213,5 +219,21 @@ describe("popoverPlacement", () => {
     expect(placed.right).toBe(740);
     expect(1440 - placed.right - placed.width).toBe(300);
     expect(popoverPlacement({ bottom: 90, right: 300 }, 1440).right).toBe(1440 - 12 - 400);
+  });
+});
+
+describe("the popover's inbox words (shared-nav-header review fixes)", () => {
+  it("names the inbox count on the link only when there is one", () => {
+    expect(inboxLinkText(3)).toBe("Go to inbox · 3 need you");
+    expect(inboxLinkText(0)).toBe("Go to inbox");
+    expect(inboxLinkText(null)).toBe("Go to inbox");
+  });
+
+  it("says what waits in the inbox when no review does", () => {
+    expect(emptyQueueText(false, 3)).toBe("Reading the queue…");
+    expect(emptyQueueText(true, null)).toBe("No reviews waiting");
+    expect(emptyQueueText(true, 0)).toBe("No reviews waiting");
+    expect(emptyQueueText(true, 1)).toBe("No reviews waiting — 1 inbox item needs you");
+    expect(emptyQueueText(true, 3)).toBe("No reviews waiting — 3 inbox items need you");
   });
 });

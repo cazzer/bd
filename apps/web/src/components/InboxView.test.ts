@@ -8,8 +8,8 @@
 // opens. And an outcome request's banner (hangar-release review fixes,
 // bd-d38.4), built from the binding and the server's read of the session,
 // outside the agent's text. The tRPC client is mocked; the shell's review
-// queue, the header search, the board's panel, and the markdown renderer
-// are stubbed (they have their own tests).
+// queue, the header's inbox count, the board's panel, and the markdown
+// renderer are stubbed (they have their own tests).
 
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -22,15 +22,17 @@ const trpcMock = vi.hoisted(() => ({
 }));
 const relayStatus = vi.hoisted(() => ({ missing: ["herdr"] as string[] }));
 vi.mock("../trpc.js", () => ({ trpc: trpcMock, HttpStatusError: class HttpStatusError extends Error {} }));
-vi.mock("../lib/navigate.js", () => ({ navigate: vi.fn() }));
+const navigateMock = vi.hoisted(() => vi.fn());
+// The real `addressProjects`, so a view's own address write is seen keeping the reader's project.
+vi.mock("../lib/navigate.js", async (importOriginal) => ({ ...(await importOriginal<object>()), navigate: navigateMock }));
 vi.mock("../lib/useRelayStatus.js", () => ({ useRelayStatus: () => ({ status: { missingBinaries: relayStatus.missing }, at: new Date() }) }));
 vi.mock("./ReviewQueue.js", () => ({
   useReviewQueue: () => ({ reviews: [], loaded: true, version: 0 }),
   useShellDrawer: () => ({ drafts: new Map() }),
   storeDraft: () => {},
-  ReviewQueuePill: () => null,
 }));
-vi.mock("./HeaderSearch.js", () => ({ HeaderSearch: () => null }));
+const inboxChangedMock = vi.hoisted(() => vi.fn());
+vi.mock("../lib/useInboxCount.js", () => ({ inboxChanged: inboxChangedMock }));
 vi.mock("./ReviewItemPanel.js", () => ({ ReviewItemPanel: () => null }));
 vi.mock("./EvidenceView.js", async () => {
   const { createElement: h } = await import("react");
@@ -100,6 +102,7 @@ beforeEach(() => {
   trpcMock.inbox.query.mockReset();
   trpcMock.inboxDecision.mutate.mockReset();
   trpcMock.relayActionsFor.query.mockReset();
+  inboxChangedMock.mockReset();
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -148,6 +151,9 @@ describe("the inbox's relay notices", () => {
     await act(async () => primary().click());
     await flush();
     expect(strips()).toEqual([["pending", "Recorded. The laptop relay will tell pane w1:p1 when it runs."]]);
+    // The header's inbox count is told once the decision's reload has landed (shared-nav-header).
+    expect(inboxChangedMock).toHaveBeenCalledTimes(1);
+    expect(trpcMock.inbox.query.mock.invocationCallOrder.at(-1)!).toBeLessThan(inboxChangedMock.mock.invocationCallOrder[0]!);
 
     // The relay fails the first prompt; the second decision lands meanwhile.
     expect(container.querySelector("h2")?.textContent).toBe("Second");
@@ -227,6 +233,18 @@ describe("an outcome request's banner", () => {
     expect(question).toBeDefined();
     expect(banner!.contains(question!)).toBe(false);
     expect(banner!.compareDocumentPosition(question!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  test("picking a row keeps the address's project (shared-nav-header: a view's own write never drops it)", async () => {
+    relayStatus.missing = [];
+    history.replaceState(null, "", "/inbox?project=tides");
+    trpcMock.inbox.query.mockResolvedValue({ items: [item(A, "First", "pending", null, "2026-11-14T10:00:00.000Z"), item(B, "Second", "pending", null, "2026-11-14T09:00:00.000Z")], total: 2, truncated: false });
+    await mount();
+    navigateMock.mockClear();
+    const row = [...container.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent?.includes("Second"))!;
+    await act(async () => row.click());
+    expect(navigateMock).toHaveBeenCalledWith({ view: "inbox", item: B, source: null, projects: ["tides"] }, "replace");
+    history.replaceState(null, "", "/");
   });
 
   test("an ordinary item has no banner", async () => {

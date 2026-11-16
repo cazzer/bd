@@ -3,10 +3,16 @@
 // the pill say to a screen reader, the order and staleness lines, what the
 // status region announces, arrow-key movement
 // through the rows, where the popover sits under its pill, and where focus
-// goes when the shell's drawer closes.
+// goes when the shell's drawer closes, and where its footer links go.
 // Structural types only, so nothing from the server reaches the bundle.
 
 import type { LiveState } from "./liveStream.js";
+import type { BoardRoute, InboxRoute } from "./route.js";
+
+/** Where the popover's "Open the board" goes before projects are carried: the plain board. */
+export const BOARD_HOME: BoardRoute = { view: "board", viewId: null, projects: [], item: null };
+/** Where its "Go to inbox" goes before projects are carried: the inbox on Needs me (its first tab). */
+export const INBOX_HOME: InboxRoute = { view: "inbox", item: null, projects: [] };
 
 /** The slice of a queue row these helpers read (`PendingReviewDto`). */
 export interface QueueRow {
@@ -81,11 +87,45 @@ export function waitingText(total: number): string {
   return `${total} review${total === 1 ? "" : "s"} waiting`;
 }
 
-/** The pill's accessible name, in the order the pill reads: the live state, then the count ("Live, 3 reviews waiting"). */
-export function pillLabel(total: number, loaded: boolean, live: LiveState): string {
-  const state = live === "live" ? "Live" : live === "connecting" ? "Connecting" : "Offline";
-  if (!loaded) return `${state}, review queue not read yet`;
-  return `${state}, ${waitingText(total).replace(/^No/, "no")}`;
+/** The live state as the pill's accessible name begins: "Live", "Connecting", "Offline". */
+export function liveLabel(live: LiveState): string {
+  return live === "live" ? "Live" : live === "connecting" ? "Connecting" : "Offline";
+}
+
+/** The review count for a screen reader: "2 reviews pending", "1 review pending", "no reviews pending", or "review queue not read yet". */
+export function reviewCountLabel(total: number, loaded: boolean): string {
+  if (!loaded) return "review queue not read yet";
+  if (total === 0) return "no reviews pending";
+  return `${total} review${total === 1 ? "" : "s"} pending`;
+}
+
+/** The inbox count for a screen reader: "3 inbox items need you", "1 inbox item needs you". */
+export function inboxCountLabel(count: number): string {
+  return count === 1 ? "1 inbox item needs you" : `${count} inbox items need you`;
+}
+
+/**
+ * The review control's name, in the order it reads: the live state, the
+ * reviews, then the inbox items when there are any to count ("Live, 2
+ * reviews pending, 3 inbox items need you"). A null inbox count (not read,
+ * or the read failed) and a zero say nothing about the inbox.
+ */
+export function pillLabel(total: number, loaded: boolean, live: LiveState, inbox: number | null = null): string {
+  const parts = [liveLabel(live), reviewCountLabel(total, loaded)];
+  if (inbox !== null && inbox > 0) parts.push(inboxCountLabel(inbox));
+  return parts.join(", ");
+}
+
+/** The popover's "Go to inbox" link text: with the inbox count when there is one ("Go to inbox · 3 need you"). */
+export function inboxLinkText(inbox: number | null): string {
+  return inbox !== null && inbox > 0 ? `Go to inbox · ${inbox} need you` : "Go to inbox";
+}
+
+/** The popover's empty state: no reviews, and the inbox items waiting when the count is known and above 0. */
+export function emptyQueueText(loaded: boolean, inbox: number | null): string {
+  if (!loaded) return "Reading the queue…";
+  if (inbox === null || inbox <= 0) return "No reviews waiting";
+  return `No reviews waiting — ${inboxCountLabel(inbox)}`;
 }
 
 /** The order line under the popover's header: "Oldest first", or "Oldest 100 of 120" when the read was cut short. */

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 //
-// The board header's hangar chip (hangar-queue tasks.md 2.7): it words the
+// The shell header's hangar chip (useHangarStatus feeding HangarStatusChip) (hangar-queue tasks.md 2.7): it words the
 // status the server answers with the open counts beside it, polls every
 // 30 s only while the tab is visible, reads again when the tab comes back,
 // disappears while reads fail, and stays off while there is nothing to say.
@@ -9,12 +9,17 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { HangarStatusView } from "../lib/hangarStatus.js";
-import { HANGAR_POLL_MS, HangarStatusPill } from "./HangarStatusPill.js";
+import { HANGAR_POLL_MS, HangarStatusChip, useHangarStatus } from "./HangarStatusPill.js";
 
 const trpcMock = vi.hoisted(() => ({ hangarStatus: { query: vi.fn() } }));
 vi.mock("../trpc.js", () => ({ trpc: trpcMock }));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+/** The shell header's wiring: one poll feeding the chip. */
+function HangarStatusPill({ compact = false }: { compact?: boolean }) {
+  return createElement(HangarStatusChip, { polled: useHangarStatus(), compact });
+}
 
 let container: HTMLDivElement;
 let root: Root;
@@ -54,7 +59,7 @@ async function advance(ms: number): Promise<void> {
 const chip = (): HTMLElement | null => container.querySelector('[role="status"]');
 const counts = (): HTMLElement | null => container.querySelector("[data-hangar-counts]");
 
-describe("HangarStatusPill", () => {
+describe("HangarStatusChip", () => {
   test("shows the status as a labelled status chip with the details in its title", async () => {
     trpcMock.hangarStatus.query.mockResolvedValue(ONLINE);
     act(() => root.render(createElement(HangarStatusPill)));
@@ -159,5 +164,16 @@ describe("HangarStatusPill", () => {
     trpcMock.hangarStatus.query.mockResolvedValueOnce(ONLINE);
     await advance(HANGAR_POLL_MS);
     expect(chip()?.textContent).toBe("hangar online · 2 queued, 1 claimed");
+  });
+
+  test("compact: the dot and one number, the words and per-state counts kept for screen readers", async () => {
+    trpcMock.hangarStatus.query.mockResolvedValue(ONLINE);
+    act(() => root.render(createElement(HangarStatusPill, { compact: true })));
+    await settle();
+    const shown = [...chip()!.querySelectorAll("span")].filter((el) => !el.className.includes("sr-only") && el.getAttribute("aria-hidden") === "true" && el.textContent !== "");
+    expect(shown.map((el) => el.textContent)).toEqual(["3"]);
+    expect(chip()?.textContent).toContain("hangar online");
+    expect(chip()?.textContent).toContain("2 queued, 1 claimed");
+    expect(chip()?.className).toContain("px-2.5");
   });
 });

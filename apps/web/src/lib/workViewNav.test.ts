@@ -1,12 +1,12 @@
-// The project switcher's and the Board / Roadmap toggle's routes
-// (roadmap-milestones tasks.md 3.2-3.3; work-board spec "Switching
-// project", "Back to all projects", "Old multi-project link", "Board to
-// roadmap").
+// The project switcher's routes (roadmap-milestones tasks.md 3.2-3.3;
+// work-board spec "Switching project", "Back to all projects", "Old
+// multi-project link"); "Board to roadmap" is the header's nav links now
+// (lib/shellNav.test.ts).
 
 import { describe, expect, it } from "vitest";
 import { PROJECT_KEY_PATTERN } from "./boardRow.js";
-import { formatRoute, parseRoute, type BoardRoute, type RoadmapRoute } from "./route.js";
-import { ALL_PROJECTS_CHOICE, boardToRoadmap, chooseProject, roadmapToBoard, SEVERAL_PROJECTS_VALUE, switcherOffer, switcherState, viewCarriedProjects } from "./workViewNav.js";
+import { formatRoute, parseRoute, type BoardRoute, type GraphRoute, type InboxRoute, type RoadmapRoute, type SearchRoute } from "./route.js";
+import { ALL_PROJECTS_CHOICE, chooseProject, SEVERAL_PROJECTS_VALUE, switcherOffer, switcherState, viewCarriedProjects } from "./workViewNav.js";
 
 const OFFERED = ["skyos", "tides", "strides"];
 
@@ -82,32 +82,26 @@ describe("chooseProject", () => {
     const roadmap: RoadmapRoute = { view: "roadmap", projects: [], item: "sky-1" };
     expect(formatRoute(chooseProject(roadmap, OFFERED, "tides"))).toBe("/roadmap?project=tides");
   });
+
+  it("changes only the projects on a route the project does not scope (shared-nav-header)", () => {
+    const inbox: InboxRoute = { view: "inbox", item: "i1", source: "gmail", projects: [] };
+    expect(chooseProject(inbox, OFFERED, "skyos")).toEqual({ ...inbox, projects: ["skyos"] });
+    const graph: GraphRoute = { view: "graph", q: "x", types: ["doc"], node: "n1", projects: ["tides"] };
+    expect(chooseProject(graph, OFFERED, ALL_PROJECTS_CHOICE)).toEqual({ ...graph, projects: [] });
+    const search: SearchRoute = { view: "search", q: "x", types: [], projects: ["tides", "skyos"], reviewsOnly: true };
+    expect(formatRoute(chooseProject(search, OFFERED, "tides"))).toBe("/search?q=x&project=tides&review=1");
+  });
 });
 
-describe("Board / Roadmap toggle", () => {
-  it("carries the project and drops the item from board to roadmap", () => {
-    expect(formatRoute(boardToRoadmap(board(["tides"], { item: "tides-r1" }), null))).toBe("/roadmap?project=tides");
-    expect(formatRoute(boardToRoadmap(board(["tides", "strides"]), null))).toBe("/roadmap?project=tides&project=strides");
-    expect(formatRoute(boardToRoadmap(board(), null))).toBe("/roadmap");
-  });
-
-  it("drops the view, carrying the view's projects when the address names none", () => {
-    expect(formatRoute(boardToRoadmap(board([], { viewId: "v1" }), ["tides", "skyos"]))).toBe("/roadmap?project=tides&project=skyos");
-    expect(formatRoute(boardToRoadmap(board(["skyos"], { viewId: "v1" }), ["tides", "skyos"]))).toBe("/roadmap?project=skyos");
-    expect(formatRoute(boardToRoadmap(board([], { viewId: "v1" }), null))).toBe("/roadmap");
-  });
-
+// The Board / Roadmap toggle is gone (shared-nav-header, design.md decision 4):
+// the header's nav links carry the projects (lib/shellNav.test.ts), by the
+// toggle's view-carrying rule kept here.
+describe("viewCarriedProjects", () => {
   it("knows a view's carried projects without the registry", () => {
     expect(viewCarriedProjects(null, ["tides"])).toBeNull();
     expect(viewCarriedProjects(["tides", "skyos", "tides"], [])).toEqual(["tides", "skyos"]);
     expect(viewCarriedProjects(["tides", "skyos"], ["skyos", "gone"])).toEqual(["skyos"]);
     expect(viewCarriedProjects(["tides", "skyos"], ["gone"])).toEqual(["tides", "skyos"]);
-    expect(formatRoute(boardToRoadmap(board([], { viewId: "v1" }), viewCarriedProjects(["tides", "skyos"], [])))).toBe("/roadmap?project=tides&project=skyos");
-  });
-
-  it("carries the project and drops the item from roadmap to board", () => {
-    expect(formatRoute(roadmapToBoard({ view: "roadmap", projects: ["skyos"], item: "sky-1" }))).toBe("/board?project=skyos");
-    expect(formatRoute(roadmapToBoard({ view: "roadmap", projects: [], item: null }))).toBe("/board");
   });
 });
 

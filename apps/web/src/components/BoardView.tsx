@@ -11,17 +11,24 @@
 // all is a board of every registered project (board-visual-reviews, design.md
 // decision 3), so the review CLI's link needs no view id. The offered
 // projects are the view filter's `project` predicate, or every registered
-// project when it names none or there is no view (lib/boardRow.ts); the
-// header's switcher (ProjectSwitcher.tsx, roadmap-milestones design.md
-// decision 5) picks one of them or all — live as soon as the offered
-// projects are known, even when the board read fails — and the choice lives
-// in the address, so a switch is a history push and a reload reproduces the board.
-// An old link naming several projects still shows them all; a switch drops
-// the open item. The Board / Roadmap toggle beside it (WorkViewToggle.tsx)
-// carries the projects to `/roadmap` and drops the open item. Only a saved
-// view's title is a visible heading, so the switcher and toggle sit at the
-// same place here and on the roadmap. A lane header names its epic's
-// milestone (LaneMilestone.tsx), which the board read answers with each epic.
+// project when it names none or there is no view (lib/boardRow.ts). The
+// shell header (AppHeader.tsx, shared-nav-header) owns the project switcher,
+// which picks one of them or all, and the Board and Roadmap nav links that
+// replaced the board's own toggle; the choice lives in the address, so a
+// switch is a history push and a reload reproduces the board. An old link
+// naming several projects still shows them all; a switch drops the open
+// item. The board's own toolbar (ViewToolbar.tsx) below the header holds
+// Refresh, and a saved view's title — the only visible heading, since the
+// header's current nav link names the plain board. A lane header names its
+// epic's milestone (LaneMilestone.tsx), which the board read answers with
+// each epic.
+//
+// The board still reads the registry itself, on every board read, rather
+// than taking the shell's (ShellProjects.tsx): its offered projects must be
+// those the board read was made against, and each project's `lastIngest`
+// error — the per-project error list — must be as current as the cards. It
+// hands each answer to the shell (`reportRegistry`), so the header's
+// switcher picks up a newly registered project with the board.
 //
 // The drawer (board-visual-reviews, task 4.4): activating a card pushes its
 // external id as `item`; closing pushes the address without it and returns
@@ -46,7 +53,7 @@
 // projects live in a ref), and the previous board stays on screen, filtered
 // to the chosen projects and marked aria-busy, until the answer lands.
 //
-// The stream's state is shown by the review queue's pill in the header
+// The stream's state is shown by the review control in the shell header
 // (components/ReviewQueue.tsx), which replaced the board's own live label;
 // the per-project error list stays here. The shell's queue drawer and this
 // board's drawer are never open together (ReviewQueue.tsx says how); the
@@ -72,20 +79,14 @@ import {
 } from "../lib/boardRow.js";
 import { describeRefresh } from "../lib/relayAction.js";
 import { drawerProject } from "../lib/reviewDrawer.js";
-import { formatRoute, type BoardRoute, type GraphRoute } from "../lib/route.js";
+import { formatRoute, type BoardRoute } from "../lib/route.js";
 import { viewFilterOf, type ViewNode } from "../lib/viewFilter.js";
-import { boardToRoadmap, chooseProject, switcherOffer, viewCarriedProjects } from "../lib/workViewNav.js";
 import { trpc } from "../trpc.js";
-import { HangarStatusPill } from "./HangarStatusPill.js";
-import { RelayStatusPill } from "./RelayStatusPill.js";
 import { ReviewDrawer, useWideDrawer } from "./ReviewDrawer.js";
-import { HeaderSearch } from "./HeaderSearch.js";
 import { LaneMilestone } from "./LaneMilestone.js";
-import { ProjectSwitcher } from "./ProjectSwitcher.js";
-import { ReviewQueuePill, storeDraft, useShellDrawer } from "./ReviewQueue.js";
-import { WorkViewToggle } from "./WorkViewToggle.js";
-
-const GRAPH_HOME: GraphRoute = { view: "graph", q: null, types: [], node: null };
+import { storeDraft, useShellDrawer } from "./ReviewQueue.js";
+import { useShellProjects } from "./ShellProjects.js";
+import { TOOLBAR_BUTTON, ViewToolbar } from "./ViewToolbar.js";
 
 type ViewState =
   | { kind: "loading" }
@@ -94,7 +95,7 @@ type ViewState =
   | { kind: "error"; message: string }
   | { kind: "ready"; forViewId: string | null; title: string; viewProjects: string[] | null };
 
-/** The board with no `view` in its address: every registered project. Its heading is for screen readers only (see the header's h1). */
+/** The board with no `view` in its address: every registered project. Its heading is for screen readers only (the header's Board link names it). */
 const ALL_PROJECTS: ViewState = { kind: "ready", forViewId: null, title: "Board", viewProjects: null };
 
 type BeadsProjectsAnswer = Awaited<ReturnType<typeof trpc.beadsProjects.query>>["projects"];
@@ -133,9 +134,6 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
   const [reading, setReading] = useState(false);
   const [announcement, setAnnouncement] = useState("");
   const [boardVersion, setBoardVersion] = useState(0);
-  /** The registry's keys as last read, kept apart from `data` so the switcher works while the board read fails. */
-  const [registryKeys, setRegistryKeys] = useState<string[] | null>(null);
-  const [registryFailed, setRegistryFailed] = useState(false);
   const boardRegionRef = useRef<HTMLDivElement>(null);
   /** The project each opened item resolved to (see openProject). */
   const pinnedProjects = useRef(new Map<string, string>());
@@ -145,6 +143,7 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
   // Unsent drawer messages by item, shared with the shell's queue drawer, so
   // closing a drawer, switching cards, or switching drawers never drops one.
   const { open: shellDrawerOpen, drafts } = useShellDrawer();
+  const { reportRegistry } = useShellProjects();
   const projectsRef = useRef(projects);
   const appliedKeyRef = useRef(projects.join("\u0000"));
   const readRef = useRef<(() => void) | null>(null);
@@ -203,20 +202,10 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
     async function readOnce() {
       const ids = [...pending];
       const address = projectsRef.current;
-      // The registry lands on its own, so the switcher is live even when the board read then fails.
-      const registryRead = trpc.beadsProjects.query().then(
-        (reg) => {
-          if (!disposed) {
-            setRegistryKeys(reg.projects.map((p) => p.key));
-            setRegistryFailed(false);
-          }
-          return reg.projects;
-        },
-        (err: unknown) => {
-          if (!disposed) setRegistryFailed(true);
-          throw err;
-        },
-      );
+      const registryRead = trpc.beadsProjects.query().then((reg) => {
+        if (!disposed) reportRegistry(reg.projects.map((p) => p.key));
+        return reg.projects;
+      });
       try {
         let registry: BeadsProjectsAnswer;
         let board: BoardData["board"];
@@ -342,18 +331,6 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
   const omitted = data ? Object.entries(data.board.omittedClosed).filter(([project]) => chosen.includes(project)) : [];
 
   const route: BoardRoute = { view: "board", viewId, projects, item };
-
-  // The switcher is live as soon as the offered projects are known — the
-  // view's own, or the registry's — whether or not the board read succeeds,
-  // so a reader can always switch away from a project that fails to read.
-  // With the registry unreadable too, it offers the address's projects and
-  // "All projects" (ProjectSwitcher's `fallback`).
-  const { offered: switcherOffered, fallback: switcherFallback } =
-    view === null ? { offered: null, fallback: false } : switcherOffer({ viewProjects: view.viewProjects, registry: registryKeys, registryFailed, address: projects });
-
-  function chooseFromSwitcher(choice: string) {
-    navigate(chooseProject(route, switcherOffered ?? [], choice), "push");
-  }
   const drawerOpen = view !== null && item !== null;
 
   // The drawer's project. A project is pinned for an item only once it is
@@ -398,48 +375,24 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
     });
   }
 
-  // Only a saved view's title is a visible heading. Otherwise the h1 is for
-  // screen readers, so the switcher and the toggle lead the header at the
-  // same place on the board and the roadmap (RoadmapView.tsx).
+  // Only a saved view's title is a visible heading; the plain board's h1 is for screen readers (the header's Board link names it).
   const heading = view && viewId !== null ? view.title || "(untitled view)" : null;
-  // The switcher keeps its place while the projects load (disabled, reading
-  // the address), and is left off only once none is offered or the address
-  // names no board view.
-  const switcherShown = (viewState.kind === "loading" || viewState.kind === "ready") && (switcherFallback || switcherOffered?.length !== 0);
 
   return (
-    <main className={`flex h-dvh w-screen flex-col overflow-hidden ${drawerOpen || shellDrawerOpen ? "sm:pr-[492px]" : ""}`}>
+    <main className={`flex h-full w-screen flex-col overflow-hidden ${drawerOpen || shellDrawerOpen ? "sm:pr-[492px]" : ""}`}>
       <div aria-hidden="true" className="ambience pointer-events-none fixed inset-0 -z-10" />
-      <header inert={drawerOpen && !wide} className="glass m-3 mb-0 flex flex-wrap items-center gap-x-4 gap-y-2 p-3">
-        {heading === null ? <h1 className="sr-only">Board</h1> : <h1 className="min-w-0 truncate text-base font-semibold text-fg">{heading}</h1>}
-        {switcherShown && <ProjectSwitcher offered={switcherOffered} address={projects} onChoose={chooseFromSwitcher} fallback={switcherFallback} />}
-        <WorkViewToggle current="board" board={route} roadmap={boardToRoadmap(route, viewCarriedProjects(view?.viewProjects ?? null, projects))} />
-        <div className="ml-auto flex flex-wrap items-center justify-end gap-3 text-xs text-fg-muted">
-          <HeaderSearch />
-          <HangarStatusPill />
-          <RelayStatusPill />
-          <ReviewQueuePill />
-          {view && (
-            <button
-              type="button"
-              onClick={() => void refresh()}
-              disabled={refreshing}
-              className="min-h-11 rounded-lg border border-hairline px-3 py-1 font-medium sm:min-h-0 text-fg hover:bg-surface-strong focus:outline-none focus:ring-2 focus:ring-accent disabled:opacity-60"
-            >
-              {refreshing ? "Refreshing…" : "Refresh"}
-            </button>
-          )}
-          <a
-            href={formatRoute(GRAPH_HOME)}
-            onClick={(e) => openGraphHome(e)}
-            className="rounded text-sm text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-accent"
-          >
-            Open the graph
-          </a>
-        </div>
-      </header>
+      <ViewToolbar
+        inert={drawerOpen && !wide}
+        title={heading ?? "Board"}
+        titleHidden={heading === null}
+        actions={
+          <button type="button" onClick={() => void refresh()} disabled={refreshing || view === null} className={TOOLBAR_BUTTON}>
+            {refreshing ? "Refreshing…" : "Refresh"}
+          </button>
+        }
+      />
 
-      <div inert={drawerOpen && !wide} className="flex min-h-0 flex-1 flex-col gap-3 p-3">
+      <div inert={drawerOpen && !wide} className="flex min-h-0 flex-1 flex-col gap-3 px-3 pb-3">
         {viewState.kind === "not-a-view" && <Empty>The address does not name a view.</Empty>}
         {viewState.kind === "wrong-renderer" && (
           <Empty>
@@ -530,12 +483,6 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
       )}
     </main>
   );
-}
-
-function openGraphHome(e: MouseEvent<HTMLAnchorElement>) {
-  if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-  e.preventDefault();
-  navigate(GRAPH_HOME, "push");
 }
 
 function Empty({ children }: { children: ReactNode }) {

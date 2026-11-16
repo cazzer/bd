@@ -58,34 +58,35 @@ export function findInputFor(route: SearchRoute, offset: number, limit: number):
   };
 }
 
-/** Where activating a result goes: a review work item with a project to its board drawer (keyed by its external id, the bead id), anything else to the graph with it selected. */
-export function resultRoute(row: Pick<FoundRow, "id" | "nodeType" | "externalId" | "project" | "isReview">): Route {
+/** Where activating a result goes: a review work item with a project to its board drawer (keyed by its external id, the bead id), anything else to the graph with it selected, carrying `projects` (the reader's, shared-nav-header). */
+export function resultRoute(row: Pick<FoundRow, "id" | "nodeType" | "externalId" | "project" | "isReview">, projects: readonly string[] = []): Route {
   if (row.isReview && row.project !== null && row.nodeType === "work_item") {
     return { view: "board", viewId: null, projects: [row.project], item: row.externalId };
   }
-  return { view: "graph", q: null, types: [], node: row.id };
+  return { view: "graph", q: null, types: [], node: row.id, projects: [...projects] };
 }
 
 /** The bare graph — no search, nothing selected. */
-export const GRAPH_HOME: GraphRoute = { view: "graph", q: null, types: [], node: null };
+export const GRAPH_HOME: GraphRoute = { view: "graph", q: null, types: [], node: null, projects: [] };
 
 /**
  * The header's graph link: the graph drawing the current text's matches
  * with the chosen types, labelled to say the project and reviews-only
- * filters do not travel (the graph has neither); with no text, the bare
+ * filters do not travel (the graph has neither — the projects ride along
+ * in its address, unfiltered, as on every route); with no text, the bare
  * graph, since the graph draws only from a query.
  */
 export function openInGraphLink(route: SearchRoute): { route: GraphRoute; label: string } {
   if (route.q === null) {
-    return { route: GRAPH_HOME, label: "Open the graph" };
+    return { route: { ...GRAPH_HOME, projects: [...route.projects] }, label: "Open the graph" };
   }
   const dropsFilters = route.projects.length > 0 || route.reviewsOnly;
-  return { route: { view: "graph", q: route.q, types: route.types, node: null }, label: dropsFilters ? "Open in graph (text and types only)" : "Open in graph" };
+  return { route: { view: "graph", q: route.q, types: route.types, node: null, projects: [...route.projects] }, label: dropsFilters ? "Open in graph (text and types only)" : "Open in graph" };
 }
 
 /** The graph's own search for the text alone, whose approximate fallback may find what exact matching did not; `null` with no text. */
 export function approximateSearchRoute(route: SearchRoute): GraphRoute | null {
-  return route.q === null ? null : { view: "graph", q: route.q, types: [], node: null };
+  return route.q === null ? null : { view: "graph", q: route.q, types: [], node: null, projects: [...route.projects] };
 }
 
 function toggled(values: readonly string[], value: string): string[] {

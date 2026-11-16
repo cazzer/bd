@@ -53,8 +53,10 @@ import {
 import { parseSnippetSegments } from "../lib/snippet.js";
 import { useMediaQuery } from "../lib/useMediaQuery.js";
 import { trpc } from "../trpc.js";
+import { HEADER_WIDE_QUERY } from "./AppHeader.js";
 import { HeaderSearch } from "./HeaderSearch.js";
-import { ReviewQueuePill, useShellDrawer } from "./ReviewQueue.js";
+import { useShellDrawer } from "./ReviewQueue.js";
+import { ViewToolbar } from "./ViewToolbar.js";
 
 /** Rows per `find` call — the server's default page. */
 const PAGE_SIZE = 50;
@@ -132,11 +134,13 @@ export function SearchView({ route }: { route: SearchRoute }) {
   // Pads itself clear of the review queue's drawer from `sm` up, as the feed does (ReviewQueue.tsx).
   const shellDrawerOpen = useShellDrawer().open;
   const wide = useMediaQuery("(min-width: 640px)");
+  // The header draws a search box only at its wide tier; below it the query is edited here.
+  const headerBox = useMediaQuery(HEADER_WIDE_QUERY);
   const [state, setState] = useState<SearchState>({ phase: { kind: "loading" }, shown: null, loadingMore: false, moreError: null });
   const [retry, setRetry] = useState(0);
   const key = formatRoute(route);
 
-  const mainRef = useRef<HTMLElement>(null);
+  const scrollerRef = useRef<HTMLDivElement>(null);
   const scrollTopRef = useRef(0);
   const pendingScroll = useRef<{ key: string; top: number } | null>(null);
   const stateRef = useRef(state);
@@ -192,8 +196,8 @@ export function SearchView({ route }: { route: SearchRoute }) {
   // A cached answer returns to where it was scrolled; a fresh one starts at the top once it lands.
   useLayoutEffect(() => {
     const pending = pendingScroll.current;
-    if (pending !== null && state.shown?.key === pending.key && mainRef.current) {
-      mainRef.current.scrollTop = pending.top;
+    if (pending !== null && state.shown?.key === pending.key && scrollerRef.current) {
+      scrollerRef.current.scrollTop = pending.top;
       scrollTopRef.current = pending.top;
       pendingScroll.current = null;
     }
@@ -257,26 +261,15 @@ export function SearchView({ route }: { route: SearchRoute }) {
     );
 
   return (
-    // `body` is `overflow: hidden` (index.css, for the canvas), so this
-    // element is the page's own scroll container.
-    <main
-      ref={mainRef}
-      onScroll={(e) => {
-        scrollTopRef.current = e.currentTarget.scrollTop;
-      }}
-      className={`h-dvh w-screen overflow-y-auto ${shellDrawerOpen ? "sm:pr-[492px]" : ""}`}
-    >
+    <main className={`flex h-full w-screen flex-col overflow-hidden ${shellDrawerOpen ? "sm:pr-[492px]" : ""}`}>
       <div aria-hidden="true" className="ambience pointer-events-none fixed inset-0 -z-10" />
-      <div className="mx-auto max-w-5xl px-4 py-6">
-        <header className="glass mb-4 flex flex-wrap items-start justify-between gap-4 p-4">
-          <div className="min-w-0">
-            <h1 className="truncate text-base font-semibold text-fg">{heading}</h1>
-            <p className="mt-0.5 text-xs text-fg-muted" role="status">
-              {countLine(phase, current)}
-            </p>
-          </div>
-          <div className="flex min-w-0 flex-wrap items-center justify-end gap-3">
-            <HeaderSearch initialText={route.q ?? ""} onSubmit={(text) => navigate({ ...route, q: searchRouteFor(text).q }, "push")} />
+      {/* At the header's wide tier its search box edits this address's text; below it (a magnifier or the Menu there), the box is here, so the page always shows its query. */}
+      <ViewToolbar
+        title={heading}
+        column="max-w-5xl"
+        status={countLine(phase, current)}
+        actions={
+          route.q !== null && (
             <a
               href={formatRoute(graphLink.route)}
               onClick={pushOnPlainClick(graphLink.route)}
@@ -284,76 +277,91 @@ export function SearchView({ route }: { route: SearchRoute }) {
             >
               {graphLink.label}
             </a>
-            <ReviewQueuePill />
+          )
+        }
+      >
+        {!headerBox && (
+          <div className="w-72 min-w-0 max-sm:basis-full">
+            <HeaderSearch initialText={route.q ?? ""} fill onSubmit={(text) => navigate({ ...route, q: searchRouteFor(text).q }, "push")} />
           </div>
-        </header>
+        )}
+      </ViewToolbar>
+      {/* `body` is `overflow: hidden` (index.css, for the canvas), so this element is the page's own scroll container. */}
+      <div
+        ref={scrollerRef}
+        onScroll={(e) => {
+          scrollTopRef.current = e.currentTarget.scrollTop;
+        }}
+        className="min-h-0 flex-1 overflow-y-auto"
+      >
+        <div className="mx-auto max-w-5xl px-4 pt-2 pb-6">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-start">
+            {filterColumn}
 
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-start">
-          {filterColumn}
+            <section aria-label="Results" className="min-w-0 flex-1 space-y-3">
+              {phase.kind === "error" && (
+                <div role="alert" className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+                  <span className="min-w-0">{phase.message}</span>
+                  <button
+                    type="button"
+                    onClick={() => setRetry((n) => n + 1)}
+                    className="min-h-11 shrink-0 rounded-lg border border-red-500/40 px-3 py-1 text-xs font-medium text-red-200 hover:bg-red-500/20 focus:outline-none focus:ring-2 focus:ring-accent sm:min-h-0"
+                  >
+                    Try again
+                  </button>
+                </div>
+              )}
+              {phase.kind === "no-terms" && <p className="glass p-4 text-sm text-fg-muted">Add a word that isn't a common stopword.</p>}
+              {phase.kind === "loading" && rows === null && <p className="glass p-4 text-sm text-fg-muted">Loading…</p>}
 
-          <section aria-label="Results" className="min-w-0 flex-1 space-y-3">
-            {phase.kind === "error" && (
-              <div role="alert" className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
-                <span className="min-w-0">{phase.message}</span>
-                <button
-                  type="button"
-                  onClick={() => setRetry((n) => n + 1)}
-                  className="min-h-11 shrink-0 rounded-lg border border-red-500/40 px-3 py-1 text-xs font-medium text-red-200 hover:bg-red-500/20 focus:outline-none focus:ring-2 focus:ring-accent sm:min-h-0"
-                >
-                  Try again
-                </button>
-              </div>
-            )}
-            {phase.kind === "no-terms" && <p className="glass p-4 text-sm text-fg-muted">Add a word that isn't a common stopword.</p>}
-            {phase.kind === "loading" && rows === null && <p className="glass p-4 text-sm text-fg-muted">Loading…</p>}
+              {phase.kind === "ready" && current !== null && current.rows.length === 0 && (
+                <div className="glass space-y-2 p-4 text-sm text-fg-muted">
+                  <p>Nothing matched{hasFilters ? ". Remove a filter to widen the search." : "."}</p>
+                  {approximate !== null && (
+                    <p>
+                      <a
+                        href={formatRoute(approximate)}
+                        onClick={pushOnPlainClick(approximate)}
+                        className="rounded text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-accent"
+                      >
+                        Try the graph's approximate search →
+                      </a>
+                    </p>
+                  )}
+                </div>
+              )}
 
-            {phase.kind === "ready" && current !== null && current.rows.length === 0 && (
-              <div className="glass space-y-2 p-4 text-sm text-fg-muted">
-                <p>Nothing matched{hasFilters ? ". Remove a filter to widen the search." : "."}</p>
-                {approximate !== null && (
-                  <p>
-                    <a
-                      href={formatRoute(approximate)}
-                      onClick={pushOnPlainClick(approximate)}
-                      className="rounded text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-accent"
-                    >
-                      Try the graph's approximate search →
-                    </a>
-                  </p>
-                )}
-              </div>
-            )}
-
-            {rows !== null && rows.rows.length > 0 && (
-              <>
-                <ol aria-busy={rowsDimmed} className={`space-y-2 ${rowsDimmed ? "opacity-60" : ""}`}>
-                  {rows.rows.map((row) => (
-                    <ResultItem key={row.id} row={row} />
-                  ))}
-                </ol>
-                {phase.kind === "ready" && current !== null && current.capped && (
-                  <p className="text-xs text-fg-muted">Showing the first {current.rows.length} — narrow the filters to see more.</p>
-                )}
-                {phase.kind === "ready" && current !== null && current.hasMore && current.nextOffset !== null && (
-                  <div className="flex items-center gap-3">
-                    <button
-                      type="button"
-                      onClick={() => void loadMore()}
-                      disabled={state.loadingMore}
-                      className="min-h-11 rounded-lg border border-hairline px-3 py-1.5 text-xs font-medium text-fg hover:bg-surface-strong focus:outline-none focus:ring-2 focus:ring-accent disabled:opacity-60 sm:min-h-0"
-                    >
-                      {state.loadingMore ? "Loading…" : "Load more"}
-                    </button>
-                    {state.moreError && (
-                      <span role="alert" className="text-xs text-red-300">
-                        {state.moreError}
-                      </span>
-                    )}
-                  </div>
-                )}
-              </>
-            )}
-          </section>
+              {rows !== null && rows.rows.length > 0 && (
+                <>
+                  <ol aria-busy={rowsDimmed} className={`space-y-2 ${rowsDimmed ? "opacity-60" : ""}`}>
+                    {rows.rows.map((row) => (
+                      <ResultItem key={row.id} row={row} projects={route.projects} />
+                    ))}
+                  </ol>
+                  {phase.kind === "ready" && current !== null && current.capped && (
+                    <p className="text-xs text-fg-muted">Showing the first {current.rows.length} — narrow the filters to see more.</p>
+                  )}
+                  {phase.kind === "ready" && current !== null && current.hasMore && current.nextOffset !== null && (
+                    <div className="flex items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={() => void loadMore()}
+                        disabled={state.loadingMore}
+                        className="min-h-11 rounded-lg border border-hairline px-3 py-1.5 text-xs font-medium text-fg hover:bg-surface-strong focus:outline-none focus:ring-2 focus:ring-accent disabled:opacity-60 sm:min-h-0"
+                      >
+                        {state.loadingMore ? "Loading…" : "Load more"}
+                      </button>
+                      {state.moreError && (
+                        <span role="alert" className="text-xs text-red-300">
+                          {state.moreError}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+            </section>
+          </div>
         </div>
       </div>
     </main>
@@ -439,8 +447,8 @@ function FacetButton({ label, count, pressed, busy, onClick }: { label: string; 
   );
 }
 
-function ResultItem({ row }: { row: FoundRow }) {
-  const target = resultRoute(row);
+function ResultItem({ row, projects }: { row: FoundRow; projects: readonly string[] }) {
+  const target = resultRoute(row, projects);
   const status = rowStatus(row);
   return (
     <li data-node-id={row.id}>

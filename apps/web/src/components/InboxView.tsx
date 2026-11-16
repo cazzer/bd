@@ -44,19 +44,20 @@
 // what a click releases, and that it deletes the disk.
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
-import { filterBySource, groupByWork, hangarOriginLabel, needsMeRows, REVIEW_SOURCE, sourcesOf, type NeedsMeRow, type WorkGroupSlot } from "../lib/inboxRows.js";
-import { navigate } from "../lib/navigate.js";
+import { filterBySource, groupByWork, hangarOriginLabel, INBOX_POLL_MS, needsMeRows, REVIEW_SOURCE, sourcesOf, type NeedsMeRow, type WorkGroupSlot } from "../lib/inboxRows.js";
+import { addressProjects, navigate } from "../lib/navigate.js";
 import { CARD_MOVED_TEXT, cardActions, chosenOption, describeChosen, isCardMovedRefusal, type CardOption } from "../lib/reviewCard.js";
 import { describeRelayPrompt, type RelayActionView } from "../lib/relayAction.js";
 import { decisionBlocked } from "../lib/reviewDrawer.js";
+import { inboxChanged } from "../lib/useInboxCount.js";
 import { MAX_RELAY_ORIGIN_IDS, useRelayActionsFor } from "../lib/useRelayActionsFor.js";
 import { useRelayStatus } from "../lib/useRelayStatus.js";
 import { trpc } from "../trpc.js";
 import { cardShortcut, DecisionCardBody, DecisionFooter, primaryDecision, type CardOutcome, type DecisionCardData, type Refusal } from "./DecisionCard.js";
 import { EvidenceView } from "./EvidenceView.js";
 import { ReviewItemPanel } from "./ReviewItemPanel.js";
-import { HeaderSearch } from "./HeaderSearch.js";
-import { ReviewQueuePill, storeDraft, useReviewQueue, useShellDrawer } from "./ReviewQueue.js";
+import { storeDraft, useReviewQueue, useShellDrawer } from "./ReviewQueue.js";
+import { ViewToolbar } from "./ViewToolbar.js";
 import { SessionLinks, type SessionLinkResult } from "./SessionLinks.js";
 
 type InboxResult = Awaited<ReturnType<typeof trpc.inbox.query>>;
@@ -72,8 +73,6 @@ const TABS: { key: Tab; label: string; statuses: Item["status"][] }[] = [
   { key: "agent", label: "With agent", statuses: ["changes", "accepted", "session"] },
   { key: "closed", label: "Closed", statuses: ["done", "dismissed"] },
 ];
-
-const POLL_MS = 15_000;
 
 const SOURCE_LABEL: Record<string, string> = {
   gmail: "Email",
@@ -171,7 +170,7 @@ export function InboxView({ item: selectedKey, source }: { item: string | null; 
     void load();
     const timer = window.setInterval(() => {
       if (document.visibilityState === "visible") void load();
-    }, POLL_MS);
+    }, INBOX_POLL_MS);
     return () => window.clearInterval(timer);
   }, [load]);
 
@@ -265,7 +264,7 @@ export function InboxView({ item: selectedKey, source }: { item: string | null; 
     if (home !== undefined) setTab((current) => (TABS.find((t) => t.key === current)!.statuses.includes(addressedStatus) ? current : home));
   }, [selectedKey, addressedStatus]);
 
-  const go = useCallback((item: string | null, nextSource: string | null = source) => navigate({ view: "inbox", item, source: nextSource }, "replace"), [source]);
+  const go = useCallback((item: string | null, nextSource: string | null = source) => navigate({ view: "inbox", item, source: nextSource, projects: addressProjects() }, "replace"), [source]);
 
   const move = useCallback(
     (delta: number) => {
@@ -288,6 +287,14 @@ export function InboxView({ item: selectedKey, source }: { item: string | null; 
     [rows, go],
   );
 
+  // A reload after the reader changed something (a decision, a release, a
+  // session opened, a card that moved under them, a work link removed): the
+  // header's inbox count is told at once rather than at its next poll.
+  const reloadChanged = useCallback(async () => {
+    await load();
+    inboxChanged();
+  }, [load]);
+
   const decide = useCallback(
     async (item: Item, decision: Decision, message = "", option?: string) => {
       const result = await trpc.inboxDecision.mutate({ id: item.id, decision, message, ...(option === undefined ? {} : { option }) });
@@ -296,26 +303,26 @@ export function InboxView({ item: selectedKey, source }: { item: string | null; 
         setFresh((prev) => [...prev.filter((f) => f.itemId !== item.id), { actionId, itemId: item.id, pane: item.pane }]);
       }
       if (item.parentId === null) moveOnFrom(item.id);
-      await load();
+      await reloadChanged();
     },
-    [moveOnFrom, load],
+    [moveOnFrom, reloadChanged],
   );
 
   const release = useCallback(
     async (item: Item) => {
       await trpc.inboxRelease.mutate({ id: item.id });
-      await load();
+      await reloadChanged();
     },
-    [load],
+    [reloadChanged],
   );
 
   const openSession = useCallback(
     async (item: Item): Promise<SessionLinkResult> => {
       const r = await trpc.inboxOpenSession.mutate({ id: item.id });
-      await load();
+      await reloadChanged();
       return { ok: true, tab: r.tab };
     },
-    [load],
+    [reloadChanged],
   );
 
   const message = useRef<HTMLTextAreaElement | null>(null);
@@ -350,35 +357,36 @@ export function InboxView({ item: selectedKey, source }: { item: string | null; 
   }
 
   return (
-    <main className="flex h-dvh w-screen flex-col overflow-hidden">
+    <main className="flex h-full w-screen flex-col overflow-hidden">
       <div aria-hidden="true" className="ambience pointer-events-none fixed inset-0 -z-10" />
-      <header className="flex flex-wrap items-center justify-between gap-3 border-b border-hairline px-4 py-3">
-        <div className="flex items-center gap-3">
-          <h1 className="text-base font-semibold text-fg">Inbox</h1>
-          <nav aria-label="Inbox tabs" className="flex gap-1">
+      <div className="border-b border-hairline">
+        <ViewToolbar
+          title="Inbox"
+          titleHidden="below-sm"
+          actions={
+            <p className="hidden lg:block">
+              <kbd className="rounded border border-hairline px-1">j</kbd>/<kbd className="rounded border border-hairline px-1">k</kbd> move ·{" "}
+              <kbd className="rounded border border-hairline px-1">a</kbd> accept · <kbd className="rounded border border-hairline px-1">c</kbd> message ·{" "}
+              <kbd className="rounded border border-hairline px-1">d</kbd> dismiss · <kbd className="rounded border border-hairline px-1">o</kbd> open session
+            </p>
+          }
+        >
+          {/* One row: below `sm` it scrolls sideways rather than wrapping (the Menu button names the inbox there, so the title is sr-only). */}
+          <nav aria-label="Inbox tabs" className="flex min-w-0 gap-1 overflow-x-auto p-0.5 max-sm:flex-1">
             {TABS.map((t) => (
               <button
                 key={t.key}
                 type="button"
                 onClick={() => pickTab(t.key)}
                 aria-pressed={tab === t.key}
-                className={`rounded-lg px-3 py-1 text-xs font-medium focus:outline-none focus:ring-2 focus:ring-accent ${tab === t.key ? "bg-surface-strong text-fg" : "text-fg-muted hover:text-fg"}`}
+                className={`shrink-0 rounded-lg px-3 py-1 text-xs font-medium whitespace-nowrap focus:outline-none focus:ring-2 focus:ring-accent ${tab === t.key ? "bg-surface-strong text-fg" : "text-fg-muted hover:text-fg"}`}
               >
                 {t.label} <span className="ml-1 tabular-nums text-fg-muted">{counts[t.key]}</span>
               </button>
             ))}
           </nav>
-        </div>
-        <div className="flex flex-wrap items-center justify-end gap-3">
-          <p className="hidden text-xs text-fg-muted lg:block">
-            <kbd className="rounded border border-hairline px-1">j</kbd>/<kbd className="rounded border border-hairline px-1">k</kbd> move ·{" "}
-            <kbd className="rounded border border-hairline px-1">a</kbd> accept · <kbd className="rounded border border-hairline px-1">c</kbd> message ·{" "}
-            <kbd className="rounded border border-hairline px-1">d</kbd> dismiss · <kbd className="rounded border border-hairline px-1">o</kbd> open session
-          </p>
-          <HeaderSearch />
-          <ReviewQueuePill />
-        </div>
-      </header>
+        </ViewToolbar>
+      </div>
 
       {error !== null && (
         <p role="alert" className="mx-4 mt-3 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-2 text-sm text-red-300">
@@ -450,7 +458,7 @@ export function InboxView({ item: selectedKey, source }: { item: string | null; 
                 onRelease={release}
                 onSelect={(id) => go(id)}
                 onOpenSession={openSession}
-                onReload={load}
+                onReload={reloadChanged}
                 herdrMissing={herdrMissing}
                 relay={promptOf(selectedItem.id)}
               />

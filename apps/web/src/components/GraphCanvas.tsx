@@ -1136,7 +1136,7 @@ export function GraphCanvas({ data, onNodeExpand, expandableNodeIds = NO_EXPANDA
         `overflow-hidden`; it returns to sr-only the moment focus leaves.
       */}
       <ul
-        className="glass sr-only-node-list sr-only max-h-64 w-72 space-y-1 overflow-y-auto p-2 text-xs text-fg focus-within:not-sr-only focus-within:fixed focus-within:top-4 focus-within:left-4 focus-within:z-50"
+        className="glass sr-only-node-list sr-only max-h-64 w-72 space-y-1 overflow-y-auto p-2 text-xs text-fg focus-within:not-sr-only focus-within:fixed focus-within:top-[calc(var(--header-h)+1rem)] focus-within:left-4 focus-within:z-50"
         aria-label="Nodes in this graph"
       >
         {data.nodes.map((node) => (

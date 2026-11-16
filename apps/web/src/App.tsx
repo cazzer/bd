@@ -45,13 +45,24 @@
 // the view element is memoized on the route, so a queue read or a
 // live-state flip re-renders the shell and the pill but not the view
 // (GraphView's canvas included).
+//
+// The shell header (shared-nav-header, design.md decision 1) is drawn here
+// too, above the view and outside its memo, inside the queue provider (its
+// review control reads the queue) and ShellProjectsProvider (the project
+// registry, read once). The header is in normal flow, `--header-h` tall,
+// and the view fills the rest of the viewport below it: each view's root is
+// `h-full` of that box, so its own scrolling and sticky offsets are
+// unchanged, and its fixed layers start below the header.
 
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { AppHeader } from "./components/AppHeader.js";
 import { FeedView } from "./components/FeedView.js";
 import { GraphView } from "./components/GraphView.js";
 import { ReviewQueueProvider } from "./components/ReviewQueue.js";
+import { ShellProjectsProvider } from "./components/ShellProjects.js";
 import { useLiveState } from "./lib/liveStream.js";
 import { navigate, subscribeToNavigation } from "./lib/navigate.js";
+import { currentSavedViewId } from "./lib/shellNav.js";
 import { useReviewQueue } from "./lib/useReviewQueue.js";
 import { graphRouteFromSearch, parseRoute, type Route } from "./lib/route.js";
 
@@ -81,7 +92,7 @@ const InboxView = lazy(async () => ({ default: (await import("./components/Inbox
 const SearchView = lazy(async () => ({ default: (await import("./components/SearchView.js")).SearchView }));
 
 const LOADING_VIEW = (
-  <main className="flex h-dvh w-screen items-center justify-center">
+  <main className="flex h-full w-screen items-center justify-center">
     <p className="text-sm text-fg-muted">Loading…</p>
   </main>
 );
@@ -126,7 +137,12 @@ export function App() {
 
   return (
     <ReviewQueueProvider queue={queue} live={live} route={route}>
-      {view}
+      <ShellProjectsProvider viewId={currentSavedViewId(route)}>
+        <div className="flex h-dvh w-screen flex-col overflow-hidden">
+          <AppHeader route={route} />
+          <div className="relative min-h-0 flex-1">{view}</div>
+        </div>
+      </ShellProjectsProvider>
     </ReviewQueueProvider>
   );
 }

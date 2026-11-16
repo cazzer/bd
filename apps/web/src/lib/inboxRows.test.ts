@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { filterBySource, groupByWork, hangarOriginLabel, needsMeRows, reviewKey, sourcesOf } from "./inboxRows.js";
+import { filterBySource, groupByWork, hangarOriginLabel, needsMeItem, needsMeItemCount, needsMeRows, reviewKey, sourcesOf } from "./inboxRows.js";
 
 const item = (id: string, priority: number, at: string, extra: Partial<{ status: string; parentId: string | null; source: string }> = {}) => ({
   id,
@@ -25,6 +25,22 @@ describe("needsMeRows", () => {
     );
     expect(rows.map((r) => r.key)).toEqual(["b", "shlo/shlo-1", "c", "a"]);
     expect(rows[1]).toMatchObject({ kind: "review", source: "review", priority: 1 });
+  });
+});
+
+describe("needsMeItem", () => {
+  it("is the rows Needs me lists from the inbox: pending top-level items only, and no reviews in the count", () => {
+    const items = [
+      item("a", 2, "2026-11-01T00:00:00.000Z"),
+      item("b", 0, "2026-11-05T00:00:00.000Z"),
+      item("held", 0, "2026-11-01T00:00:00.000Z", { status: "undigested" }),
+      item("agent", 0, "2026-11-01T00:00:00.000Z", { status: "changes" }),
+      item("kid", 0, "2026-11-01T00:00:00.000Z", { parentId: "a" }),
+    ];
+    expect(items.filter(needsMeItem).map((i) => i.id)).toEqual(["a", "b"]);
+    const rows = needsMeRows(items, [review("shlo", "shlo-1", "2026-11-03T00:00:00.000Z")]);
+    expect(needsMeItemCount(items)).toBe(rows.filter((r) => r.kind === "inbox").length);
+    expect(needsMeItemCount(items) + 1).toBe(rows.length);
   });
 });
 
