@@ -122,6 +122,11 @@ function spokenText(el: Element): string {
   return out;
 }
 
+/** The pill's visible, aria-hidden texts (its badges). */
+function shownText(pill: Element): (string | null)[] {
+  return [...pill.children].filter((el) => el.getAttribute("aria-hidden") === "true" && el.textContent !== "").map((el) => el.textContent);
+}
+
 function pills(): HTMLButtonElement[] {
   return [...document.querySelectorAll<HTMLButtonElement>("button[data-review-control]")];
 }
@@ -150,7 +155,7 @@ function buttonIn(scope: Element | Document, label: string): HTMLButtonElement {
 
 describe("the review control's counts", () => {
   test("names the reviews and the inbox items, each in its own sr-only text, and hides the bare numbers", () => {
-    shell(queueOf([review(1), review(2)]), GRAPH, createElement(ReviewQueuePill, { compact: true, inboxCount: 3 }));
+    shell(queueOf([review(1), review(2)]), GRAPH, createElement(ReviewQueuePill, { bare: true, inboxCount: 3 }));
     const [pill] = pills();
     expect(spokenText(pill!)).toBe("Live, 2 reviews pending, 3 inbox items need you");
     expect(pill!.querySelector('[data-count="reviews"]')?.className).toBe("sr-only");
@@ -158,6 +163,15 @@ describe("the review control's counts", () => {
     expect(pill!.getAttribute("title")).toBe("Live, 2 reviews pending, 3 inbox items need you");
     const shownNumbers = [...pill!.children].filter((el) => el.getAttribute("aria-hidden") === "true").map((el) => el.textContent);
     expect(shownNumbers).toEqual(["2", "3"]);
+  });
+
+  test("words the review count unless bare, and carries a tooltip only without the state word", () => {
+    shell(queueOf([review(1), review(2)]), GRAPH, createElement(ReviewQueuePill, { inboxCount: 3 }));
+    expect(pills()[0]!.hasAttribute("title")).toBe(false);
+    expect(shownText(pills()[0]!)).toEqual(["2 reviews", "3"]);
+    shell(queueOf([review(1), review(2)]), GRAPH, createElement(ReviewQueuePill, { compact: true, inboxCount: 3 }));
+    expect(pills()[0]!.getAttribute("title")).toBe("Live, 2 reviews pending, 3 inbox items need you");
+    expect(shownText(pills()[0]!)).toEqual(["2 reviews", "3"]);
   });
 
   test("shows no inbox count at zero or when it is unknown", () => {
@@ -203,6 +217,22 @@ describe("Go to inbox", () => {
     expect(pills()[0]!.getAttribute("aria-expanded")).toBe("false");
   });
 
+  test("both footer links follow the pill's current routes while the popover is open", () => {
+    const at = (project: string) =>
+      shell(
+        queueOf([review(1)]),
+        { ...GRAPH, projects: [project] },
+        createElement(ReviewQueuePill, { inboxRoute: { view: "inbox", item: null, projects: [project] }, boardRoute: { view: "board", viewId: null, projects: [project], item: null } }),
+      );
+    at("tides");
+    click(pills()[0]!);
+    expect(linkIn(popover()!, "Open the board").getAttribute("href")).toBe("/board?project=tides");
+    expect(linkIn(popover()!, "Go to inbox").getAttribute("href")).toBe("/inbox?project=tides");
+    at("skyos");
+    expect(linkIn(popover()!, "Open the board").getAttribute("href")).toBe("/board?project=skyos");
+    expect(linkIn(popover()!, "Go to inbox").getAttribute("href")).toBe("/inbox?project=skyos");
+  });
+
   test("from a pill with no route of its own, carries the address's projects", () => {
     history.replaceState(null, "", "/feed?view=v1&project=skyos");
     shell(queueOf([]), { view: "feed", viewId: "v1", projects: ["skyos"] }, createElement(ReviewQueuePill));
@@ -237,6 +267,20 @@ describe("the popover's anchor", () => {
       popover()!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     });
     expect(document.activeElement).toBe(viewPill);
+  });
+
+  test("moves to the header's pill when the pill that opened it unmounts", () => {
+    const both = (withView: boolean) =>
+      shell(queueOf([review(1)]), GRAPH, createElement(Fragment, null, createElement(ReviewQueuePill, { key: "header" }), withView ? createElement(ReviewQueuePill, { key: "view" }) : null));
+    both(true);
+    const [header, viewPill] = pills();
+    click(viewPill!);
+    expect(viewPill!.getAttribute("aria-expanded")).toBe("true");
+    both(false);
+    expect(popover()).not.toBeNull();
+    expect(header!.getAttribute("aria-expanded")).toBe("true");
+    click(header!);
+    expect(popover()).toBeNull();
   });
 
   test("closing the drawer a pick opened returns focus to that pill once the review is decided", async () => {

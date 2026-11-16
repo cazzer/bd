@@ -24,28 +24,31 @@
 // Size. The header is a normal-flow bar `--header-h` tall (index.css) on
 // every view; it never wraps. Its contents follow four width tiers, chosen
 // in script (`headerTier`) so each control is mounted once:
-// - wide (80rem up): everything inline, search as a box, status pills worded
-//   — unless worded they would be clipped, when they go compact until the
-//   bar is wider than it was then (`useWordsFit`);
+// - wide (80rem up): everything inline, search as a box, status pills and
+//   the review pill worded — unless worded they would be clipped, when they
+//   go compact until the bar is wider than it was then (`useClipFallback`);
 // - mid (56rem up): nav and Views inline; search behind a magnifier button
 //   (a popover holding the box); status pills compact (dot and one count)
-//   and the review pill without its state word;
+//   and the review pill without its state word ("1 review");
 // - narrow (40rem up): nav, Views and search collapse into one Menu
-//   disclosure labelled with the current place; compact pills stay inline;
+//   disclosure labelled with the current place; compact pills stay inline
+//   and the review pill shows bare numbers;
 // - phone: the same Menu, which also holds the status pills — the Menu
 //   button then carries a warning dot while hangar or the relay shows
 //   offline, so status is never hidden behind a closed disclosure unflagged.
 // Within a row the search box gives up width first, then the status pills
-// are clipped, so the review control at the end is never pushed out.
+// are clipped, so the review control at the end is never pushed out. On
+// wide and mid, when even the compact status pills are clipped, the review
+// pill goes to bare numbers too, by the same rule.
 //
 // Status. The header polls hangar and the relay once (`useHangarStatus`,
 // `useRelayStatus`) and draws the chips wherever the tier puts them.
 //
 // Review control. The review pill with the inbox count beside it (design.md
 // decision 6): the header polls the inbox's pending items itself
-// (lib/useInboxCount.ts), and hands the pill its "Go to inbox" route — the
-// inbox's Needs me with the projects every header link carries. The pill is
-// compact (bare counts) in every tier but wide.
+// (lib/useInboxCount.ts), and hands the pill its popover's footer routes —
+// the board and the inbox's Needs me with the projects every header link
+// carries. How worded the pill is follows the tiers above.
 //
 // Stacking. Above a drawer (z-[45] over the drawers' z-40, under the
 // portalled queue popover's z-50), so a menu panel is never covered by one;
@@ -55,7 +58,8 @@
 
 import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { navigate } from "../lib/navigate.js";
-import { withProjects, type InboxRoute, type Route } from "../lib/route.js";
+import { BOARD_HOME, INBOX_HOME } from "../lib/reviewQueueRow.js";
+import { withProjects, type Route } from "../lib/route.js";
 import { searchRouteFor } from "../lib/searchRow.js";
 import { boardViewProjects, carriedProjects, currentPlace, currentSavedViewId, headerSwitcherOffer, navLinks, shownView, unfilteredHint, type NavLink } from "../lib/shellNav.js";
 import { useDisclosure } from "../lib/useDisclosure.js";
@@ -80,33 +84,40 @@ export const HEADER_NARROW_QUERY = "(min-width: 40rem)";
 
 export type HeaderTier = "wide" | "mid" | "narrow" | "phone";
 
-/**
- * Whether the status pills must go compact although the tier words them:
- * true once worded pills were clipped (their box narrower than their
- * content), until the bar is wider than it was when that happened.
- */
-function useWordsFit(tier: HeaderTier, bar: { current: HTMLElement | null }, chips: { current: HTMLElement | null }): boolean {
-  const [barWidth, setBarWidth] = useState(0);
-  const [clippedAt, setClippedAt] = useState<number | null>(null);
-  const compact = tier !== "wide" || (clippedAt !== null && barWidth <= clippedAt);
+type ElementRef = { current: HTMLElement | null };
 
+/** The bar's width, kept current. */
+function useBarWidth(bar: ElementRef): number {
+  const [width, setWidth] = useState(0);
   useLayoutEffect(() => {
     const el = bar.current;
     if (el === null || typeof ResizeObserver === "undefined") return;
-    setBarWidth(el.clientWidth);
-    const observer = new ResizeObserver(() => setBarWidth(el.clientWidth));
+    setWidth(el.clientWidth);
+    const observer = new ResizeObserver(() => setWidth(el.clientWidth));
     observer.observe(el);
     return () => observer.disconnect();
   }, [bar]);
+  return width;
+}
+
+/**
+ * Whether the header must fall back to fewer words although the tier
+ * `tries` them: true when it does not try, and once `chips` was clipped
+ * (its box narrower than its content) while `measuring`, until the bar is
+ * wider than it was when that happened.
+ */
+function useClipFallback(tries: boolean, measuring: boolean, barWidth: number, bar: ElementRef, chips: ElementRef): boolean {
+  const [clippedAt, setClippedAt] = useState<number | null>(null);
+  const fallback = !tries || (clippedAt !== null && barWidth <= clippedAt);
 
   // Every render: content changes (a count growing) can clip the words at an unchanged width.
   useLayoutEffect(() => {
     const el = chips.current;
-    if (compact || el === null || el.scrollWidth <= el.clientWidth) return;
+    if (fallback || !measuring || el === null || el.scrollWidth <= el.clientWidth) return;
     setClippedAt(bar.current?.clientWidth ?? barWidth);
   });
 
-  return compact;
+  return fallback;
 }
 
 function useHeaderTier(): HeaderTier {
@@ -130,8 +141,6 @@ const SMALL_BUTTON =
   "inline-flex h-7 items-center justify-center rounded-lg border border-hairline text-fg hover:bg-surface-strong focus:outline-none focus:ring-2 focus:ring-accent pointer-coarse:h-auto pointer-coarse:min-h-11";
 
 const PANEL = "rounded-2xl border border-hairline bg-ground p-2 shadow-[0_12px_40px_-12px_rgba(0,0,0,0.65)]";
-
-const INBOX_HOME: InboxRoute = { view: "inbox", item: null, projects: [] };
 
 export interface AppHeaderProps {
   route: Route;
@@ -163,7 +172,10 @@ export function AppHeader({ route }: AppHeaderProps) {
   const collapsed = tier === "narrow" || tier === "phone";
   const barRef = useRef<HTMLDivElement>(null);
   const chipsRef = useRef<HTMLDivElement>(null);
-  const compact = useWordsFit(tier, barRef, chipsRef);
+  const barWidth = useBarWidth(barRef);
+  // The status pills lose their words first; the review pill then loses its count words while the compact status pills are still clipped.
+  const compact = useClipFallback(tier === "wide", true, barWidth, barRef, chipsRef);
+  const reviewBare = useClipFallback(tier === "wide" || tier === "mid", compact, barWidth, barRef, chipsRef);
 
   return (
     <header inert={inert} className={`relative h-[var(--header-h)] shrink-0 px-2 pt-2 sm:px-3 sm:pt-3 ${inert ? "z-30" : "z-[45]"}`}>
@@ -209,7 +221,7 @@ export function AppHeader({ route }: AppHeaderProps) {
               <RelayStatusChip polled={relay} compact={compact} />
             </div>
           )}
-          <ReviewQueuePill compact={tier !== "wide"} inboxCount={inboxCount} inboxRoute={withProjects(INBOX_HOME, carried)} />
+          <ReviewQueuePill compact={compact} bare={reviewBare} inboxCount={inboxCount} inboxRoute={withProjects(INBOX_HOME, carried)} boardRoute={withProjects(BOARD_HOME, carried)} />
         </div>
       </div>
     </header>

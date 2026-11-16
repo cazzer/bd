@@ -23,11 +23,13 @@
 // are not reviews (lib/inboxRows.ts `needsMeItem`), so nothing is counted
 // twice. Its accessible name is built from sr-only text, one piece per
 // count ("Live, 2 reviews pending, 3 inbox items need you",
-// lib/reviewQueueRow.ts `pillLabel`, also its tooltip); the visible numbers
-// are hidden from assistive technology. Compact (the header's tighter
-// tiers) drops the word and the divider and shows bare numbers. The state
-// word sits in a box wide enough for "Connecting…", so a flip never shifts
-// the header. A null inbox count (not read yet, or the read failed) shows
+// lib/reviewQueueRow.ts `pillLabel`); the visible numbers are hidden from
+// assistive technology. Compact drops the state word; bare also drops the
+// divider and the word "reviews", leaving numbers (the header picks which,
+// AppHeader.tsx). Without the state word the name is also the tooltip,
+// there only, so a worded pill is not announced twice. The state word sits
+// in a box wide enough for "Connecting…", so a flip never shifts the
+// header. A null inbox count (not read yet, or the read failed) shows
 // no inbox count, and the pill works as before. Every pill registers with
 // the provider; ArrowDown on a pill opens the popover under it, or focuses
 // its active row when it is already open there; Escape closes it.
@@ -38,9 +40,10 @@
 // LIVE_ANNOUNCE_HOLD_MS); never the first load, a reconnect, or connecting.
 //
 // Popover. Anchored under the pill that opened it — the one the reader
-// activated, not whichever registered last, while it is in the document;
-// else the first pill still registered (the header's, which outlives
-// every view) — and focus returns to that same pill (portalled to <body> and positioned from
+// activated, not whichever registered last — and focus returns to that same
+// pill. When that pill unmounts, the popover moves to the first pill still
+// registered (the header's, which outlives every view), which then shows
+// it as expanded. (Portalled to <body> and positioned from
 // the pill's rect, since the headers it sits in are `glass` — a
 // backdrop-filter makes them the containing block of anything fixed inside
 // them — and the code view's clips). It follows the pill every frame while
@@ -57,8 +60,9 @@
 // 6) sits in its header, disabled while the queue is empty. Its footer
 // links to the board (except on the board) and to the inbox's Needs me
 // (except on the inbox): "Go to inbox" opens `/inbox` — Needs me is the
-// inbox's first tab — with the projects of the pill that opened it (the
-// header's links' projects), else the address's, and closes the popover.
+// inbox's first tab. Both carry the routes the anchoring pill was last
+// rendered with (the header passes its links' projects, kept in step while
+// the popover is open), else the address's projects, and close the popover.
 //
 // Drawer. A pick opens the board's ReviewDrawer from here (decision 4): the
 // project from the row, `boardLoaded` true, `boardVersion` the queue's
@@ -115,8 +119,10 @@ import {
   rowLabel,
   staleNote,
   type QueueRow,
+  BOARD_HOME,
+  INBOX_HOME,
 } from "../lib/reviewQueueRow.js";
-import type { BoardRoute, InboxRoute, Route } from "../lib/route.js";
+import { formatRoute, type BoardRoute, type InboxRoute, type Route } from "../lib/route.js";
 import { ShellLink } from "./ShellLink.js";
 import { ReviewDrawer, useWideDrawer } from "./ReviewDrawer.js";
 import { ReviewRunModal } from "./ReviewRunModal.js";
@@ -136,12 +142,28 @@ interface ReviewQueueContextValue {
   focusPopover: () => void;
   /** Register a pill's button, a candidate anchor once the one that opened the popover is gone. */
   registerPill: (el: HTMLElement) => () => void;
+  /** The anchoring pill's current links, re-sent while the popover is open under it. */
+  syncPill: (pill: PillTarget) => void;
 }
 
-/** A pill as the popover sees it: where to anchor and return focus, and where its "Go to inbox" goes (null: the address's projects). */
+/** A pill as the popover sees it: where to anchor and return focus, and where its footer links go (null: the address's projects). */
 interface PillTarget {
   el: HTMLElement;
   inboxRoute: InboxRoute | null;
+  boardRoute: BoardRoute | null;
+}
+
+/** The pill nothing has rendered links for yet: the address's projects. */
+function bareTarget(el: HTMLElement): PillTarget {
+  return { el, inboxRoute: null, boardRoute: null };
+}
+
+function routeKey(route: Route | null): string | null {
+  return route === null ? null : formatRoute(route);
+}
+
+function sameLinks(a: PillTarget, b: PillTarget): boolean {
+  return routeKey(a.inboxRoute) === routeKey(b.inboxRoute) && routeKey(a.boardRoute) === routeKey(b.boardRoute);
 }
 
 const ReviewQueueContext = createContext<ReviewQueueContextValue | null>(null);
@@ -175,9 +197,6 @@ export function storeDraft(drafts: Map<string, string>, item: string, draft: str
   if (draft.trim() === "") drafts.delete(item);
   else drafts.set(item, draft);
 }
-
-const BOARD_HOME: BoardRoute = { view: "board", viewId: null, projects: [], item: null };
-const INBOX_HOME: InboxRoute = { view: "inbox", item: null, projects: [] };
 
 type PopoverState = { open: false } | { open: true; focusId: string | null; view: ViewName; pill: PillTarget | null };
 
@@ -215,8 +234,19 @@ export function ReviewQueueProvider({ queue, live, route, children }: ReviewQueu
     setAnchorVersion((v) => v + 1);
     return () => {
       pills.current = pills.current.filter((p) => p !== el);
+      // The pill that opened the popover is going: move it to the first one left.
+      if (activePill.current?.el === el) {
+        const next = pills.current.find((p) => p.isConnected);
+        activePill.current = next === undefined ? null : bareTarget(next);
+        setPopover((p) => (p.open && p.pill?.el === el ? { ...p, pill: activePill.current } : p));
+      }
       setAnchorVersion((v) => v + 1);
     };
+  }, []);
+
+  const syncPill = useCallback((pill: PillTarget) => {
+    if (activePill.current?.el === pill.el) activePill.current = pill;
+    setPopover((p) => (p.open && p.pill !== null && p.pill.el === pill.el && !sameLinks(p.pill, pill) ? { ...p, pill } : p));
   }, []);
 
   const closePopover = useCallback(
@@ -299,8 +329,9 @@ export function ReviewQueueProvider({ queue, live, route, children }: ReviewQueu
       closePopover,
       focusPopover: () => popoverFocus.current?.(),
       registerPill,
+      syncPill,
     }),
-    [queue, live, popoverPill, view, closePopover, registerPill],
+    [queue, live, popoverPill, view, closePopover, registerPill, syncPill],
   );
 
   const shownPicked = picked !== null && picked.view === route.view ? picked.review : null;
@@ -325,7 +356,7 @@ export function ReviewQueueProvider({ queue, live, route, children }: ReviewQueu
               queue={queue}
               live={live}
               initialFocusId={shownPopover.focusId}
-              showBoardLink={route.view !== "board"}
+              boardRoute={route.view === "board" ? null : (shownPopover.pill?.boardRoute ?? withAddressProjects(BOARD_HOME))}
               inboxRoute={route.view === "inbox" ? null : (shownPopover.pill?.inboxRoute ?? withAddressProjects(INBOX_HOME))}
               focusRef={popoverFocus}
               onPick={openReview}
@@ -383,28 +414,40 @@ function useQueueAnnouncement(queue: ReviewQueueState, live: LiveState): string 
 export interface ReviewQueuePillProps {
   /** `inline` sits in a header bar; `floating` stands alone (the graph's right column) with its own surface. */
   variant?: "inline" | "floating";
-  /** The light and bare counts, at every width (the shell header's tighter tiers); the state word stays in the accessible name. */
+  /** Without the state word, at every width; it stays in the accessible name. */
   compact?: boolean;
+  /** Numbers only: no state word, divider, or "reviews" (the header's narrow tiers, or when words don't fit). */
+  bare?: boolean;
   /** Inbox items needing the reader that are not reviews (shown when greater than 0); null or absent shows none. */
   inboxCount?: number | null;
   /** Where the popover's "Go to inbox" goes from this pill; absent: the inbox with the address's projects. */
   inboxRoute?: InboxRoute;
+  /** Where its "Open the board" goes from this pill; absent: the board with the address's projects. */
+  boardRoute?: BoardRoute;
 }
 
 /** The review control: the shell header's, and the pill a view still places in its own header. */
-export function ReviewQueuePill({ variant = "inline", compact = false, inboxCount = null, inboxRoute }: ReviewQueuePillProps) {
-  const { queue, live, popoverPill, togglePopover, openPopover, closePopover, focusPopover, registerPill } = useReviewQueueContext();
-  const ref = useRef<HTMLButtonElement>(null);
-  const expanded = popoverPill !== null && popoverPill === ref.current;
+export function ReviewQueuePill({ variant = "inline", compact = false, bare = false, inboxCount = null, inboxRoute, boardRoute }: ReviewQueuePillProps) {
+  const { queue, live, popoverPill, togglePopover, openPopover, closePopover, focusPopover, registerPill, syncPill } = useReviewQueueContext();
+  const [el, setEl] = useState<HTMLButtonElement | null>(null);
+  const expanded = el !== null && popoverPill === el;
 
   useLayoutEffect(() => {
-    const el = ref.current;
     if (el === null) return;
     return registerPill(el);
-  }, [registerPill]);
+  }, [el, registerPill]);
+
+  // While the popover is open here, its footer links follow this pill's routes.
+  const inboxKey = routeKey(inboxRoute ?? null);
+  const boardKey = routeKey(boardRoute ?? null);
+  useLayoutEffect(() => {
+    if (expanded && el !== null) syncPill({ el, inboxRoute: inboxRoute ?? null, boardRoute: boardRoute ?? null });
+    // The keys stand for the routes, which are fresh objects on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expanded, el, inboxKey, boardKey, syncPill]);
 
   function target(): PillTarget | null {
-    return ref.current === null ? null : { el: ref.current, inboxRoute: inboxRoute ?? null };
+    return el === null ? null : { el, inboxRoute: inboxRoute ?? null, boardRoute: boardRoute ?? null };
   }
 
   function onKeyDown(e: KeyboardEvent<HTMLButtonElement>) {
@@ -419,17 +462,18 @@ export function ReviewQueuePill({ variant = "inline", compact = false, inboxCoun
     }
   }
 
+  const wordless = compact || bare;
   const zero = !queue.loaded || queue.total === 0;
   const inboxShown = inboxCount !== null && inboxCount > 0;
   const surface = variant === "floating" ? "h-11 sm:h-8 bg-surface-strong backdrop-blur-lg shadow-[0_12px_40px_-12px_rgba(0,0,0,0.65)]" : "h-11 sm:h-7";
   const ring = expanded ? "border-accent/60 ring-2 ring-accent ring-offset-2 ring-offset-ground" : "border-hairline hover:bg-surface-strong";
-  const spacing = compact ? "gap-1.5 pr-[5px] pl-2.5" : "gap-2 pr-[5px] pl-3";
+  const spacing = bare ? "gap-1.5 pr-[5px] pl-2.5" : "gap-2 pr-[5px] pl-3";
 
   return (
     <button
-      ref={ref}
+      ref={setEl}
       type="button"
-      title={pillLabel(queue.total, queue.loaded, live, inboxCount)}
+      title={wordless ? pillLabel(queue.total, queue.loaded, live, inboxCount) : undefined}
       aria-haspopup="dialog"
       aria-expanded={expanded}
       onClick={() => {
@@ -441,21 +485,21 @@ export function ReviewQueuePill({ variant = "inline", compact = false, inboxCoun
       className={`inline-flex shrink-0 items-center rounded-full border text-xs whitespace-nowrap focus:outline-none focus-visible:ring-2 focus-visible:ring-accent ${spacing} ${surface} ${ring}`}
     >
       {/* Wide enough for "Connecting…" from `sm` up, so a state flip never moves the header's other controls. */}
-      <span className={`inline-flex items-center gap-2 ${compact ? "" : "sm:min-w-[5.25rem]"}`}>
+      <span className={`inline-flex items-center gap-2 ${wordless ? "" : "sm:min-w-[5.25rem]"}`}>
         <StatusLight live={live} />
-        {!compact && (
+        {!wordless && (
           <span aria-hidden="true" className="hidden text-fg-muted sm:inline">
             {liveText(live)}
           </span>
         )}
       </span>
       <span className="sr-only">{liveLabel(live)}, </span>
-      {!compact && <span aria-hidden="true" className="h-3.5 w-px bg-hairline" />}
+      {!bare && <span aria-hidden="true" className="h-3.5 w-px bg-hairline" />}
       <span className="sr-only" data-count="reviews">
         {reviewCountLabel(queue.total, queue.loaded)}
       </span>
       <CountBadge zero={zero} decorative>
-        {compact ? (queue.loaded ? queue.total : "…") : countText(queue.total, queue.loaded)}
+        {bare ? (queue.loaded ? queue.total : "…") : countText(queue.total, queue.loaded)}
       </CountBadge>
       {inboxShown && (
         <>
@@ -513,7 +557,8 @@ interface QueuePopoverProps {
   live: LiveState;
   /** The row to focus on open (the drawer closing on it); null focuses the first. */
   initialFocusId: string | null;
-  showBoardLink: boolean;
+  /** Where "Open the board" goes; null hides it (on the board itself). */
+  boardRoute: BoardRoute | null;
   /** Where "Go to inbox" goes; null hides it (on the inbox itself). */
   inboxRoute: InboxRoute | null;
   /** Set to this popover's "focus the active row" while it is mounted. */
@@ -542,7 +587,7 @@ const TABBABLE = "button:not([disabled]):not([tabindex='-1']), a[href]";
 
 const FOOTER_LINK = "inline-flex min-h-11 items-center rounded text-xs text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-accent sm:min-h-0";
 
-function QueuePopover({ anchor, anchorVersion, queue, live, initialFocusId, showBoardLink, inboxRoute, focusRef, onPick, onClose, onReviewAll }: QueuePopoverProps) {
+function QueuePopover({ anchor, anchorVersion, queue, live, initialFocusId, boardRoute, inboxRoute, focusRef, onPick, onClose, onReviewAll }: QueuePopoverProps) {
   const titleId = useId();
   const rootRef = useRef<HTMLDivElement>(null);
   const rowRefs = useRef(new Map<string, HTMLButtonElement>());
@@ -758,10 +803,10 @@ function QueuePopover({ anchor, anchorVersion, queue, live, initialFocusId, show
             <Kbd>Esc</Kbd> close
           </span>
         </span>
-        {(showBoardLink || inboxRoute !== null) && (
+        {(boardRoute !== null || inboxRoute !== null) && (
           <span className="ml-auto flex items-center gap-3">
-            {showBoardLink && (
-              <ShellLink route={withAddressProjects(BOARD_HOME)} onNavigate={() => onClose(false)} className={FOOTER_LINK}>
+            {boardRoute !== null && (
+              <ShellLink route={boardRoute} onNavigate={() => onClose(false)} className={FOOTER_LINK}>
                 Open the board
               </ShellLink>
             )}

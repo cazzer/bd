@@ -38,8 +38,20 @@ vi.mock("./ReviewDrawer.js", () => ({ useWideDrawer: () => env.wideDrawer }));
 vi.mock("./ReviewQueue.js", async () => {
   const { createElement: h } = await import("react");
   return {
-    ReviewQueuePill: ({ compact, inboxCount, inboxRoute }: { compact?: boolean; inboxCount?: number | null; inboxRoute?: Route }) =>
-      h("button", { type: "button", "data-stub": "review-pill", "data-compact": String(compact ?? false), "data-inbox-count": String(inboxCount ?? null), "data-inbox-href": inboxRoute === undefined ? "" : formatRoute(inboxRoute) }, "reviews"),
+    ReviewQueuePill: ({ compact, bare, inboxCount, inboxRoute, boardRoute }: { compact?: boolean; bare?: boolean; inboxCount?: number | null; inboxRoute?: Route; boardRoute?: Route }) =>
+      h(
+        "button",
+        {
+          type: "button",
+          "data-stub": "review-pill",
+          "data-compact": String(compact ?? false),
+          "data-bare": String(bare ?? false),
+          "data-inbox-count": String(inboxCount ?? null),
+          "data-inbox-href": inboxRoute === undefined ? "" : formatRoute(inboxRoute),
+          "data-board-href": boardRoute === undefined ? "" : formatRoute(boardRoute),
+        },
+        "reviews",
+      ),
     useShellDrawer: () => ({ open: env.shellDrawerOpen, drafts: new Map() }),
   };
 });
@@ -83,6 +95,7 @@ afterEach(() => {
   act(() => root.unmount());
   container.remove();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 function at(url: string): Route {
@@ -318,6 +331,20 @@ describe("AppHeader on a phone", () => {
 describe("AppHeader width tiers", () => {
   const searchBox = () => container.querySelector<HTMLInputElement>('header input[type="search"]');
   const hangarWords = () => container.querySelector("[data-hangar-pill] > span:not([aria-hidden])");
+  const reviewPill = () => {
+    const pill = container.querySelector('[data-stub="review-pill"]')!;
+    return { compact: pill.getAttribute("data-compact"), bare: pill.getAttribute("data-bare") };
+  };
+  /** The status pills' box reports clipped content whenever `clipped` says so (jsdom lays nothing out). */
+  const clipChips = (clipped: (chips: Element) => boolean) => {
+    const isChips = (el: Element) => el.classList.contains("overflow-hidden") && el.querySelector("[data-hangar-pill]") !== null;
+    vi.spyOn(Element.prototype, "scrollWidth", "get").mockImplementation(function (this: Element) {
+      return isChips(this) && clipped(this) ? 200 : 0;
+    });
+    vi.spyOn(Element.prototype, "clientWidth", "get").mockImplementation(function (this: Element) {
+      return isChips(this) ? 100 : 1300;
+    });
+  };
   const inPanel = (el: Element | null) => el !== null && el.closest("[hidden], [id]") !== null && el.closest("[hidden]") !== null;
 
   test("wide: nav inline, a search box, worded status pills, the full review pill", () => {
@@ -326,7 +353,23 @@ describe("AppHeader width tiers", () => {
     expect(container.querySelector('nav[aria-label="Main"]')?.closest("[hidden]")).toBeNull();
     expect(searchBox()).not.toBeNull();
     expect(hangarWords()?.className).toBe("sr-only sm:not-sr-only");
-    expect(container.querySelector('[data-stub="review-pill"]')?.getAttribute("data-compact")).toBe("false");
+    expect(reviewPill()).toEqual({ compact: "false", bare: "false" });
+  });
+
+  test("wide: clipped status words go compact first, and the review pill keeps its count words", () => {
+    env.width = 1300;
+    // Clipped only while a status pill shows its words.
+    clipChips((chips) => chips.querySelector(".sm\\:not-sr-only") !== null);
+    render("/graph");
+    expect(hangarWords()?.className).toBe("sr-only");
+    expect(reviewPill()).toEqual({ compact: "true", bare: "false" });
+  });
+
+  test("wide or mid: when even the compact status pills are clipped, the review pill goes to bare numbers", () => {
+    clipChips(() => true);
+    env.width = 1300;
+    render("/graph");
+    expect(reviewPill()).toEqual({ compact: "true", bare: "true" });
   });
 
   test("mid: nav inline, search behind a magnifier, compact pills", () => {
@@ -340,7 +383,7 @@ describe("AppHeader width tiers", () => {
     expect(document.activeElement).toBe(searchBox());
     expect(hangarWords()?.className).toBe("sr-only");
     expect(container.querySelector("[data-relay-pill]")).not.toBeNull();
-    expect(container.querySelector('[data-stub="review-pill"]')?.getAttribute("data-compact")).toBe("true");
+    expect(reviewPill()).toEqual({ compact: "true", bare: "false" });
   });
 
   test("narrow: a Menu, with compact status pills still inline", () => {
@@ -351,12 +394,13 @@ describe("AppHeader width tiers", () => {
     const hangar = container.querySelector("[data-hangar-pill]");
     expect(hangar).not.toBeNull();
     expect(hangar!.closest("[hidden]")).toBeNull();
+    expect(reviewPill()).toEqual({ compact: "true", bare: "true" });
   });
 
   test("phone: the status pills move into the Menu, which flags an offline status", () => {
     env.width = 390;
     render("/graph");
-    expect(container.querySelector('[data-stub="review-pill"]')?.getAttribute("data-compact")).toBe("true");
+    expect(reviewPill()).toEqual({ compact: "true", bare: "true" });
     expect(inPanel(container.querySelector("[data-hangar-pill]"))).toBe(true);
     expect(container.querySelector("[data-menu-warning]")).toBeNull();
     env.hangar = { status: { ...HANGAR_ONLINE, status: "offline" }, at: new Date() };
@@ -373,6 +417,7 @@ describe("AppHeader review control", () => {
     const pill = container.querySelector('[data-stub="review-pill"]')!;
     expect(pill.getAttribute("data-inbox-count")).toBe("3");
     expect(pill.getAttribute("data-inbox-href")).toBe("/inbox?project=tides");
+    expect(pill.getAttribute("data-board-href")).toBe("/board?project=tides");
   });
 });
 

@@ -3,10 +3,16 @@
 // the pill say to a screen reader, the order and staleness lines, what the
 // status region announces, arrow-key movement
 // through the rows, where the popover sits under its pill, and where focus
-// goes when the shell's drawer closes.
+// goes when the shell's drawer closes, and where its footer links go.
 // Structural types only, so nothing from the server reaches the bundle.
 
 import type { LiveState } from "./liveStream.js";
+import type { BoardRoute, InboxRoute } from "./route.js";
+
+/** Where the popover's "Open the board" goes before projects are carried: the plain board. */
+export const BOARD_HOME: BoardRoute = { view: "board", viewId: null, projects: [], item: null };
+/** Where its "Go to inbox" goes before projects are carried: the inbox on Needs me (its first tab). */
+export const INBOX_HOME: InboxRoute = { view: "inbox", item: null, projects: [] };
 
 /** The slice of a queue row these helpers read (`PendingReviewDto`). */
 export interface QueueRow {

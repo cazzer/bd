@@ -10,7 +10,9 @@
 // The shell header's inbox count (shared-nav-header, design.md decision 6)
 // counts the inbox items of Needs me through the same predicate,
 // `needsMeItem`, and never the reviews: those are the review control's own
-// count, so the two numbers add up to Needs me and none is counted twice.
+// count, so the two numbers add up to Needs me and none is counted twice —
+// give or take a poll's lag, or InboxView's all-status read reaching its
+// 500-item cap, which the header's pending-only read does not.
 
 export const REVIEW_SOURCE = "review";
 export const REVIEW_PRIORITY = 1;

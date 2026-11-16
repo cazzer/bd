@@ -3,8 +3,9 @@
 // The shell header's inbox count (shared-nav-header tasks.md 2.2): it reads
 // the pending items on InboxView's cadence, counts what Needs me lists from
 // the inbox (no reviews), stops while the tab is hidden and reads at once
-// when it shows again, and a failed read hides the count. The tRPC client
-// is mocked; timers are fake.
+// when it shows again, re-reads at once when the inbox says it changed,
+// drops a read overtaken by a newer one, and a failed read hides the count.
+// The tRPC client is mocked; timers are fake.
 
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -13,7 +14,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 const trpcMock = vi.hoisted(() => ({ inbox: { query: vi.fn() } }));
 vi.mock("../trpc.js", () => ({ trpc: trpcMock }));
 
-const { useInboxCount } = await import("./useInboxCount.js");
+const { inboxChanged, useInboxCount } = await import("./useInboxCount.js");
 const { INBOX_POLL_MS } = await import("./inboxRows.js");
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -123,5 +124,45 @@ describe("useInboxCount", () => {
     });
     await flush();
     expect(shown).toBe(2);
+  });
+
+  test("inboxChanged() re-reads at once and updates the count", async () => {
+    act(() => root.render(createElement(Probe)));
+    await flush();
+    expect(shown).toBe(2);
+    trpcMock.inbox.query.mockResolvedValue({ items: [item("b", "pending")], total: 1, truncated: false });
+    act(() => inboxChanged());
+    await flush();
+    expect(trpcMock.inbox.query).toHaveBeenCalledTimes(2);
+    expect(shown).toBe(1);
+  });
+
+  test("an older read that resolves after a newer one is dropped", async () => {
+    const answers: ((value: unknown) => void)[] = [];
+    trpcMock.inbox.query.mockImplementation(() => new Promise((resolve) => answers.push(resolve)));
+    act(() => root.render(createElement(Probe)));
+    act(() => inboxChanged());
+    expect(answers).toHaveLength(2);
+    const [older, newer] = answers;
+    await act(async () => {
+      newer!({ items: [item("a", "pending")], total: 1, truncated: false });
+      await Promise.resolve();
+    });
+    await flush();
+    expect(shown).toBe(1);
+    await act(async () => {
+      older!({ items: [item("a", "pending"), item("b", "pending"), item("c", "pending")], total: 3, truncated: false });
+      await Promise.resolve();
+    });
+    await flush();
+    expect(shown).toBe(1);
+  });
+
+  test("an unmounted count no longer listens for inboxChanged()", async () => {
+    act(() => root.render(createElement(Probe)));
+    await flush();
+    act(() => root.render(null));
+    act(() => inboxChanged());
+    expect(trpcMock.inbox.query).toHaveBeenCalledTimes(1);
   });
 });
