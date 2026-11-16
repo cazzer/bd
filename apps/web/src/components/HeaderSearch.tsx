@@ -1,6 +1,7 @@
 // The header search box (search-results-view, design.md decision 7): one
-// compact input and a submit button, mounted beside `ReviewQueuePill` in
-// every view's header but the graph's, which keeps its own SearchBar.
+// compact input and a submit button, mounted by the shell header
+// (AppHeader.tsx) on every view; the graph also keeps its own SearchBar,
+// its entry point.
 // Submitting opens the results view for the text — whitespace-only opens
 // it with no text rather than doing nothing (search-results/spec.md,
 // "Every view offers search"). The typed text is local state seeded from

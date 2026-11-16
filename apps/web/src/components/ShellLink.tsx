@@ -1,7 +1,7 @@
 // A link the shell header draws: a real address, so a modified or
 // non-primary click is the browser's (a new tab, a copied link), and a
-// plain click is a history push through `navigate` — the old Board /
-// Roadmap toggle's rule (WorkViewToggle.tsx), shared by every header link.
+// plain click is a history push through `navigate` — the rule the old Board
+// / Roadmap toggle followed, shared by every header link.
 
 import type { MouseEvent, ReactNode } from "react";
 import { navigate } from "../lib/navigate.js";

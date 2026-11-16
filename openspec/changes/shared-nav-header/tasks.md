@@ -17,9 +17,9 @@
 
 ## 3. Views adopt the shell
 
-- [ ] 3.1 Board and roadmap: drop own switcher, WorkViewToggle (delete component + test), search, pills; keep Refresh/error list in a view toolbar; sticky offsets use `--header-h`; their existing tests pass
-- [ ] 3.2 Feed, code, timeline, search, inbox: drop own HeaderSearch/pill; titles and tabs in a view toolbar
-- [ ] 3.3 Graph: floating search stays; top-right column and canvas sit below the header
-- [ ] 3.4 Live check (second stack, headless Playwright) of every route at 1440 and 390 px: header position identical across views, nav current marking, project carried graph→roadmap, Views menu opens a saved timeline, Go to inbox, deciding a review clears Needs me, phone Menu; screenshots
-- [ ] 3.5 File a follow-up bead for inbox/review-queue dedup with the overlap table from design context; README's board/roadmap section mentions the header
+- [x] 3.1 Board and roadmap: drop own switcher, WorkViewToggle (delete component + test), search, pills; keep Refresh/error list in a view toolbar; sticky offsets use `--header-h`; their existing tests pass
+- [x] 3.2 Feed, code, timeline, search, inbox: drop own HeaderSearch/pill; titles and tabs in a view toolbar
+- [x] 3.3 Graph: floating search stays; top-right column and canvas sit below the header
+- [x] 3.4 Live check (second stack, headless Playwright) of every route at 1440 and 390 px: header position identical across views, nav current marking, project carried graph→roadmap, Views menu opens a saved timeline, Go to inbox, deciding a review clears Needs me, phone Menu; screenshots
+- [x] 3.5 File a follow-up bead for inbox/review-queue dedup with the overlap table from design context; README's board/roadmap section mentions the header
 - [ ] 3.6 One review-request card at close with every view's screenshot

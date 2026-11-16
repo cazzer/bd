@@ -62,8 +62,8 @@ import { addressProjects, navigate, withAddressProjects } from "../lib/navigate.
 import { formatRoute, type GraphRoute } from "../lib/route.js";
 import { viewFilterOf } from "../lib/viewFilter.js";
 import { trpc } from "../trpc.js";
-import { HeaderSearch } from "./HeaderSearch.js";
-import { ReviewQueuePill, useShellDrawer } from "./ReviewQueue.js";
+import { useShellDrawer } from "./ReviewQueue.js";
+import { ViewToolbar } from "./ViewToolbar.js";
 
 type ListResult = Awaited<ReturnType<typeof trpc.list.query>>;
 type RootRow = ListResult["nodes"][number];
@@ -410,9 +410,10 @@ export function CodeView({ viewId, node }: { viewId: string | null; node: string
     );
   }
 
-  // The graph link names the shown node when there is one to name —
-  // even one this view does not hold, since the graph can still draw it.
-  const graphRoute: GraphRoute = withAddressProjects(shown.kind === "ready" ? { view: "graph", q: null, types: [], node: shown.node.id, projects: [] } : GRAPH_HOME);
+  // The toolbar's graph link names the shown node when there is one to name —
+  // even one this view does not hold, since the graph can still draw it;
+  // with none there is no link (the header's Graph link is the bare graph).
+  const graphRoute: GraphRoute | null = shown.kind === "ready" ? withAddressProjects({ view: "graph", q: null, types: [], node: shown.node.id, projects: [] }) : null;
   const shownRow = owner.kind === "found" && node !== null ? owner.tree.rows.get(node) : undefined;
   const path = shown.kind === "ready" ? (shownRow?.path ?? metadataText(shown.node.metadata, "path") ?? shown.node.title) : null;
   const rootsLine = `${view.roots.length} root${view.roots.length === 1 ? "" : "s"} shown${view.hasMore ? " · more match this view" : ""}`;
@@ -420,53 +421,55 @@ export function CodeView({ viewId, node }: { viewId: string | null; node: string
   const paneError = shown.kind === "error" ? shown.message : owner.kind === "error" ? owner.message : null;
 
   return (
-    <main className={`flex h-full w-screen gap-3 overflow-hidden p-3 ${shellDrawerOpen ? "sm:pr-[504px]" : ""}`}>
+    <main className={`flex h-full w-screen flex-col overflow-hidden ${shellDrawerOpen ? "sm:pr-[492px]" : ""}`}>
       <div aria-hidden="true" className="ambience pointer-events-none fixed inset-0 -z-10" />
+      <ViewToolbar
+        title={view.view.title || "(untitled view)"}
+        actions={
+          graphRoute !== null && (
+            <a href={formatRoute(graphRoute)} onClick={handleGraphLink(graphRoute)} className="shrink-0 rounded text-sm text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-accent">
+              Open in graph
+            </a>
+          )
+        }
+      />
 
-      <nav aria-label="Tree" className="glass flex w-72 shrink-0 flex-col overflow-hidden">
-        <p role="status" className="border-b border-hairline px-3 py-2 text-xs text-fg-muted">
-          {view.roots.length === 0 ? "No nodes match this view." : rootsLine}
-        </p>
-        <ul className="min-h-0 flex-1 overflow-y-auto p-2 text-sm">
-          {view.roots.map((root) => (
-            <RootEntry key={root.id} root={root} state={trees.get(root.id)} expanded={expanded} selectedId={node} onToggle={toggle} onActivate={activate} />
-          ))}
-        </ul>
-      </nav>
+      <div className="flex min-h-0 flex-1 gap-3 px-3 pb-3">
+        <nav aria-label="Tree" className="glass flex w-72 shrink-0 flex-col overflow-hidden">
+          <p role="status" className="border-b border-hairline px-3 py-2 text-xs text-fg-muted">
+            {view.roots.length === 0 ? "No nodes match this view." : rootsLine}
+          </p>
+          <ul className="min-h-0 flex-1 overflow-y-auto p-2 text-sm">
+            {view.roots.map((root) => (
+              <RootEntry key={root.id} root={root} state={trees.get(root.id)} expanded={expanded} selectedId={node} onToggle={toggle} onActivate={activate} />
+            ))}
+          </ul>
+        </nav>
 
-      <section aria-label="File" className="glass flex min-w-0 flex-1 flex-col overflow-hidden">
-        <header className="flex items-start justify-between gap-4 border-b border-hairline p-4">
-          <div className="min-w-0">
-            <h1 className="truncate text-base font-semibold text-fg">{view.view.title || "(untitled view)"}</h1>
-            {path !== null && (
-              <h2 className="mt-0.5 truncate font-mono text-xs text-fg-muted" data-path={path}>
+        <section aria-label="File" className="glass flex min-w-0 flex-1 flex-col overflow-hidden">
+          {path !== null && (
+            <header className="border-b border-hairline px-4 py-2.5">
+              <h2 className="truncate font-mono text-xs text-fg-muted" data-path={path}>
                 {path}
               </h2>
-            )}
-          </div>
-          <div className="flex min-w-0 flex-wrap items-center justify-end gap-3">
-            <a href={formatRoute(graphRoute)} onClick={handleGraphLink(graphRoute)} className="shrink-0 rounded text-sm text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-accent">
-              {graphRoute.node === null ? "Open the graph" : "Open in graph"}
-            </a>
-            <HeaderSearch />
-            <ReviewQueuePill />
-          </div>
-        </header>
+            </header>
+          )}
 
-        <div className="min-h-0 flex-1 overflow-hidden">
-          {node === null && <p className="p-4 text-sm text-fg-muted">Choose a file from the tree.</p>}
-          {node !== null && paneError !== null && (
-            <p role="alert" className="m-4 rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
-              {paneError}
-            </p>
-          )}
-          {node !== null && paneError === null && (shown.kind === "loading" || owner.kind === "pending") && <p className="p-4 text-sm text-fg-muted">Loading…</p>}
-          {node !== null && (shown.kind === "missing" || (shown.kind === "ready" && owner.kind === "outside")) && (
-            <p className="p-4 text-sm text-fg-muted">That node is not in this view.</p>
-          )}
-          {shown.kind === "ready" && owner.kind === "found" && <NodePane node={shown.node} tree={owner.tree} onActivate={activate} />}
-        </div>
-      </section>
+          <div className="min-h-0 flex-1 overflow-hidden">
+            {node === null && <p className="p-4 text-sm text-fg-muted">Choose a file from the tree.</p>}
+            {node !== null && paneError !== null && (
+              <p role="alert" className="m-4 rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+                {paneError}
+              </p>
+            )}
+            {node !== null && paneError === null && (shown.kind === "loading" || owner.kind === "pending") && <p className="p-4 text-sm text-fg-muted">Loading…</p>}
+            {node !== null && (shown.kind === "missing" || (shown.kind === "ready" && owner.kind === "outside")) && (
+              <p className="p-4 text-sm text-fg-muted">That node is not in this view.</p>
+            )}
+            {shown.kind === "ready" && owner.kind === "found" && <NodePane node={shown.node} tree={owner.tree} onActivate={activate} />}
+          </div>
+        </section>
+      </div>
     </main>
   );
 }

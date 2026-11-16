@@ -8,8 +8,8 @@
 // opens. And an outcome request's banner (hangar-release review fixes,
 // bd-d38.4), built from the binding and the server's read of the session,
 // outside the agent's text. The tRPC client is mocked; the shell's review
-// queue, the header search, the board's panel, and the markdown renderer
-// are stubbed (they have their own tests).
+// queue, the header's inbox count, the board's panel, and the markdown
+// renderer are stubbed (they have their own tests).
 
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -30,9 +30,9 @@ vi.mock("./ReviewQueue.js", () => ({
   useReviewQueue: () => ({ reviews: [], loaded: true, version: 0 }),
   useShellDrawer: () => ({ drafts: new Map() }),
   storeDraft: () => {},
-  ReviewQueuePill: () => null,
 }));
-vi.mock("./HeaderSearch.js", () => ({ HeaderSearch: () => null }));
+const inboxChangedMock = vi.hoisted(() => vi.fn());
+vi.mock("../lib/useInboxCount.js", () => ({ inboxChanged: inboxChangedMock }));
 vi.mock("./ReviewItemPanel.js", () => ({ ReviewItemPanel: () => null }));
 vi.mock("./EvidenceView.js", async () => {
   const { createElement: h } = await import("react");
@@ -102,6 +102,7 @@ beforeEach(() => {
   trpcMock.inbox.query.mockReset();
   trpcMock.inboxDecision.mutate.mockReset();
   trpcMock.relayActionsFor.query.mockReset();
+  inboxChangedMock.mockReset();
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -150,6 +151,9 @@ describe("the inbox's relay notices", () => {
     await act(async () => primary().click());
     await flush();
     expect(strips()).toEqual([["pending", "Recorded. The laptop relay will tell pane w1:p1 when it runs."]]);
+    // The header's inbox count is told once the decision's reload has landed (shared-nav-header).
+    expect(inboxChangedMock).toHaveBeenCalledTimes(1);
+    expect(trpcMock.inbox.query.mock.invocationCallOrder.at(-1)!).toBeLessThan(inboxChangedMock.mock.invocationCallOrder[0]!);
 
     // The relay fails the first prompt; the second decision lands meanwhile.
     expect(container.querySelector("h2")?.textContent).toBe("Second");

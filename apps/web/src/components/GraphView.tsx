@@ -98,12 +98,12 @@
 // `history.state`: the URL is the sole source of truth, which is what
 // makes a pasted link and a popstate the same input to `applyRoute`.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { CreateNoteForm } from "./CreateNoteForm.js";
 import { DetailPanel, type OfferedView } from "./DetailPanel.js";
 import { GraphCanvas } from "./GraphCanvas.js";
 import { SearchBar, type SearchBarStatus } from "./SearchBar.js";
-import { ReviewQueuePill, useShellDrawer } from "./ReviewQueue.js";
+import { useShellDrawer } from "./ReviewQueue.js";
 import { TypePanel } from "./TypePanel.js";
 import { UnlinkedNotes } from "./UnlinkedNotes.js";
 import { edgeLegendOf } from "../graph/edgeLegend.js";
@@ -1123,6 +1123,17 @@ export function GraphView() {
   // defaulting to the narrower w-80 when nothing is selected (the same
   // width a freshly opened panel would start at).
   const shellDrawerOpen = useShellDrawer().open;
+  // The search bar's height, which the right column clears below `xl` (see the column's comment).
+  const searchBarRef = useRef<HTMLDivElement>(null);
+  const [searchBarHeight, setSearchBarHeight] = useState(0);
+  useLayoutEffect(() => {
+    const el = searchBarRef.current;
+    if (el === null || typeof ResizeObserver === "undefined") return;
+    setSearchBarHeight(el.offsetHeight);
+    const observer = new ResizeObserver(() => setSearchBarHeight(el.offsetHeight));
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
   const rightColumnExpanded = Boolean(selectedNodeId) && detailExpanded;
   const rightColumnWidthClass = rightColumnExpanded ? "w-96" : "w-80";
   const rightColumnWidthPx = rightColumnExpanded ? RIGHT_COLUMN_EXPANDED_WIDTH_PX : RIGHT_COLUMN_SUMMARY_WIDTH_PX;
@@ -1135,7 +1146,7 @@ export function GraphView() {
   const insetRight = rightColumnOpen ? RIGHT_COLUMN_OFFSET_PX + rightColumnWidthPx : 0;
 
   return (
-    <div className="h-full w-screen overflow-hidden">
+    <div className="h-full w-screen overflow-hidden" style={{ "--graph-search-h": `${searchBarHeight}px` } as CSSProperties}>
       {/*
         Empty-state ambience (bd-8ub review, immersive brief item 11): a
         static vignette + sparse starfield, `-z-10` so it always sits
@@ -1161,9 +1172,9 @@ export function GraphView() {
         />
       </div>
 
-      {/* Top-center: search bar + "New note" popover. Below `sm` it would cover the review queue's pill at the head of the right column (review-queue), so there it starts under the pill's row. */}
-      <div className="pointer-events-none fixed inset-x-0 top-[calc(var(--header-h)+4.25rem)] z-20 flex justify-center px-4 sm:top-[calc(var(--header-h)+1rem)]">
-        <div className="pointer-events-auto">
+      {/* Top-center: search bar + "New note" popover, the graph's entry point, just under the shell header. */}
+      <div className="pointer-events-none fixed inset-x-0 top-[calc(var(--header-h)+1rem)] z-20 flex justify-center px-4">
+        <div ref={searchBarRef} className="pointer-events-auto">
           <SearchBar
             query={query}
             onQueryChange={setQuery}
@@ -1219,21 +1230,23 @@ export function GraphView() {
         state (bd-e9n, design.md decision 6) rather than a fixed `w-96` —
         see `rightColumnWidthClass`'s own comment above — so the column
         never has a gap between its own edge and DetailPanel's. The review
-        queue's pill heads the column (review-queue, design.md decision 3),
-        so the panels below it move down rather than sit under it. While the
+        control is the shell header's (shared-nav-header), so the column
+        starts with the type control. Below `xl` the centred search would
+        overlap the column (the search is ~26rem wide, the column 20-24rem
+        at the right edge), so there the column starts under it, by the
+        search bar's measured height (`--graph-search-h`) rather than a
+        fixed offset. While the
         queue's drawer is open over it (from `sm` up; below that the drawer is
         a modal sheet and the view is inert) the column is hidden, not moved:
         moved clear of the drawer it would run under the centred search bar
         at ordinary widths, and left in place its controls would stay
         tabbable under the drawer. Closing the drawer shows it again before
-        focus returns to the pill.
+        focus returns to the review control.
       */}
-      <div className={`pointer-events-none fixed top-[calc(var(--header-h)+1rem)] right-4 bottom-4 z-10 flex ${shellDrawerOpen ? "sm:invisible" : ""} ${rightColumnWidthClass} flex-col items-stretch gap-3`}>
-        <div className="pointer-events-auto shrink-0 self-end">
-          <ReviewQueuePill variant="floating" />
-        </div>
-        {/* Below `sm` the search sits under the pill's row, across the full width, so the type control starts under the search. */}
-        <div className="glass pointer-events-auto shrink-0 p-3 max-sm:mt-[8.75rem]">
+      <div
+        className={`pointer-events-none fixed top-[calc(var(--header-h)+1rem)] right-4 bottom-4 z-10 flex max-xl:top-[calc(var(--header-h)+1.75rem+var(--graph-search-h))] ${shellDrawerOpen ? "sm:invisible" : ""} ${rightColumnWidthClass} flex-col items-stretch gap-3`}
+      >
+        <div className="glass pointer-events-auto shrink-0 p-3">
           <TypePanel drawnTypes={drawnTypes} storeTypes={nodeTypeCounts} selected={typePanelSelection} focusedType={focusedType} onToggleFocus={handleToggleTypeFocus} typeColors={typeColors} edgeLegend={edgeLegend} />
         </div>
         {selectedNodeId && (

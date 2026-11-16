@@ -12,7 +12,7 @@
 // draws any view's filter as chips. The anchor is its own state keyed on
 // `node` alone (the code view's `shown` shape): `getNodes([node])` for
 // the heading, read once per anchor, so a chip toggle leaves the heading,
-// the header link, and the header's height exactly as they were. The
+// the toolbar's graph link, and the toolbar's height exactly as they were. The
 // page is keyed on `(viewId, node, chosen)`: `timeline({ anchorId,
 // nodeTypes, sourceSystems, limit })` with the chosen types (`chosenTypes`,
 // lib/timelineRow.ts — the address's `type`s intersected with the view's
@@ -23,7 +23,7 @@
 // is. While a page loads, the previous page's rows — when they are the
 // same anchor's under the same view — stay on screen dimmed under
 // `aria-busy`, and the always-mounted `role="status"` line says
-// "Loading…", so the header never changes height and the new count is
+// "Loading…", so the toolbar never changes height and the new count is
 // announced when it lands. A stale answer is dropped by the effect's
 // `cancelled` flag (the feed's pattern), and a `ready` view loaded for
 // another address is never read from — `forViewId` on the view state,
@@ -114,7 +114,7 @@ import { useEffect, useMemo, useState, type CSSProperties, type MouseEvent } fro
 import { colorForNodeType } from "../graph/palette.js";
 import { typeColorsForStore, type TypeCount } from "../graph/typePrevalence.js";
 import { extractLinks, pickRowFields } from "../lib/feedRow.js";
-import { addressProjects, navigate, withAddressProjects } from "../lib/navigate.js";
+import { addressProjects, navigate } from "../lib/navigate.js";
 import { formatRoute, type GraphRoute } from "../lib/route.js";
 import {
   addressTypesFor,
@@ -134,8 +134,8 @@ import {
 } from "../lib/timelineRow.js";
 import { viewFilterOf, type ViewFilter, type ViewNode } from "../lib/viewFilter.js";
 import { trpc } from "../trpc.js";
-import { HeaderSearch } from "./HeaderSearch.js";
-import { ReviewQueuePill, useShellDrawer } from "./ReviewQueue.js";
+import { useShellDrawer } from "./ReviewQueue.js";
+import { ViewToolbar } from "./ViewToolbar.js";
 
 type TimelineResult = Awaited<ReturnType<typeof trpc.timeline.query>>;
 type TimelineRow = TimelineResult["rows"][number];
@@ -144,8 +144,6 @@ type TimelineCursor = NonNullable<TimelineResult["nextCursor"]>;
 /** Rows per `timeline` call — core's `DEFAULT_TIMELINE_LIMIT`, the feed's page size. */
 const PAGE_SIZE = 50;
 
-/** The bare graph — no search, nothing selected — which is where "Open the graph" goes. */
-const GRAPH_HOME: GraphRoute = { view: "graph", q: null, types: [], node: null, projects: [] };
 
 export interface TimelineViewProps {
   viewId: string | null;
@@ -456,9 +454,9 @@ export function TimelineView({ viewId, node, types }: TimelineViewProps) {
   const viewTitle = view.kind === "ready" ? view.view.title || "(untitled view)" : null;
   const anchorRef = anchor.kind === "ready" ? anchor.node : null;
   const anchorMissing = anchor.kind === "missing" || page.kind === "anchor-missing";
-  // The graph link names the anchor once it is known; before that, or in
-  // an empty state, it is the bare graph.
-  const graphRoute: GraphRoute = anchorRef !== null ? graphRouteFor(anchorRef.id) : withAddressProjects(GRAPH_HOME);
+  // The toolbar's graph link names the anchor once it is known; before that,
+  // or in an empty state, there is none (the header's Graph link is the bare graph).
+  const graphRoute: GraphRoute | null = anchorRef !== null ? graphRouteFor(anchorRef.id) : null;
   const heading = anchorRef !== null && viewTitle !== null ? `${anchorRef.title || "(untitled)"} · ${viewTitle}` : "Timeline";
 
   // The rows on screen: the loaded page, or the previous page dimmed
@@ -476,7 +474,7 @@ export function TimelineView({ viewId, node, types }: TimelineViewProps) {
   // header on why this is the page's and not the store's.
   const rowTypeCounts = useMemo(() => countRowsByType(shownRows ?? []), [shownRows]);
 
-  // The status line, always mounted so the header keeps its height and a
+  // The status line, always mounted so the toolbar keeps its height and a
   // change is announced: the count (or the one zero-row sentence) while a
   // page is shown, "Loading…" while anything loads, the view's name while
   // a view is loaded but no anchor is (so the "choose a node" state names
@@ -526,127 +524,124 @@ export function TimelineView({ viewId, node, types }: TimelineViewProps) {
   const errorMessage = view.kind === "error" ? view.message : anchor.kind === "error" ? anchor.message : anchor.kind === "ready" && page.kind === "error" ? page.message : null;
 
   return (
-    // `body` is `overflow: hidden` (index.css, for the canvas), so this
-    // element is the page's own scroll container.
-    <main className={`h-full w-screen overflow-y-auto ${shellDrawerOpen ? "sm:pr-[492px]" : ""}`}>
+    <main className={`flex h-full w-screen flex-col overflow-hidden ${shellDrawerOpen ? "sm:pr-[492px]" : ""}`}>
       <div aria-hidden="true" className="ambience pointer-events-none fixed inset-0 -z-10" />
-      <div className="mx-auto max-w-3xl px-4 py-6">
-        <header className="glass mb-4 flex flex-wrap items-start justify-between gap-4 p-4 sm:flex-nowrap">
-          <div className="min-w-0">
-            <h1 className="break-words text-base font-semibold text-fg sm:truncate">{heading}</h1>
-            <p className="mt-0.5 min-h-4 text-xs text-fg-muted" role="status">
-              {status}
-            </p>
-          </div>
-          <div className="flex min-w-0 flex-wrap items-center justify-end gap-3">
+      <ViewToolbar
+        title={heading}
+        column="max-w-3xl"
+        status={status}
+        actions={
+          graphRoute !== null && (
             <a href={formatRoute(graphRoute)} onClick={pushOnPlainClick(graphRoute)} className="shrink-0 rounded text-sm text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-accent">
-              {graphRoute.node === null ? "Open the graph" : "Open in graph"}
+              Open in graph
             </a>
-            <HeaderSearch />
-            <ReviewQueuePill />
-          </div>
-        </header>
-
-        {showChips && (
-          <div className="mb-4">
-            <div role="group" aria-label="Node types" className="flex flex-wrap gap-2">
-              {chips.map((type) => {
-                const pressed = selection?.chosen?.includes(type) ?? false;
-                // A count only once a page with rows is on screen: with
-                // nothing loaded there is nothing to count, and a "0"
-                // against no page at all would read as a claim about the
-                // store rather than about what is shown.
-                // `shown.chosen`, not `selection.chosen`: the counts
-                // describe the rows on screen, so the narrowing they are
-                // judged against has to be the one those rows were loaded
-                // under. See ReadyPage.chosen.
-                const count = shown === null || shown.rows.length === 0 ? null : chipCountLabel(type, shown.chosen, rowTypeCounts);
-                return (
-                  <button
-                    key={type}
-                    type="button"
-                    aria-pressed={pressed}
-                    title={count?.title}
-                    onClick={() => toggleChip(type)}
-                    className={`flex min-h-11 items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium focus:outline-none focus:ring-2 focus:ring-accent sm:min-h-0 ${
-                      pressed ? "border-accent/60 bg-accent/20 text-fg" : "border-hairline bg-surface text-fg-muted hover:text-fg"
-                    }`}
-                  >
-                    <span aria-hidden="true" className="size-2 shrink-0 rounded-full" style={{ backgroundColor: colorForNodeType(type, typeColors) }} />
-                    {type}
-                    {/*
-                      bd-v1y review: the count is the ONLY channel saying
-                      "this would show nothing". An earlier version also
-                      faded an empty chip with opacity-60 — but `empty` is
-                      only ever true for a chip that IS selected, and a
-                      deselected chip stayed at full opacity, so dim meant
-                      on-but-empty and bright meant off. A reader decoding
-                      "faded means off" got it exactly backwards, and the
-                      fade was borrowing the affordance the pressed state
-                      already spends. Emphasis is left to aria-pressed and
-                      the border, and the number carries emptiness on its
-                      own.
-                    */}
-                    {count?.text !== null && count?.text !== undefined && (
-                      <span className={`font-mono tabular-nums ${count.empty ? "text-fg-muted/60" : "text-fg-muted"}`}>{count.text}</span>
-                    )}
-                  </button>
-                );
-              })}
+          )
+        }
+      />
+      {/* `body` is `overflow: hidden` (index.css, for the canvas), so this element is the page's own scroll container. */}
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="mx-auto max-w-3xl px-4 pt-2 pb-6">
+          {showChips && (
+            <div className="mb-4">
+              <div role="group" aria-label="Node types" className="flex flex-wrap gap-2">
+                {chips.map((type) => {
+                  const pressed = selection?.chosen?.includes(type) ?? false;
+                  // A count only once a page with rows is on screen: with
+                  // nothing loaded there is nothing to count, and a "0"
+                  // against no page at all would read as a claim about the
+                  // store rather than about what is shown.
+                  // `shown.chosen`, not `selection.chosen`: the counts
+                  // describe the rows on screen, so the narrowing they are
+                  // judged against has to be the one those rows were loaded
+                  // under. See ReadyPage.chosen.
+                  const count = shown === null || shown.rows.length === 0 ? null : chipCountLabel(type, shown.chosen, rowTypeCounts);
+                  return (
+                    <button
+                      key={type}
+                      type="button"
+                      aria-pressed={pressed}
+                      title={count?.title}
+                      onClick={() => toggleChip(type)}
+                      className={`flex min-h-11 items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium focus:outline-none focus:ring-2 focus:ring-accent sm:min-h-0 ${
+                        pressed ? "border-accent/60 bg-accent/20 text-fg" : "border-hairline bg-surface text-fg-muted hover:text-fg"
+                      }`}
+                    >
+                      <span aria-hidden="true" className="size-2 shrink-0 rounded-full" style={{ backgroundColor: colorForNodeType(type, typeColors) }} />
+                      {type}
+                      {/*
+                        bd-v1y review: the count is the ONLY channel saying
+                        "this would show nothing". An earlier version also
+                        faded an empty chip with opacity-60 — but `empty` is
+                        only ever true for a chip that IS selected, and a
+                        deselected chip stayed at full opacity, so dim meant
+                        on-but-empty and bright meant off. A reader decoding
+                        "faded means off" got it exactly backwards, and the
+                        fade was borrowing the affordance the pressed state
+                        already spends. Emphasis is left to aria-pressed and
+                        the border, and the number carries emptiness on its
+                        own.
+                      */}
+                      {count?.text !== null && count?.text !== undefined && (
+                        <span className={`font-mono tabular-nums ${count.empty ? "text-fg-muted/60" : "text-fg-muted"}`}>{count.text}</span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+              {shown !== null && shown.rows.length > 0 && <p className="mt-1.5 text-[11px] text-fg-muted">{chipCountsCaption(shown.rows.length, shown.hasMore)}</p>}
             </div>
-            {shown !== null && shown.rows.length > 0 && <p className="mt-1.5 text-[11px] text-fg-muted">{chipCountsCaption(shown.rows.length, shown.hasMore)}</p>}
-          </div>
-        )}
+          )}
 
-        {errorMessage !== null && (
-          <p role="alert" className="rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
-            {errorMessage}
-          </p>
-        )}
-        {errorMessage === null && copy !== null && <p className="glass p-4 text-sm text-fg-muted">{copy}</p>}
+          {errorMessage !== null && (
+            <p role="alert" className="rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+              {errorMessage}
+            </p>
+          )}
+          {errorMessage === null && copy !== null && <p className="glass p-4 text-sm text-fg-muted">{copy}</p>}
 
-        {shown !== null && shown.rows.length > 0 && (
-          <div role="group" aria-label="Timeline rows" aria-busy={pageLoading} className={`transition-opacity ${pageLoading ? "opacity-50" : ""}`}>
-            {groups.map((group, index) => (
-              // Keyed by position as well as day: two runs of one day are
-              // two groups (lib/timelineRow.ts's `groupRowsByDay`), and
-              // the key must stay unique when that happens.
-              <section key={`${group.key}#${index}`} aria-label={group.label} style={marginForGap(group.gap)}>
-                {group.gap?.label != null && <GapMarker label={group.gap.label} />}
-                <h2 className="sticky top-0 z-10 mb-2 flex items-baseline gap-2 bg-ground px-2 py-2 text-xs font-semibold text-fg">
-                  {group.label}
-                  <span className="font-normal text-fg-muted">{group.entries.length}</span>
-                </h2>
-                <ol>
-                  {group.entries.map(({ row, gap }) => (
-                    <li key={row.id} style={marginForGap(gap)}>
-                      {gap?.label != null && <GapMarker label={gap.label} />}
-                      <TimelineRowItem row={row} typeColors={typeColors} />
-                    </li>
-                  ))}
-                </ol>
-              </section>
-            ))}
-          </div>
-        )}
+          {shown !== null && shown.rows.length > 0 && (
+            <div role="group" aria-label="Timeline rows" aria-busy={pageLoading} className={`transition-opacity ${pageLoading ? "opacity-50" : ""}`}>
+              {groups.map((group, index) => (
+                // Keyed by position as well as day: two runs of one day are
+                // two groups (lib/timelineRow.ts's `groupRowsByDay`), and
+                // the key must stay unique when that happens.
+                <section key={`${group.key}#${index}`} aria-label={group.label} style={marginForGap(group.gap)}>
+                  {group.gap?.label != null && <GapMarker label={group.gap.label} />}
+                  <h2 className="sticky top-0 z-10 mb-2 flex items-baseline gap-2 bg-ground px-2 py-2 text-xs font-semibold text-fg">
+                    {group.label}
+                    <span className="font-normal text-fg-muted">{group.entries.length}</span>
+                  </h2>
+                  <ol>
+                    {group.entries.map(({ row, gap }) => (
+                      <li key={row.id} style={marginForGap(gap)}>
+                        {gap?.label != null && <GapMarker label={gap.label} />}
+                        <TimelineRowItem row={row} typeColors={typeColors} />
+                      </li>
+                    ))}
+                  </ol>
+                </section>
+              ))}
+            </div>
+          )}
 
-        {page.kind === "ready" && page.hasMore && (
-          <div className="mt-4 flex items-center gap-3">
-            <button
-              type="button"
-              onClick={() => void loadMore()}
-              disabled={page.loadingMore}
-              className="min-h-11 rounded-lg border border-hairline px-3 py-1.5 text-xs font-medium text-fg hover:bg-surface-strong focus:outline-none focus:ring-2 focus:ring-accent disabled:opacity-60 sm:min-h-0"
-            >
-              {page.loadingMore ? "Loading…" : "Load more"}
-            </button>
-            {page.moreError && (
-              <span role="alert" className="text-xs text-red-300">
-                {page.moreError}
-              </span>
-            )}
-          </div>
-        )}
+          {page.kind === "ready" && page.hasMore && (
+            <div className="mt-4 flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => void loadMore()}
+                disabled={page.loadingMore}
+                className="min-h-11 rounded-lg border border-hairline px-3 py-1.5 text-xs font-medium text-fg hover:bg-surface-strong focus:outline-none focus:ring-2 focus:ring-accent disabled:opacity-60 sm:min-h-0"
+              >
+                {page.loadingMore ? "Loading…" : "Load more"}
+              </button>
+              {page.moreError && (
+                <span role="alert" className="text-xs text-red-300">
+                  {page.moreError}
+                </span>
+              )}
+            </div>
+          )}
+        </div>
       </div>
     </main>
   );

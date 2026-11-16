@@ -1,17 +1,19 @@
-// Moving between the board and the roadmap, and between projects on either
-// (roadmap-milestones, design.md decisions 5-6): the pure half of the
-// project switcher (components/ProjectSwitcher.tsx) and the Board / Roadmap
-// toggle (components/WorkViewToggle.tsx). Each answers the route to
-// navigate to; the components own when.
+// Moving between projects (roadmap-milestones, design.md decisions 5-6): the
+// pure half of the project switcher (components/ProjectSwitcher.tsx), now in
+// the shell header. Each answers the route to navigate to; the components
+// own when. The Board / Roadmap toggle is gone (shared-nav-header, design.md
+// decision 4): the header's nav links (lib/shellNav.ts) replace it, and its
+// view-carrying rule, `viewCarriedProjects`, is kept for them.
 //
 // The switcher picks one project at a time, but an address may still name
 // several (an old link, a review deep link), so its state has a third case
 // besides "All projects" and one key — the projects named, or how many —
-// which no choice produces and every choice replaces. A switch, like the
-// toggle, drops the open item: the drawer belongs to what was shown before.
+// which no choice produces and every choice replaces. A switch on the
+// board or roadmap drops the open item: the drawer belongs to what was shown
+// before.
 
 import { chosenProjects, offeredProjects } from "./boardRow.js";
-import type { BoardRoute, RoadmapRoute, Route } from "./route.js";
+import type { Route } from "./route.js";
 
 /** The switcher's value for "All projects". Never a project key: the key pattern needs at least one character. */
 export const ALL_PROJECTS_CHOICE = "";
@@ -61,7 +63,7 @@ export function chooseProject<R extends Route>(route: R, offered: readonly strin
 }
 
 /**
- * The projects a board drawn from a view shows, for the toggle to carry:
+ * The projects a board drawn from a view shows, for the header's links to carry:
  * the view's own projects narrowed by the address, known without the
  * registry, so the Roadmap link is right while the board loads or after a
  * read fails. Null when the view names no projects (or there is none yet),
@@ -69,23 +71,6 @@ export function chooseProject<R extends Route>(route: R, offered: readonly strin
  */
 export function viewCarriedProjects(viewProjects: readonly string[] | null, address: readonly string[]): string[] | null {
   return viewProjects === null ? null : chosenProjects(offeredProjects(viewProjects, []), address);
-}
-
-/**
- * The roadmap a board's toggle opens: its projects carried, its item and
- * view dropped. A board drawn from a view that names projects, with no
- * project in its address, shows the view's projects — "all" there is not
- * every registered project — so `viewChosen` (`viewCarriedProjects`) is
- * carried in that case instead.
- */
-export function boardToRoadmap(route: BoardRoute, viewChosen: readonly string[] | null): RoadmapRoute {
-  const projects = route.projects.length === 0 && route.viewId !== null && viewChosen !== null ? [...viewChosen] : [...route.projects];
-  return { view: "roadmap", projects, item: null };
-}
-
-/** The board a roadmap's toggle opens: its projects carried, its item dropped, no view. */
-export function roadmapToBoard(route: RoadmapRoute): BoardRoute {
-  return { view: "board", viewId: null, projects: [...route.projects], item: null };
 }
 
 /** What the switcher offers (ProjectSwitcher's `offered` and `fallback`). */

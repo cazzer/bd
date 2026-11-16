@@ -4,14 +4,13 @@
 // its epics, then "No milestone", on one shared week-scaled timeline with a
 // line at today, and progress rolled up from items. It writes nothing.
 //
-// Header: laid out as the board's so the switcher and toggle do not move
-// between the two (its h1 is for screen readers): the project switcher the
-// board uses, offering every registered project (a switch drops the open
-// item), live as soon as the registry is read whatever the roadmap read
-// does, and with the address's projects and "All projects" when the registry
-// cannot be read (lib/workViewNav.ts `switcherOffer`); the Board / Roadmap
-// toggle, which carries the projects back to `/board` and drops the item;
-// and the review queue's pill, placed here as every view places it.
+// Header: the shell's (AppHeader.tsx, shared-nav-header), which owns the
+// project switcher (a switch drops the open item) and the Board and Roadmap
+// nav links that replaced the roadmap's own toggle; the roadmap has no
+// toolbar of its own, only an h1 for screen readers (the header's current
+// Roadmap link names it). It still reads the registry itself, on every
+// roadmap read, for what it offers and each project's `lastIngest` error,
+// so the error list is as current as the rows.
 //
 // Sections and groups are lib/roadmapRows.ts; the axis, bars, remaining
 // spans, markers, overdue rule, and date labels are lib/roadmapLayout.ts.
@@ -74,12 +73,9 @@ import {
 } from "../lib/roadmapLayout.js";
 import { buildRoadmapSections, NO_MILESTONE_TITLE, roadmapItemProject, watchedProjects, type RoadmapEpic, type RoadmapGroup, type RoadmapSection } from "../lib/roadmapRows.js";
 import { formatRoute, type RoadmapRoute } from "../lib/route.js";
-import { chooseProject, roadmapToBoard, switcherOffer } from "../lib/workViewNav.js";
 import { trpc } from "../trpc.js";
-import { ProjectSwitcher } from "./ProjectSwitcher.js";
 import { ReviewDrawer, useWideDrawer } from "./ReviewDrawer.js";
-import { ReviewQueuePill, storeDraft, useShellDrawer } from "./ReviewQueue.js";
-import { WorkViewToggle } from "./WorkViewToggle.js";
+import { storeDraft, useShellDrawer } from "./ReviewQueue.js";
 
 type BeadsProjectsAnswer = Awaited<ReturnType<typeof trpc.beadsProjects.query>>["projects"];
 type RoadmapAnswer = Awaited<ReturnType<typeof trpc.roadmap.query>>;
@@ -127,7 +123,6 @@ export interface RoadmapViewProps {
 
 export function RoadmapView({ projects, item }: RoadmapViewProps) {
   const [registry, setRegistry] = useState<BeadsProjectsAnswer | null>(null);
-  const [registryFailed, setRegistryFailed] = useState(false);
   const [data, setData] = useState<RoadmapData | null>(null);
   const [readError, setReadError] = useState<string | null>(null);
   const [eventErrors, setEventErrors] = useState<ReadonlyMap<string, string>>(new Map());
@@ -157,11 +152,9 @@ export function RoadmapView({ projects, item }: RoadmapViewProps) {
         if (disposed) return;
         keys = reg.map((p) => p.key);
         setRegistry(reg);
-        setRegistryFailed(false);
       } catch (err) {
         if (disposed) return;
         // Without the registry the roadmap is still read: the address's projects, or every registered one (the server knows them).
-        setRegistryFailed(true);
         setReadError(messageOf(err, "Failed to read the projects."));
       }
       let read: string[] | null;
@@ -241,7 +234,6 @@ export function RoadmapView({ projects, item }: RoadmapViewProps) {
 
   const route: RoadmapRoute = { view: "roadmap", projects, item };
   const offered = registry === null ? null : offeredProjects(null, registry.map((p) => p.key));
-  const { offered: switcherOffered, fallback: switcherFallback } = switcherOffer({ viewProjects: null, registry: offered, registryFailed, address: projects });
 
   // The projects to draw, and whether that is every project (then a project with nothing planned is left out).
   const answerProjects = data ? [...new Set([...data.answer.milestones, ...data.answer.epics].map((r) => r.project))] : [];
@@ -295,21 +287,7 @@ export function RoadmapView({ projects, item }: RoadmapViewProps) {
   return (
     <main className={`flex h-full w-screen flex-col overflow-hidden ${drawerOpen || shellDrawerOpen ? "sm:pr-[492px]" : ""}`}>
       <div aria-hidden="true" className="ambience pointer-events-none fixed inset-0 -z-10" />
-      <header inert={drawerOpen && !wide} className="glass m-3 mb-0 flex flex-wrap items-center gap-x-4 gap-y-2 p-3">
-        <h1 className="sr-only">Roadmap</h1>
-        {(switcherFallback || switcherOffered?.length !== 0) && (
-          <ProjectSwitcher
-            offered={switcherOffered}
-            address={projects}
-            fallback={switcherFallback}
-            onChoose={(choice) => switcherOffered && navigate(chooseProject(route, switcherOffered, choice), "push")}
-          />
-        )}
-        <WorkViewToggle current="roadmap" board={roadmapToBoard(route)} roadmap={route} />
-        <div className="ml-auto flex items-center text-xs text-fg-muted">
-          <ReviewQueuePill />
-        </div>
-      </header>
+      <h1 className="sr-only">Roadmap</h1>
 
       <div inert={drawerOpen && !wide} className="flex min-h-0 flex-1 flex-col gap-3 p-3">
         {readError && (
