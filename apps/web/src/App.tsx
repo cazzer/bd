@@ -62,6 +62,7 @@ import { ReviewQueueProvider } from "./components/ReviewQueue.js";
 import { ShellProjectsProvider } from "./components/ShellProjects.js";
 import { useLiveState } from "./lib/liveStream.js";
 import { navigate, subscribeToNavigation } from "./lib/navigate.js";
+import { currentSavedViewId } from "./lib/shellNav.js";
 import { useReviewQueue } from "./lib/useReviewQueue.js";
 import { graphRouteFromSearch, parseRoute, type Route } from "./lib/route.js";
 
@@ -136,7 +137,7 @@ export function App() {
 
   return (
     <ReviewQueueProvider queue={queue} live={live} route={route}>
-      <ShellProjectsProvider boardViewId={route.view === "board" ? route.viewId : null}>
+      <ShellProjectsProvider viewId={currentSavedViewId(route)}>
         <div className="flex h-dvh w-screen flex-col overflow-hidden">
           <AppHeader route={route} />
           <div className="relative min-h-0 flex-1">{view}</div>

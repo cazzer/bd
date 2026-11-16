@@ -114,7 +114,7 @@ import { useEffect, useMemo, useState, type CSSProperties, type MouseEvent } fro
 import { colorForNodeType } from "../graph/palette.js";
 import { typeColorsForStore, type TypeCount } from "../graph/typePrevalence.js";
 import { extractLinks, pickRowFields } from "../lib/feedRow.js";
-import { addressProjects, navigate } from "../lib/navigate.js";
+import { addressProjects, navigate, withAddressProjects } from "../lib/navigate.js";
 import { formatRoute, type GraphRoute } from "../lib/route.js";
 import {
   addressTypesFor,
@@ -221,7 +221,7 @@ function pageKeyOf(viewId: string, node: string, chosen: readonly string[] | nul
 
 /** The route that opens `id` selected in the graph. */
 function graphRouteFor(id: string): GraphRoute {
-  return { view: "graph", q: null, types: [], node: id, projects: [] };
+  return { view: "graph", q: null, types: [], node: id, projects: addressProjects() };
 }
 
 /**
@@ -458,7 +458,7 @@ export function TimelineView({ viewId, node, types }: TimelineViewProps) {
   const anchorMissing = anchor.kind === "missing" || page.kind === "anchor-missing";
   // The graph link names the anchor once it is known; before that, or in
   // an empty state, it is the bare graph.
-  const graphRoute: GraphRoute = anchorRef !== null ? graphRouteFor(anchorRef.id) : GRAPH_HOME;
+  const graphRoute: GraphRoute = anchorRef !== null ? graphRouteFor(anchorRef.id) : withAddressProjects(GRAPH_HOME);
   const heading = anchorRef !== null && viewTitle !== null ? `${anchorRef.title || "(untitled)"} · ${viewTitle}` : "Timeline";
 
   // The rows on screen: the loaded page, or the previous page dimmed

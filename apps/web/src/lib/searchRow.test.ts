@@ -44,13 +44,18 @@ describe("resultRoute", () => {
     expect(formatRoute(resultRoute({ id: "n3", nodeType: "gh-pr", externalId: "owner/repo#12", project: null, isReview: false }))).toBe("/graph?node=n3");
     expect(formatRoute(resultRoute({ id: "n4", nodeType: "work_item", externalId: "bd-1", project: "bd", isReview: false }))).toBe("/graph?node=n4");
   });
+
+  it("carries the reader's projects into the graph (shared-nav-header), but not into a review's board", () => {
+    expect(formatRoute(resultRoute({ id: "n3", nodeType: "gh-pr", externalId: "o/r#1", project: null, isReview: false }, ["tides"]))).toBe("/graph?node=n3&project=tides");
+    expect(formatRoute(resultRoute({ id: "n1", nodeType: "work_item", externalId: "c-1", project: "c", isReview: true }, ["tides"]))).toBe("/board?project=c&item=c-1");
+  });
 });
 
 describe("openInGraphLink", () => {
   it("carries the text and chosen types, and says so when projects or reviews only stay behind", () => {
     const link = openInGraphLink(search({ q: "cuts", types: ["work_item", "gh-pr"], projects: ["p"], reviewsOnly: true }));
-    expect(link.route).toEqual({ view: "graph", q: "cuts", types: ["work_item", "gh-pr"], node: null, projects: [] });
-    expect(formatRoute(link.route)).toBe("/graph?q=cuts&type=work_item&type=gh-pr");
+    expect(link.route).toEqual({ view: "graph", q: "cuts", types: ["work_item", "gh-pr"], node: null, projects: ["p"] });
+    expect(formatRoute(link.route)).toBe("/graph?q=cuts&type=work_item&type=gh-pr&project=p");
     expect(link.label).toBe("Open in graph (text and types only)");
     expect(openInGraphLink(search({ q: "cuts", reviewsOnly: true })).label).toBe("Open in graph (text and types only)");
     expect(openInGraphLink(search({ q: "cuts", types: ["a"] })).label).toBe("Open in graph");
@@ -58,14 +63,14 @@ describe("openInGraphLink", () => {
 
   it("opens the bare graph with no text", () => {
     const link = openInGraphLink(search({ types: ["a"], projects: ["p"] }));
-    expect(formatRoute(link.route)).toBe("/graph");
+    expect(formatRoute(link.route)).toBe("/graph?project=p");
     expect(link.label).toBe("Open the graph");
   });
 });
 
 describe("approximateSearchRoute", () => {
   it("is the graph's search for the text alone, or null with no text", () => {
-    expect(formatRoute(approximateSearchRoute(search({ q: "cuts", types: ["a"], projects: ["p"] }))!)).toBe("/graph?q=cuts");
+    expect(formatRoute(approximateSearchRoute(search({ q: "cuts", types: ["a"], projects: ["p"] }))!)).toBe("/graph?q=cuts&project=p");
     expect(approximateSearchRoute(search())).toBeNull();
   });
 });

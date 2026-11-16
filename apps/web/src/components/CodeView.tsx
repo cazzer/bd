@@ -58,7 +58,7 @@ import { TRPCClientError } from "@trpc/client";
 import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { loadLanguage } from "../lib/codeLanguage.js";
 import { ancestorsOf, buildTree, childrenOf, isContainer, isExpandable, rootKeyOf, type CodeTree, type TreeRow } from "../lib/codeTree.js";
-import { addressProjects, navigate } from "../lib/navigate.js";
+import { addressProjects, navigate, withAddressProjects } from "../lib/navigate.js";
 import { formatRoute, type GraphRoute } from "../lib/route.js";
 import { viewFilterOf } from "../lib/viewFilter.js";
 import { trpc } from "../trpc.js";
@@ -402,7 +402,7 @@ export function CodeView({ viewId, node }: { viewId: string | null; node: string
               {view.message}
             </p>
           )}
-          <a href={formatRoute(GRAPH_HOME)} onClick={handleGraphLink(GRAPH_HOME)} className="mt-4 inline-block rounded text-sm text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-accent">
+          <a href={formatRoute(withAddressProjects(GRAPH_HOME))} onClick={handleGraphLink(withAddressProjects(GRAPH_HOME))} className="mt-4 inline-block rounded text-sm text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-accent">
             Open the graph
           </a>
         </div>
@@ -412,7 +412,7 @@ export function CodeView({ viewId, node }: { viewId: string | null; node: string
 
   // The graph link names the shown node when there is one to name —
   // even one this view does not hold, since the graph can still draw it.
-  const graphRoute: GraphRoute = shown.kind === "ready" ? { view: "graph", q: null, types: [], node: shown.node.id, projects: [] } : GRAPH_HOME;
+  const graphRoute: GraphRoute = withAddressProjects(shown.kind === "ready" ? { view: "graph", q: null, types: [], node: shown.node.id, projects: [] } : GRAPH_HOME);
   const shownRow = owner.kind === "found" && node !== null ? owner.tree.rows.get(node) : undefined;
   const path = shown.kind === "ready" ? (shownRow?.path ?? metadataText(shown.node.metadata, "path") ?? shown.node.title) : null;
   const rootsLine = `${view.roots.length} root${view.roots.length === 1 ? "" : "s"} shown${view.hasMore ? " · more match this view" : ""}`;

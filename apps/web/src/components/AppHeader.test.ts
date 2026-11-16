@@ -5,34 +5,44 @@
 // chosen project follows the reader", "The header fits a phone"): the nav
 // links carry the project and mark the current view, the switcher says when
 // a view is not filtered, the Views menu reads once and fails in one line,
-// and on a phone the nav collapses into a Menu disclosure. The tRPC client,
-// the queue's pill, the status pills, and the project registry are stubbed
-// (they have their own tests).
+// and below the mid tier the nav collapses into a Menu disclosure named for
+// the current place; the width tiers decide where search and the status
+// chips go. The tRPC client, the queue's pill, the status polls, and the
+// project registry are stubbed (they have their own tests). `matchMedia`
+// answers `(min-width: Nrem)` against `env.width`.
 
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { parseRoute, type Route } from "../lib/route.js";
+import type { HangarStatusView } from "../lib/hangarStatus.js";
+import type { RelayStatusView } from "../lib/relayStatus.js";
 import type { ShellProjects } from "../lib/shellNav.js";
 
 const trpcMock = vi.hoisted(() => ({ list: { query: vi.fn() } }));
 const navigateMock = vi.hoisted(() => vi.fn());
 const env = vi.hoisted(() => ({
-  wideHeader: true,
+  width: 1440,
   wideDrawer: true,
   shellDrawerOpen: false,
-  shell: { registry: ["skyos", "tides"], registryFailed: false, boardView: null } as ShellProjects,
+  shell: { registry: ["skyos", "tides"], registryFailed: false, view: null } as ShellProjects,
+  retries: 0,
+  hangar: null as { status: HangarStatusView; at: Date } | null,
+  relay: null as { status: RelayStatusView; at: Date } | null,
 }));
 vi.mock("../trpc.js", () => ({ trpc: trpcMock }));
 vi.mock("../lib/navigate.js", () => ({ navigate: navigateMock }));
-vi.mock("./ShellProjects.js", () => ({ useShellProjects: () => env.shell }));
+vi.mock("./ShellProjects.js", () => ({ useShellProjects: () => ({ ...env.shell, retryRegistry: () => (env.retries += 1) }) }));
 vi.mock("./ReviewDrawer.js", () => ({ useWideDrawer: () => env.wideDrawer }));
 vi.mock("./ReviewQueue.js", async () => {
   const { createElement: h } = await import("react");
-  return { ReviewQueuePill: () => h("button", { type: "button", "data-stub": "review-pill" }, "reviews"), useShellDrawer: () => ({ open: env.shellDrawerOpen, drafts: new Map() }) };
+  return {
+    ReviewQueuePill: ({ compact }: { compact?: boolean }) => h("button", { type: "button", "data-stub": "review-pill", "data-compact": String(compact ?? false) }, "reviews"),
+    useShellDrawer: () => ({ open: env.shellDrawerOpen, drafts: new Map() }),
+  };
 });
-vi.mock("./HangarStatusPill.js", () => ({ HangarStatusPill: () => null }));
-vi.mock("./RelayStatusPill.js", () => ({ RelayStatusPill: () => null }));
+vi.mock("./HangarStatusPill.js", async (importOriginal) => ({ ...(await importOriginal<object>()), useHangarStatus: () => env.hangar }));
+vi.mock("../lib/useRelayStatus.js", () => ({ useRelayStatus: () => env.relay }));
 
 const { AppHeader } = await import("./AppHeader.js");
 const { forgetSavedViews } = await import("./ViewsMenu.js");
@@ -42,15 +52,24 @@ const { forgetSavedViews } = await import("./ViewsMenu.js");
 let container: HTMLDivElement;
 let root: Root;
 
+const HANGAR_ONLINE: HangarStatusView = { status: "online", hangar: "hangar-desktop", version: "0.4.1", lastSeenAt: new Date().toISOString(), intervalS: 30, now: new Date().toISOString(), queued: 2, claimed: 0, running: 1, capacity: null, capacityAt: null };
+const RELAY: RelayStatusView = { status: "online", relay: "relay-laptop", version: "1.0.0", lastSeenAt: new Date().toISOString(), queued: 1, claimed: 0, missingBinaries: ["herdr"] };
+
 beforeEach(() => {
-  env.wideHeader = true;
+  env.width = 1440;
   env.wideDrawer = true;
   env.shellDrawerOpen = false;
-  env.shell = { registry: ["skyos", "tides"], registryFailed: false, boardView: null };
+  env.shell = { registry: ["skyos", "tides"], registryFailed: false, view: null };
+  env.retries = 0;
+  env.hangar = { status: HANGAR_ONLINE, at: new Date() };
+  env.relay = { status: RELAY, at: new Date() };
   navigateMock.mockReset();
   trpcMock.list.query.mockReset();
   forgetSavedViews();
-  vi.stubGlobal("matchMedia", (query: string) => ({ matches: env.wideHeader, media: query, addEventListener() {}, removeEventListener() {} }));
+  vi.stubGlobal("matchMedia", (query: string) => {
+    const rem = /min-width:\s*([\d.]+)rem/.exec(query);
+    return { matches: rem === null ? true : env.width >= Number(rem[1]) * 16, media: query, addEventListener() {}, removeEventListener() {} };
+  });
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -90,6 +109,12 @@ function link(label: string): HTMLAnchorElement {
 function button(label: string): HTMLButtonElement {
   const found = [...container.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent?.trim() === label);
   if (found === undefined) throw new Error(`no ${label} button`);
+  return found;
+}
+
+function menuButton(): HTMLButtonElement {
+  const found = container.querySelector<HTMLButtonElement>('button[aria-label^="Views and navigation"]');
+  if (found === null) throw new Error("no Menu button");
   return found;
 }
 
@@ -151,8 +176,8 @@ describe("AppHeader project switcher", () => {
   test("on the inbox it says it does not filter, and a choice changes only the address (Unscoped view says so)", () => {
     render("/inbox?item=i1");
     const select = container.querySelector("select")!;
-    expect(select.getAttribute("aria-description")).toBe("The inbox is not filtered by project.");
-    expect(select.getAttribute("title")).toBe("The inbox is not filtered by project.");
+    expect(select.getAttribute("aria-description")).toBe("The inbox isn't filtered by project.");
+    expect(select.getAttribute("title")).toBe("The inbox isn't filtered by project.");
     act(() => {
       select.value = "skyos";
       select.dispatchEvent(new Event("change", { bubbles: true }));
@@ -245,14 +270,16 @@ describe("Views menu", () => {
 
 describe("AppHeader on a phone", () => {
   test("collapses the nav and Views into one Menu disclosure; a choice navigates with the project and closes it (Phone navigation)", async () => {
-    env.wideHeader = false;
+    env.width = 390;
     trpcMock.list.query.mockResolvedValue({ nodes: VIEWS, hasMore: false, nextCursor: null });
     render("/inbox?project=tides");
     expect(() => button("Views")).toThrow();
     expect(container.querySelector("select")).not.toBeNull();
     expect(container.querySelector('[data-stub="review-pill"]')).not.toBeNull();
 
-    const menu = button("Menu");
+    const menu = menuButton();
+    expect(menu.getAttribute("aria-label")).toBe("Views and navigation, current: Inbox");
+    expect(menu.textContent).toBe("Inbox");
     const panel = panelOf(menu);
     expect(menu.getAttribute("aria-expanded")).toBe("false");
     expect(panel.hidden).toBe(true);
@@ -272,14 +299,162 @@ describe("AppHeader on a phone", () => {
   });
 
   test("Escape closes the Menu and returns focus to it", () => {
-    env.wideHeader = false;
+    env.width = 390;
     trpcMock.list.query.mockResolvedValue({ nodes: [], hasMore: false, nextCursor: null });
     render("/graph");
-    const menu = button("Menu");
+    const menu = menuButton();
     click(menu);
     link("Board").focus();
     key("Escape");
     expect(menu.getAttribute("aria-expanded")).toBe("false");
     expect(document.activeElement).toBe(menu);
+  });
+});
+
+describe("AppHeader width tiers", () => {
+  const searchBox = () => container.querySelector<HTMLInputElement>('header input[type="search"]');
+  const hangarWords = () => container.querySelector("[data-hangar-pill] > span:not([aria-hidden])");
+  const inPanel = (el: Element | null) => el !== null && el.closest("[hidden], [id]") !== null && el.closest("[hidden]") !== null;
+
+  test("wide: nav inline, a search box, worded status pills, the full review pill", () => {
+    env.width = 1300;
+    render("/graph");
+    expect(container.querySelector('nav[aria-label="Main"]')?.closest("[hidden]")).toBeNull();
+    expect(searchBox()).not.toBeNull();
+    expect(hangarWords()?.className).toBe("sr-only sm:not-sr-only");
+    expect(container.querySelector('[data-stub="review-pill"]')?.getAttribute("data-compact")).toBe("false");
+  });
+
+  test("mid: nav inline, search behind a magnifier, compact pills", () => {
+    env.width = 1000;
+    render("/graph");
+    expect(button("Views")).toBeDefined();
+    expect(searchBox()).toBeNull();
+    const magnifier = container.querySelector<HTMLButtonElement>('button[aria-label="Search everything"]')!;
+    expect(magnifier.getAttribute("aria-expanded")).toBe("false");
+    click(magnifier);
+    expect(document.activeElement).toBe(searchBox());
+    expect(hangarWords()?.className).toBe("sr-only");
+    expect(container.querySelector("[data-relay-pill]")).not.toBeNull();
+    expect(container.querySelector('[data-stub="review-pill"]')?.getAttribute("data-compact")).toBe("true");
+  });
+
+  test("narrow: a Menu, with compact status pills still inline", () => {
+    env.width = 700;
+    render("/graph");
+    expect(() => button("Views")).toThrow();
+    expect(menuButton()).toBeDefined();
+    const hangar = container.querySelector("[data-hangar-pill]");
+    expect(hangar).not.toBeNull();
+    expect(hangar!.closest("[hidden]")).toBeNull();
+  });
+
+  test("phone: the status pills move into the Menu, which flags an offline status", () => {
+    env.width = 390;
+    render("/graph");
+    expect(inPanel(container.querySelector("[data-hangar-pill]"))).toBe(true);
+    expect(container.querySelector("[data-menu-warning]")).toBeNull();
+    env.hangar = { status: { ...HANGAR_ONLINE, status: "offline" }, at: new Date() };
+    render("/graph");
+    expect(container.querySelector("[data-menu-warning]")).not.toBeNull();
+    expect(menuButton().getAttribute("aria-label")).toBe("Views and navigation, current: Graph (a status is offline)");
+  });
+});
+
+describe("AppHeader current saved view", () => {
+  test("marks the Views trigger and the open view's row; Board opens the plain board", async () => {
+    trpcMock.list.query.mockResolvedValue({ nodes: VIEWS, hasMore: false, nextCursor: null });
+    render("/board?view=b1&project=tides");
+    expect(link("Board").hasAttribute("aria-current")).toBe(false);
+    expect(link("Board").getAttribute("href")).toBe("/board?project=tides");
+    const views = button("Views");
+    expect(views.getAttribute("aria-description")).toBe("A saved view is open");
+    click(views);
+    await settle();
+    const rows = [...panelOf(views).querySelectorAll("a")];
+    expect(rows.find((a) => a.textContent === "Tides board")?.getAttribute("aria-current")).toBe("page");
+    expect(rows.find((a) => a.textContent === "Shipping log")?.hasAttribute("aria-current")).toBe(false);
+  });
+
+  test("the collapsed Menu is named for the saved view once read, else its renderer", () => {
+    env.width = 700;
+    render("/timeline?view=t1");
+    expect(menuButton().getAttribute("aria-label")).toBe("Views and navigation, current: Timeline");
+    env.shell = { ...env.shell, view: { viewId: "t1", title: "Shipping log", renderer: "timeline", projects: null } };
+    render("/timeline?view=t1");
+    expect(menuButton().getAttribute("aria-label")).toBe("Views and navigation, current: Shipping log");
+  });
+
+  test("says when more views exist than one read lists", async () => {
+    trpcMock.list.query.mockResolvedValue({ nodes: VIEWS, hasMore: true, nextCursor: { updatedAt: "x", id: "y" } });
+    render("/graph");
+    click(button("Views"));
+    await settle();
+    expect(panelOf(button("Views")).textContent).toContain("More views not listed.");
+  });
+});
+
+describe("AppHeader not-filtered state", () => {
+  test("a visible tag in the switcher's box, and on a phone the Menu's first line", () => {
+    render("/inbox");
+    expect(container.querySelector("[data-unfiltered-marker]")?.textContent).toBe("unfiltered");
+    render("/board");
+    expect(container.querySelector("[data-unfiltered-marker]")).toBeNull();
+    env.width = 390;
+    act(() => root.unmount());
+    root = createRoot(container);
+    render("/inbox");
+    expect(panelOf(menuButton()).firstElementChild?.textContent).toBe("The inbox isn't filtered by project.");
+  });
+
+  test("a lone project is focusable text carrying the hint", () => {
+    env.shell = { ...env.shell, registry: ["tides"] };
+    render("/inbox");
+    const lone = [...container.querySelectorAll<HTMLElement>("header span[aria-description]")][0]!;
+    expect(lone.tabIndex).toBe(0);
+    expect(lone.getAttribute("aria-description")).toBe("The inbox isn't filtered by project.");
+  });
+
+  test("an empty registry keeps the switcher's width, and a failed one is retried on focus", () => {
+    env.shell = { ...env.shell, registry: [] };
+    render("/graph");
+    expect(container.querySelector("select")).toBeNull();
+    expect(container.querySelector("header span.w-36[aria-hidden]")).not.toBeNull();
+    env.shell = { registry: null, registryFailed: true, view: null };
+    render("/graph?project=tides");
+    act(() => container.querySelector("select")!.focus());
+    expect(env.retries).toBe(1);
+  });
+});
+
+describe("AppHeader disclosures", () => {
+  test("ArrowDown on Views opens it on its first link, and arrows move between links", async () => {
+    trpcMock.list.query.mockResolvedValue({ nodes: VIEWS, hasMore: false, nextCursor: null });
+    render("/graph");
+    const views = button("Views");
+    views.focus();
+    key("ArrowDown");
+    await settle();
+    expect(views.getAttribute("aria-expanded")).toBe("true");
+    expect(document.activeElement?.textContent).toBe("Shipping log");
+    key("ArrowDown");
+    expect(document.activeElement?.textContent).toBe("Tides board");
+  });
+
+  test("focus leaving the button and panel closes it; an Escape already handled does not", async () => {
+    trpcMock.list.query.mockResolvedValue({ nodes: VIEWS, hasMore: false, nextCursor: null });
+    render("/graph");
+    const views = button("Views");
+    click(views);
+    await settle();
+    const handled = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+    handled.preventDefault();
+    act(() => {
+      document.body.dispatchEvent(handled);
+    });
+    expect(views.getAttribute("aria-expanded")).toBe("true");
+    views.focus();
+    act(() => link("Graph").focus());
+    expect(views.getAttribute("aria-expanded")).toBe("false");
   });
 });

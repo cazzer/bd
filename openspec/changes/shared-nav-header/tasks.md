@@ -4,7 +4,7 @@
 - [x] 1.2 Shell context reading `beadsProjects` once; `switcherOffer` fed from it (board with a view still offers the view's projects)
 - [x] 1.3 `AppHeader` in `App.tsx` outside the memoized view: ProjectSwitcher (with "not filtered here" hint on unscoped routes), nav links Graph · Board · Roadmap · Inbox · Search with `aria-current`, HeaderSearch, Hangar/Relay pills, review control slot; `--header-h` token; `inert` while a narrow shell drawer is open
 - [x] 1.4 `ViewsMenu`: `trpc.list` of view nodes on open, grouped by renderer, opens the renderer route with `viewId` and current `project`; error line on failure; tests on the pure grouping
-- [x] 1.5 Phone: below `sm` nav + Views collapse into a Menu disclosure (aria-expanded, Escape, focus return); jsdom tests
+- [x] 1.5 Width tiers (design.md decision 8): wide ≥80rem inline; mid 56–80rem nav inline, search behind a magnifier, compact pills; below 56rem nav + Views + search collapse into a Menu disclosure named for the current place (aria-expanded, ArrowDown, Escape, focus return); below 40rem the status pills move into the Menu with a warning dot when one is offline; jsdom tests
 - [x] 1.6 `pnpm check` passes (bd-lev aside)
 
 ## 2. Review control with inbox entry

@@ -107,14 +107,15 @@
 // not the next. Without `decisions` the panel is the drawer's: "Accept",
 // "Request changes", nothing extra, no shortcuts, no arming.
 
-import { useEffect, useId, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
-import { navigate } from "../lib/navigate.js";
+import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { addressProjects } from "../lib/navigate.js";
 import { appendNote, reviewAttachments } from "../lib/reviewAttachments.js";
 import { CARD_MOVED_TEXT, cardActions, chosenOption, describeChosen, isCardMovedRefusal, seenFor, type CardOption, type ChosenOption } from "../lib/reviewCard.js";
 import { describeRelayDecision, isRelayActionOpen, RELAY_PENDING_TEXT } from "../lib/relayAction.js";
 import { canDecide, decisionBlocked, decisionEffects, describeNotified, describeRecipient, describeThrownDecision, type ReviewDecisionKind } from "../lib/reviewDrawer.js";
 import { useRelayAction } from "../lib/useRelayAction.js";
-import { formatRoute, type GraphRoute } from "../lib/route.js";
+import type { GraphRoute } from "../lib/route.js";
+import { ShellLink } from "./ShellLink.js";
 import { HttpStatusError, trpc } from "../trpc.js";
 import { ReviewAttachments, SectionTitle, type AttachmentLayout, type AttachmentSlot } from "./ReviewAttachments.js";
 import { ReviewSessionLinks } from "./ReviewSessionLinks.js";
@@ -675,16 +676,11 @@ function Chip({ children, tone = "muted" }: { children: ReactNode; tone?: ChipTo
 }
 
 function GraphLink({ nodeId, className, children = "Open in graph" }: { nodeId: string; className: string; children?: ReactNode }) {
-  const route: GraphRoute = { view: "graph", q: null, types: [], node: nodeId, projects: [] };
-  function open(e: MouseEvent<HTMLAnchorElement>) {
-    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-    e.preventDefault();
-    navigate(route, "push");
-  }
+  const route: GraphRoute = { view: "graph", q: null, types: [], node: nodeId, projects: addressProjects() };
   return (
-    <a href={formatRoute(route)} onClick={open} className={className}>
+    <ShellLink route={route} className={className}>
       {children}
-    </a>
+    </ShellLink>
   );
 }
 

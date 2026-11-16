@@ -14,7 +14,7 @@ describe("groupSavedViews", () => {
     const groups = groupSavedViews([row("1", "Board A", "board"), row("2", "Shipping log", "timeline"), row("3", "Repo", "code"), row("4", "Inbox feed", "feed")]);
     expect(groups.map((g) => [g.renderer, g.label])).toEqual([
       ["feed", "Feeds"],
-      ["code", "Code"],
+      ["code", "Code views"],
       ["timeline", "Timelines"],
       ["board", "Boards"],
     ]);

@@ -14,7 +14,7 @@ export type SavedViewRenderer = "feed" | "code" | "timeline" | "board";
 /** The menu's group order, and each group's heading. */
 export const SAVED_VIEW_GROUPS: ReadonlyArray<{ renderer: SavedViewRenderer; label: string }> = [
   { renderer: "feed", label: "Feeds" },
-  { renderer: "code", label: "Code" },
+  { renderer: "code", label: "Code views" },
   { renderer: "timeline", label: "Timelines" },
   { renderer: "board", label: "Boards" },
 ];

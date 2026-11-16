@@ -16,6 +16,12 @@
 // so "since 09:00" gains its date once the day turns. If a read fails the
 // chip disappears until one succeeds: hangar's status is a side note on the
 // board, and the board's own reads already surface a lost connection.
+//
+// The shell header (shared-nav-header) polls once with `useHangarStatus`
+// and draws `HangarStatusChip`, `compact` where its row is tight — chosen by
+// the header's own width tiers, not the viewport's `sm`: the dot, the
+// capacity note, and the open sessions as one number, with the words and
+// the per-state counts kept for screen readers (and in the tooltip).
 
 import { useEffect, useState } from "react";
 import { hangarPillCapacity, hangarPillCounts, hangarPillHidden, hangarPillLabel, hangarPillTitle, type HangarStatusView } from "../lib/hangarStatus.js";
@@ -23,15 +29,15 @@ import { trpc } from "../trpc.js";
 
 export const HANGAR_POLL_MS = 30_000;
 
-interface Polled {
+export interface PolledHangarStatus {
   status: HangarStatusView;
   /** When the answer arrived, in the browser's clock: what the label is worded against. */
   at: Date;
 }
 
 /** The latest `hangarStatus`, or null before the first answer and after a failed read. */
-function useHangarStatus(): Polled | null {
-  const [polled, setPolled] = useState<Polled | null>(null);
+export function useHangarStatus(): PolledHangarStatus | null {
+  const [polled, setPolled] = useState<PolledHangarStatus | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -76,7 +82,21 @@ function HangarLight({ status }: { status: HangarStatusView["status"] }) {
 }
 
 export function HangarStatusPill() {
-  const polled = useHangarStatus();
+  return <HangarStatusChip polled={useHangarStatus()} />;
+}
+
+/** Whether the chip would show hangar offline: what a closed menu holding it flags. */
+export function hangarShownOffline(polled: PolledHangarStatus | null): boolean {
+  return polled !== null && !hangarPillHidden(polled.status) && polled.status.status === "offline";
+}
+
+export interface HangarStatusChipProps {
+  polled: PolledHangarStatus | null;
+  /** The dot and the counts only at every width; the words stay for screen readers. */
+  compact?: boolean;
+}
+
+export function HangarStatusChip({ polled, compact = false }: HangarStatusChipProps) {
   if (polled === null || hangarPillHidden(polled.status)) return null;
   const { status, at } = polled;
   const counts = hangarPillCounts(status);
@@ -87,16 +107,25 @@ export function HangarStatusPill() {
       role="status"
       title={hangarPillTitle(status, at)}
       data-hangar-pill={status.status}
-      className="inline-flex h-7 shrink-0 items-center gap-2 rounded-full border border-hairline px-3 text-xs whitespace-nowrap text-fg-muted"
+      className={`inline-flex h-7 shrink-0 items-center rounded-full border border-hairline text-xs whitespace-nowrap text-fg-muted ${compact ? "gap-1.5 px-2.5" : "gap-2 px-3"}`}
     >
       <HangarLight status={status.status} />
       {/* The dot and the counts on phones, where the header is tight; the words stay readable to a screen reader there. */}
-      <span className="sr-only sm:not-sr-only">
+      <span className={compact ? "sr-only" : "sr-only sm:not-sr-only"}>
         {hangarPillLabel(status, at)}
         {full === null && counts === null ? "" : " ·"}
       </span>
-      {full === null ? null : <span data-hangar-capacity={full}>{` ${full}${counts === null ? "" : " ·"}`}</span>}
-      {counts === null ? null : <span data-hangar-counts="">{` ${counts}`}</span>}
+      {full === null ? null : <span data-hangar-capacity={full}>{` ${full}${counts === null || compact ? "" : " ·"}`}</span>}
+      {counts === null ? null : compact ? (
+        <>
+          <span className="sr-only">{` ${counts}`}</span>
+          <span aria-hidden="true" data-hangar-counts="" className="tabular-nums">
+            {status.queued + status.claimed + status.running}
+          </span>
+        </>
+      ) : (
+        <span data-hangar-counts="">{` ${counts}`}</span>
+      )}
     </span>
   );
 }

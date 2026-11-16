@@ -54,7 +54,7 @@
 
 import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { subscribeLive } from "../lib/liveStream.js";
-import { navigate } from "../lib/navigate.js";
+import { navigate, withAddressProjects } from "../lib/navigate.js";
 import { createReadScheduler, READ_DEBOUNCE_MS, READ_MAX_WAIT_MS } from "../lib/readScheduler.js";
 import {
   addHighlights,
@@ -430,7 +430,7 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
             </button>
           )}
           <a
-            href={formatRoute(GRAPH_HOME)}
+            href={formatRoute(withAddressProjects(GRAPH_HOME))}
             onClick={(e) => openGraphHome(e)}
             className="rounded text-sm text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-accent"
           >
@@ -535,7 +535,7 @@ export function BoardView({ viewId, projects, item }: BoardViewProps) {
 function openGraphHome(e: MouseEvent<HTMLAnchorElement>) {
   if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
   e.preventDefault();
-  navigate(GRAPH_HOME, "push");
+  navigate(withAddressProjects(GRAPH_HOME), "push");
 }
 
 function Empty({ children }: { children: ReactNode }) {

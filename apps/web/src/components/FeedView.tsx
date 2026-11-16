@@ -42,7 +42,7 @@
 import { TRPCClientError } from "@trpc/client";
 import { useEffect, useState, type MouseEvent } from "react";
 import { extractLinks, pickRowFields } from "../lib/feedRow.js";
-import { navigate } from "../lib/navigate.js";
+import { addressProjects, navigate, withAddressProjects } from "../lib/navigate.js";
 import { formatRoute, type GraphRoute } from "../lib/route.js";
 import { viewFilterOf, type ViewFilter, type ViewNode } from "../lib/viewFilter.js";
 import { trpc } from "../trpc.js";
@@ -173,7 +173,7 @@ export function FeedView({ viewId }: { viewId: string | null }) {
 
   /** Row activation (node-views/spec.md, "Activating a row"): a push, so the browser's back control returns to this feed. */
   function activate(row: FeedRow) {
-    navigate({ view: "graph", q: null, types: [], node: row.id, projects: [] }, "push");
+    navigate({ view: "graph", q: null, types: [], node: row.id, projects: addressProjects() }, "push");
   }
 
   // A real `href` so the link is a link (middle-click, copy address); a
@@ -184,7 +184,7 @@ export function FeedView({ viewId }: { viewId: string | null }) {
       return;
     }
     e.preventDefault();
-    navigate(GRAPH_HOME, "push");
+    navigate(withAddressProjects(GRAPH_HOME), "push");
   }
 
   const heading = state.kind === "ready" ? state.view.title || "(untitled view)" : "Feed";
@@ -206,7 +206,7 @@ export function FeedView({ viewId }: { viewId: string | null }) {
           </div>
           <div className="flex min-w-0 flex-wrap items-center justify-end gap-3">
             <a
-              href={formatRoute(GRAPH_HOME)}
+              href={formatRoute(withAddressProjects(GRAPH_HOME))}
               onClick={handleOpenGraph}
               className="shrink-0 rounded text-sm text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-accent"
             >

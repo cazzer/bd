@@ -23,7 +23,7 @@
 // React; unlike route.ts, this module does touch `location` and
 // `history`, which is why it is the one that does.
 
-import { formatRoute, projectsFrom, type Route } from "./route.js";
+import { formatRoute, projectsFrom, withProjects, type Route } from "./route.js";
 
 type NavigationListener = () => void;
 
@@ -54,6 +54,11 @@ export function navigate(route: Route, mode: "push" | "replace"): void {
  */
 export function addressProjects(): string[] {
   return projectsFrom(new URLSearchParams(location.search));
+}
+
+/** `route` carrying the address's projects — a link a view draws to another view, so the reader's project follows them there too. */
+export function withAddressProjects<R extends Route>(route: R): R {
+  return withProjects(route, addressProjects());
 }
 
 /** Run `listener` after every history write `navigate` makes; returns the unsubscribe. App.tsx is the intended (and only) subscriber. */

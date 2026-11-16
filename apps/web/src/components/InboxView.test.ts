@@ -22,7 +22,9 @@ const trpcMock = vi.hoisted(() => ({
 }));
 const relayStatus = vi.hoisted(() => ({ missing: ["herdr"] as string[] }));
 vi.mock("../trpc.js", () => ({ trpc: trpcMock, HttpStatusError: class HttpStatusError extends Error {} }));
-vi.mock("../lib/navigate.js", () => ({ navigate: vi.fn(), addressProjects: () => [] }));
+const navigateMock = vi.hoisted(() => vi.fn());
+// The real `addressProjects`, so a view's own address write is seen keeping the reader's project.
+vi.mock("../lib/navigate.js", async (importOriginal) => ({ ...(await importOriginal<object>()), navigate: navigateMock }));
 vi.mock("../lib/useRelayStatus.js", () => ({ useRelayStatus: () => ({ status: { missingBinaries: relayStatus.missing }, at: new Date() }) }));
 vi.mock("./ReviewQueue.js", () => ({
   useReviewQueue: () => ({ reviews: [], loaded: true, version: 0 }),
@@ -227,6 +229,18 @@ describe("an outcome request's banner", () => {
     expect(question).toBeDefined();
     expect(banner!.contains(question!)).toBe(false);
     expect(banner!.compareDocumentPosition(question!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  test("picking a row keeps the address's project (shared-nav-header: a view's own write never drops it)", async () => {
+    relayStatus.missing = [];
+    history.replaceState(null, "", "/inbox?project=tides");
+    trpcMock.inbox.query.mockResolvedValue({ items: [item(A, "First", "pending", null, "2026-11-14T10:00:00.000Z"), item(B, "Second", "pending", null, "2026-11-14T09:00:00.000Z")], total: 2, truncated: false });
+    await mount();
+    navigateMock.mockClear();
+    const row = [...container.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent?.includes("Second"))!;
+    await act(async () => row.click());
+    expect(navigateMock).toHaveBeenCalledWith({ view: "inbox", item: B, source: null, projects: ["tides"] }, "replace");
+    history.replaceState(null, "", "/");
   });
 
   test("an ordinary item has no banner", async () => {

@@ -23,7 +23,11 @@
 // On a view `project` does not filter (the shell header on the graph, feed,
 // code, timeline or inbox — shared-nav-header, design.md decision 3), the
 // caller passes a `hint` saying so: the box's tooltip and its accessible
-// description.
+// description, and the box is drawn dashed and muted with an "unfiltered"
+// tag inside it from `sm` up (the box's width never changes, so the label
+// gives up the room). With one project
+// offered the box is text, made focusable while it carries a hint so a
+// keyboard reader reaches the hint too.
 
 import { useId } from "react";
 import { ALL_PROJECTS_CHOICE, SEVERAL_PROJECTS_VALUE, switcherState } from "../lib/workViewNav.js";
@@ -49,9 +53,15 @@ export function ProjectSwitcher({ offered, address, onChoose, fallback = false, 
 
   if (!fallback && offered !== null && offered.length === 1) {
     return (
-      <span className={`${BOX} inline-flex items-center truncate border-transparent pr-2.5 text-fg`} title={hint ?? undefined} aria-description={hint ?? undefined}>
+      <span
+        className={`${BOX} inline-flex items-center gap-1 truncate pr-2.5 ${hint === null ? "border-transparent text-fg" : "border-dashed border-fg-muted/30 text-fg-muted focus:outline-none focus:ring-2 focus:ring-accent"}`}
+        title={hint ?? undefined}
+        aria-description={hint ?? undefined}
+        tabIndex={hint === null ? undefined : 0}
+      >
         <span className="sr-only">Project: </span>
-        {offered[0]}
+        <span className="min-w-0 truncate">{offered[0]}</span>
+        {hint !== null && <UnfilteredTag className="ml-auto" />}
       </span>
     );
   }
@@ -71,7 +81,7 @@ export function ProjectSwitcher({ offered, address, onChoose, fallback = false, 
         onChange={(e) => {
           if (e.target.value !== state.value) onChoose(e.target.value);
         }}
-        className={`${BOX} cursor-pointer appearance-none truncate border-fg-muted/30 bg-surface-strong pr-7 text-fg hover:border-accent/50 focus:outline-none focus:ring-2 focus:ring-accent disabled:cursor-default disabled:text-fg-muted disabled:hover:border-fg-muted/30`}
+        className={`${BOX} cursor-pointer appearance-none truncate border-fg-muted/30 pr-7 ${hint === null ? "bg-surface-strong text-fg" : "border-dashed bg-transparent text-fg-muted sm:pr-[5.25rem]"} hover:border-accent/50 focus:outline-none focus:ring-2 focus:ring-accent disabled:cursor-default disabled:text-fg-muted disabled:hover:border-fg-muted/30`}
       >
         {loading ? (
           <option value={state.value}>{state.label}</option>
@@ -91,9 +101,19 @@ export function ProjectSwitcher({ offered, address, onChoose, fallback = false, 
           </>
         )}
       </select>
+      {hint !== null && <UnfilteredTag className="pointer-events-none absolute right-7" />}
       <svg aria-hidden="true" viewBox="0 0 12 12" className="pointer-events-none absolute right-2.5 h-3 w-3 text-fg-muted">
         <path d="M3 4.5 6 7.5 9 4.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
       </svg>
+    </span>
+  );
+}
+
+/** The visible half of the hint (its words are the box's description): from `sm` up, inside the box. */
+function UnfilteredTag({ className }: { className: string }) {
+  return (
+    <span aria-hidden="true" data-unfiltered-marker="" className={`hidden shrink-0 rounded border border-dashed border-fg-muted/40 px-1 text-[10px] leading-4 text-fg-muted sm:inline ${className}`}>
+      unfiltered
     </span>
   );
 }

@@ -817,7 +817,7 @@ export function GraphView() {
       setSelectedNodeId(null);
       setDetailExpanded(false);
       if (replaced) {
-        navigate(route, "replace");
+        navigate({ ...route, projects: addressProjects() }, "replace");
       }
       return;
     }
@@ -829,7 +829,7 @@ export function GraphView() {
     if (found) {
       selectNode(found);
       if (replaced) {
-        navigate(route, "replace");
+        navigate({ ...route, projects: addressProjects() }, "replace");
       }
       return;
     }
@@ -849,7 +849,7 @@ export function GraphView() {
       setExpansionError(lookupFailure === null ? "That node no longer exists." : `Couldn't open the linked node: ${lookupFailure}`);
       setSelectedNodeId(null);
       setDetailExpanded(false);
-      navigate({ ...route, node: null }, "replace");
+      navigate({ ...route, node: null, projects: addressProjects() }, "replace");
       return;
     }
     const node = graphNodeFromUnlinkedNote(lookedUp);
@@ -861,7 +861,7 @@ export function GraphView() {
     selectNode(node);
     // The survivor's id when a merged-away id resolved; otherwise this IS
     // `route`, and the re-assert described above.
-    navigate({ ...route, node: lookedUp.id }, "replace");
+    navigate({ ...route, node: lookedUp.id, projects: addressProjects() }, "replace");
   }
 
   // No dependency array, on purpose: the ref must hold THIS render's
@@ -1167,7 +1167,7 @@ export function GraphView() {
           <SearchBar
             query={query}
             onQueryChange={setQuery}
-            onSubmit={(q) => navigate(searchRouteFor(q, { types: chips }), "push")}
+            onSubmit={(q) => navigate(searchRouteFor(q, { types: chips, projects: addressProjects() }), "push")}
             status={status}
             suggestions={typeSuggestions}
             chips={chips}

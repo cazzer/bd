@@ -43,45 +43,108 @@ const HOMES: ReadonlyArray<{ id: NavId; label: string; route: Route }> = [
 ];
 
 /**
+ * The saved view the route draws: its `view` id on feed, code, timeline,
+ * and a board drawn from one; null everywhere else (the plain board
+ * included). The Views menu marks it current.
+ */
+export function currentSavedViewId(route: Route): string | null {
+  switch (route.view) {
+    case "feed":
+    case "code":
+    case "timeline":
+    case "board":
+      return route.viewId;
+    default:
+      return null;
+  }
+}
+
+/**
  * Graph · Board · Roadmap · Inbox · Search. Each opens its view's home with
- * `carried` (the board with no saved view, the inbox on every source, an
- * empty search); the current view's link is the current address itself, so
- * activating it changes nothing. Feed, code and timeline have no link of
- * their own (the Views menu reaches them), so on them none is current.
+ * `carried` (the plain board with no saved view, the inbox on every source,
+ * an empty search); the current view's link is the current address itself,
+ * so activating it changes nothing. A saved view — a feed, code view,
+ * timeline, or a board drawn from a view — has no link of its own (the
+ * Views menu marks it), so on one none is current, and Board opens the
+ * plain board.
  */
 export function navLinks(route: Route, carried: readonly string[]): NavLink[] {
+  const onSavedView = currentSavedViewId(route) !== null;
   return HOMES.map(({ id, label, route: home }) => {
-    const current = id === route.view;
+    const current = id === route.view && !onSavedView;
     return { id, label, current, route: current ? route : withProjects(home, carried) };
   });
 }
 
-/** The views `project` scopes; on every other one the switcher only changes the address. */
-export function isProjectScoped(view: Route["view"]): boolean {
-  return view === "board" || view === "roadmap" || view === "search";
+const RENDERER_NAMES: Partial<Record<Route["view"], string>> = { feed: "Feed", code: "Code", timeline: "Timeline", board: "Board" };
+
+/**
+ * Where the reader is, for the collapsed Menu's label: the current nav
+ * link's label, else the saved view's title once known (`viewTitle`), else
+ * its renderer's name.
+ */
+export function currentPlace(route: Route, viewTitle: string | null): string {
+  if (currentSavedViewId(route) !== null) return viewTitle !== null && viewTitle.trim() !== "" ? viewTitle : (RENDERER_NAMES[route.view] ?? "View");
+  return HOMES.find((h) => h.id === route.view)?.label ?? RENDERER_NAMES[route.view] ?? "View";
 }
 
-const UNSCOPED_NAMES: Partial<Record<Route["view"], string>> = {
+/**
+ * For every view, what the switcher's hint calls it when `project` does not
+ * filter it — or null for the views it scopes (board, roadmap, search). The
+ * one source for both `isProjectScoped` and `unfilteredHint`.
+ */
+const UNFILTERED_NAME: Record<Route["view"], string | null> = {
   graph: "The graph",
   feed: "This feed",
   code: "The code view",
   timeline: "The timeline",
   inbox: "The inbox",
+  board: null,
+  roadmap: null,
+  search: null,
 };
+
+/** The views `project` scopes; on every other one the switcher only changes the address. */
+export function isProjectScoped(view: Route["view"]): boolean {
+  return UNFILTERED_NAME[view] === null;
+}
 
 /** The switcher's "not filtered here" hint on a view `project` does not scope; null on one it does. */
 export function unfilteredHint(view: Route["view"]): string | null {
-  const name = UNSCOPED_NAMES[view];
-  return name === undefined ? null : `${name} is not filtered by project.`;
+  const name = UNFILTERED_NAME[view];
+  return name === null ? null : `${name} isn't filtered by project.`;
 }
 
-/** What the shell knows about projects (components/ShellProjects.tsx). */
+/** The saved view the address names, once read (components/ShellProjects.tsx). */
+export interface ShellView {
+  viewId: string;
+  /** Its title; null when it could not be read or is not a view. */
+  title: string | null;
+  /** `metadata.renderer`; null when it could not be read or is not a view. */
+  renderer: string | null;
+  /** Its filter's `project` predicate; null when it names none or could not be read. */
+  projects: string[] | null;
+}
+
+/** What the shell knows about projects and the current saved view (components/ShellProjects.tsx). */
 export interface ShellProjects {
   /** The registry's keys, null until read (and while unreadable). */
   registry: string[] | null;
   registryFailed: boolean;
-  /** The saved board view the address names, once read: its `project` predicate, or null when it names none or is not a board view. */
-  boardView: { viewId: string; projects: string[] | null } | null;
+  /** The saved view the address names, once read; null before that or with none named. */
+  view: ShellView | null;
+}
+
+/** The current route's saved view as read, or null while it is not (or none is named). */
+export function shownView(route: Route, shell: ShellProjects): ShellView | null {
+  const id = currentSavedViewId(route);
+  return id !== null && shell.view !== null && shell.view.viewId === id ? shell.view : null;
+}
+
+/** A saved board view's own projects, when the route is a board drawn from one that names some. */
+export function boardViewProjects(route: Route, shell: ShellProjects): string[] | null {
+  const view = route.view === "board" ? shownView(route, shell) : null;
+  return view !== null && view.renderer === "board" ? view.projects : null;
 }
 
 /**
@@ -92,10 +155,6 @@ export interface ShellProjects {
  * (`switcherOffer`).
  */
 export function headerSwitcherOffer(route: Route, shell: ShellProjects): SwitcherOffer {
-  let viewProjects: string[] | null = null;
-  if (route.view === "board" && route.viewId !== null) {
-    if (shell.boardView === null || shell.boardView.viewId !== route.viewId) return { offered: null, fallback: false };
-    viewProjects = shell.boardView.projects;
-  }
-  return switcherOffer({ viewProjects, registry: shell.registry, registryFailed: shell.registryFailed, address: route.projects });
+  if (route.view === "board" && route.viewId !== null && shownView(route, shell) === null) return { offered: null, fallback: false };
+  return switcherOffer({ viewProjects: boardViewProjects(route, shell), registry: shell.registry, registryFailed: shell.registryFailed, address: route.projects });
 }

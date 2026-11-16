@@ -79,7 +79,7 @@
 import { createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FocusEvent, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import type { LiveState } from "../lib/liveStream.js";
-import { navigate } from "../lib/navigate.js";
+import { navigate, withAddressProjects } from "../lib/navigate.js";
 import type { ReviewQueueState } from "../lib/reviewQueueReader.js";
 import {
   countAnnouncement,
@@ -364,14 +364,16 @@ function useQueueAnnouncement(queue: ReviewQueueState, live: LiveState): string 
 export interface ReviewQueuePillProps {
   /** `inline` sits in a header bar; `floating` stands alone (the graph's right column) with its own surface. */
   variant?: "inline" | "floating";
+  /** The light and the count only, at every width (the shell header's tighter tiers); the state word stays in the accessible name. */
+  compact?: boolean;
 }
 
 /** The queue indicator a view places in its own top-right header. */
-export function ReviewQueuePill({ variant = "inline" }: ReviewQueuePillProps) {
-  return <PillButton variant={variant} placed />;
+export function ReviewQueuePill({ variant = "inline", compact = false }: ReviewQueuePillProps) {
+  return <PillButton variant={variant} placed compact={compact} />;
 }
 
-function PillButton({ variant, placed }: { variant: "inline" | "floating"; placed: boolean }) {
+function PillButton({ variant, placed, compact = false }: { variant: "inline" | "floating"; placed: boolean; compact?: boolean }) {
   const { queue, live, popoverOpen, togglePopover, openPopover, closePopover, focusPopover, registerPill } = useReviewQueueContext();
   const ref = useRef<HTMLButtonElement>(null);
 
@@ -409,9 +411,9 @@ function PillButton({ variant, placed }: { variant: "inline" | "floating"; place
       className={`inline-flex shrink-0 items-center gap-2 rounded-full border pr-[5px] pl-3 text-xs whitespace-nowrap focus:outline-none focus-visible:ring-2 focus-visible:ring-accent ${surface} ${expanded}`}
     >
       {/* Wide enough for "Connecting…" from `sm` up, so a state flip never moves the header's other controls. */}
-      <span className="inline-flex items-center justify-end gap-2 sm:min-w-[5.25rem]">
+      <span className={`inline-flex items-center justify-end gap-2 ${compact ? "" : "sm:min-w-[5.25rem]"}`}>
         <StatusLight live={live} />
-        <span className="hidden text-fg-muted sm:inline">{liveText(live)}</span>
+        {!compact && <span className="hidden text-fg-muted sm:inline">{liveText(live)}</span>}
       </span>
       <span aria-hidden="true" className="h-3.5 w-px bg-hairline" />
       <CountBadge zero={zero}>{countText(queue.total, queue.loaded)}</CountBadge>
@@ -604,7 +606,7 @@ function QueuePopover({ anchor, anchorVersion, queue, live, initialFocusId, show
     if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
     e.preventDefault();
     onClose(false);
-    navigate(BOARD_HOME, "push");
+    navigate(withAddressProjects(BOARD_HOME), "push");
   }
 
   const stale = staleNote(live);
@@ -699,7 +701,7 @@ function QueuePopover({ anchor, anchorVersion, queue, live, initialFocusId, show
         </span>
         {showBoardLink && (
           <a
-            href={formatRoute(BOARD_HOME)}
+            href={formatRoute(withAddressProjects(BOARD_HOME))}
             onClick={openBoard}
             className="ml-auto inline-flex min-h-11 items-center rounded text-xs text-accent hover:underline focus:outline-none focus:ring-2 focus:ring-accent sm:min-h-0"
           >

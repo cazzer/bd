@@ -328,7 +328,7 @@ export function SearchView({ route }: { route: SearchRoute }) {
               <>
                 <ol aria-busy={rowsDimmed} className={`space-y-2 ${rowsDimmed ? "opacity-60" : ""}`}>
                   {rows.rows.map((row) => (
-                    <ResultItem key={row.id} row={row} />
+                    <ResultItem key={row.id} row={row} projects={route.projects} />
                   ))}
                 </ol>
                 {phase.kind === "ready" && current !== null && current.capped && (
@@ -439,8 +439,8 @@ function FacetButton({ label, count, pressed, busy, onClick }: { label: string; 
   );
 }
 
-function ResultItem({ row }: { row: FoundRow }) {
-  const target = resultRoute(row);
+function ResultItem({ row, projects }: { row: FoundRow; projects: readonly string[] }) {
+  const target = resultRoute(row, projects);
   const status = rowStatus(row);
   return (
     <li data-node-id={row.id}>
