@@ -82,6 +82,13 @@
 // accepted.` with no message) or `Review <id> changes requested: <message>`;
 // with an option, `Review <id> accepted: <option> — <message>` (`Review <id>
 // accepted: <option>.`).
+// With decision images (review-decision-images, design.md decision 3) the
+// comment ends with `\n\nImages:\n` and the images' paths relative to the
+// media root, one per line, and the prompt ends with ` Images: ` and the
+// absolute files the caller resolved (`imageFiles`: the router's media root
+// joined with each path; the relay's own downloads), separated by spaces.
+// The writer never resolves a path itself. Without images both texts are
+// exactly what they were before.
 // The text always starts with `Review`, so it is never read as a flag.
 // herdr 0.9.1 does not accept `--` before positionals (it answers "unknown
 // option"), so none is passed; the pane pattern is what keeps the pane from
@@ -123,7 +130,7 @@
 
 import { execFile } from "node:child_process";
 import { statSync } from "node:fs";
-import { HostBinaryUnavailableError, isReviewSocketPath, normalizeReviewMetadata, REVIEW_PANE_PATTERN, reviewCard, type ReviewOption } from "@breakdown/core";
+import { decisionCommentImagesBlock, HostBinaryUnavailableError, isReviewSocketPath, normalizeReviewMetadata, REVIEW_PANE_PATTERN, reviewCard, type ReviewOption } from "@breakdown/core";
 
 function isDirectory(dir: string): boolean {
   try {
@@ -181,6 +188,10 @@ export interface ReviewWriteInput {
   option?: string;
   /** What the person saw when choosing `option`; required with it (module header). */
   seen?: ReviewOptionSeen;
+  /** Decision images, relative to the media root, as recorded in the comment (module header). */
+  imagePaths?: readonly string[];
+  /** The same images as absolute files the requesting agent can open, named in the prompt (module header). */
+  imageFiles?: readonly string[];
   /** Called once the bd steps are over and the checkout's queue is released, before the notification (module header). */
   onWritten?: (outcome: { ok: boolean; attempted: boolean }) => void;
 }
@@ -264,10 +275,10 @@ function acceptedTail(message: string, option: string | undefined): string {
 }
 
 /** The comment written for a decision. The fixed prefix keeps the argv element from ever starting with `-`. */
-export function commentText(decision: ReviewDecision, message: string, option?: string): string {
+export function commentText(decision: ReviewDecision, message: string, option?: string, imagePaths: readonly string[] = []): string {
   const m = message.trim();
-  if (decision === "accept") return `Accepted${acceptedTail(m, option)}`;
-  return `Changes requested: ${m}`;
+  const text = decision === "accept" ? `Accepted${acceptedTail(m, option)}` : `Changes requested: ${m}`;
+  return `${text}${decisionCommentImagesBlock(imagePaths)}`;
 }
 
 /** The close reason for an accept. */
@@ -276,10 +287,10 @@ export function closeReason(option?: string): string {
 }
 
 /** The prompt sent to the requesting pane. Starts with `Review`, never `-`. */
-export function notifyText(decision: ReviewDecision, id: string, message: string, option?: string): string {
+export function notifyText(decision: ReviewDecision, id: string, message: string, option?: string, imageFiles: readonly string[] = []): string {
   const m = message.trim();
-  if (decision === "accept") return `Review ${id} accepted${acceptedTail(m, option)}`;
-  return `Review ${id} changes requested: ${m}`;
+  const text = decision === "accept" ? `Review ${id} accepted${acceptedTail(m, option)}` : `Review ${id} changes requested: ${m}`;
+  return imageFiles.length === 0 ? text : `${text} Images: ${imageFiles.join(" ")}`;
 }
 
 /** The card on the tracker's record: none (decide the legacy way), unreadable (fail closed), or its question and options (module header). */
@@ -528,7 +539,7 @@ export function createHerdrRunner(options: HerdrRunnerOptions = {}): RunHerdr {
 
 function stepsFor(input: ReviewWriteInput): Array<{ step: ReviewStep; args: string[] }> {
   const id = input.externalId;
-  const comment = { step: "comment" as const, args: ["comments", "add", id, commentText(input.decision, input.message, input.option)] };
+  const comment = { step: "comment" as const, args: ["comments", "add", id, commentText(input.decision, input.message, input.option, input.imagePaths)] };
   if (input.decision === "accept") {
     return [
       comment,
@@ -633,7 +644,7 @@ export function createReviewWriter(options: ReviewWriterOptions = {}): ReviewWri
       notified = { ok: false, reason: target.reason };
     } else {
       try {
-        await runHerdr(["agent", "prompt", target.pane, notifyText(input.decision, input.externalId, input.message, input.option)], target.socket);
+        await runHerdr(["agent", "prompt", target.pane, notifyText(input.decision, input.externalId, input.message, input.option, input.imageFiles)], target.socket);
         notified = { ok: true, pane: target.pane };
       } catch (err) {
         notified = { ok: false, reason: err instanceof Error && err.message !== "" ? err.message : "herdr failed" };

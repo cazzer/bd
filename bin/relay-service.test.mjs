@@ -39,6 +39,7 @@ describe("parseArgs", () => {
       kinds: null,
       herdrSockets: [],
       maxAge: null,
+      mediaDir: null,
     });
     assert.equal(parseArgs(["install", "--url", "https://j", "--name", "r", ...P, "--token-file", "/x/t"]).tokenFile, "/x/t");
     assert.deepEqual(parseArgs(["install", "--url", "https://j", "--name", "r", ...P, "--kinds", "beads_reingest", "--herdr-socket", "/s.sock", "--max-age", "6h"]), {
@@ -50,7 +51,10 @@ describe("parseArgs", () => {
       kinds: "beads_reingest",
       herdrSockets: ["/s.sock"],
       maxAge: "6h",
+      mediaDir: null,
     });
+    assert.equal(parseArgs(["install", "--url", "https://j", "--name", "r", ...P, "--media-dir", "/x/media/"]).mediaDir, "/x/media/");
+    assert.match(parseArgs(["install", "--url", "https://j", "--name", "r", ...P, "--media-dir", "media"]).error, /--media-dir must be an absolute path/);
   });
 
   it("refuses missing or bad install flags, and flags on other commands", () => {
@@ -97,7 +101,7 @@ describe("the plist", () => {
   });
 
   it("reads back what it wrote, escaping included", () => {
-    const odd = { ...args, tokenFile: "/Users/me/a&b <c>/token", name: "relay'laptop", kinds: "review_decision,herdr_prompt", herdrSockets: ["/s<1>.sock"], maxAge: "12h" };
+    const odd = { ...args, tokenFile: "/Users/me/a&b <c>/token", name: "relay'laptop", kinds: "review_decision,herdr_prompt", herdrSockets: ["/s<1>.sock"], maxAge: "12h", mediaDir: "/m<1>" };
     const xml = renderPlist({ ...odd, pathEnv: "/opt/a&b:/usr/bin", paths });
     assert.match(xml, /a&amp;b &lt;c&gt;/);
     assert.deepEqual(readPlist(xml), {
@@ -110,6 +114,7 @@ describe("the plist", () => {
       kinds: "review_decision,herdr_prompt",
       herdrSockets: ["/s<1>.sock"],
       maxAge: "12h",
+      mediaDir: "/m<1>",
       pathEnv: "/opt/a&b:/usr/bin",
     });
   });

@@ -18,9 +18,16 @@
 // the message box is blank and Send to agent (`changes`) once it holds a
 // note, and Ctrl/Cmd+Enter follows it. Option actions are unchanged and
 // carry the note. Hosts that leave it off (the board) keep both buttons.
+//
+// `images` (review-decision-images): a host that passes it lets the message
+// box take screenshots — pasted (the clipboard's files; a text paste is left
+// alone) or dropped on the box — shown as thumbnails under it, each with a
+// Remove button, and a line per file it refused. The host owns the list and
+// its checks (lib/decisionImages.ts); the footer only renders and forwards.
 
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
+import { filesOf, MAX_DECISION_IMAGES, type AttachedImage } from "../lib/decisionImages.js";
 import { cardActions, evidenceMarkdown, foldLabel, type CardActions, type CardLike, type CardOption } from "../lib/reviewCard.js";
 import { decisionBlocked, type DecisionOutcome, type ReviewDecisionKind } from "../lib/reviewDrawer.js";
 import { CardEvidence, CardOnAccept, CardOptions, CardQuestion, InlineText } from "./ReviewCardBody.js";
@@ -150,6 +157,7 @@ export function DecisionFooter({
   refusal,
   waiting = false,
   decide,
+  images,
 }: {
   open: boolean;
   /** Who the decision will be pushed to (describeRecipient). */
@@ -177,8 +185,12 @@ export function DecisionFooter({
   /** A decision is queued for the laptop relay and not yet reported: the form is held, the outcome line says so. */
   waiting?: boolean;
   decide: (decision: ReviewDecisionKind, option?: CardOption) => void;
+  /** Screenshots on the decision (module header); absent where a host takes none. */
+  images?: DecisionImagesControl;
 }) {
   const messageId = useId();
+  const imagesId = useId();
+  const [dragging, setDragging] = useState(false);
   const labelId = useId();
   const hintId = useId();
   const recipientId = useId();
@@ -245,10 +257,43 @@ export function DecisionFooter({
             value={message}
             onChange={(e) => setMessage(e.target.value)}
             disabled={busy}
-            aria-describedby={describedBy}
+            aria-describedby={[describedBy, images !== undefined && images.attached.length > 0 ? imagesId : null].filter(Boolean).join(" ") || undefined}
             title={hintElsewhere ? recipient : undefined}
-            className={`block w-full resize-none rounded-lg border border-hairline bg-ground/60 px-3 py-2 text-base text-fg focus:outline-none focus:ring-2 focus:ring-accent disabled:opacity-60 sm:text-sm ${textareaHeight}`}
+            onPaste={
+              images === undefined
+                ? undefined
+                : (e) => {
+                    const files = filesOf(e.clipboardData);
+                    if (files.length === 0) return;
+                    e.preventDefault();
+                    images.add(files);
+                  }
+            }
+            onDragOver={
+              images === undefined || busy
+                ? undefined
+                : (e) => {
+                    if (![...e.dataTransfer.types].includes("Files")) return;
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = "copy";
+                    setDragging(true);
+                  }
+            }
+            onDragLeave={images === undefined ? undefined : () => setDragging(false)}
+            onDrop={
+              images === undefined || busy
+                ? undefined
+                : (e) => {
+                    setDragging(false);
+                    const files = filesOf(e.dataTransfer);
+                    if (files.length === 0) return;
+                    e.preventDefault();
+                    images.add(files);
+                  }
+            }
+            className={`block w-full resize-none rounded-lg border bg-ground/60 px-3 py-2 text-base text-fg focus:outline-none focus:ring-2 focus:ring-accent disabled:opacity-60 sm:text-sm ${dragging ? "border-accent ring-2 ring-accent" : "border-hairline"} ${textareaHeight}`}
           />
+          {images !== undefined && <DecisionImages id={imagesId} control={images} busy={busy} />}
           {needsMessage && (
             <p id={hintId} role="alert" className="text-xs text-amber-200">
               Add a message to request changes.
@@ -544,6 +589,54 @@ function ChooseAnother({
                 }}
               />
             </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/** What a host hands the footer to take screenshots (module header). */
+export interface DecisionImagesControl {
+  attached: readonly AttachedImage[];
+  /** Files pasted or dropped, in order; the host admits or refuses each. */
+  add: (files: File[]) => void;
+  remove: (key: string) => void;
+  /** A line per file the host refused, until the next paste or drop. */
+  notes: readonly string[];
+}
+
+function DecisionImages({ id, control, busy }: { id: string; control: DecisionImagesControl; busy: boolean }) {
+  const { attached, notes, remove } = control;
+  if (attached.length === 0 && notes.length === 0) return null;
+  return (
+    <div className="space-y-1.5">
+      {attached.length > 0 && (
+        <ul id={id} aria-label={`${attached.length} of ${MAX_DECISION_IMAGES} images attached`} className="flex flex-wrap gap-2">
+          {attached.map((image, i) => (
+            <li key={image.key} className="relative">
+              {image.url === "" ? (
+                <div role="img" aria-label={`Attached image ${i + 1}: ${image.file.name || "pasted image"}`} className="h-16 w-16 animate-pulse rounded-md border border-hairline bg-fg/5" />
+              ) : (
+                <img src={image.url} alt={`Attached image ${i + 1}: ${image.file.name || "pasted image"}`} className="h-16 w-16 rounded-md border border-hairline object-cover" />
+              )}
+              <button
+                type="button"
+                onClick={() => remove(image.key)}
+                disabled={busy}
+                aria-label={`Remove image ${i + 1}`}
+                className="absolute -right-1.5 -top-1.5 flex h-6 w-6 items-center justify-center rounded-full border border-hairline bg-surface-strong text-xs text-fg hover:bg-fg/10 focus:outline-none focus:ring-2 focus:ring-accent disabled:opacity-50"
+              >
+                ×
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {notes.length > 0 && (
+        <ul role="status" className="space-y-0.5 text-xs text-amber-200">
+          {notes.map((note, i) => (
+            <li key={i}>{note}</li>
           ))}
         </ul>
       )}

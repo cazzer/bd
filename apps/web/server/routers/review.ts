@@ -60,6 +60,19 @@
 // differently from what was written; and requires the item id to start
 // with a letter or digit (never a flag).
 //
+// Decision images (review-decision-images, design.md decisions 2 and 3):
+// `images` is at most core's MAX_DECISION_IMAGES paths relative to the media
+// root, each `<project>/<item>/<run>/<name>` for this decision's own project
+// and item (core's isDecisionImagePath), and the message must fit beside
+// them (core's decisionMessageBudget; the refusal says how much to cut).
+// Both are schema refusals. After the store checks (3–7) and before any
+// command or queued action, `checkDecisionImages` lstats every level under
+// the media root: a missing file, a symlink, or anything but a regular file
+// at the end is PRECONDITION_FAILED naming the path. The writer gets the
+// relative paths for the comment and the absolute files for the prompt; a
+// queued decision carries the relative paths, which the relay downloads
+// through `GET /relay/v1/actions/:id/media/:n` (relay-api.ts).
+//
 // A tracker failure is data, not a tRPC error: `{ ok: false, error, partial,
 // uncertain? }` with `written` naming the steps that landed and `uncertain`
 // a step that timed out and may have landed, so the drawer can show the
@@ -74,7 +87,11 @@
 
 import { stat } from "node:fs/promises";
 import {
+  decisionMessageBudget,
   enqueueRelayAction,
+  isDecisionImagePath,
+  MAX_DECISION_IMAGE_PATH_LENGTH,
+  MAX_DECISION_IMAGES,
   getBoardItem,
   getRegisteredBeadsProject,
   InvalidRelayActionError,
@@ -86,6 +103,7 @@ import {
   PROJECT_KEY_PATTERN,
   RelayActionPendingError,
   REVIEW_DECISION_MESSAGE_REFUSED_CHARS,
+  REVIEW_IMAGE_ROOT,
   REVIEW_OPTION_ID_PATTERN,
   type BeadsProject,
   type BoardItem,
@@ -93,6 +111,7 @@ import {
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import type { Context } from "../context.js";
+import { resolveDecisionImages } from "../decision-images.js";
 import { mapCoreError } from "../errors.js";
 import { ReviewDecisionInFlightError, ReviewRecordRefusedError, type ReviewNotified, type ReviewStep } from "../review-writer.js";
 import { humanProcedure, router } from "../trpc.js";
@@ -120,8 +139,22 @@ export const reviewDecisionInputSchema = z
         risk: z.string().max(MAX_REVIEW_OPTION_TEXT_LENGTH).optional(),
       })
       .optional(),
+    images: z
+      .array(z.string().max(MAX_DECISION_IMAGE_PATH_LENGTH, `must be at most ${MAX_DECISION_IMAGE_PATH_LENGTH} characters`))
+      .max(MAX_DECISION_IMAGES, `must name at most ${MAX_DECISION_IMAGES} images`)
+      .optional(),
   })
   .superRefine((input, ctx) => {
+    input.images?.forEach((image, i) => {
+      if (!isDecisionImagePath(image, input.project, input.item)) {
+        ctx.addIssue({ code: "custom", path: ["images", i], message: `${image} is not an image of this review: it must be ${input.project}/${input.item}/<run>/<name> ending in png, jpg, jpeg, gif, or webp` });
+      }
+    });
+    const images = input.images ?? [];
+    if (images.length > 0 && input.message.length > decisionMessageBudget(images)) {
+      const cut = input.message.length - decisionMessageBudget(images);
+      ctx.addIssue({ code: "custom", path: ["message"], message: `is too long to fit beside its images: cut ${cut} character${cut === 1 ? "" : "s"}` });
+    }
     if (input.decision === "changes" && input.message === "") {
       ctx.addIssue({ code: "custom", path: ["message"], message: "is required when requesting changes — say what needs to change" });
     }
@@ -190,9 +223,18 @@ async function loadOpenReview(ctx: Context, input: ReviewDecisionInput): Promise
   return { project, item };
 }
 
+/** The decision's images as absolute files under the media root, or PRECONDITION_FAILED naming the first that is not a regular file there (decision-images.ts). */
+async function checkDecisionImages(root: string, images: readonly string[]): Promise<string[]> {
+  const checked = await resolveDecisionImages(root, images);
+  if (checked.ok) return checked.files;
+  const message = checked.reason === "missing" ? `Image ${checked.image} is not on this server; upload it again.` : `Image ${checked.image} is not a file in the review media directory.`;
+  throw new TRPCError({ code: "PRECONDITION_FAILED", message });
+}
+
 /** Queue mode (header, steps 8–9 of the queued path): the decision becomes a `review_decision` relay action. */
 async function queueReviewDecision(ctx: Context, input: ReviewDecisionInput): Promise<ReviewDecisionQueued> {
   const { project, item } = await loadOpenReview(ctx, input);
+  await checkDecisionImages(ctx.reviewImageRoot ?? REVIEW_IMAGE_ROOT, input.images ?? []);
   if (!isRelayIssueId(item.externalId)) {
     throw new TRPCError({
       code: "PRECONDITION_FAILED",
@@ -207,6 +249,7 @@ async function queueReviewDecision(ctx: Context, input: ReviewDecisionInput): Pr
     message: input.message,
     ...(input.option === undefined ? {} : { option: input.option }),
     ...(input.seen === undefined ? {} : { seen: input.seen }),
+    ...(input.images === undefined || input.images.length === 0 ? {} : { images: input.images }),
   };
   let enqueued;
   try {
@@ -241,6 +284,8 @@ const reviewDecisionProcedure = humanProcedure.input(reviewDecisionInputSchema).
   if (!isDirectory) {
     throw new TRPCError({ code: "PRECONDITION_FAILED", message: `The registered checkout for "${input.project}" is not a directory: ${project.path}.` });
   }
+  const imagePaths = input.images ?? [];
+  const imageFiles = await checkDecisionImages(ctx.reviewImageRoot ?? REVIEW_IMAGE_ROOT, imagePaths);
 
   let result;
   try {
@@ -252,6 +297,7 @@ const reviewDecisionProcedure = humanProcedure.input(reviewDecisionInputSchema).
       message: input.message,
       option: input.option,
       seen: input.seen,
+      ...(imagePaths.length === 0 ? {} : { imagePaths, imageFiles }),
       onWritten: ({ attempted }) => {
         if (attempted) ctx.watcher?.wake(input.project);
       },

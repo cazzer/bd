@@ -66,6 +66,8 @@ export interface RelayOptions {
   herdrSockets: readonly string[];
   /** `--max-age` in milliseconds; 24 h by default. */
   maxAgeMs?: number;
+  /** `--media-dir`: where a review decision's images are downloaded (bin/relay-lib.mjs default). */
+  mediaDir?: string;
   /** Reads and checks the token file (bin/relay-lib.mjs `readTokenFile`). */
   readToken: () => string | Promise<string>;
 }
@@ -226,6 +228,8 @@ export async function runRelay(options: RelayOptions, deps: RelayDeps = {}): Pro
     reingest,
     kinds,
     maxAgeMs,
+    ...(options.mediaDir === undefined ? {} : { mediaDir: options.mediaDir }),
+    fetchImage: async (id: string, n: number) => (await client.get(`/relay/v1/actions/${id}/media/${n}`)).bytes,
   };
 
   async function firstRegistryRead(): Promise<boolean> {

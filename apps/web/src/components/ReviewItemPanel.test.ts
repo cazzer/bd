@@ -939,3 +939,108 @@ describe("relay state across polls, reloads, and item swaps", () => {
     expect(trpcMock.relayAction.query.mock.calls.length).toBe(polls);
   });
 });
+
+describe("decision images (review-decision-images)", () => {
+  const legacy = () => boardItem({ images: [], pane: null, summary: "Board header" }, "Board header");
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn(async () => ({ ok: true, status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  const png = (name: string) => new File([new Uint8Array([1, 2, 3])], name, { type: "image/png" });
+
+  /** Pastes or drops `files` on the message box, then lets the thumbnails' FileReader reads land. */
+  async function transfer(kind: "paste" | "drop", files: File[]) {
+    const box = container.querySelector("textarea")!;
+    const event = new Event(kind, { bubbles: true, cancelable: true });
+    const data = { files, items: [], types: ["Files"] };
+    Object.defineProperty(event, kind === "paste" ? "clipboardData" : "dataTransfer", { value: data });
+    act(() => {
+      box.dispatchEvent(event);
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    return event;
+  }
+
+  const thumbs = () => [...container.querySelectorAll("img[alt^='Attached image']")].map((i) => i.getAttribute("alt"));
+
+  test("two pasted screenshots become thumbnails; the message is unchanged", async () => {
+    await render(legacy());
+    typeMessage("Smoke is too dark");
+    const event = await transfer("paste", [png("image.png"), png("Screen Shot 2.png")]);
+    expect(event.defaultPrevented).toBe(true);
+    expect(thumbs()).toEqual(["Attached image 1: image.png", "Attached image 2: Screen Shot 2.png"]);
+    expect(container.querySelector<HTMLImageElement>("img[alt^='Attached image 1']")!.src).toMatch(/^data:image\/png;base64,/);
+    expect(container.querySelector("textarea")!.value).toBe("Smoke is too dark");
+  });
+
+  test("a text paste is left alone", async () => {
+    await render(legacy());
+    expect((await transfer("paste", [])).defaultPrevented).toBe(false);
+    expect(thumbs()).toEqual([]);
+  });
+
+  test("a dropped PDF is refused by name and the JPEG beside it is kept", async () => {
+    await render(legacy());
+    await transfer("drop", [new File(["%PDF"], "spec.pdf", { type: "application/pdf" }), new File([new Uint8Array([1])], "shot.jpg", { type: "image/jpeg" })]);
+    expect(thumbs()).toEqual(["Attached image 1: shot.jpg"]);
+    expect(container.textContent).toContain("spec.pdf is not an image a decision can carry");
+  });
+
+  test("a seventh image is refused and the six stay; remove takes one off", async () => {
+    await render(legacy());
+    await transfer("paste", Array.from({ length: 6 }, (_, i) => png(`s${i}.png`)));
+    await transfer("paste", [png("seventh.png")]);
+    expect(thumbs()).toHaveLength(6);
+    expect(container.textContent).toContain("seventh.png was not added: a decision carries at most 6 images.");
+    await click(container.querySelector<HTMLButtonElement>("button[aria-label='Remove image 2']")!);
+    expect(thumbs()).toEqual(["Attached image 1: s0.png", "Attached image 2: s2.png", "Attached image 3: s3.png", "Attached image 4: s4.png", "Attached image 5: s5.png"]);
+  });
+
+  test("on send, uploads each image into one run, then sends the paths", async () => {
+    trpcMock.reviewDecision.mutate.mockResolvedValue({ ok: true, decision: "changes", item: "shlo-k54.4.1.1", written: ["comment", "add-changes-label"], notified: { ok: true, pane: "w1:p1" } });
+    await render(legacy());
+    typeMessage("Smoke is too dark");
+    await transfer("paste", [png("image.png"), png("b.png")]);
+    await click(button("Request changes"));
+    const puts = fetchMock.mock.calls.map(([url, init]) => [(init as RequestInit).method ?? "", url as string] as const);
+    expect(puts).toHaveLength(2);
+    expect(puts[0]![1]).toMatch(/^\/review-uploads\/shlo\/shlo-k54\.4\.1\.1\/d-\d{14}-[a-z0-9]{4}\/01-image\.png$/);
+    expect(puts[1]![1]).toMatch(/\/02-b\.png$/);
+    const run = puts[0]![1].split("/")[4]!;
+    expect(trpcMock.reviewDecision.mutate.mock.calls[0]![0]).toEqual({
+      project: "shlo",
+      item: "shlo-k54.4.1.1",
+      decision: "changes",
+      message: "Smoke is too dark",
+      images: [`shlo/shlo-k54.4.1.1/${run}/01-image.png`, `shlo/shlo-k54.4.1.1/${run}/02-b.png`],
+    });
+    expect(thumbs()).toEqual([]);
+  });
+
+  test("a 507 on the second image deletes the run, sends nothing, and keeps the message and thumbnails", async () => {
+    fetchMock.mockImplementation(async (url: string, init: RequestInit) => (init.method === "PUT" && url.endsWith("/02-b.png") ? { ok: false, status: 507 } : { ok: true, status: 204 }));
+    await render(legacy());
+    typeMessage("Smoke is too dark");
+    await transfer("paste", [png("a.png"), png("b.png"), png("c.png")]);
+    await click(button("Request changes"));
+    const calls = fetchMock.mock.calls.map(([url, init]) => `${(init as RequestInit).method} ${(url as string).split("/").slice(4).join("/")}`);
+    expect(calls).toEqual([expect.stringMatching(/^PUT d-.*\/01-a\.png$/), expect.stringMatching(/^PUT d-.*\/02-b\.png$/), expect.stringMatching(/^DELETE d-[^/]*$/)]);
+    expect(trpcMock.reviewDecision.mutate).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("The second image could not be uploaded because the server is out of space; nothing was sent.");
+    expect(container.querySelector("textarea")!.value).toBe("Smoke is too dark");
+    expect(thumbs()).toHaveLength(3);
+  });
+
+  test("a decision without images uploads nothing", async () => {
+    await render(legacy());
+    await click(button("Accept"));
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(trpcMock.reviewDecision.mutate.mock.calls[0]![0]).toEqual({ project: "shlo", item: "shlo-k54.4.1.1", decision: "accept", message: "" });
+  });
+});

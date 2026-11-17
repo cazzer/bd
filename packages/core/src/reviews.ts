@@ -546,3 +546,54 @@ export function isInsideReviewRoot(candidate: string, root: string = REVIEW_IMAG
   const rel = path.relative(root, path.resolve(candidate));
   return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
 }
+
+// Decision images (review-decision-images, design.md decisions 1–3). A
+// person deciding a review may attach up to MAX_DECISION_IMAGES screenshots,
+// each at most MAX_DECISION_IMAGE_BYTES (the board's cap; the upload route
+// keeps its own). The board uploads them to `/review-uploads/` and the
+// decision carries their paths relative to the media root, which must name
+// the decision's own project and item: `<project>/<item>/<run>/<name>`, run
+// and name each a SEGMENT (a letter or digit first, then letters, digits,
+// `.`, `_`, `-`, at most 255), the name ending in one of DECISION_IMAGE_TYPES.
+// The comment records them after the message as `decisionCommentImagesBlock`.
+
+export const MAX_DECISION_IMAGES = 6;
+export const MAX_DECISION_IMAGE_BYTES = 10 * 2 ** 20;
+/** The extensions a decision image may have, lower case, without the dot. */
+export const DECISION_IMAGE_TYPES = ["png", "jpg", "jpeg", "gif", "webp"] as const;
+/** A decision image path's length cap (the review contract's). */
+export const MAX_DECISION_IMAGE_PATH_LENGTH = MAX_REVIEW_IMAGE_PATH_LENGTH;
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** The pattern a decision image path on `project`'s item `item` must match (module section above). */
+export function decisionImagePathPattern(project: string, item: string): RegExp {
+  return new RegExp(
+    `^${escapeRegExp(project)}/${escapeRegExp(item)}/[A-Za-z0-9][A-Za-z0-9._-]{0,254}/[A-Za-z0-9][A-Za-z0-9._-]{0,254}\\.(?:${DECISION_IMAGE_TYPES.join("|")})$`,
+  );
+}
+
+/** Whether `value` is a decision image path for `project`'s item `item`. */
+export function isDecisionImagePath(value: unknown, project: string, item: string): value is string {
+  if (typeof value !== "string" || value.length > MAX_DECISION_IMAGE_PATH_LENGTH) return false;
+  const segments = value.split("/");
+  // `.`/`..` cannot match the segment rule (a letter or digit first); a project or item that is one would.
+  if (segments.some((s) => s === "." || s === "..")) return false;
+  return decisionImagePathPattern(project, item).test(value);
+}
+
+/** What follows a decision's comment text when it carries images: a blank line, `Images:`, one path per line; empty without images. */
+export function decisionCommentImagesBlock(paths: readonly string[]): string {
+  return paths.length === 0 ? "" : `\n\nImages:\n${paths.join("\n")}`;
+}
+
+/**
+ * How long a decision's message may be beside `paths`: the message cap less
+ * the images block, so the comment, prefix and block included, stays within
+ * MAX_REVIEW_COMMENT_LENGTH. Without images it is the message cap itself.
+ */
+export function decisionMessageBudget(paths: readonly string[]): number {
+  return MAX_REVIEW_DECISION_MESSAGE_LENGTH - decisionCommentImagesBlock(paths).length;
+}

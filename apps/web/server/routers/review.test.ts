@@ -7,7 +7,7 @@
 // asserts a store-wide count.
 
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -20,6 +20,7 @@ import type { Context } from "../context.js";
 import { BdUncertainError, createReviewWriter, NOTIFY_NO_PANE, NOTIFY_NOT_WRITTEN, type RunBd, type RunHerdr } from "../review-writer.js";
 import { appRouter } from "../router.js";
 import { createCallerFactory } from "../trpc.js";
+import { MAX_REVIEW_MESSAGE_LENGTH } from "./review.js";
 
 let pool: ReturnType<typeof createPool>;
 let db: Database;
@@ -43,7 +44,7 @@ const EXTERNAL_IDS = [
   `project:${PROJECT}`,
   `project:${MISSING_DIR}`,
   `project:${FORGED}`,
-  ...["r1", "r2", "plain", "closed", "orphan", "missing", "forged", "fx", "fy", "card", "q1", "q2", "q3"].map(id),
+  ...["r1", "r2", "plain", "closed", "orphan", "missing", "forged", "fx", "fy", "card", "q1", "q2", "q3", "q4"].map(id),
   UNRELAYABLE,
 ];
 /** Relay actions this file queued, deleted by id. No relay claims them: this suite never claims. */
@@ -90,6 +91,7 @@ beforeAll(async () => {
     item(id("q1"), PROJECT),
     item(id("q2"), PROJECT),
     item(id("q3"), PROJECT),
+    item(id("q4"), PROJECT),
     item(UNRELAYABLE, PROJECT),
     // The store's copy carries a card offering B; the tracker's record (the fake `bd show`) decides.
     item(id("card"), PROJECT, { review: { ...review, question: "Which migration?", options: [{ id: "A", label: "Keep" }, { id: "B", label: "Skip" }], recommend: "A" } }),
@@ -127,6 +129,7 @@ interface SetupOptions {
   db?: Database;
   readOnly?: boolean;
   missingBinaries?: Context["missingBinaries"];
+  reviewImageRoot?: string;
 }
 
 function setup(opts: SetupOptions = {}) {
@@ -156,6 +159,7 @@ function setup(opts: SetupOptions = {}) {
     watcher: { wake } as unknown as BeadsWatcher,
     ...(opts.readOnly !== undefined ? { readOnly: opts.readOnly } : {}),
     ...(opts.missingBinaries !== undefined ? { missingBinaries: opts.missingBinaries } : {}),
+    ...(opts.reviewImageRoot !== undefined ? { reviewImageRoot: opts.reviewImageRoot } : {}),
   };
   const writes = () => calls.filter((c) => c.args[0] !== "show");
   return { caller: createCaller(ctx), calls, writes, wake, herdrCalls, order };
@@ -523,5 +527,82 @@ describe("reviewDecision", () => {
       error: "bd not found on PATH",
     });
     expect(showFails.wake).not.toHaveBeenCalled();
+  });
+});
+
+describe("reviewDecision with images (review-decision-images)", () => {
+  let media: string;
+  const run = "d-20261117120000-ab12";
+  const rel = (item: string, name: string) => `${PROJECT}/${item}/${run}/${name}`;
+  beforeAll(() => {
+    media = mkdtempSync(path.join(tmpdir(), "rr-media-"));
+    for (const item of [id("r1"), id("r2"), id("q4")]) {
+      mkdirSync(path.join(media, PROJECT, item, run), { recursive: true });
+      writeFileSync(path.join(media, PROJECT, item, run, "01-a.png"), "png");
+      writeFileSync(path.join(media, PROJECT, item, run, "02-b.webp"), "webp");
+    }
+    symlinkSync(path.join(media, PROJECT, id("r1"), run, "01-a.png"), path.join(media, PROJECT, id("r1"), run, "03-link.png"));
+    mkdirSync(path.join(media, PROJECT, id("r1"), run, "04-dir.png"));
+  });
+  afterAll(() => rmSync(media, { recursive: true, force: true }));
+
+  it("records the relative paths in the comment and names the absolute files in the prompt", async () => {
+    const { caller, writes, herdrCalls } = setup({ reviewImageRoot: media, show: () => ({ metadata: { review: { pane: "w5:p5", socket: SOCKET, images: [], summary: "" } } }) });
+    const images = [rel(id("r2"), "01-a.png"), rel(id("r2"), "02-b.webp")];
+    const result = await caller.reviewDecision({ project: PROJECT, item: id("r2"), decision: "changes", message: "Smoke is too dark", images });
+    expect(result).toMatchObject({ ok: true, notified: { ok: true, pane: "w5:p5" } });
+    expect(writes()[0]!.args).toEqual(["comments", "add", id("r2"), `Changes requested: Smoke is too dark\n\nImages:\n${images.join("\n")}`]);
+    expect(herdrCalls[0]![3]).toBe(`Review ${id("r2")} changes requested: Smoke is too dark Images: ${images.map((i) => path.join(media, i)).join(" ")}`);
+  });
+
+  it("a decision without images is unchanged", async () => {
+    const { caller, writes } = setup({ reviewImageRoot: media });
+    await caller.reviewDecision({ project: PROJECT, item: id("r2"), decision: "changes", message: "fix", images: [] });
+    expect(writes()[0]!.args[3]).toBe("Changes requested: fix");
+  });
+
+  it.each([
+    ["another review's image", () => `${PROJECT}/${id("r2")}/${run}/01-a.png`, "BAD_REQUEST"],
+    ["a path that climbs out", () => `${PROJECT}/${id("r1")}/../01-a.png`, "BAD_REQUEST"],
+    ["a video", () => rel(id("r1"), "01-a.mp4"), "BAD_REQUEST"],
+    ["a missing file", () => rel(id("r1"), "09-gone.png"), "PRECONDITION_FAILED"],
+    ["a symlink", () => rel(id("r1"), "03-link.png"), "PRECONDITION_FAILED"],
+    ["a directory", () => rel(id("r1"), "04-dir.png"), "PRECONDITION_FAILED"],
+  ])("refuses %s naming the path, before running anything", async (_name, image, code) => {
+    const { caller, calls } = setup({ reviewImageRoot: media });
+    const err = await caller.reviewDecision({ project: PROJECT, item: id("r1"), decision: "changes", message: "x", images: [image()] }).catch((e: unknown) => e);
+    expect(err).toMatchObject({ code });
+    expect((err as Error).message).toContain(image());
+    expect(calls).toEqual([]);
+  });
+
+  it("refuses a seventh image and a message too long to fit beside its images, saying how much to cut", async () => {
+    const { caller, calls } = setup({ reviewImageRoot: media });
+    const seven = Array.from({ length: 7 }, () => rel(id("r1"), "01-a.png"));
+    await expect(caller.reviewDecision({ project: PROJECT, item: id("r1"), decision: "changes", message: "x", images: seven })).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    const images = [rel(id("r1"), "01-a.png")];
+    const message = "x".repeat(MAX_REVIEW_MESSAGE_LENGTH);
+    const cut = `\n\nImages:\n${images[0]}`.length;
+    await expect(caller.reviewDecision({ project: PROJECT, item: id("r1"), decision: "changes", message, images })).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+      message: expect.stringContaining(`cut ${cut} characters`),
+    });
+    expect(calls).toEqual([]);
+  });
+
+  it("queues the paths in the relay payload when bd is missing", async () => {
+    const { caller } = setup({ reviewImageRoot: media, missingBinaries: ["bd"] });
+    const images = [rel(id("q4"), "01-a.png")];
+    const result = await caller.reviewDecision({ project: PROJECT, item: id("q4"), decision: "changes", message: "see shot", images });
+    if (!("queued" in result)) throw new Error("expected a queued decision");
+    ACTION_IDS.push(result.actionId);
+    expect((await getRelayAction(db, result.actionId))!.payload).toMatchObject({ issue_id: id("q4"), images });
+  });
+
+  it("refuses a missing file in queue mode too, queueing nothing", async () => {
+    const { caller } = setup({ reviewImageRoot: media, missingBinaries: ["bd"] });
+    await expect(caller.reviewDecision({ project: PROJECT, item: id("q4"), decision: "changes", message: "x", images: [rel(id("q4"), "09-gone.png")] })).rejects.toMatchObject({
+      code: "PRECONDITION_FAILED",
+    });
   });
 });

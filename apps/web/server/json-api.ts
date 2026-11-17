@@ -132,16 +132,18 @@ export async function readJsonBody<T extends z.ZodType>(req: IncomingMessage, sc
 // --- Routing -------------------------------------------------------------------------
 
 /** The path's `:id`, or null when `path` does not fit `pattern` segment by segment. */
-export function matchPath(pattern: string, path: string): { id: string | undefined } | null {
+export function matchPath(pattern: string, path: string): { id: string | undefined; n?: string } | null {
   const want = pattern.split("/");
   const got = path.split("/");
   if (want.length !== got.length) return null;
   let id: string | undefined;
+  let n: string | undefined;
   for (let i = 0; i < want.length; i += 1) {
     if (want[i] === ":id") id = got[i];
+    else if (want[i] === ":n") n = got[i];
     else if (want[i] !== got[i]) return null;
   }
-  return { id };
+  return n === undefined ? { id } : { id, n };
 }
 
 // --- Long-poll ------------------------------------------------------------------------

@@ -21,7 +21,7 @@ https://<breakdown-host>/relay/v1/...            # behind a TLS proxy such as `t
 - **Scope.** Every endpoint takes exactly scope `relay`. `human`, `agent`, and `hangar` tokens are refused on every endpoint here, and the `relay` token is refused everywhere else in Breakdown (tRPC, the hangar API, review images and review media uploads, the connect flow, and MCP) except `GET /healthz`.
 - **Requests must arrive off loopback.** Breakdown trusts a request from its own machine (loopback peer, loopback `Host`) without reading any token and treats it as the local person, so every endpoint here refuses it with `403`. The relay is meant for another host. A proxy on Breakdown's machine must set `X-Forwarded-For` (`tailscale serve` does); see the hangar API's warning about forwarders that do not.
 - **Host.** The `Host` header must be a name allowed with `--allow-host`, at the server's port or bare.
-- **Content.** Every response body is JSON (`Content-Type: application/json; charset=utf-8`, `Cache-Control: no-store`). `POST` requests send `Content-Type: application/json` and a UTF-8 JSON body of at most **64 KiB** (65,536 bytes), except `POST /relay/v1/beads-ingest`, which may be up to **8 MiB** (8,388,608 bytes). Unknown request fields are ignored.
+- **Content.** Every response body is JSON, except a successful [`GET /relay/v1/actions/:id/media/:n`](#get-relayv1actionsidmedian--scope-relay), which is the image's bytes. JSON bodies carry `Content-Type: application/json; charset=utf-8` and `Cache-Control: no-store`. `POST` requests send `Content-Type: application/json` and a UTF-8 JSON body of at most **64 KiB** (65,536 bytes), except `POST /relay/v1/beads-ingest`, which may be up to **8 MiB** (8,388,608 bytes). Unknown request fields are ignored.
 - **Read-only servers.** A Breakdown started with `BRAIN_READ_ONLY` answers `GET`s and refuses every `POST` with `403 read_only`, check-in and claim included.
 
 ## Endpoints
@@ -33,8 +33,9 @@ https://<breakdown-host>/relay/v1/...            # behind a TLS proxy such as `t
 | `POST` | `/relay/v1/actions/:id/result` | Report a claimed action `done` or `failed` |
 | `POST` | `/relay/v1/beads-ingest` | Push one registered project's beads export |
 | `GET` | `/relay/v1/projects` | The registered beads projects to watch, and whether to push |
+| `GET` | `/relay/v1/actions/:id/media/:n` | One image of a review decision you hold |
 
-`:id` is an action id, a positive decimal integer of at most 18 digits. Any other segment gets `404 not_found`. A known path with the wrong method gets `405 method_not_allowed` with an `Allow` header. Any other path under `/relay/v1/` gets `404 not_found`, including one with a trailing slash.
+`:id` is an action id, a positive decimal integer of at most 18 digits. Any other segment gets `404 not_found`. `:n` is an index from 0. A known path with the wrong method gets `405 method_not_allowed` with an `Allow` header. Any other path under `/relay/v1/` gets `404 not_found`, including one with a trailing slash.
 
 ### `POST /relay/v1/check-in` — scope `relay`
 
@@ -89,7 +90,8 @@ Response `200` with an action:
       "decision": "accept",
       "message": "Ship it",
       "option": "b",
-      "seen": { "question": "Which layout?", "label": "Two columns" }
+      "seen": { "question": "Which layout?", "label": "Two columns" },
+      "images": ["bd/bd-d38.11/d-20261117120000-ab12/01-screenshot.png"]
     },
     "created_at": "2026-11-14T08:59:40.000Z",
     "attempts": 1
@@ -101,7 +103,7 @@ or, when nothing arrived in time, `{ "action": null }`.
 
 - `id`: the action id; report it with [`POST /relay/v1/actions/:id/result`](#post-relayv1actionsidresult--scope-relay).
 - `payload`: validated data, never a command string. Parse it again against `packages/core/src/relay.ts`'s schema for its `kind` before running anything, and check every command against the allowlist (below). That bounds the payload's shape only: take where it runs (the checkout, the herdr socket) from your own configuration, never from the payload (see [What the relay trusts](#what-the-relay-trusts)).
-  - `review_decision`: `{ project_key, cwd, issue_id, decision: "accept" | "changes", message, option?, seen? }`. Run it with the review writer, which re-reads the issue with `bd show` first, so an accept on an issue already closed is reported `done` with `{ "note": "already applied" }`, not run twice. A request for changes on a closed issue is reported `failed` (`refused: the review is closed`): it never closes one, so it was not applied.
+  - `review_decision`: `{ project_key, cwd, issue_id, decision: "accept" | "changes", message, option?, seen?, images? }`. `images` (1 to 6, when present) are screenshots the person attached, as paths relative to Breakdown's media root, each `<project_key>/<issue_id>/<run>/<name>`. Download each with [`GET /relay/v1/actions/:id/media/:n`](#get-relayv1actionsidmedian--scope-relay) before running anything; the comment records the relative paths, and the agent's prompt names the downloaded files. Run it with the review writer, which re-reads the issue with `bd show` first, so an accept on an issue already closed is reported `done` with `{ "note": "already applied" }`, not run twice. A request for changes on a closed issue is reported `failed` (`refused: the review is closed`): it never closes one, so it was not applied.
   - `herdr_prompt`: `{ pane, socket, text }`: `herdr agent prompt <pane> <text>` on that socket.
   - `beads_reingest`: `{ project_key }`: re-ingest that project now and [push](#post-relayv1beads-ingest--scope-relay) it.
 - `created_at`: when it was queued. The relay refuses a `review_decision` or `herdr_prompt` older than its own `--max-age` (24 h by default), and one with no readable `created_at`, before running it.
@@ -202,6 +204,16 @@ Response `200`:
 
 Status codes: `200`, `401`, `403`.
 
+### `GET /relay/v1/actions/:id/media/:n` — scope `relay`
+
+The `n`-th image (from 0) of a `review_decision` action's `images`, while **you** hold its claim: the action is `claimed`, by this token's client. Response `200` with the file's bytes, its type (`image/png`, `image/jpeg`, `image/gif`, or `image/webp`), `Content-Length`, and `Cache-Control: no-store`.
+
+Anything else — an action that is queued, finished, claimed by another relay, or of another kind, an index past the list, or a file no longer on the server (or reached through a symlink) — gets the same `404 not_found` (`No such media.`), saying nothing about which. This is the only way a relay reads review media: a `relay` token never reaches `/review-images/`.
+
+The relay downloads every image before it writes anything, into `<--media-dir>/<action id>/` (each file to a temporary name, then renamed). If one fails, it removes that directory, writes nothing, and reports the action `failed` with `could not fetch image <n>: <reason>`.
+
+Status codes: `200`, `401`, `403`, `404`.
+
 ## Long-poll
 
 `POST /claim` long-polls:
@@ -286,7 +298,7 @@ The relay is `bin/relay.mjs`, run from a checkout of this repo on the Mac that h
 
    ```bash
    pnpm relay:service install --url https://<breakdown-host> --name relay-laptop --project bd=/Users/me/dev/bd \
-     [--project <key>=<path>]... [--kinds <kind>,…] [--herdr-socket <path>]... [--max-age 24h] [--token-file <path>]
+     [--project <key>=<path>]... [--kinds <kind>,…] [--herdr-socket <path>]... [--max-age 24h] [--token-file <path>] [--media-dir <dir>]
    ```
 
    - `--name` is the client name the token was minted for; it labels the log.
@@ -295,6 +307,7 @@ The relay is `bin/relay.mjs`, run from a checkout of this repo on the Mac that h
    - `--herdr-socket` (repeatable; default `~/.config/herdr/herdr.sock`) names the herdr servers it may prompt through.
    - `--max-age` (`<n>s`, `m`, `h`, or `d`; default `24h`) is the oldest decision or prompt it will run.
    - `--token-file` defaults to `~/.config/breakdown/relay-token`.
+   - `--media-dir` (default `~/.local/share/breakdown/relay-media`, created mode 0700) is where a decision's images are downloaded, one directory per action, so the agent's prompt can name files it opens on this Mac. Nothing sweeps it yet; the files are small.
 
    Install waits up to 20 s for the relay's first check-in and prints what it installed.
 
@@ -342,7 +355,7 @@ The logs are `~/Library/Logs/breakdown/relay.out.log` (start, check-in, each act
 - **Check-in** every `interval_s` (30 s), on its own loop, so a long action never makes it look offline.
 - **Claim, run, report**, one action at a time: a 30 s long-poll naming its `--kinds` and `--project` keys, then the action, then its report, retried with backoff until Breakdown takes it. A report Breakdown refuses (`409 not_claimer`, `404`) is given up and logged.
   - Before running anything, the payload is parsed with the same schema Breakdown used at enqueue. A malformed one, a kind outside `--kinds`, a decision or prompt older than `--max-age`, a project or `cwd` other than a served `--project` checkout, or a herdr socket outside `--herdr-socket` (or not a socket of yours) is reported `failed` with `refused: …` and nothing runs.
-  - `review_decision` runs the review writer, which re-reads the issue with `bd show` first. An accept on an issue already closed is reported `done` with `{ "note": "already applied" }`; a request for changes on one is `failed`. The result is the writer's own: what was written, and whether the agent's pane was told.
+  - `review_decision` first downloads the decision's `images`, if any, into `--media-dir` (a failure writes nothing and reports `failed`), then runs the review writer, which re-reads the issue with `bd show` first. An accept on an issue already closed is reported `done` with `{ "note": "already applied" }`; a request for changes on one is `failed`. The result is the writer's own: what was written, and whether the agent's pane was told.
   - `herdr_prompt` is reported `done` with `{ "pane" }`, `beads_reingest` with `{ "project", "changed" }`.
 - **Registry.** The `--project` checkouts, narrowed by `GET /projects` at start, before each `beads_reingest`, when a decision names a project it does not hold, and every 5 minutes. A project is kept only when the server lists it at the same path and the path is its own realpath (no symlink on the way), a directory, and holds `.beads/`; anything else is logged once and skipped. A project the server registers after the relay started is picked up within 5 minutes; one it does not name on its own command line never is.
 - **Push watcher**, only while `GET /projects` says `push: true`: the server's beads watcher, run here with the push as its sink, so a bead edit on the Mac reaches open boards within a second or two. Each push carries the whole export; review threads unchanged since the last accepted push are not fetched again. An export over 8 MiB is refused before it is sent, with its size.
@@ -385,6 +398,10 @@ Branch on `code`, which is stable within v1. `message` is for people.
 | 415 | `unsupported_media_type` | A `POST` without `Content-Type: application/json`. |
 | 429 | `too_many_waiters` | This client already holds 2 claims open (see [Long-poll](#long-poll)). Sent with `Retry-After: 1`. |
 | 500 | `internal` | A server fault, logged on Breakdown's side. Retry with backoff. |
+
+## Deploy order for a payload change
+
+The relay parses every payload with a strict schema, so a field it does not know makes it refuse the action. When a release adds a payload field (decision `images` did), update the relay on the Mac **before** the server: an older relay refuses decisions that carry the new field (they show `failed` on the board and can be decided again) and keeps running every decision without it.
 
 ## Versioning
 

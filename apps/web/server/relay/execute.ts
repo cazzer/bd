@@ -17,6 +17,14 @@
 //   it was registered since), then the review writer runs it — the same
 //   `createReviewWriter` the web server uses locally, with the relay's
 //   allowlisted runners — so `bd show`'s check-then-act stays in one place.
+//   A decision carrying `images` (review-decision-images, design.md
+//   decision 5) first downloads each one through `fetchImage` (the media
+//   endpoint) into `<mediaDir>/<action id>/`, each written to a temporary
+//   name and renamed; a directory left by an earlier claim of the same
+//   action is replaced. Any failure removes that directory and reports
+//   `failed: could not fetch image <n>: <reason>` with nothing written.
+//   The writer then records the payload's relative paths in the comment and
+//   names the downloaded files in the prompt.
 //   `ok: true` → `done` with the writer's result; `ok: false` → `failed`
 //   with its error and the result kept; an accept on an issue already
 //   closed → `done` `{ note: "already applied", message }` (the decision
@@ -32,6 +40,8 @@
 // It never throws: every outcome is a report. Nothing here logs; main.ts
 // logs the action's id, kind, and state, never the payload.
 
+import { mkdir, rename, rm, writeFile } from "node:fs/promises";
+import path from "node:path";
 import { InvalidRelayActionError, parseRelayPayload, RELAY_ACTION_KINDS, RELAY_MAX_AGE_S, type RelayActionKind, type ReviewDecisionPayload } from "@breakdown/core";
 import { ReviewRecordRefusedError, type ReviewWriter, type ReviewWriteResult, type RunHerdr } from "../review-writer.js";
 import type { RelayRegistry } from "./registry.js";
@@ -62,6 +72,10 @@ export interface ExecuteDeps {
   maxAgeMs?: number;
   /** The relay's clock (tests). */
   now?: () => number;
+  /** `--media-dir`: where a decision's images are downloaded, one directory per action (module header). */
+  mediaDir?: string;
+  /** Fetches image `n` of claimed action `id` (client.get on the media endpoint); rejects with a reason safe to log. */
+  fetchImage?(id: string, n: number): Promise<Uint8Array>;
 }
 
 /** Why a review decision or herdr prompt is too old to run, or null (module header). */
@@ -96,11 +110,45 @@ async function inRegistry(deps: ExecuteDeps, project: string): Promise<{ project
   return deps.registry.get(project);
 }
 
-async function reviewDecision(deps: ExecuteDeps, payload: ReviewDecisionPayload): Promise<RelayReport> {
+/** Downloads a decision's images into `<mediaDir>/<id>/`, or says which failed, leaving nothing behind (module header). */
+async function downloadImages(deps: ExecuteDeps, id: string, images: readonly string[]): Promise<{ ok: true; files: string[] } | { ok: false; error: string }> {
+  if (deps.mediaDir === undefined || deps.fetchImage === undefined) return { ok: false, error: "refused: this relay cannot download decision images (no --media-dir); nothing ran" };
+  if (!/^[1-9]\d{0,17}$/.test(id)) return { ok: false, error: "refused: the action id is not a decimal id; nothing ran" };
+  const dir = path.join(deps.mediaDir, id);
+  const files: string[] = [];
+  let n = 0;
+  try {
+    await mkdir(deps.mediaDir, { recursive: true, mode: 0o700 });
+    await rm(dir, { recursive: true, force: true });
+    await mkdir(dir, { mode: 0o700 });
+    for (; n < images.length; n += 1) {
+      const base = path.posix.basename(images[n]!);
+      const name = files.some((f) => path.basename(f) === base) ? `${n}-${base}` : base;
+      const bytes = await deps.fetchImage(id, n);
+      const target = path.join(dir, name);
+      const tmp = path.join(dir, `.${name}.tmp`);
+      await writeFile(tmp, bytes, { mode: 0o600 });
+      await rename(tmp, target);
+      files.push(target);
+    }
+  } catch (err) {
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
+    return { ok: false, error: `could not fetch image ${n}: ${message(err)}` };
+  }
+  return { ok: true, files };
+}
+
+async function reviewDecision(deps: ExecuteDeps, payload: ReviewDecisionPayload, actionId: string): Promise<RelayReport> {
   const entry = await inRegistry(deps, payload.project_key);
   if (entry === undefined) return { state: "failed", error: `refused: project ${payload.project_key} is not in this relay's registry; nothing ran` };
   if (entry.dir !== payload.cwd) {
     return { state: "failed", error: `refused: ${payload.cwd} is not project ${payload.project_key}'s checkout in this relay's registry (${entry.dir}); nothing ran` };
+  }
+  let images: { imagePaths: readonly string[]; imageFiles: readonly string[] } | null = null;
+  if (payload.images !== undefined && payload.images.length > 0) {
+    const downloaded = await downloadImages(deps, actionId, payload.images);
+    if (!downloaded.ok) return { state: "failed", error: downloaded.error };
+    images = { imagePaths: payload.images, imageFiles: downloaded.files };
   }
   let written: ReviewWriteResult;
   try {
@@ -112,6 +160,7 @@ async function reviewDecision(deps: ExecuteDeps, payload: ReviewDecisionPayload)
       message: payload.message.trim(),
       ...(payload.option === undefined ? {} : { option: payload.option }),
       ...(payload.seen === undefined ? {} : { seen: payload.seen }),
+      ...(images === null ? {} : images),
     });
   } catch (err) {
     if (err instanceof ReviewRecordRefusedError) {
@@ -146,7 +195,7 @@ export async function executeAction(action: ClaimedAction, deps: ExecuteDeps): P
 
   switch (kind) {
     case "review_decision":
-      return reviewDecision(deps, payload as ReviewDecisionPayload);
+      return reviewDecision(deps, payload as ReviewDecisionPayload, action.id);
     case "herdr_prompt": {
       const { pane, socket, text } = payload as { pane: string; socket: string; text: string };
       try {

@@ -160,7 +160,7 @@ async function main(): Promise<void> {
       reviewImages: createReviewImageHandler({ root: reviewImageRoot }),
       reviewUploads: createReviewUploadHandler({ root: reviewImageRoot, readOnly }),
       hangar: createHangarHandler({ db, readOnly, shutdownSignal: shutdown.signal }),
-      relay: createRelayHandler({ db, readOnly, shutdownSignal: shutdown.signal, watcher, missingBinaries }),
+      relay: createRelayHandler({ db, readOnly, shutdownSignal: shutdown.signal, watcher, missingBinaries, mediaRoot: reviewImageRoot }),
       trpc: trpcHandler,
       ...(staticClient !== undefined ? { staticClient } : {}),
     }),

@@ -298,6 +298,36 @@ describe("pane notification", () => {
     expect(result.notified).toEqual({ ok: true, pane: "w3:p1" });
   });
 
+  describe("decision images", () => {
+    const imagePaths = ["tides/tides-r1/d-1/01-a.png", "tides/tides-r1/d-1/02-b.png"];
+    const imageFiles = ["/media/tides/tides-r1/d-1/01-a.png", "/media/tides/tides-r1/d-1/02-b.png"];
+
+    it("changes: the comment ends with the Images block and the prompt names the absolute files", async () => {
+      const bd = recordingRunner({ show: withPane("w1:p2") });
+      const herdr = recordingHerdr();
+      await createReviewWriter({ runBd: bd.runBd, runHerdr: herdr.runHerdr }).write({ ...BASE, decision: "changes", message: "Smoke is too dark", imagePaths, imageFiles });
+      expect(bd.writes()[0]!.args).toEqual(["comments", "add", "tides-r1", "Changes requested: Smoke is too dark\n\nImages:\ntides/tides-r1/d-1/01-a.png\ntides/tides-r1/d-1/02-b.png"]);
+      expect(herdr.calls.map((c) => c.args[3])).toEqual([
+        "Review tides-r1 changes requested: Smoke is too dark Images: /media/tides/tides-r1/d-1/01-a.png /media/tides/tides-r1/d-1/02-b.png",
+      ]);
+    });
+
+    it("accept with an option: the same block after the accepted text", async () => {
+      expect(commentText("accept", "go", "B", imagePaths.slice(0, 1))).toBe("Accepted: B — go\n\nImages:\ntides/tides-r1/d-1/01-a.png");
+      expect(notifyText("accept", "x-1", "", undefined, imageFiles.slice(0, 1))).toBe("Review x-1 accepted. Images: /media/tides/tides-r1/d-1/01-a.png");
+    });
+
+    it("no images: today's comment and prompt, byte for byte", async () => {
+      expect(commentText("changes", "fix", undefined, [])).toBe("Changes requested: fix");
+      expect(notifyText("changes", "x-1", "fix", undefined, [])).toBe("Review x-1 changes requested: fix");
+      const bd = recordingRunner({ show: withPane("w1:p2") });
+      const herdr = recordingHerdr();
+      await createReviewWriter({ runBd: bd.runBd, runHerdr: herdr.runHerdr }).write({ ...BASE, decision: "changes", message: "fix" });
+      expect(bd.writes()[0]!.args[3]).toBe("Changes requested: fix");
+      expect(herdr.calls[0]!.args[3]).toBe("Review tides-r1 changes requested: fix");
+    });
+  });
+
   it.each([
     ["no metadata", (id: string) => shown({ id })],
     ["no review metadata", (id: string) => shown({ id, metadata: { other: 1 } })],

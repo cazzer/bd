@@ -46,8 +46,14 @@ describe("parseRelayArgs", () => {
       kinds: RELAY_KINDS,
       herdrSockets: [defaultHerdrSocket(HOME)],
       maxAgeMs: 24 * 3_600_000,
+      mediaDir: "/Users/me/.local/share/breakdown/relay-media",
     });
     assert.equal(defaultHerdrSocket(HOME), "/Users/me/.config/herdr/herdr.sock");
+  });
+
+  it("takes --media-dir as an absolute path, normalized, and refuses a relative one", () => {
+    assert.equal(parse([...BASE, "--media-dir", "/Volumes/x/../media/"]).mediaDir, "/Volumes/media/");
+    assert.match(parse([...BASE, "--media-dir", "media"]).error, /--media-dir must be an absolute path/);
   });
 
   it("takes --kinds, repeatable --herdr-socket, and --max-age", () => {
