@@ -88,3 +88,24 @@ describe("backoff and sleep", () => {
     expect(Date.now() - started).toBeLessThan(1000);
   });
 });
+
+describe("the relay client's binary get", () => {
+  it("answers the bytes and content type of a 2xx with the same Bearer token", async () => {
+    const fetch = vi.fn(async (_url: string, _init: RequestInit) => new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "Content-Type": "image/png" } }));
+    const client = createRelayClient({ origin: "https://j", readToken: () => "bdt_one", fetch });
+    const got = await client.get("/relay/v1/actions/4/media/0");
+    expect([...got.bytes]).toEqual([1, 2, 3]);
+    expect(got.contentType).toBe("image/png");
+    const [url, init] = fetch.mock.calls[0]!;
+    expect(url).toBe("https://j/relay/v1/actions/4/media/0");
+    expect(init).toMatchObject({ method: "GET", redirect: "error" });
+    expect((init.headers as Record<string, string>)["Authorization"]).toBe("Bearer bdt_one");
+  });
+
+  it("throws a final RelayRequestError on a 404 naming the server's code", async () => {
+    const client = createRelayClient({ origin: "https://j", readToken: () => "t", fetch: async () => json(404, { error: { code: "not_found", message: "No such media." } }) });
+    const err = await client.get("/relay/v1/actions/4/media/9").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RelayRequestError);
+    expect(err).toMatchObject({ status: 404, code: "not_found", retryable: false, message: "GET /relay/v1/actions/4/media/9 answered 404 not_found: No such media." });
+  });
+});

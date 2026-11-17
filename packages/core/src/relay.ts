@@ -61,7 +61,11 @@ import {
   RELAY_ISSUE_ID_PATTERN,
 } from "./relay-allowlist.js";
 import {
+  decisionMessageBudget,
+  isDecisionImagePath,
   isReviewSocketPath,
+  MAX_DECISION_IMAGE_PATH_LENGTH,
+  MAX_DECISION_IMAGES,
   MAX_REVIEW_DECISION_MESSAGE_LENGTH,
   MAX_REVIEW_OPTION_LABEL_LENGTH,
   MAX_REVIEW_OPTION_TEXT_LENGTH,
@@ -138,9 +142,23 @@ export const reviewDecisionPayloadSchema = z
         risk: z.string().max(MAX_REVIEW_OPTION_TEXT_LENGTH).optional(),
       })
       .optional(),
+    // Decision images (review-decision-images): paths relative to the server's media root, fetched by the relay through its media endpoint.
+    images: z
+      .array(z.string().max(MAX_DECISION_IMAGE_PATH_LENGTH))
+      .min(1, "must name at least one image when present")
+      .max(MAX_DECISION_IMAGES, `must name at most ${MAX_DECISION_IMAGES} images`)
+      .optional(),
   })
   .superRefine((p, ctx) => {
     if (p.decision === "changes" && p.message.trim() === "") ctx.addIssue({ code: "custom", path: ["message"], message: "is required when requesting changes" });
+    p.images?.forEach((image, i) => {
+      if (!isDecisionImagePath(image, p.project_key, p.issue_id)) {
+        ctx.addIssue({ code: "custom", path: ["images", i], message: `must be an image under ${p.project_key}/${p.issue_id}/<run>/ (png, jpg, jpeg, gif, or webp)` });
+      }
+    });
+    if (p.images !== undefined && p.message.trim().length > decisionMessageBudget(p.images)) {
+      ctx.addIssue({ code: "custom", path: ["message"], message: `must be at most ${decisionMessageBudget(p.images)} characters beside its images` });
+    }
     if (p.decision === "changes" && p.option !== undefined) ctx.addIssue({ code: "custom", path: ["option"], message: "is chosen only by accepting" });
     if (p.option !== undefined && p.seen === undefined) ctx.addIssue({ code: "custom", path: ["seen"], message: "is required with an option" });
     if (p.option === undefined && p.seen !== undefined) ctx.addIssue({ code: "custom", path: ["seen"], message: "is sent only with an option" });

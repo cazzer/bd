@@ -119,7 +119,8 @@ import { ShellLink } from "./ShellLink.js";
 import { HttpStatusError, trpc } from "../trpc.js";
 import { ReviewAttachments, SectionTitle, type AttachmentLayout, type AttachmentSlot } from "./ReviewAttachments.js";
 import { ReviewSessionLinks } from "./ReviewSessionLinks.js";
-import { cardShortcut, DecisionCardBody, DecisionFooter, type CardOutcome, type FooterLabels, type Refusal } from "./DecisionCard.js";
+import { admitDecisionImages, charactersToCut, decisionImagePaths, decisionRunName, thumbnailUrl, uploadDecisionImages, type AttachedImage } from "../lib/decisionImages.js";
+import { cardShortcut, DecisionCardBody, DecisionFooter, type CardOutcome, type DecisionImagesControl, type FooterLabels, type Refusal } from "./DecisionCard.js";
 import { EvidenceView } from "./EvidenceView.js";
 import { HangarSessions } from "./HangarSessions.js";
 
@@ -283,6 +284,45 @@ export function ReviewItemPanel({
   const relayAction = useRelayAction(queued?.actionId ?? null);
   /** The option whose decision button has focus: its text is shown in full in the list (ReviewCardBody.tsx). */
   const [focusedOption, setFocusedOption] = useState<string | null>(null);
+  // Screenshots on the decision (lib/decisionImages.ts). `attachedRef` counts the ones still being read, so a quick second paste respects the cap.
+  const [attached, setAttached] = useState<AttachedImage[]>([]);
+  const [imageNotes, setImageNotes] = useState<string[]>([]);
+  const attachedRef = useRef<AttachedImage[]>([]);
+  const imageKey = useRef(0);
+  const imageEpoch = useRef(0);
+
+  function setAttachedImages(next: AttachedImage[]) {
+    attachedRef.current = next;
+    setAttached(next);
+  }
+
+  function clearImages() {
+    imageEpoch.current += 1;
+    setAttachedImages([]);
+    setImageNotes([]);
+  }
+
+  const imagesControl: DecisionImagesControl = {
+    attached,
+    notes: imageNotes,
+    add(files) {
+      const { accepted, refused } = admitDecisionImages(attachedRef.current.length, files);
+      setImageNotes(refused);
+      if (accepted.length === 0) return;
+      const epoch = imageEpoch.current;
+      const pending = accepted.map((file) => ({ key: `img-${(imageKey.current += 1)}`, file, url: "" }));
+      attachedRef.current = [...attachedRef.current, ...pending];
+      void Promise.all(pending.map(async (p) => ({ ...p, url: await thumbnailUrl(p.file).catch(() => "") }))).then((read) => {
+        if (epoch !== imageEpoch.current) return;
+        const byKey = new Map(read.map((r) => [r.key, r]));
+        setAttachedImages(attachedRef.current.map((a) => byKey.get(a.key) ?? a));
+      });
+    },
+    remove(key) {
+      setAttachedImages(attachedRef.current.filter((a) => a.key !== key));
+      setImageNotes([]);
+    },
+  };
   const optionIdPrefix = useId();
   const optionDescId = (id: string) => `${optionIdPrefix}-option-${id}`;
   const { timeArmed, keyArmed } = useArmed(decisions.armAfterMs);
@@ -325,6 +365,7 @@ export function ReviewItemPanel({
     setNeedsMessage(false);
     setFocusedOption(null);
     setMessageState(initialDraft);
+    clearImages();
   }, [itemKey]);
 
   useEffect(() => {
@@ -377,7 +418,10 @@ export function ReviewItemPanel({
     setOutcome({ ...reading.outcome, notified: reading.notified });
     if (!reading.finished) return;
     setQueued(null);
-    if (!reading.outcome.keepMessage) setMessage("");
+    if (!reading.outcome.keepMessage) {
+      setMessage("");
+      clearImages();
+    }
     if (reading.reread) {
       setRefetch((n) => n + 1);
       onDecided();
@@ -430,7 +474,7 @@ export function ReviewItemPanel({
     if (e.defaultPrevented || overlayOpen || fromOwnDialog(e.target)) return;
     if (e.key === "Escape") {
       e.preventDefault();
-      if (message.trim() !== "" || pending !== null) return;
+      if (message.trim() !== "" || attached.length > 0 || pending !== null) return;
       onEscape();
     } else if (decisions.shortcuts) {
       const shortcut = cardShortcut(e, card, message);
@@ -461,7 +505,23 @@ export function ReviewItemPanel({
     setRefusal(null);
     let written: { decision: ReviewDecisionKind; report: WrittenReport } | null = null;
     try {
-      const result = await trpc.reviewDecision.mutate({ project, item: loaded.externalId, decision, message, ...chosen });
+      // Images upload first; a failed upload sends nothing and keeps the message and thumbnails (lib/decisionImages.ts).
+      let images: { images: string[] } | Record<string, never> = {};
+      if (attached.length > 0) {
+        const run = decisionRunName();
+        const cut = charactersToCut(message, decisionImagePaths(project, loaded.externalId, run, attached.map((a) => a.file)));
+        if (cut > 0) {
+          setRefusal({ text: `The message is too long to send beside its images: cut ${cut} character${cut === 1 ? "" : "s"}.`, detail: null });
+          return;
+        }
+        const uploaded = await uploadDecisionImages(project, loaded.externalId, attached.map((a) => a.file), { run });
+        if (!uploaded.ok) {
+          setRefusal({ text: uploaded.text, detail: null });
+          return;
+        }
+        images = { images: uploaded.paths };
+      }
+      const result = await trpc.reviewDecision.mutate({ project, item: loaded.externalId, decision, message, ...chosen, ...images });
       // A failed notice matters only where one was promised (a pane and a herdr session recorded); otherwise the recipient line already said the comment is the record.
       const promised = promisesNotice(loaded);
       if ("queued" in result) {
@@ -472,7 +532,10 @@ export function ReviewItemPanel({
         const effects = decisionEffects(result, named === null ? undefined : describeChosen(named));
         const notified = describeNotified(result.notified);
         setOutcome({ ...effects.outcome, notified });
-        if (effects.clearMessage) setMessage("");
+        if (effects.clearMessage) {
+          setMessage("");
+          clearImages();
+        }
         if (effects.reread) {
           setRefetch((n) => n + 1);
           onDecided();
@@ -567,6 +630,7 @@ export function ReviewItemPanel({
       refusal={refusal}
       waiting={queued !== null}
       decide={(d, option) => void decide(d, option)}
+      images={imagesControl}
     />
   );
 

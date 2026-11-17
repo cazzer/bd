@@ -45,6 +45,7 @@ const code = await runRelay({
   kinds: parsed.kinds,
   herdrSockets: parsed.herdrSockets,
   maxAgeMs: parsed.maxAgeMs,
+  mediaDir: parsed.mediaDir,
   readToken: () => readTokenFile(parsed.tokenFile),
 });
 process.exit(code);

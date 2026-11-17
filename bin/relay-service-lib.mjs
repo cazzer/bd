@@ -81,7 +81,7 @@ export function entryPath(repoRoot) {
 /**
  * @returns {{ help: true } | { error: string } | { command: "uninstall" | "status" }
  *   | { command: "install", origin: string, name: string, tokenFile: string | null,
- *       projects: { key: string, path: string }[], kinds: string | null, herdrSockets: string[], maxAge: string | null }}
+ *       projects: { key: string, path: string }[], kinds: string | null, herdrSockets: string[], maxAge: string | null, mediaDir: string | null }}
  */
 export function parseArgs(argv) {
   let parsed;
@@ -139,7 +139,7 @@ export function servicePathEnv({ bd, herdr }) {
 }
 
 /** ProgramArguments: one node process, tsx as a loader, no wrapper between launchd and the relay. */
-export function programArguments({ execPath, repoRoot, origin, tokenFile, name, projects, kinds = null, herdrSockets = [], maxAge = null }) {
+export function programArguments({ execPath, repoRoot, origin, tokenFile, name, projects, kinds = null, herdrSockets = [], maxAge = null, mediaDir = null }) {
   return [
     execPath, "--import", "tsx", entryPath(repoRoot),
     "--url", origin, "--token-file", tokenFile, "--name", name,
@@ -147,12 +147,13 @@ export function programArguments({ execPath, repoRoot, origin, tokenFile, name, 
     ...(kinds === null ? [] : ["--kinds", kinds]),
     ...herdrSockets.flatMap((s) => ["--herdr-socket", s]),
     ...(maxAge === null ? [] : ["--max-age", maxAge]),
+    ...(mediaDir === null ? [] : ["--media-dir", mediaDir]),
   ];
 }
 
-export function renderPlist({ execPath, repoRoot, origin, tokenFile, name, projects, kinds = null, herdrSockets = [], maxAge = null, pathEnv, paths }) {
+export function renderPlist({ execPath, repoRoot, origin, tokenFile, name, projects, kinds = null, herdrSockets = [], maxAge = null, mediaDir = null, pathEnv, paths }) {
   const str = (value) => `<string>${xmlEscape(value)}</string>`;
-  const args = programArguments({ execPath, repoRoot, origin, tokenFile, name, projects, kinds, herdrSockets, maxAge })
+  const args = programArguments({ execPath, repoRoot, origin, tokenFile, name, projects, kinds, herdrSockets, maxAge, mediaDir })
     .map((arg) => `\t\t${str(arg)}`)
     .join("\n");
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -217,6 +218,7 @@ export function readPlist(xml) {
     kinds: flag("--kinds"),
     herdrSockets: all("--herdr-socket"),
     maxAge: flag("--max-age"),
+    mediaDir: flag("--media-dir"),
     pathEnv: pathRaw === undefined ? null : xmlUnescape(pathRaw),
   };
 }
@@ -369,6 +371,7 @@ async function install(ctx, args) {
     kinds: args.kinds,
     herdrSockets: args.herdrSockets,
     maxAge: args.maxAge,
+    mediaDir: args.mediaDir,
     pathEnv,
     paths,
   });

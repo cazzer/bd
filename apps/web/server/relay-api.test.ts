@@ -12,7 +12,7 @@
 // Nothing asserts on a table as a whole.
 
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer, request, type IncomingHttpHeaders, type Server } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -40,6 +40,8 @@ const OTHER_PROJECT = `${PREFIX}-other`;
 const UNREGISTERED = `${PREFIX}-nowhere`;
 const SCRATCH = mkdtempSync(path.join(tmpdir(), "relay-api-test-"));
 const CHECKOUT = realpathSync(SCRATCH);
+/** The review media root this suite's servers serve decision media from. */
+const MEDIA = path.join(CHECKOUT, "media");
 
 let pool: ReturnType<typeof createPool>;
 let db: Database;
@@ -82,6 +84,7 @@ async function listen(readOnly: boolean): Promise<number> {
       readOnly,
       watcher,
       missingBinaries: ["bd"],
+      mediaRoot: MEDIA,
       claimAmong: () => {
         const hook = onClaimAttempt;
         onClaimAttempt = null;
@@ -389,8 +392,75 @@ describe("GET /relay/v1/projects", () => {
 
 // --- Scopes and refusals ---------------------------------------------------------------------------
 
+describe("GET /relay/v1/actions/:id/media/:n", () => {
+  const run = "d-20261117120000-ab12";
+  let decisionN = 0;
+  const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]);
+
+  /** A queued review decision with images on a bead of its own, its files on disk under MEDIA. */
+  async function decision(names: string[], write = names): Promise<{ id: number; images: string[] }> {
+    decisionN += 1;
+    const bead = `${BEAD}-m${decisionN}`;
+    const dir = path.join(MEDIA, PROJECT, bead, run);
+    mkdirSync(dir, { recursive: true });
+    for (const name of write) writeFileSync(path.join(dir, name), PNG);
+    const images = names.map((name) => `${PROJECT}/${bead}/${run}/${name}`);
+    const payload = { project_key: PROJECT, cwd: CHECKOUT, issue_id: bead, decision: "changes", message: "see", images };
+    const { action } = await enqueueRelayAction(db, { kind: "review_decision", payload, requestedBy: PHONE });
+    actionIds.push(action.id);
+    return { id: action.id, images };
+  }
+
+  async function claimDecision(id: number, relay = RELAY_A): Promise<void> {
+    among = [id];
+    const sent = await send("/relay/v1/claim", { token: tokens[relay], body: { kinds: ["review_decision"] } });
+    among = [];
+    expect(sent.status, sent.body).toBe(200);
+    expect((sent.json["action"] as { id: number }).id).toBe(id);
+  }
+
+  it("serves the n-th image to the relay holding the claim, with its type and no-store", async () => {
+    const { id } = await decision(["01-a.png", "02-b.webp"]);
+    await claimDecision(id);
+    const first = await send(`/relay/v1/actions/${id}/media/0`, { token: tokens[RELAY_A] });
+    expect(first.status, first.body).toBe(200);
+    expect(first.headers["content-type"]).toBe("image/png");
+    expect(first.headers["cache-control"]).toBe("no-store");
+    expect(first.headers["content-length"]).toBe(String(PNG.length));
+    const second = await send(`/relay/v1/actions/${id}/media/1`, { token: tokens[RELAY_A] });
+    expect(second.status).toBe(200);
+    expect(second.headers["content-type"]).toBe("image/webp");
+  });
+
+  it("answers a bare 404 for a queued action, another relay's, a bad index, a missing file, a symlink, and a finished action", async () => {
+    const bare = async (url: string, relay = RELAY_A) => {
+      const sent = await send(url, { token: tokens[relay] });
+      expect(sent.status, url).toBe(404);
+      expect(sent.json.error).toEqual({ code: "not_found", message: "No such media." });
+    };
+    const queuedOne = await decision(["01-a.png"]);
+    await bare(`/relay/v1/actions/${queuedOne.id}/media/0`);
+
+    const held = await decision(["01-a.png", "02-gone.png", "03-link.png"], ["01-a.png"]);
+    symlinkSync(path.join(MEDIA, held.images[0]!), path.join(MEDIA, held.images[2]!));
+    await claimDecision(held.id);
+    await bare(`/relay/v1/actions/${held.id}/media/0`, RELAY_B);
+    for (const n of ["3", "01", "-1", "x"]) await bare(`/relay/v1/actions/${held.id}/media/${n}`);
+    await bare(`/relay/v1/actions/${held.id}/media/1`);
+    await bare(`/relay/v1/actions/${held.id}/media/2`);
+
+    const reported = await send(`/relay/v1/actions/${held.id}/result`, { token: tokens[RELAY_A], body: { state: "done", result: {} } });
+    expect(reported.status).toBe(200);
+    await bare(`/relay/v1/actions/${held.id}/media/0`);
+
+    const reingest = await queued();
+    await claim(reingest);
+    await bare(`/relay/v1/actions/${reingest}/media/0`);
+  });
+});
+
 describe("scopes", () => {
-  const concrete = (p: string): string => p.replace(":id", "1");
+  const concrete = (p: string): string => p.replace(":id", "1").replace(":n", "0");
 
   it("refuses an agent, hangar, or human token on every endpoint with a JSON 403", async () => {
     for (const { method, path: p } of RELAY_ENDPOINTS) {

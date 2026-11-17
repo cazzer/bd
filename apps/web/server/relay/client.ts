@@ -1,7 +1,10 @@
 // The laptop relay's HTTP client for Breakdown's `/relay/v1/` API
 // (docs/relay.md; laptop-relay design.md decisions 7 and 9).
 //
-// One request per `send`: a Bearer token, a JSON body, and a timeout. The
+// One request per `send`: a Bearer token, a JSON body, and a timeout. `get`
+// is the same request for a binary body (a decision's image, docs/relay.md
+// `GET /relay/v1/actions/:id/media/:n`): the same token, timeout, redirect,
+// and error handling, resolving with the bytes and their content type. The
 // token is read from the relay's own token file (bin/relay-lib.mjs checks
 // its mode and shape) on first use and again after every 401, so a token
 // rotated in the file is picked up without a restart; a 401 is otherwise
@@ -59,6 +62,8 @@ export interface RelayClient {
   readonly origin: string;
   /** One request; resolves with the parsed JSON body of a 2xx, or throws RelayRequestError. `body` is sent as JSON, or as given when already a string. */
   send(method: "GET" | "POST", path: string, body?: unknown, options?: SendOptions): Promise<unknown>;
+  /** One GET of a binary body; resolves with the bytes of a 2xx and its content type, or throws RelayRequestError like `send`. */
+  get(path: string, options?: SendOptions): Promise<{ bytes: Uint8Array; contentType: string | null }>;
 }
 
 const MAX_SERVER_MESSAGE_CHARS = 500;
@@ -101,45 +106,57 @@ export function createRelayClient(options: RelayClientOptions): RelayClient {
     return token;
   }
 
+  /** One request; the 2xx response and its body as bytes, or a RelayRequestError (module header). */
+  async function request(method: "GET" | "POST", path: string, body: unknown, accept: string, { timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS, signal }: SendOptions): Promise<{ res: Response; bytes: Uint8Array }> {
+    const what = `${method} ${path}`;
+    const bearer = await currentToken();
+    if (signal?.aborted) throw new RelayRequestError(`${what}: stopped`, null, "aborted", false);
+    const timeout = AbortSignal.timeout(timeoutMs);
+    const combined = signal === undefined ? timeout : AbortSignal.any([timeout, signal]);
+    const headers: Record<string, string> = { Authorization: `Bearer ${bearer}`, Accept: accept };
+    if (body !== undefined) headers["Content-Type"] = "application/json";
+    let res: Response;
+    let bytes: Uint8Array;
+    try {
+      res = await fetchFn(`${options.origin}${path}`, {
+        method,
+        headers,
+        redirect: "error",
+        ...(body === undefined ? {} : { body: typeof body === "string" ? body : JSON.stringify(body) }),
+        signal: combined,
+      });
+      bytes = new Uint8Array(await res.arrayBuffer());
+    } catch (err) {
+      if (signal?.aborted) throw new RelayRequestError(`${what}: stopped`, null, "aborted", false);
+      if (timeout.aborted) throw new RelayRequestError(`${what}: no answer within ${Math.round(timeoutMs / 1000)} s`, null, "timeout", true);
+      const cause = (err as { cause?: { code?: unknown; message?: unknown } }).cause;
+      const why = typeof cause?.code === "string" ? cause.code : typeof cause?.message === "string" && cause.message !== "" ? cause.message : err instanceof Error ? err.name : "error";
+      throw new RelayRequestError(`${what}: could not reach ${options.origin} (${why})`, null, "network", true);
+    }
+    if (res.status === 401) token = null;
+    if (res.status < 200 || res.status > 299) {
+      const { code, message } = serverError(new TextDecoder().decode(bytes));
+      const said = message === "" ? "" : `: ${message}`;
+      throw new RelayRequestError(`${what} answered ${res.status} ${code}${said}`, res.status, code, retryableStatus(res.status));
+    }
+    return { res, bytes };
+  }
+
   return {
     origin: options.origin,
-    async send(method, path, body, { timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS, signal } = {}) {
+    async send(method, path, body, sendOptions = {}) {
+      const { res, bytes } = await request(method, path, body, "application/json", sendOptions);
+      const text = new TextDecoder().decode(bytes);
       const what = `${method} ${path}`;
-      const bearer = await currentToken();
-      if (signal?.aborted) throw new RelayRequestError(`${what}: stopped`, null, "aborted", false);
-      const timeout = AbortSignal.timeout(timeoutMs);
-      const combined = signal === undefined ? timeout : AbortSignal.any([timeout, signal]);
-      const headers: Record<string, string> = { Authorization: `Bearer ${bearer}`, Accept: "application/json" };
-      if (body !== undefined) headers["Content-Type"] = "application/json";
-      let res: Response;
-      let text: string;
-      try {
-        res = await fetchFn(`${options.origin}${path}`, {
-          method,
-          headers,
-          redirect: "error",
-          ...(body === undefined ? {} : { body: typeof body === "string" ? body : JSON.stringify(body) }),
-          signal: combined,
-        });
-        text = await res.text();
-      } catch (err) {
-        if (signal?.aborted) throw new RelayRequestError(`${what}: stopped`, null, "aborted", false);
-        if (timeout.aborted) throw new RelayRequestError(`${what}: no answer within ${Math.round(timeoutMs / 1000)} s`, null, "timeout", true);
-        const cause = (err as { cause?: { code?: unknown; message?: unknown } }).cause;
-        const why = typeof cause?.code === "string" ? cause.code : typeof cause?.message === "string" && cause.message !== "" ? cause.message : err instanceof Error ? err.name : "error";
-        throw new RelayRequestError(`${what}: could not reach ${options.origin} (${why})`, null, "network", true);
-      }
-      if (res.status === 401) token = null;
-      if (res.status < 200 || res.status > 299) {
-        const { code, message } = serverError(text);
-        const said = message === "" ? "" : `: ${message}`;
-        throw new RelayRequestError(`${what} answered ${res.status} ${code}${said}`, res.status, code, retryableStatus(res.status));
-      }
       try {
         return text === "" ? null : (JSON.parse(text) as unknown);
       } catch {
         throw new RelayRequestError(`${what} answered ${res.status} with a body that is not JSON`, res.status, "invalid_response", true);
       }
+    },
+    async get(path, sendOptions = {}) {
+      const { res, bytes } = await request("GET", path, undefined, "*/*", sendOptions);
+      return { bytes, contentType: res.headers.get("content-type") };
     },
   };
 }

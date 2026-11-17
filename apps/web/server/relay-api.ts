@@ -33,9 +33,23 @@
 // reported through the beads watcher's `record`, so open boards get the
 // same events a local load sends.
 //
+// Decision media (review-decision-images, design.md decision 4): `GET
+// /relay/v1/actions/:id/media/:n` serves the `n`-th image (from 0) of a
+// `review_decision` action's `images`, and only while that action is
+// `claimed` by this token's client. The path is re-parsed with core's
+// payload schema and re-checked on disk under the media root
+// (decision-images.ts), opened without following a symlink, and streamed
+// with its extension's content type and `Cache-Control: no-store`.
+// Anything else — another relay's action, a queued or finished one,
+// another kind, a bad index, a missing file — is the same bare 404, so a
+// relay learns nothing about actions it does not hold. No relay token
+// reads `/review-images/`.
+//
 // Nothing here logs a token, a header, a query string, or a body.
 
-import { isAbsolute } from "node:path";
+import { constants as fsConstants } from "node:fs";
+import { open } from "node:fs/promises";
+import { extname, isAbsolute } from "node:path";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import {
   applyBeadsIngest,
@@ -45,6 +59,7 @@ import {
   DuplicateEdgeInBatchError,
   DuplicateNodeInBatchError,
   getRegisteredBeadsProject,
+  getRelayAction,
   InvalidEdgeInputError,
   InvalidEdgeWeightError,
   InvalidEventTimeError,
@@ -60,6 +75,7 @@ import {
   MAX_RELAY_WAIT_S,
   MetadataTooLargeError,
   parseBeadsIssues,
+  parseRelayPayload,
   PROJECT_KEY_PATTERN,
   recordRelayCheckIn,
   RELAY_ACTION_KINDS,
@@ -68,6 +84,7 @@ import {
   RelayActionNotFoundError,
   reportRelayAction,
   requeueRelayAction,
+  REVIEW_IMAGE_ROOT,
   TitleTooLargeError,
   type ClaimedRelayAction,
   type HostBinary,
@@ -77,6 +94,8 @@ import type { Database } from "@breakdown/db";
 import { z } from "zod";
 import type { BeadsWatcher } from "./beads-watcher.js";
 import type { AdmittedClient } from "./context.js";
+import { resolveDecisionImages } from "./decision-images.js";
+import { CONTENT_TYPES } from "./review-images.js";
 import { ApiError, createWaiterCap, invalidRequest, longPoll, matchPath, readJsonBody, sendError, sendJson, splitUrl } from "./json-api.js";
 
 export const RELAY_API_PREFIX = "/relay/v1/";
@@ -100,6 +119,7 @@ export const RELAY_ENDPOINTS = [
   { method: "POST", path: "/relay/v1/actions/:id/result", scope: "relay" },
   { method: "POST", path: "/relay/v1/beads-ingest", scope: "relay" },
   { method: "GET", path: "/relay/v1/projects", scope: "relay" },
+  { method: "GET", path: "/relay/v1/actions/:id/media/:n", scope: "relay" },
 ] as const;
 
 type Endpoint = (typeof RELAY_ENDPOINTS)[number];
@@ -108,6 +128,10 @@ type EndpointKey = KeyOf<Endpoint>;
 
 /** A relay action id: bigserial, so a positive decimal integer of at most 18 digits (relay.ts takes no other spelling). */
 const ACTION_ID_RE = /^[1-9]\d{0,17}$/;
+/** A media index: a decimal integer from 0, no leading zero. */
+const MEDIA_INDEX_RE = /^(?:0|[1-9]\d{0,2})$/;
+/** Every refusal of a media request (module header): it says nothing about why. */
+const NO_MEDIA = "No such media.";
 
 export interface RelayHandlerOptions {
   db: Database;
@@ -125,6 +149,8 @@ export interface RelayHandlerOptions {
    * database with live data claims only its own fixtures. Never set in production.
    */
   claimAmong?: () => readonly (number | string)[];
+  /** The review media root (`--media-dir`, else core's REVIEW_IMAGE_ROOT); decision media is served from under it. */
+  mediaRoot?: string;
 }
 
 // --- Request bodies -------------------------------------------------------------------
@@ -188,6 +214,8 @@ interface Call {
   admitted: AdmittedClient;
   /** The `:id` segment, when the endpoint has one (already a decimal id). */
   id: string | undefined;
+  /** The `:n` segment, when the endpoint has one. */
+  n: string | undefined;
   /** Aborted when the client's socket closes or the server shuts down. */
   signal: AbortSignal;
 }
@@ -219,7 +247,7 @@ function mapCoreError(err: unknown): ApiError | null {
   return null;
 }
 
-export function createRelayHandler({ db, readOnly = false, shutdownSignal, watcher, missingBinaries = [], claimAmong }: RelayHandlerOptions): (req: IncomingMessage, res: ServerResponse, admitted: AdmittedClient | null) => Promise<void> {
+export function createRelayHandler({ db, readOnly = false, shutdownSignal, watcher, missingBinaries = [], claimAmong, mediaRoot = REVIEW_IMAGE_ROOT }: RelayHandlerOptions): (req: IncomingMessage, res: ServerResponse, admitted: AdmittedClient | null) => Promise<void> {
   const asWaiter = createWaiterCap(
     MAX_CONCURRENT_RELAY_LONG_POLLS,
     `This client already holds ${MAX_CONCURRENT_RELAY_LONG_POLLS} claims open; retry once one answers.`,
@@ -311,6 +339,48 @@ export function createRelayHandler({ db, readOnly = false, shutdownSignal, watch
         push: missingBinaries.includes("bd"),
       });
     },
+
+    "GET /relay/v1/actions/:id/media/:n": async ({ res, admitted, id, n }) => {
+      const notFound = () => new ApiError(404, "not_found", NO_MEDIA);
+      if (n === undefined || !MEDIA_INDEX_RE.test(n)) throw notFound();
+      const action = await getRelayAction(db, id!);
+      if (action === null || action.kind !== "review_decision" || action.state !== "claimed" || action.claimedBy !== admitted.client) throw notFound();
+      let images: readonly string[];
+      try {
+        images = parseRelayPayload("review_decision", action.payload).images ?? [];
+      } catch {
+        throw notFound();
+      }
+      const image = images[Number(n)];
+      if (image === undefined) throw notFound();
+      const checked = await resolveDecisionImages(mediaRoot, [image]);
+      if (!checked.ok) throw notFound();
+      let handle;
+      try {
+        handle = await open(checked.files[0]!, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+      } catch {
+        throw notFound();
+      }
+      try {
+        const info = await handle.stat();
+        if (!info.isFile()) throw notFound();
+        res.writeHead(200, {
+          "Content-Type": CONTENT_TYPES[extname(image).toLowerCase()] ?? "application/octet-stream",
+          "Content-Length": String(info.size),
+          "Cache-Control": "no-store",
+          "X-Content-Type-Options": "nosniff",
+        });
+        await new Promise<void>((resolve, reject) => {
+          const stream = handle.createReadStream({ autoClose: false });
+          stream.on("error", reject);
+          res.on("close", resolve);
+          stream.on("end", resolve);
+          stream.pipe(res);
+        });
+      } finally {
+        await handle.close();
+      }
+    },
   };
 
   return async (req, res, admitted) => {
@@ -324,10 +394,10 @@ export function createRelayHandler({ db, readOnly = false, shutdownSignal, watch
     try {
       const matches = RELAY_ENDPOINTS.flatMap((endpoint) => {
         const matched = matchPath(endpoint.path, path);
-        return matched === null ? [] : [{ endpoint, id: matched.id }];
+        return matched === null ? [] : [{ endpoint, id: matched.id, n: matched.n }];
       });
       if (matches.length === 0) throw new ApiError(404, "not_found", "No relay endpoint has this path (docs/relay.md lists them).");
-      const id = matches[0]!.id;
+      const { id, n } = matches[0]!;
       if (id !== undefined && !ACTION_ID_RE.test(id)) throw new ApiError(404, "not_found", "No relay action has this id: an action id is a positive decimal integer.");
       const hit = matches.find((m) => m.endpoint.method === method);
       if (hit === undefined) {
@@ -349,7 +419,7 @@ export function createRelayHandler({ db, readOnly = false, shutdownSignal, watch
       }
       if (readOnly && method !== "GET") throw new ApiError(403, "read_only", "The server is read-only (BRAIN_READ_ONLY); relay writes are refused.");
 
-      await handlers[`${endpoint.method} ${endpoint.path}` as EndpointKey]({ req, res, admitted, id, signal });
+      await handlers[`${endpoint.method} ${endpoint.path}` as EndpointKey]({ req, res, admitted, id, n, signal });
     } catch (err) {
       const mapped = mapCoreError(err);
       if (mapped !== null) {

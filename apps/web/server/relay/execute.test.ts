@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, realpathSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, realpathSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -246,5 +246,66 @@ describe("executeAction: herdr prompts and re-ingests", () => {
     expect(reingest).toHaveBeenCalledWith("bd");
     reingest.mockRejectedValueOnce(new Error("no issues to ingest"));
     expect(await executeAction(act("beads_reingest", { project_key: "bd" }), deps)).toEqual({ state: "failed", error: "no issues to ingest" });
+  });
+});
+
+describe("executeAction: decision images", () => {
+  const images = ["bd/bd-x1/d-1/01-a.png", "bd/bd-x1/d-1/02-b.png"];
+  const withImages = { ...changes, images };
+
+  function media() {
+    const dir = mkdtempSync(path.join(tmp, "media-"));
+    return dir;
+  }
+
+  it("downloads every image before writing, records the relative paths, and prompts with the local files", async () => {
+    const { deps, bd, herdr } = relay();
+    const mediaDir = media();
+    const order: string[] = [];
+    const fetchImage = vi.fn(async (_id: string, n: number) => {
+      order.push(`fetch ${n}`);
+      return new Uint8Array([n]);
+    });
+    bd.mockImplementation(async (args: readonly string[]) => {
+      order.push(`bd ${args[0]}`);
+      return args[0] === "show" ? shown() : "";
+    });
+    const report = await executeAction({ ...act("review_decision", withImages), id: "42" }, { ...deps, mediaDir, fetchImage });
+    expect(report.state).toBe("done");
+    expect(order.slice(0, 3)).toEqual(["fetch 0", "fetch 1", "bd show"]);
+    expect(fetchImage.mock.calls).toEqual([["42", 0], ["42", 1]]);
+    const local = images.map((i) => path.join(mediaDir, "42", path.basename(i)));
+    expect(readFileSync(local[1]!)).toEqual(Buffer.from([1]));
+    expect(bd.mock.calls.find((c) => c[0][0] === "comments")![0][3]).toBe(`Changes requested: Wider gutters\n\nImages:\n${images.join("\n")}`);
+    expect((herdr.mock.calls[0] as unknown[])[0]).toEqual(["agent", "prompt", "w1:p1", sent(`Review bd-x1 changes requested: Wider gutters Images: ${local.join(" ")}`)]);
+  });
+
+  it("a 404 mid-way writes nothing, removes the directory, and reports which image failed", async () => {
+    const { deps, bd, herdr } = relay();
+    const mediaDir = media();
+    const fetchImage = vi.fn(async (_id: string, n: number) => {
+      if (n === 1) throw new Error("GET /relay/v1/actions/42/media/1 answered 404 not_found: No such media.");
+      return new Uint8Array([n]);
+    });
+    const report = await executeAction({ ...act("review_decision", withImages), id: "42" }, { ...deps, mediaDir, fetchImage });
+    expect(report).toEqual({ state: "failed", error: "could not fetch image 1: GET /relay/v1/actions/42/media/1 answered 404 not_found: No such media." });
+    expect(existsSync(path.join(mediaDir, "42"))).toBe(false);
+    expect(bd).not.toHaveBeenCalled();
+    expect(herdr).not.toHaveBeenCalled();
+  });
+
+  it("a decision without images fetches nothing", async () => {
+    const { deps } = relay();
+    const fetchImage = vi.fn(async () => new Uint8Array());
+    const report = await executeAction(act("review_decision", changes), { ...deps, mediaDir: media(), fetchImage });
+    expect(report.state).toBe("done");
+    expect(fetchImage).not.toHaveBeenCalled();
+  });
+
+  it("refuses images when the relay has no media dir, running nothing", async () => {
+    const { deps, bd } = relay();
+    const report = await executeAction(act("review_decision", withImages), deps);
+    expect(report).toMatchObject({ state: "failed", error: expect.stringContaining("no --media-dir") });
+    expect(bd).not.toHaveBeenCalled();
   });
 });

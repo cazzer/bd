@@ -36,7 +36,7 @@ export const DEFAULT_MAX_AGE = "24h";
 
 export const RELAY_USAGE = [
   "usage: relay --url <http(s)://host[:port]> --token-file <absolute path> --name <client> --project <key>=<absolute path>...",
-  "             [--kinds <kind>[,<kind>]...] [--herdr-socket <absolute path>]... [--max-age <n>s|m|h|d]",
+  "             [--kinds <kind>[,<kind>]...] [--herdr-socket <absolute path>]... [--max-age <n>s|m|h|d] [--media-dir <absolute path>]",
   "  --url           the Breakdown web server (its origin: no path, query, or credentials); http only to",
   "                  loopback, a tailnet address (100.64.0.0/10), or a *.ts.net name",
   "  --token-file    a file holding the relay-scoped token, mode 0600 (pnpm -s client-token create <name> --scope relay)",
@@ -45,6 +45,7 @@ export const RELAY_USAGE = [
   `  --kinds         the action kinds it claims, comma-separated (default: ${RELAY_KINDS.join(",")})`,
   "  --herdr-socket  a herdr server socket it may prompt through (repeatable; default ~/.config/herdr/herdr.sock)",
   `  --max-age       refuse an action queued longer ago than this (default ${DEFAULT_MAX_AGE})`,
+  "  --media-dir     where a review decision's images are downloaded (default ~/.local/share/breakdown/relay-media; created 0700)",
 ].join("\n");
 
 export const MAX_TOKEN_LENGTH = 512;
@@ -65,7 +66,13 @@ export const RELAY_CONFIG_OPTIONS = {
   kinds: { type: "string" },
   "herdr-socket": { type: "string", multiple: true },
   "max-age": { type: "string" },
+  "media-dir": { type: "string" },
 };
+
+/** Where the relay downloads a decision's images by default (docs/relay.md "Install"). */
+export function defaultRelayMediaDir(homedir = os.homedir()) {
+  return path.join(homedir, ".local", "share", "breakdown", "relay-media");
+}
 
 /** herdr's own default server socket for the user whose home is `homedir` (apps/web/server/herdr-session.ts `resolveHerdrSocket`). */
 export function defaultHerdrSocket(homedir = os.homedir()) {
@@ -148,8 +155,8 @@ export function parseMaxAge(value) {
  * `explicit` keeps only what was given, for writing back into a plist.
  *
  * @returns {{ error: string } | {
- *   projects: { key: string, path: string }[], kinds: string[], herdrSockets: string[], maxAgeMs: number,
- *   explicit: { kinds: string | null, herdrSockets: string[], maxAge: string | null }
+ *   projects: { key: string, path: string }[], kinds: string[], herdrSockets: string[], maxAgeMs: number, mediaDir: string,
+ *   explicit: { kinds: string | null, herdrSockets: string[], maxAge: string | null, mediaDir: string | null }
  * }}
  */
 export function parseRelayConfig(values, { homedir = os.homedir() } = {}) {
@@ -180,19 +187,31 @@ export function parseRelayConfig(values, { homedir = os.homedir() } = {}) {
     if ("error" in parsed) return parsed;
     maxAgeMs = parsed.ms;
   }
+  let mediaDir = defaultRelayMediaDir(homedir);
+  if (values["media-dir"] !== undefined) {
+    const raw = values["media-dir"];
+    if (!path.isAbsolute(raw) || CONTROL_CHAR.test(raw) || raw.length > MAX_PROJECT_PATH_LENGTH) return { error: `--media-dir must be an absolute path with no control characters, got ${JSON.stringify(raw)}` };
+    mediaDir = path.normalize(raw);
+  }
   return {
     projects,
     kinds,
     herdrSockets: given.length > 0 ? given : [defaultHerdrSocket(homedir)],
     maxAgeMs,
-    explicit: { kinds: values.kinds === undefined ? null : kinds.join(","), herdrSockets: given, maxAge: values["max-age"] ?? null },
+    mediaDir,
+    explicit: {
+      kinds: values.kinds === undefined ? null : kinds.join(","),
+      herdrSockets: given,
+      maxAge: values["max-age"] ?? null,
+      mediaDir: values["media-dir"] === undefined ? null : mediaDir,
+    },
   };
 }
 
 /**
  * @returns {{ help: true } | { error: string }
  *   | { origin: string, tokenFile: string, name: string, projects: { key: string, path: string }[],
- *       kinds: string[], herdrSockets: string[], maxAgeMs: number }}
+ *       kinds: string[], herdrSockets: string[], maxAgeMs: number, mediaDir: string }}
  */
 export function parseRelayArgs(argv, { homedir = os.homedir() } = {}) {
   let parsed;
@@ -225,8 +244,8 @@ export function parseRelayArgs(argv, { homedir = os.homedir() } = {}) {
   if (!NAME_RE.test(name)) return { error: `--name must be a client name (a letter or digit, then letters, digits, . _ @ : -; at most 200), got ${JSON.stringify(name)}` };
   const config = parseRelayConfig(values, { homedir });
   if ("error" in config) return config;
-  const { projects, kinds, herdrSockets, maxAgeMs } = config;
-  return { origin: origin.origin, tokenFile: path.normalize(tokenFile), name, projects, kinds, herdrSockets, maxAgeMs };
+  const { projects, kinds, herdrSockets, maxAgeMs, mediaDir } = config;
+  return { origin: origin.origin, tokenFile: path.normalize(tokenFile), name, projects, kinds, herdrSockets, maxAgeMs, mediaDir };
 }
 
 /**

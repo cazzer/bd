@@ -39,6 +39,12 @@ export default defineConfig({
         changeOrigin: true,
         xfwd: true,
       },
+      // Review media uploads: the board uploads a decision's screenshots here (review-decision-images, design.md decision 1).
+      "/review-uploads": {
+        target: `http://127.0.0.1:${serverPort}`,
+        changeOrigin: true,
+        xfwd: true,
+      },
       // The connect screen's token-for-cookie exchange (tailnet-hosting decision 5).
       "/auth/connect": {
         target: `http://127.0.0.1:${serverPort}`,
