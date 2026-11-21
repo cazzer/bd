@@ -180,7 +180,7 @@ Response `200`:
 
 Push semantics:
 
-- **Raw data only.** Breakdown builds every node itself and takes the registry node's path from its own registration, so a push cannot register a project or re-point one. A project must first be registered by a local beads ingest (`pnpm ingest:beads --project`).
+- **Raw data only.** Breakdown builds every node itself and takes the registry node's path from its own registration, so a push cannot register a project or re-point one. A project must first be registered: by a local beads ingest (`pnpm ingest:beads --project`) where `bd` runs, or, on a Breakdown without `bd`, over the API by a person (the `registerBeadsProject` tRPC mutation) or Claude (the `brain_register_project` MCP tool). That call writes only the registry row with the Mac path it is given (checked for shape, since the server cannot see the Mac), never re-points a key, and queues one `beads_reingest` so the relay loads the project at once. The relay token cannot register.
 - **Idempotent.** Pushing the same export twice reports everything `unchanged` the second time.
 - **Serialized per project.** Concurrent pushes of one project apply one at a time, in arrival order.
 - **Same events.** A push that changes something sends open boards the same `changed` event a local load does; a push that fails to apply sends the same `error` event.

@@ -23,7 +23,7 @@
 // own stderr via `console.error` below, for whoever is running this
 // locally to read — never sent to the client.
 
-import { HangarOutcomeRefusedError, HangarSessionNotFoundError, ReservedInboxItemError, HostBinaryUnavailableError, InboxCardChangedError, InboxDecisionConflictError, InboxItemNotThisSessionError, InboxItemSessionEndedError, InvalidHangarSessionError, InvalidInboxItemError, NotAnInboxItemError, type HostBinary } from "@breakdown/core";
+import { BeadsProjectConflictError, InvalidCheckoutPathError, InvalidWorkItemError, HangarOutcomeRefusedError, HangarSessionNotFoundError, ReservedInboxItemError, HostBinaryUnavailableError, InboxCardChangedError, InboxDecisionConflictError, InboxItemNotThisSessionError, InboxItemSessionEndedError, InvalidHangarSessionError, InvalidInboxItemError, NotAnInboxItemError, type HostBinary } from "@breakdown/core";
 import {
   asPgError,
   ContentTooLargeError,
@@ -239,6 +239,17 @@ export function mapCoreError(procedureName: string, err: unknown): TRPCError {
   // this is the mapping a bad time typed into the web app reaches. ---
   if (err instanceof InvalidEventTimeError) {
     return actionable("BAD_REQUEST", err, `Fix ${err.field} on the named item and retry; nothing from this call was persisted. It is an ISO-8601 timestamp carrying a zone (Z or ±HH:MM) or a date alone (YYYY-MM-DD, read as UTC), stored canonically as UTC with milliseconds (2026-03-04T08:00:00.000Z), or null to remove it.`);
+  }
+
+  // --- Project registration (register-beads-project). ---
+  if (err instanceof BeadsProjectConflictError) {
+    return actionable("CONFLICT", err, "A registration never moves a project; register the path it already has, or use another key.");
+  }
+  if (err instanceof InvalidCheckoutPathError) {
+    return actionable("BAD_REQUEST", err, "Give the checkout's real absolute path; nothing was written.");
+  }
+  if (err instanceof InvalidWorkItemError) {
+    return actionable("BAD_REQUEST", err, "Fix that field and retry; nothing was written.");
   }
 
   // --- Attribution plumbing (should not surface in practice — every write

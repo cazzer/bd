@@ -18,9 +18,25 @@
 // per registered project (folding into one already open) and reports each
 // project `{ ok: true, queued: <action id> }`, or `{ ok: false, error }` when
 // its action could not be queued.
+//
+// `registerBeadsProject` (register-beads-project) registers a project by key
+// and path without running `bd`. With `bd` here the path must be a real
+// checkout on this host (core's checkLocalCheckout) and the watcher reloads
+// at once; without it the path is the Mac's, checked for shape only
+// (checkRemoteCheckoutPath), and a new registration queues one
+// `beads_reingest` so the laptop relay, which re-reads the registry before
+// each re-ingest, loads it now instead of within 5 minutes.
 
 import { on } from "node:events";
-import { enqueueRelayAction, listBeadsProjects } from "@breakdown/core";
+import {
+  checkLocalCheckout,
+  checkRemoteCheckoutPath,
+  enqueueRelayAction,
+  listBeadsProjects,
+  registerBeadsProject,
+  type RegisterBeadsProjectResult,
+} from "@breakdown/core";
+import { z } from "zod";
 import { BEADS_WATCHER_EVENT, type BeadsWatcher, type BeadsWatcherEvent } from "../beads-watcher.js";
 import type { Context } from "../context.js";
 import { mapCoreError } from "../errors.js";
@@ -57,7 +73,40 @@ async function queueReingests(ctx: Context): Promise<RefreshOutcome[]> {
   return outcomes;
 }
 
+export const registerBeadsProjectInputSchema = z.strictObject({
+  project: z.string().min(1).max(64),
+  path: z.string().min(1).max(1024),
+});
+
+export type RegisterProjectOutcome = RegisterBeadsProjectResult & {
+  /** How the project's items arrive: `watcher` (loaded here now), `relay` (a re-ingest queued for the laptop relay, with its action id), or `relay-later` (the relay picks it up on its next registry read). */
+  pickup: { by: "watcher" } | { by: "relay"; queued: number } | { by: "relay-later" };
+};
+
 export const boardLiveRouter = router({
+  registerBeadsProject: humanProcedure.input(registerBeadsProjectInputSchema).mutation(async ({ ctx, input }): Promise<RegisterProjectOutcome> => {
+    const hasBd = !ctx.missingBinaries?.includes("bd");
+    let result: RegisterBeadsProjectResult;
+    try {
+      const checked = hasBd ? checkLocalCheckout(input.path) : checkRemoteCheckoutPath(input.path);
+      result = await registerBeadsProject(ctx.db, { project: input.project, path: checked, ...(ctx.client ? { actor: ctx.client } : {}) });
+    } catch (err) {
+      throw mapCoreError("registerBeadsProject", err);
+    }
+    if (hasBd) {
+      if (ctx.watcher) await ctx.watcher.reload();
+      return { ...result, pickup: { by: "watcher" } };
+    }
+    try {
+      const { action } = await enqueueRelayAction(ctx.db, { kind: "beads_reingest", payload: { project_key: result.project }, requestedBy: ctx.client ?? "human" });
+      return { ...result, pickup: { by: "relay", queued: action.id } };
+    } catch (err) {
+      console.error(`[breakdown-web] registered ${result.project} but could not queue its re-ingest for the laptop relay:`, err);
+      return { ...result, pickup: { by: "relay-later" } };
+    }
+  }),
+
+
   boardEvents: humanProcedure.subscription(async function* (opts): AsyncGenerator<BeadsWatcherEvent> {
     const watcher = requireWatcher(opts.ctx.watcher);
     const signals = [opts.signal, opts.ctx.shutdownSignal].filter((s): s is AbortSignal => s !== undefined);

@@ -134,7 +134,7 @@ const BOGUS_ID = "00000000-0000-0000-0000-000000000000";
 // --- Tool listing (spec: "No arbitrary SQL from the model", "Read-only mode") ---
 
 describe("tool listing", () => {
-  it("advertises all fifteen tools with object-shaped input schemas, and no SQL passthrough tool", async () => {
+  it("advertises all sixteen tools with object-shaped input schemas, and no SQL passthrough tool", async () => {
     const { client } = await connectClient();
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
@@ -151,6 +151,7 @@ describe("tool listing", () => {
       "brain_merge",
       "brain_neighbors",
       "brain_ready",
+      "brain_register_project",
       "brain_search",
       "brain_update_work_item",
       "brain_write",

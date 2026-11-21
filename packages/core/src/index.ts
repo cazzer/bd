@@ -32,6 +32,7 @@ export {
   InvalidListOptionError,
   InvalidWorkItemError,
   BeadsProjectConflictError,
+  InvalidCheckoutPathError,
   NotAWorkItemError,
   NotAnInboxItemError,
   InvalidInboxItemError,
@@ -382,6 +383,17 @@ export {
   type IngestBeadsCheckoutOptions,
   type IngestBeadsCheckoutResult,
 } from "./beads-ingest.js";
+
+// Registering a beads project without running bd (register-beads-project).
+// See beads-registration.ts.
+export {
+  registerBeadsProject,
+  checkLocalCheckout,
+  checkRemoteCheckoutPath,
+  MAX_CHECKOUT_PATH_LENGTH,
+  type RegisterBeadsProjectOptions,
+  type RegisterBeadsProjectResult,
+} from "./beads-registration.js";
 
 // Host-only binaries (tailnet-hosting decision 8). See host-binaries.ts.
 export { HostBinaryUnavailableError, findOnPath, type HostBinary } from "./host-binaries.js";

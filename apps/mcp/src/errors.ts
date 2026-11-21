@@ -25,6 +25,8 @@ import {
   InvalidRetrievalOptionError,
   InvalidViewError,
   InvalidWorkItemError,
+  InvalidCheckoutPathError,
+  BeadsProjectConflictError,
   InvalidInboxItemError,
   InboxItemNotThisSessionError,
   InvalidHangarSessionError,
@@ -207,6 +209,16 @@ export function mapError(toolName: string, err: unknown): CallToolResult {
   }
   if (err instanceof InboxItemNotThisSessionError) {
     return actionable(err, "Nothing from this call was persisted. A hangar session's token writes only new inbox keys and the items its own session filed; give your item its own externalId, or leave that item to the session or person who owns it.");
+  }
+  // --- Project registration (brain_register_project) ---
+  if (err instanceof BeadsProjectConflictError) {
+    return actionable(err, "Nothing was written. A registration never moves a project: register the path it already has, or use another key.");
+  }
+  if (err instanceof InvalidCheckoutPathError) {
+    return actionable(err, "Nothing was written. Pass the checkout's real absolute path (run `realpath` on it); on a server with bd it must be a directory here holding .beads/.");
+  }
+  if (err instanceof InvalidWorkItemError && toolName === "brain_register_project") {
+    return actionable(err, "Nothing was written. project is 1-64 characters of lowercase letters, digits, '.', '_' or '-'.");
   }
   // --- Work items (brain_write of a work_item, brain_update_work_item) ---
   if (err instanceof InvalidWorkItemError) {
