@@ -14,6 +14,10 @@
 
 import type { EdgeInput, NodeInput } from "@breakdown/core";
 import {
+  checkLocalCheckout,
+  checkRemoteCheckoutPath,
+  enqueueRelayAction,
+  registerBeadsProject,
   assertNoHangarOutcomeKeys,
   assertNoReservedHangarEdges,
   assertNotHangarOutcomeItem,
@@ -347,4 +351,50 @@ export const updateWorkItemTool: ToolDef<typeof updateWorkItemSchema> = {
   },
 };
 
-export const writeTools: ToolDef[] = [writeTool, linkTool, mergeTool, updateWorkItemTool];
+// --- brain_register_project ------------------------------------------------
+// register-beads-project: a beads project's registry row, by key and path,
+// without running bd (core beads-registration.ts). The path check depends on
+// whether bd is on this host (ctx.bdAvailable, design.md decision 2). Without
+// bd a new registration queues one beads_reingest, so the laptop relay loads
+// it now; with bd the web server's watcher picks it up on the board's
+// refresh (its tick does not re-read the registry), and this process has no
+// handle on that watcher.
+
+const registerProjectSchema = z.object({
+  project: z.string().min(1).max(64),
+  path: z.string().min(1).max(1024),
+});
+
+export const registerProjectTool: ToolDef<typeof registerProjectSchema> = {
+  name: "brain_register_project",
+  description:
+    "Register a beads checkout as a Breakdown project so its work items reach the board: project (the key, 1-64 of a-z 0-9 . _ -) and path (the checkout's real absolute path, " +
+    "on the Mac when this Breakdown has no bd — use `realpath`, since the laptop relay serves a project only at its own real path). " +
+    "Idempotent: the same key and path again reports unchanged. Refused when the key is already registered at another path (a registration never moves a project) " +
+    "and, on a server that has bd, when the path is not a real directory here holding .beads/. Writes only the registry row, never work items. " +
+    "Returns the key, path, status (created/unchanged/updated), and how the items arrive (pickup).",
+  schema: registerProjectSchema,
+  isWrite: true,
+  async handler(ctx: ToolContext, args) {
+    const checked = ctx.bdAvailable ? checkLocalCheckout(args.path) : checkRemoteCheckoutPath(args.path);
+    const actor = ctx.actor();
+    const result = await registerBeadsProject(ctx.db, { project: args.project, path: checked, ...(actor === undefined ? {} : { actor }) });
+    if (ctx.bdAvailable) {
+      return { ...result, pickup: "This server runs bd itself: refresh the board (or restart the web server) and its watcher loads the project." };
+    }
+    try {
+      const { action } = await enqueueRelayAction(ctx.db, { kind: "beads_reingest", payload: { project_key: result.project }, requestedBy: actor ?? "agent" });
+      return {
+        ...result,
+        pickup: `Queued re-ingest ${action.id} for the laptop relay. The relay serves the project only if it was started with --project ${result.project}=${result.path}; if not, add it with pnpm relay:service install.`,
+      };
+    } catch {
+      return {
+        ...result,
+        pickup: `Registered, but no re-ingest could be queued; the laptop relay picks the project up within 5 minutes if it was started with --project ${result.project}=${result.path}.`,
+      };
+    }
+  },
+};
+
+export const writeTools: ToolDef[] = [writeTool, linkTool, mergeTool, updateWorkItemTool, registerProjectTool];

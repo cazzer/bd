@@ -25,6 +25,8 @@ export interface ToolContext {
    * argument; server.ts refuses `SESSION_REFUSED_TOOLS` when it is set.
    */
   hangarSessionId: string | null;
+  /** Whether `bd` is on this host's PATH (server.ts `bdAvailable`): brain_register_project checks a path here only when it is. */
+  bdAvailable: boolean;
 }
 
 /**

@@ -111,7 +111,7 @@ export function createRelayRegistry({ client, local, log = () => {}, checkDir = 
       for (const entry of local) {
         const listed = parsed.projects.filter((p) => p.key === entry.project);
         if (listed.length === 0) {
-          say(entry.project, `[relay] project ${entry.project} (${entry.dir}) is not registered on the server; not serving it until it is (register it with a local beads ingest)`);
+          say(entry.project, `[relay] project ${entry.project} (${entry.dir}) is not registered on the server; not serving it until it is (register it with brain_register_project or a local beads ingest)`);
           continue;
         }
         if (!listed.some((p) => p.dir === entry.dir)) {

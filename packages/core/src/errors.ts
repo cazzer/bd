@@ -482,6 +482,16 @@ export class InvalidWorkItemError extends KnowledgeStoreError {
   }
 }
 
+/** A checkout path offered for registration failed a check (beads-project-registration); `reason` says which. */
+export class InvalidCheckoutPathError extends KnowledgeStoreError {
+  constructor(
+    readonly path: string,
+    readonly reason: string,
+  ) {
+    super(`invalid checkout path ${JSON.stringify(path)}: ${reason}`);
+  }
+}
+
 /**
  * A beads load would take over something another project owns
  * (live-beads-board design.md decision 3): an item already stored under a

@@ -97,7 +97,7 @@ describe("the relay registry", () => {
     const registry = createRelayRegistry({ client: { send: async () => ({ projects: [{ key: "bd", path: good }], push: true }) }, local: [{ project: "bd", dir: good }, { project: "other", dir: other }], log: (l) => lines.push(l) });
     await registry.refresh();
     expect(registry.entries()).toEqual([{ project: "bd", dir: good }]);
-    expect(lines).toContain(`[relay] project other (${other}) is not registered on the server; not serving it until it is (register it with a local beads ingest)`);
+    expect(lines).toContain(`[relay] project other (${other}) is not registered on the server; not serving it until it is (register it with brain_register_project or a local beads ingest)`);
   });
 
   it("throws on a malformed answer, keeping what it had", async () => {

@@ -292,7 +292,7 @@ function storedReviewThreads(db: Database, project: string | undefined): PriorRe
 }
 
 /** Canonical key: trimmed and valid, else `InvalidWorkItemError` naming `project` (an explicit empty key included). */
-function canonicalProject(project: string | undefined): string | undefined {
+export function canonicalProject(project: string | undefined): string | undefined {
   if (project === undefined) return undefined;
   const key = typeof project === "string" ? project.trim() : project;
   if (typeof key !== "string" || key.length === 0) {

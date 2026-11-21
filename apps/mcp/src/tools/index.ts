@@ -7,5 +7,5 @@ export { hangarTools } from "./hangar.js";
 export { readTools } from "./read.js";
 export { writeTools } from "./write.js";
 
-/** All fifteen tools: the store's reads, its writes, then hangar's. */
+/** All sixteen tools: the store's reads, its writes, then hangar's. */
 export const allTools: ToolDef[] = [...readTools, ...writeTools, ...hangarTools];
